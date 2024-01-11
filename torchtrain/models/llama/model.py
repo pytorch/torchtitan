@@ -188,9 +188,9 @@ class Attention(nn.Module):
 
         """
         super().__init__()
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         self.n_heads = args.n_heads
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = args.dim // args.n_heads
 
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
@@ -217,9 +217,9 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
@@ -399,3 +399,17 @@ class Transformer(nn.Module):
         h = self.norm(h)
         output = self.output(h).float()
         return output
+
+    @classmethod
+    def from_model_args(cls, model_args: ModelArgs):
+        """
+        Initialize a Transformer model from a ModelArgs object.
+
+        Args:
+            model_args (ModelArgs): Model configuration parameters.
+
+        Returns:
+            Transformer: Transformer model.
+
+        """
+        return cls(model_args)

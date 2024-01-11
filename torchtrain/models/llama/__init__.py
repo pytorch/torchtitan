@@ -1,4 +1,4 @@
-from .model import ModelArgs
+from torchtrain.models.llama.model import ModelArgs, Transformer
 
 llama_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=1, n_heads=16),

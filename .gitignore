@@ -8,3 +8,4 @@ build
 data
 out
 wandb
+*.model
