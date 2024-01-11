@@ -224,8 +224,8 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(xk, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
@@ -236,6 +236,7 @@ class Attention(nn.Module):
             xq, xk, xv, is_causal=True
         )
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
 
@@ -392,10 +393,10 @@ class Transformer(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        freqs_cis = self.freqs_cis[0 : seqlen]
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis)
+            h = layer(h, freqs_cis)
         h = self.norm(h)
         output = self.output(h).float()
         return output
