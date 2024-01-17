@@ -9,3 +9,4 @@ data
 out
 wandb
 *.model
+*.json
