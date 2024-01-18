@@ -12,7 +12,8 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader
 
-import contextlib
+from torchtrain.profiling import maybe_run_profiler
+from torchtrain.logging_utils import init_logger, rank0_log
 
 
 # torchtrain related
@@ -24,34 +25,11 @@ from torchtrain.datasets import (
 )
 
 
-def lprint(msg=""):
-    print(f"Debug ++> {sys._getframe().f_back.f_lineno}: {msg}")
-
-
-logger = getLogger()
-
-
 @dataclass
 class TrainState:
     step: int = 0
     current_loss: float = -1
     losses: List[float] = field(default_factory=list)
-
-
-def rank0_log(msg):
-    if torch.distributed.get_rank() == 0:
-        logger.info(msg)
-
-
-def init_logger():
-    logger.setLevel(logging.INFO)
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
 
 
 def build_optimizer(model, args):
@@ -106,48 +84,13 @@ def main(args):
     optimizer = build_optimizer(model, args)
 
     # TODO: apply parallelisms, e.g. fsdp/tp
-    # TODO: add profiler
-    @contextlib.contextmanager
-    def maybe_run_profiler(args, *pos_args, **kwargs):
-        use_profiler: bool = args.run_profiler
-
-        trace_dir = args.profile_folder
-        rank = torch.distributed.get_rank()
-
-        def trace_handler(prof):
-            rank0_log(f"exporting profile traces to {trace_dir}")
-            prof.export_chrome_trace(f"{trace_dir}/rank{rank}_trace.json")
-
-        if use_profiler:
-            if not os.path.exists(trace_dir):
-                os.makedirs(trace_dir)
-
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
-                on_trace_ready=trace_handler,
-                profile_memory=True,
-                with_stack=False,
-                record_shapes=True,
-            ) as torch_profiler:
-                yield torch_profiler
-        else:
-            torch_profiler = contextlib.nullcontext()
-            yield None
-
-    if args.run_profiler:
-        rank0_log(f"Profiling active.  Traces will be saved at {args.profile_folder}")
-
     # TODO: add metrics
     train_state = TrainState()
 
     # train loop
     model.train()
 
-    with maybe_run_profiler(args) as torch_profiler:
+    with maybe_run_profiler() as torch_profiler:
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
             # get batch
@@ -218,14 +161,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--compile", action="store_true", help="Whether to compile the model."
     )
-    parser.add_argument(
-        "--run_profiler", action="store_true", help="Whether to run the profiler."
-    )
-    parser.add_argument(
-        "--profile_folder",
-        type=str,
-        default="./torchtrain/profiler",
-        help="Folder to save profile traces to.",
-    )
+
     args = parser.parse_args()
     main(args)

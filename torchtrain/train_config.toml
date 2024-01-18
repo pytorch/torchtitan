@@ -1,0 +1,9 @@
+# TorchTrain Config.toml
+[global]
+dump_folder = "./torchtrain/outputs"
+
+[profiling]
+run_profiler = true
+save_traces_folder = "profiling/traces"
+num_iters_to_profile = 1
+iter_to_start_profiling = 9
