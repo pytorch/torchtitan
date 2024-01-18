@@ -29,23 +29,29 @@ def maybe_run_profiler(*pos_args, **kwargs):
     config = get_config_from_toml()
 
     # get user defined profiler settings
-    dump_dir = config["global"]["dump_folder"]
     run_profiler = config["profiling"].get("run_profiler", False)
-    save_trace_dir = config["profiling"]["save_traces_folder"]
-    trace_dir = os.path.join(dump_dir, save_trace_dir)
-
-    num_iters_to_profile = config["profiling"]["num_iters_to_profile"]
-    iter_to_start_profiling = config["profiling"]["iter_to_start_profiling"]
-    # profiler wants a warmup, so we reduce when to start by 1
-    iter_to_start_profiling -= 1
-
-    rank = torch.distributed.get_rank()
-
-    def trace_handler(prof):
-        rank0_log(f"exporting profile traces to {trace_dir}")
-        prof.export_chrome_trace(f"{trace_dir}/rank{rank}_trace.json")
 
     if run_profiler:
+        dump_dir = config["global"]["dump_folder"]
+        save_trace_dir = config["profiling"]["save_traces_folder"]
+        trace_dir = os.path.join(dump_dir, save_trace_dir)
+        iter_frequency = config["profiling"]["profile_every_x_iter"]
+
+        _global_iter_count = 0
+
+        rank = torch.distributed.get_rank()
+
+        def trace_handler(prof):
+            nonlocal _global_iter_count
+            _global_iter_count += iter_frequency
+            curr_trace_dir_name = "iteration_" + str(_global_iter_count)
+            curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
+            if not os.path.exists(curr_trace_dir):
+                os.makedirs(curr_trace_dir)
+            rank0_log(f"exporting profile traces to {curr_trace_dir}")
+
+            prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
+
         rank0_log(f"Profiling active.  Traces will be saved at {trace_dir}")
 
         if not os.path.exists(trace_dir):
@@ -57,9 +63,9 @@ def maybe_run_profiler(*pos_args, **kwargs):
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                wait=iter_to_start_profiling,
+                wait=iter_frequency - 2,
                 warmup=1,
-                active=num_iters_to_profile,
+                active=1,
                 repeat=0,
             ),
             on_trace_ready=trace_handler,
