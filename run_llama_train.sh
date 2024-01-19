@@ -9,4 +9,4 @@ NGPU=8
 MP=4
 
 torchrun --nproc_per_node=${NGPU} \
-${TRAINER_DIR}/train.py
+train.py --steps 10
