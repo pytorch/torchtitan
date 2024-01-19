@@ -3,9 +3,11 @@ __pycache__
 .DS_Store
 *.egg-info
 build
+outputs
 
 # data
 data
 out
 wandb
 *.model
+*.json
