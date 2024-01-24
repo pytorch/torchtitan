@@ -9,6 +9,7 @@ import sys  # for logging
 # torch imports
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader
 
@@ -23,6 +24,8 @@ from torchtrain.datasets import (
     dataset_cls_map,
     pad_batch_to_longest_seq,
 )
+
+from torchtrain.tt_config.config_utils import get_config
 
 
 @dataclass
@@ -47,6 +50,7 @@ def build_optimizer(model, args):
 def main(args):
     init_logger()
 
+
     # only support cuda for now
     device_type = "cuda"
     # distributed init
@@ -55,6 +59,15 @@ def main(args):
     world_mesh = init_device_mesh(
         device_type, (dp_degree, args.tp_degree), mesh_dim_names=("dp", "tp")
     )
+
+    # load config
+    test_config = get_config()
+    rank0_log(f"config: {test_config=}")
+    if dist.get_rank()==0:
+        print(f"config: {test_config=}")
+
+    assert False, "check config"
+
 
     model_name = args.model
     # build tokenizer
