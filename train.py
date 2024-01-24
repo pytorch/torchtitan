@@ -2,14 +2,10 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from typing import List
-import logging
-from logging import getLogger
-import sys  # for logging
 
 # torch imports
 import torch
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader
 
@@ -50,7 +46,6 @@ def build_optimizer(model, args):
 def main(args):
     init_logger()
 
-
     # only support cuda for now
     device_type = "cuda"
     # distributed init
@@ -61,13 +56,8 @@ def main(args):
     )
 
     # load config
-    test_config = get_config()
-    rank0_log(f"config: {test_config=}")
-    if dist.get_rank()==0:
-        print(f"config: {test_config=}")
-
-    assert False, "check config"
-
+    tt_config = get_config()
+    _use_compile = tt_config["compile"]["use_compile"]
 
     model_name = args.model
     # build tokenizer
@@ -98,6 +88,14 @@ def main(args):
 
     # TODO: apply parallelisms, e.g. fsdp/tp
     # TODO: add metrics
+
+    # torch.compile model for improved performance
+    if _use_compile:
+        rank0_log(f"Compiling model {model_name} with torch.compile...")
+        torch.compile(
+            model,
+        )
+
     train_state = TrainState()
 
     # train loop

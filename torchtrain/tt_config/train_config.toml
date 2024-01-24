@@ -2,7 +2,7 @@
 [global]
 dump_folder = "./torchtrain/outputs"
 
-[compiler]
+[compile]
 use_compile = true
 
 [profiling]

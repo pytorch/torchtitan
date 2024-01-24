@@ -1,8 +1,8 @@
-import pathlib
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
+
 
 def get_config(config_path: str = "./torchtrain/tt_config/train_config.toml") -> dict:
     """
