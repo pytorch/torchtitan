@@ -5,14 +5,28 @@ import contextlib
 import os
 import torch
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 from torchtrain.logging_utils import rank0_log
-from torchtrain.tt_config.config_utils import get_config
+
+_config_file = "./torchtrain/train_config/train_config.toml"
+
+
+def get_config_from_toml(config_path: str = _config_file) -> dict:
+    """
+    Reads a config file in TOML format and returns a dictionary.
+    """
+    with open(config_path, "rb") as f:
+        config = tomllib.load(f)
+    return config
 
 
 @contextlib.contextmanager
 def maybe_run_profiler(*pos_args, **kwargs):
-    config = get_config()
+    config = get_config_from_toml()
 
     # get user defined profiler settings
     run_profiler = config["profiling"].get("run_profiler", False)

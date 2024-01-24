@@ -21,8 +21,6 @@ from torchtrain.datasets import (
     pad_batch_to_longest_seq,
 )
 
-from torchtrain.tt_config.config_utils import get_config
-
 
 @dataclass
 class TrainState:
@@ -55,9 +53,6 @@ def main(args):
         device_type, (dp_degree, args.tp_degree), mesh_dim_names=("dp", "tp")
     )
 
-    # load config
-    tt_config = get_config()
-    _use_compile = tt_config["compile"]["use_compile"]
 
     model_name = args.model
     # build tokenizer
@@ -90,9 +85,10 @@ def main(args):
     # TODO: add metrics
 
     # torch.compile model for improved performance
-    if _use_compile:
+
+    if args.compile:
         rank0_log(f"Compiling model {model_name} with torch.compile...")
-        torch.compile(
+        model = torch.compile(
             model,
         )
 
