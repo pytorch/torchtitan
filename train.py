@@ -4,25 +4,23 @@ from dataclasses import dataclass, field
 from typing import List
 import logging
 from logging import getLogger
-import sys  # for logging
 
 # torch imports
 import torch
 import torch.nn.functional as F
-from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.logging_utils import init_logger, rank0_log
 
-
 # torchtrain related
-from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.datasets import (
     create_tokenizer,
     dataset_cls_map,
     pad_batch_to_longest_seq,
 )
+from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
+from torchtrain.parallelisms import models_parallelize_fns
 
 
 @dataclass
@@ -47,15 +45,6 @@ def build_optimizer(model, args):
 def main(args):
     init_logger()
 
-    # only support cuda for now
-    device_type = "cuda"
-    # distributed init
-    world_size = int(os.environ["WORLD_SIZE"])
-    dp_degree = world_size // args.tp_degree
-    world_mesh = init_device_mesh(
-        device_type, (dp_degree, args.tp_degree), mesh_dim_names=("dp", "tp")
-    )
-
     model_name = args.model
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -77,13 +66,13 @@ def main(args):
 
     model = model_cls.from_model_args(model_config)
 
-    model.to(device_type)
+    # apply PTD parallelisms + AC
+    model = models_parallelize_fns[model_name](model, args)
 
-    # build optimizer
+    # build optimizer after apply parallelisms to the model
     # TODO: add scheduler if needed
     optimizer = build_optimizer(model, args)
 
-    # TODO: apply parallelisms, e.g. fsdp/tp
     # TODO: add metrics
     train_state = TrainState()
 
@@ -96,8 +85,8 @@ def main(args):
             # get batch
             batch = next(iter(data_loader))
             input_ids, labels = batch
-            input_ids = input_ids.to(device_type)
-            labels = labels.to(device_type)
+            input_ids = input_ids.cuda()
+            labels = labels.cuda()
 
             # forward
             pred = model(input_ids)
@@ -153,10 +142,13 @@ if __name__ == "__main__":
         "--steps", type=int, default=-1, help="how many train steps to run"
     )
     parser.add_argument(
-        "--tp_degree",
+        "--enable_sp", action="store_true", help="Whether to use Sequence Parallelism."
+    )
+    parser.add_argument(
+        "--sp_degree",
         type=int,
         default=LOCAL_WORLD_SIZE,
-        help="Tensor/Sequence Parallelism degree",
+        help="Sequence Parallelism degree",
     )
     parser.add_argument(
         "--compile", action="store_true", help="Whether to compile the model."
