@@ -2,8 +2,6 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from typing import List
-import logging
-from logging import getLogger
 
 # torch imports
 import torch
@@ -74,6 +72,14 @@ def main(args):
     optimizer = build_optimizer(model, args)
 
     # TODO: add metrics
+
+    # torch.compile model for improved performance
+    if args.compile:
+        rank0_log(f"Compiling model {model_name} with torch.compile...")
+        model = torch.compile(
+            model,
+        )
+
     train_state = TrainState()
 
     # train loop
