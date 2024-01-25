@@ -44,16 +44,6 @@ def build_optimizer(model, args):
 def main(args):
     init_logger()
 
-    # only support cuda for now
-    device_type = "cuda"
-    # distributed init
-    world_size = int(os.environ["WORLD_SIZE"])
-    dp_degree = world_size // args.tp_degree
-    world_mesh = init_device_mesh(
-        device_type, (dp_degree, args.tp_degree), mesh_dim_names=("dp", "tp")
-    )
-
-
     model_name = args.model
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -85,7 +75,6 @@ def main(args):
     # TODO: add metrics
 
     # torch.compile model for improved performance
-
     if args.compile:
         rank0_log(f"Compiling model {model_name} with torch.compile...")
         model = torch.compile(
