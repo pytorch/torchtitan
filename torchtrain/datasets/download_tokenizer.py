@@ -13,7 +13,7 @@ def hf_download(repo_id: Optional[str] = None, hf_token: Optional[str] = None) -
     from huggingface_hub import hf_hub_download
     os.makedirs(f"checkpoints/{repo_id}", exist_ok=True)
     try:
-        hf_hub_download(repo_id, "tokenizer.model", local_dir=f"torchtrain/datasets/tokenizer/", local_dir_use_symlinks=False, token=hf_token)
+        hf_hub_download(repo_id, "tokenizer.model", local_dir=f"./tokenizer/", local_dir_use_symlinks=False, token=hf_token)
     except HTTPError as e:
         if e.response.status_code == 401:
             print("You need to pass a valid `--hf_token=...` to download private checkpoints.")
