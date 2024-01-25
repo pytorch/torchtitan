@@ -2,9 +2,11 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from typing import List
+from contextlib import contextmanager
 
 # torch imports
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
@@ -19,7 +21,7 @@ from torchtrain.datasets import (
 )
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.parallelisms import models_parallelize_fns
-
+from torchtrain.meta_init import meta_model_init
 
 @dataclass
 class TrainState:
@@ -38,6 +40,7 @@ def build_optimizer(model, args):
         raise NotImplementedError(f"optimizer {args.optimizer} not added")
 
     return optimizer
+
 
 
 def main(args):
@@ -62,7 +65,13 @@ def main(args):
     model_config = models_config[model_name][args.model_conf]
     model_config.vocab_size = tokenizer.n_words
 
-    model = model_cls.from_model_args(model_config)
+    _use_meta_init = True # todo - add to toml
+
+    if _use_meta_init:
+        with meta_model_init():
+            model = model_cls.from_model_args(model_config)
+    else:
+        model = model_cls.from_model_args(model_config)
 
     # apply PTD parallelisms + AC
     model = models_parallelize_fns[model_name](model, args)
@@ -84,6 +93,9 @@ def main(args):
 
     # train loop
     model.train()
+
+    # use fsdp
+
 
     with maybe_run_profiler() as torch_profiler:
         while train_state.step < args.steps or args.steps == -1:

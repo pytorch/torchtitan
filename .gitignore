@@ -11,3 +11,4 @@ out
 wandb
 *.model
 *.json
+*.watchman

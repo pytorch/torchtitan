@@ -19,7 +19,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import enable_wrap, wrap
 
 from torchtrain.logging_utils import rank0_log
-
+from torchtrain.meta_init import meta_to_real_init_fn
 
 # Uses PTD FSDP AC wrapper
 def checkpoint_wrapper(module, config):
@@ -62,20 +62,21 @@ def parallelize_llama(model, args):
         # When torch.compile is active, it requires us to set use_orig_params=True
         "use_orig_params": True,
         "device_mesh": dp_mesh,
+        "param_init_fn":meta_to_real_init_fn,
     }
 
     with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
         for layer_id, transformer_block in enumerate(model.layers):
             # apply AC to each layer
             # before wrapping with FSDP, we need to make sure the layer is on GPU
-            transformer_block = transformer_block.cuda()
-            transformer_block = checkpoint_wrapper(transformer_block, args)
+            # todo - config this: transformer_block = transformer_block.cuda()
+            # todo - transformer_block = checkpoint_wrapper(transformer_block, args)
 
             # Wraps each layer with FSDP
             model.layers[layer_id]= wrap(transformer_block)
 
         # wrap the rest layers with FSDP
-        model = wrap(model.cuda())
+        model = wrap(model) # todo - was .cuda()
 
     rank0_log(f"Applied parallelisms to the model...")
 
