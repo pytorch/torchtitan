@@ -12,7 +12,7 @@ except ModuleNotFoundError:
 
 from torchtrain.logging_utils import rank0_log
 
-_config_file = "./torchtrain/train_config/train_config.toml"
+_config_file = "./torchtrain/train_configs/train_config.toml"
 
 
 def get_config_from_toml(config_path: str = _config_file) -> dict:
