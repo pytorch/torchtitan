@@ -26,11 +26,11 @@ def checkpoint_wrapper(module, config):
     return ptd_checkpoint_wrapper(module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False)
 
 
-def parallelize_llama(model, args):
+def parallelize_llama(model, args, use_meta_init=False):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
 
-    NOTE: the model passed in preferrablably shoule be a meta device model,
+    NOTE: the model passed in preferrablably should be a meta device model,
     otherwise the model needs to be small enough on GPU or can fit into CPU.
     # TODO: apply SP
     """
@@ -51,6 +51,8 @@ def parallelize_llama(model, args):
         dp_mesh = world_mesh
 
     # apply PTD parallelisms
+    meta_init_fn = meta_to_real_init_fn if use_meta_init else None
+
     fsdp_config = {
         "mixed_precision": MixedPrecision(
             param_dtype=torch.bfloat16,
@@ -62,21 +64,30 @@ def parallelize_llama(model, args):
         # When torch.compile is active, it requires us to set use_orig_params=True
         "use_orig_params": True,
         "device_mesh": dp_mesh,
-        "param_init_fn":meta_to_real_init_fn,
+        "param_init_fn": meta_init_fn,
     }
 
     with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
+
+        using_meta_init = fsdp_config["param_init_fn"]
+
         for layer_id, transformer_block in enumerate(model.layers):
             # apply AC to each layer
             # before wrapping with FSDP, we need to make sure the layer is on GPU
-            # todo - config this: transformer_block = transformer_block.cuda()
-            # todo - transformer_block = checkpoint_wrapper(transformer_block, args)
+            # unless using meta init:
+
+            if not using_meta_init:
+                transformer_block = transformer_block.cuda()
+
+            transformer_block = checkpoint_wrapper(transformer_block, args)
 
             # Wraps each layer with FSDP
             model.layers[layer_id]= wrap(transformer_block)
 
-        # wrap the rest layers with FSDP
-        model = wrap(model) # todo - was .cuda()
+        # wrap the remaining layers with FSDP
+        if not using_meta_init:
+            model.cuda()
+        model = wrap(model)
 
     rank0_log(f"Applied parallelisms to the model...")
 

@@ -6,11 +6,11 @@ from torch import nn
 from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
 
 from contextlib import contextmanager
-from torchtrain.logging_utils import rank0_log
+
 
 @contextmanager
 def meta_model_init():
-    """ init model on meta device """
+    """init model on meta device"""
     saved_register_parameter = nn.Module.register_parameter
     saved_register_buffer = nn.Module.register_buffer
 
@@ -30,23 +30,19 @@ def meta_model_init():
 
     try:
         nn.Module.register_parameter = register_meta_param
-        #nn.Module.register_buffer = register_meta_buffer
+        nn.Module.register_buffer = register_meta_buffer
         yield
     finally:
         nn.Module.register_parameter = saved_register_parameter
-        #nn.Module.register_buffer = saved_register_buffer
+        nn.Module.register_buffer = saved_register_buffer
 
 
 @torch.no_grad()
 def meta_to_real_init_fn(module: nn.Module):
-
     for submodule in module.modules():
         for param_name, param in submodule.named_parameters(recurse=False):
             if not _is_fsdp_flattened(param) and param.is_meta:
                 materialized_param = nn.Parameter(
-                    torch.empty_like(param, device=torch.device("cuda"))
+                    torch.randn_like(param, device=torch.device("cuda"))
                 )
-                rank0_log(f"called to reinflate...{materialized_param=}")
-                #print(f"called to reinflate...{module=}")
-                #assert False, "good meta"
                 setattr(submodule, param_name, materialized_param)

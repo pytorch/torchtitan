@@ -2,11 +2,9 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from typing import List
-from contextlib import contextmanager
 
 # torch imports
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
@@ -22,6 +20,7 @@ from torchtrain.datasets import (
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.parallelisms import models_parallelize_fns
 from torchtrain.meta_init import meta_model_init
+
 
 @dataclass
 class TrainState:
@@ -42,7 +41,6 @@ def build_optimizer(model, args):
     return optimizer
 
 
-
 def main(args):
     init_logger()
 
@@ -60,12 +58,15 @@ def main(args):
     )
 
     # build model
-    # TODO: add meta initialization
+
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][args.model_conf]
+
     model_config.vocab_size = tokenizer.n_words
 
-    _use_meta_init = True # todo - add to toml
+    # meta initialization
+    _use_meta_init = args.meta_init  # todo - add to toml
+    model_config.use_meta_init = _use_meta_init  # append this to model config
 
     if _use_meta_init:
         with meta_model_init():
@@ -74,9 +75,12 @@ def main(args):
         model = model_cls.from_model_args(model_config)
 
     # apply PTD parallelisms + AC
-    model = models_parallelize_fns[model_name](model, args)
+    model = models_parallelize_fns[model_name](
+        model, args, use_meta_init=_use_meta_init
+    )
 
     # build optimizer after apply parallelisms to the model
+
     # TODO: add scheduler if needed
     optimizer = build_optimizer(model, args)
 
@@ -95,7 +99,6 @@ def main(args):
     model.train()
 
     # use fsdp
-
 
     with maybe_run_profiler() as torch_profiler:
         while train_state.step < args.steps or args.steps == -1:
@@ -170,6 +173,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--compile", action="store_true", help="Whether to compile the model."
+    )
+
+    parser.add_argument(
+        "--meta_init",
+        action="store_true",
+        help="Whether to use meta init for the model.",
     )
 
     args = parser.parse_args()
