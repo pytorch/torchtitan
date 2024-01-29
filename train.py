@@ -69,6 +69,9 @@ def main(args):
 
     # build optimizer after apply parallelisms to the model
     # TODO: add scheduler if needed
+    from torchtrain.lr_scheduling import LinearScheduler
+    scheduler = LinearScheduler(args)
+
     optimizer = build_optimizer(model, args)
 
     # TODO: add metrics
@@ -88,6 +91,7 @@ def main(args):
     with maybe_run_profiler() as torch_profiler:
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
+            scheduler.set_lr(optimizer, train_state.step)
             # get batch
             batch = next(iter(data_loader))
             input_ids, labels = batch
@@ -143,7 +147,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--optimizer", type=str, default="AdamW", help="optimizer to use"
     )
-    parser.add_argument("--lr", type=float, default=2e-5, help="learning rate to use")
+    parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
     parser.add_argument(
         "--steps", type=int, default=-1, help="how many train steps to run"
     )
