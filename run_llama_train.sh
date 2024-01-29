@@ -5,7 +5,7 @@ set -ex
 TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 
 MODEL="debugmodel"
-NGPU=2
+NGPU=8
 MP=4
 
 torchrun --nproc_per_node=${NGPU} \
