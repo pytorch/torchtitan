@@ -1,33 +1,39 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-from torchtrain.logging_utils import rank0_log
+from torch.optim.lr_scheduler import LambdaLR
+
+# global states for scheduling
+# these are needed as LambdaLR does not support argument passing
+_warmup_steps = 2
+_decay_steps = 0
 
 
-class LinearScheduler:
-    def __init__(self, args):
-        self.lr_max = args.lr
-        self.lr_min = args.lr / 10
-        self.lr_warmup_pct = 0.10
-        # enforce min of 2 steps for warmup
-        self.warmup_steps = max(int(args.steps * self.lr_warmup_pct), 2)
+def linear_warmup_linear_decay(current_step: int) -> float:
+    """Computes linear warmup followed by linear decay.
+    Per LambdaLR requirement, this is accomplished by returning
+    a multiplicative factor to adjust the learning rate to
+    create the desired schedule.
+    """
+    if current_step < _warmup_steps:
+        # linear warmup
+        # 0-indexed step, hence + 1 adjustments
+        current_step += 1
+        curr_adjustment = float(current_step / (_warmup_steps + 1))
 
-        rank0_log(
-            f"LR Warmup Schedule: {self.lr_min} -> {self.lr_max} with {self.warmup_steps} warmup steps"
-        )
-        self.decay_steps = args.steps - self.warmup_steps
-        self.curr_lr = 0
+    else:
+        # linear decay
+        normalized_step = _decay_steps - (current_step - _warmup_steps)
+        curr_adjustment = 1 - (_decay_steps - normalized_step) / _decay_steps
 
-    def set_lr(self, optimizer, step):
-        """Set the learning rate for the optimizer"""
-        if step < self.warmup_steps:
-            self.curr_lr = self.lr_max * (step / self.warmup_steps)
-        else:
-            self.curr_lr = self.lr_min + (
-                (self.lr_max - self.lr_min)
-                * (1 - (step - self.warmup_steps) / self.decay_steps)
-            )
-        # apply across all optim groups
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = self.curr_lr
-        rank0_log(f"Optimizer LR Update: {step=}, lr = {round(self.curr_lr,6)}")
+    return curr_adjustment
+
+
+def get_full_lr_scheduler(optimizer, args):
+    """Build a linear warmup and linear decay scheduler"""
+    global _warmup_steps, _decay_steps
+    _warmup_steps = max(int(args.steps * args.warmup_pct), 2)
+    _decay_steps = float(max(1, args.steps - _warmup_steps))
+
+    warmup_scheduler = LambdaLR(optimizer, lr_lambda=linear_warmup_linear_decay)
+    return warmup_scheduler

@@ -19,6 +19,7 @@ from torchtrain.datasets import (
 )
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.parallelisms import models_parallelize_fns
+from torchtrain.lr_scheduling import get_full_lr_scheduler
 
 
 @dataclass
@@ -68,11 +69,8 @@ def main(args):
     model = models_parallelize_fns[model_name](model, args)
 
     # build optimizer after apply parallelisms to the model
-    # TODO: add scheduler if needed
-    from torchtrain.lr_scheduling import LinearScheduler
-    scheduler = LinearScheduler(args)
-
     optimizer = build_optimizer(model, args)
+    scheduler = get_full_lr_scheduler(optimizer, args)
 
     # TODO: add metrics
 
@@ -91,7 +89,6 @@ def main(args):
     with maybe_run_profiler() as torch_profiler:
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
-            scheduler.set_lr(optimizer, train_state.step)
             # get batch
             batch = next(iter(data_loader))
             input_ids, labels = batch
@@ -120,7 +117,10 @@ def main(args):
             train_state.current_loss = loss.item()
             train_state.losses.append(train_state.current_loss)
 
-            rank0_log(f"current loss: {train_state.current_loss}")
+            rank0_log(
+                f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
+            )
+            scheduler.step()
 
 
 if __name__ == "__main__":
@@ -148,6 +148,9 @@ if __name__ == "__main__":
         "--optimizer", type=str, default="AdamW", help="optimizer to use"
     )
     parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
+    parser.add_argument(
+        "--warmup_pct", type=float, default=0.10, help="pct training to use for warmup"
+    )
     parser.add_argument(
         "--steps", type=int, default=-1, help="how many train steps to run"
     )
