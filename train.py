@@ -6,6 +6,7 @@ from typing import List
 # torch imports
 import torch
 import torch.nn.functional as F
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.utils.data import DataLoader
 
 from torchtrain.profiling import maybe_run_profiler
@@ -82,6 +83,8 @@ def main(args):
 
     train_state = TrainState()
 
+    scaler = ShardedGradScaler()
+
     # train loop
     model.train()
 
@@ -101,13 +104,18 @@ def main(args):
             )
             loss = tok_loss.mean()
 
-            # backward
-            loss.backward()
-            # TODO: add grad scaler
+            # backward on scaled loss to create scaled gradients
+            scaler.scale(loss).backward()
 
             # optimizer step
-            optimizer.step()
+            # scaler.step() first unscales gradients of the optimizer's params.
+            # If gradients don't contain infs/NaNs, optimizer.step() is then called,
+            # otherwise, optimizer.step() is skipped.
+            scaler.step(optimizer)
             optimizer.zero_grad()
+
+            # updates the scale for next iteration
+            scaler.update()
 
             # if profiler is active
             if torch_profiler:
