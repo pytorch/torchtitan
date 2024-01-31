@@ -42,6 +42,18 @@ def build_optimizer(model, args):
     return optimizer
 
 
+def build_grad_scaler(model):
+    # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
+    if model.mixed_precision.param_dtype == torch.float16:
+        enable_grad_scaling = True
+        rank0_log(f"Enabling gradient scaling for mixed precision training.")
+    else:
+        enable_grad_scaling = False
+        rank0_log("Gradient scaling not enabled.")
+
+    return ShardedGradScaler(enabled=enable_grad_scaling)
+
+
 def main(args):
     init_logger()
 
@@ -69,18 +81,14 @@ def main(args):
     # apply PTD parallelisms + AC
     model = models_parallelize_fns[model_name](model, args)
 
+    # to use FSDP-customized gradient scaler and gradient clipping solutions
+    assert isinstance(model, FSDP)
+
     # build optimizer after apply parallelisms to the model
     # TODO: add scheduler if needed
     optimizer = build_optimizer(model, args)
 
-    # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
-    if isinstance(model, FSDP) and model.mixed_precision.param_dtype == torch.float16:
-        enable_grad_scaling = True
-        rank0_log(f"Enabling gradient scaling for mixed precision training.")
-    else:
-        enable_grad_scaling = False
-        rank0_log("Gradient scaling not enabled.")
-    scaler = ShardedGradScaler(enabled=enable_grad_scaling)
+    scaler = build_grad_scaler(model)
 
     # TODO: add metrics
 
