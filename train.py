@@ -7,6 +7,7 @@ from typing import List
 import torch
 import torch.nn.functional as F
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 
 from torchtrain.profiling import maybe_run_profiler
@@ -72,6 +73,15 @@ def main(args):
     # TODO: add scheduler if needed
     optimizer = build_optimizer(model, args)
 
+    # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
+    if isinstance(model, FSDP) and model.mixed_precision.param_dtype == torch.float16:
+        enable_grad_scaling = True
+        rank0_log(f"Enabling gradient scaling for mixed precision training.")
+    else:
+        enable_grad_scaling = False
+        rank0_log("Gradient scaling not enabled.")
+    scaler = ShardedGradScaler(enabled=enable_grad_scaling)
+
     # TODO: add metrics
 
     # torch.compile model for improved performance
@@ -82,8 +92,6 @@ def main(args):
         )
 
     train_state = TrainState()
-
-    scaler = ShardedGradScaler()
 
     # train loop
     model.train()
