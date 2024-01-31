@@ -4,7 +4,7 @@
 import argparse
 import os
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import Any, Dict, List, Union
 
 # torch imports
 import torch
@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
+from torchtrain.checkpoint import CheckpointManager, IntervalType
 # torchtrain related
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
@@ -28,6 +29,18 @@ class TrainState:
     step: int = 0
     current_loss: float = -1
     losses: List[float] = field(default_factory=list)
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "step": torch.tensor(self.step, dtype=torch.int32),
+            "current_loss": torch.tensor(self.current_loss, dtype=torch.float32),
+            "losses": torch.tensor(self.current_loss, dtype=torch.float32),
+        }
+
+    def load_state_dict(self, state_dict) -> None:
+        self.step = state_dict["step"].item()
+        self.current_loss = state_dict["current_loss"].item()
+        self.losses = state_dict["losses"].tolist()
 
 
 def build_optimizer(model, args):
@@ -116,7 +129,22 @@ def main(args):
     # train loop
     model.train()
 
+    checkpoint = CheckpointManager(
+        model=model,
+        optimizer=optimizer,
+        states={"train_state": train_state},
+        folder=args.checkpoint_folder,
+        interval_type=(
+            IntervalType.SECONDS
+            if args.checkpoint_interval_type == "seconds"
+            else IntervalType.STEPS
+        ),
+        interval=args.checkpoint_interval,
+    )
+    checkpoint.load()
+
     with maybe_run_profiler() as torch_profiler:
+        checkpoint.reset()
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
             # get batch
@@ -160,6 +188,11 @@ def main(args):
                 f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
             )
             scheduler.step()
+
+            checkpoint.save(train_state.step)
+
+            if train_state.step == args.steps:
+                checkpoint.save(train_state.step, force=True)
 
 
 if __name__ == "__main__":
@@ -223,6 +256,32 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--compile", action="store_true", help="Whether to compile the model."
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=3600,
+        help=(
+            "Checkpointing interval. The unit of measurement is in seconds or "
+            "steps depending on --checkpoint-internval-type."
+        )
+    )
+    parser.add_argument(
+        "--checkpoint-interval-type",
+        type=str, default="seconds",
+        help=(
+            "The checkpointing interval unit of measurement."
+            "The default value is seconds."
+        )
+    )
+    parser.add_argument(
+        "--checkpoint-folder",
+        type=str,
+        default="",
+        help=(
+            "The folder to store the checkpoints. If this is not specified or "
+            "is an empty string, checkpointing is disabled."
+        )
     )
 
     args = parser.parse_args()
