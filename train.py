@@ -148,13 +148,22 @@ if __name__ == "__main__":
         "--steps", type=int, default=-1, help="how many train steps to run"
     )
     parser.add_argument(
-        "--enable_sp", action="store_true", help="Whether to use Sequence Parallelism."
+        "--dp_degree",
+        type=int,
+        default=-1,
+        help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
     )
     parser.add_argument(
         "--sp_degree",
         type=int,
         default=LOCAL_WORLD_SIZE,
-        help="Sequence Parallelism degree",
+        help="Sequence Parallelism degree.  1 means disabled.",
+    )
+    parser.add_argument(
+        "--pp_degree",
+        type=int,
+        default=1,
+        help="Pipeline Parallelism degree (default of 1 means disabled)",
     )
     parser.add_argument(
         "--compile", action="store_true", help="Whether to compile the model."
