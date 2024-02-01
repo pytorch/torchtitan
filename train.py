@@ -21,6 +21,7 @@ from torchtrain.datasets import (
 )
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.parallelisms import models_parallelize_fns
+from torchtrain.lr_scheduling import get_lr_scheduler
 
 
 @dataclass
@@ -46,7 +47,7 @@ def build_grad_scaler(model):
     # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
     if model.mixed_precision.param_dtype == torch.float16:
         enable_grad_scaling = True
-        rank0_log(f"Enabling gradient scaling for mixed precision training.")
+        rank0_log("Enabling gradient scaling for mixed precision training.")
     else:
         enable_grad_scaling = False
         rank0_log("Gradient scaling not enabled.")
@@ -85,8 +86,8 @@ def main(args):
     assert isinstance(model, FSDP)
 
     # build optimizer after apply parallelisms to the model
-    # TODO: add scheduler if needed
     optimizer = build_optimizer(model, args)
+    scheduler = get_lr_scheduler(optimizer, args)
 
     scaler = build_grad_scaler(model)
 
@@ -144,7 +145,10 @@ def main(args):
             train_state.current_loss = loss.item()
             train_state.losses.append(train_state.current_loss)
 
-            rank0_log(f"current loss: {train_state.current_loss}")
+            rank0_log(
+                f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
+            )
+            scheduler.step()
 
 
 if __name__ == "__main__":
@@ -171,9 +175,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--optimizer", type=str, default="AdamW", help="optimizer to use"
     )
-    parser.add_argument("--lr", type=float, default=2e-5, help="learning rate to use")
+    parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
     parser.add_argument(
-        "--max_norm", type=Union[float, int], default=1.0, help="max norm for gradient clipping"
+        "--warmup_pct",
+        type=float,
+        default=0.10,
+        help="percentage of total training steps to use for warmup",
+    )
+    parser.add_argument(
+        "--max_norm",
+        type=Union[float, int],
+        default=1.0,
+        help="max norm for gradient clipping",
     )
     parser.add_argument(
         "--steps", type=int, default=-1, help="how many train steps to run"
