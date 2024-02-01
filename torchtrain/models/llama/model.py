@@ -214,7 +214,10 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        bsz, seqlen, _ = x.shape
+        seqlen, _ = freqs_cis.shape
+        bs_seqlen, _ = x.shape
+        bsz = bs_seqlen // seqlen
+
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
@@ -236,7 +239,8 @@ class Attention(nn.Module):
             xq, xk, xv, is_causal=True
         )
         output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
-        output = output.view(bsz, seqlen, -1)
+        # output stay folded with batch and sequence dimension
+        output = output.view(bsz * seqlen, -1)
         return self.wo(output)
 
 
@@ -301,7 +305,6 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
-        self.head_dim = args.dim // args.n_heads
         self.attention = Attention(args)
         self.feed_forward = FeedForward(
             dim=args.dim,
@@ -390,14 +393,20 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        _bsz, seqlen = tokens.shape
+        bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
+        # fold batch and sequence dimension for more efficient allgather/reduce_scatter
+        h = h.view(-1, self.params.dim)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[0 : seqlen]
 
         for layer in self.layers:
             h = layer(h, freqs_cis)
+
         h = self.norm(h)
+        # unfold batch and sequence dimension
+        bs_seqlen = h.shape[0]
+        h = h.view(bsz, bs_seqlen//bsz, self.params.dim)
         output = self.output(h).float()
         return output
 
