@@ -21,7 +21,7 @@ from torchtrain.datasets import (
 )
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
 from torchtrain.parallelisms import models_parallelize_fns
-from torchtrain.lr_scheduling import get_full_lr_scheduler
+from torchtrain.lr_scheduling import get_lr_scheduler
 
 
 @dataclass
@@ -87,7 +87,7 @@ def main(args):
 
     # build optimizer after apply parallelisms to the model
     optimizer = build_optimizer(model, args)
-    scheduler = get_full_lr_scheduler(optimizer, args)
+    scheduler = get_lr_scheduler(optimizer, args)
 
     scaler = build_grad_scaler(model)
 
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
     parser.add_argument(
-        "--warmup_pct", type=float, default=0.10, help="pct training to use for warmup"
+        "--warmup_pct", type=float, default=0.10, help="percentage of total training steps to use for warmup"
     )
     parser.add_argument(
         "--max_norm", type=Union[float, int], default=1.0, help="max norm for gradient clipping"
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sp_degree",
         type=int,
-        default=LOCAL_WORLD_SIZE,
+        default=1,
         help="Sequence Parallelism degree.  1 means disabled.",
     )
     parser.add_argument(

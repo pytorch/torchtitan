@@ -29,7 +29,7 @@ def linear_warmup_linear_decay(current_step: int) -> float:
     return curr_adjustment
 
 
-def get_full_lr_scheduler(optimizer, args):
+def get_lr_scheduler(optimizer, args):
     """Build a linear warmup and linear decay scheduler"""
     global _warmup_steps, _decay_steps
     _warmup_steps = max(int(args.steps * args.warmup_pct), 2)
