@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sp_degree",
         type=int,
-        default=LOCAL_WORLD_SIZE,
+        default=1,
         help="Sequence Parallelism degree.  1 means disabled.",
     )
     parser.add_argument(
