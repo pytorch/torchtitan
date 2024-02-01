@@ -19,7 +19,6 @@ class AlpacaDataset(IterableDataset):
 
     Args:
         tokenizer (Tokenizer): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
-        batch_size (int): local batch size
         seq_len (int): max sequence length
 
     Data input format:
@@ -40,25 +39,17 @@ class AlpacaDataset(IterableDataset):
 
     def __init__(self,
         tokenizer: TokenizerIf,
-        seq_len: int = 48,
+        seq_len: int = 2048,
         **kwargs
     ) -> None:
-        # TODO: right now it's a dataset with streaming, evaluate whether we should
-        # further enhance the implementation for performance
         self._data = load_dataset("tatsu-lab/alpaca", split="train")
         self._tokenizer = tokenizer
         self.data_iterator = iter(self._data)
-        # self.batch_size = batch_size
         self.seq_len = seq_len
         self.response_tag = "\n\n### Response:\n"
 
-        # print(f">>>> eos token: {tokenizer.eos_token_id}")
-
     def __len__(self):
         return len(self._data)
-
-    # def __getitem__(self, index: int) -> Tuple[List[int], List[int]]:
-    #     return self._transform(self._data[index]["text"])
 
     def __iter__(self):
         max_buffer_token_len = (1 + self.seq_len)
