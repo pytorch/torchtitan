@@ -47,7 +47,7 @@ def build_grad_scaler(model):
     # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
     if model.mixed_precision.param_dtype == torch.float16:
         enable_grad_scaling = True
-        rank0_log(f"Enabling gradient scaling for mixed precision training.")
+        rank0_log("Enabling gradient scaling for mixed precision training.")
     else:
         enable_grad_scaling = False
         rank0_log("Gradient scaling not enabled.")
@@ -177,10 +177,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
     parser.add_argument(
-        "--warmup_pct", type=float, default=0.10, help="percentage of total training steps to use for warmup"
+        "--warmup_pct",
+        type=float,
+        default=0.10,
+        help="percentage of total training steps to use for warmup",
     )
     parser.add_argument(
-        "--max_norm", type=Union[float, int], default=1.0, help="max norm for gradient clipping"
+        "--max_norm",
+        type=Union[float, int],
+        default=1.0,
+        help="max norm for gradient clipping",
     )
     parser.add_argument(
         "--steps", type=int, default=-1, help="how many train steps to run"
