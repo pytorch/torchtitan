@@ -16,11 +16,10 @@ from torchtrain.logging_utils import init_logger, rank0_log
 # torchtrain related
 from torchtrain.datasets import (
     create_tokenizer,
-    dataset_cls_map,
-    pad_batch_to_longest_seq,
+    dataloader_fn,
 )
 from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
-from torchtrain.parallelisms import models_parallelize_fns
+from torchtrain.parallelisms import ParallelDims, models_parallelize_fns
 from torchtrain.lr_scheduling import get_lr_scheduler
 
 
@@ -57,6 +56,11 @@ def build_grad_scaler(model):
 
 def main(args):
     init_logger()
+    # init world mesh
+    world_size = int(os.environ["WORLD_SIZE"])
+    parallel_dims = ParallelDims(dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size)
+    world_mesh = parallel_dims.build_mesh(device_type="cuda")
+
 
     model_name = args.model
     # build tokenizer
@@ -64,11 +68,17 @@ def main(args):
     tokenizer = create_tokenizer(tokenizer_type, args.tokenizer_path)
 
     # build dataloader
-    dataset_cls = dataset_cls_map[args.dataset]
-    data_loader = DataLoader(
-        dataset_cls(tokenizer),
-        batch_size=args.batch_size,
-        collate_fn=pad_batch_to_longest_seq,
+    # need dp world size and rank
+    # TODO: dp might not always be 0 so we need to handle that more carefully
+    dp_degree = world_mesh.size(0)
+    dp_rank = world_mesh.get_local_rank(0)
+    build_dataloader_fn = dataloader_fn[args.dataset]
+    data_loader = build_dataloader_fn(
+        tokenizer,
+        args.batch_size,
+        args.seq_len,
+        dp_degree,
+        dp_rank,
     )
 
     # build model
@@ -80,7 +90,12 @@ def main(args):
     model = model_cls.from_model_args(model_config)
 
     # apply PTD parallelisms + AC
-    model = models_parallelize_fns[model_name](model, args)
+    model = models_parallelize_fns[model_name](
+        model,
+        world_mesh,
+        parallel_dims,
+        args
+    )
 
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
@@ -172,6 +187,7 @@ if __name__ == "__main__":
         help="tokenizer path",
     )
     parser.add_argument("--batch_size", type=int, default=8, help="batch size")
+    parser.add_argument("--seq_len", type=int, default=2048, help="sequence length")
     parser.add_argument(
         "--optimizer", type=str, default="AdamW", help="optimizer to use"
     )

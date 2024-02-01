@@ -5,8 +5,6 @@ import os
 import torch
 import logging
 
-from torch.distributed.device_mesh import init_device_mesh
-
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
@@ -21,7 +19,6 @@ from torch.distributed.fsdp.wrap import enable_wrap, wrap
 
 from torchtrain.logging_utils import rank0_log
 from typing import Dict
-from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -29,50 +26,9 @@ logger = logging.getLogger(__name__)
 def checkpoint_wrapper(module, config):
     return ptd_checkpoint_wrapper(module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False)
 
-@dataclass
-class ParallelDims:
-    dp: int
-    sp: int
-    pp: int
-    world_size: int
 
-    def __post_init__(self):
-        self._validate()
 
-    def _validate(self):
-        dp, sp, pp = self.dp, self.sp, self.pp
-        if dp == -1:
-            self.dp = dp = self.world_size // (sp * pp)
-        assert dp >= 1, dp
-        assert sp >= 1, sp
-        assert pp >= 1, pp
-        assert dp * sp * pp == self.world_size, (
-            f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        )
-
-    def build_mesh(self, device_type):
-        dims = []
-        names = []
-        for d, name in zip([self.dp, self.sp, self.pp], ["dp", "sp", "pp"]):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        return init_device_mesh(device_type, dims, mesh_dim_names=names)
-
-    @property
-    def dp_enabled(self):
-        return self.dp > 1
-
-    @property
-    def sp_enabled(self):
-        return self.sp > 1
-
-    @property
-    def pp_enabled(self):
-        return self.pp > 1
-
-def parallelize_llama(model, args):
+def parallelize_llama(model, world_mesh, parallel_dims, args):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
 
@@ -80,13 +36,6 @@ def parallelize_llama(model, args):
     otherwise the model needs to be small enough on GPU or can fit into CPU.
     # TODO: apply SP
     """
-    # DeviceMesh or multi-dim pg setup
-    # only support cuda for now
-    device_type = "cuda"
-    # distributed init
-    world_size = int(os.environ["WORLD_SIZE"])
-    parallel_dims = ParallelDims(dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size)
-    world_mesh = parallel_dims.build_mesh(device_type)
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
