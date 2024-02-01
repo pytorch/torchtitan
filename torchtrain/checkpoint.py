@@ -70,21 +70,20 @@ class CheckpointManager:
         self.pg = dist.new_group(backend="gloo")
         self.doit = None
 
-    def reset(self, step: int = 0) -> None:
-        self.begin = (
-            time.monotonic() if self.interval_type == IntervalType.SECONDS else step
-        )
+    def reset(self) -> None:
+        self.begin = time.monotonic()
 
     def create_checkpoint_id(self, step: int) -> str:
         return os.path.join(self.folder, f"step-{step}")
 
     def save(self, curr_step: int, force: bool = False) -> None:
+        if not self.folder:
+            return
+
         if not force:
-            if not self.folder:
-                return
             if (
                 self.interval_type == IntervalType.STEPS
-                and (curr_step - self.begin) < self.interval
+                and not (curr_step % self.interval == 0)
             ):
                 return
             if self.interval_type == IntervalType.SECONDS:
@@ -102,16 +101,22 @@ class CheckpointManager:
                         return
                 else:
                     return
-        else:
-            if self.work:
-                self.work.wait()
-                self.doit = None
+
+        if self.work:
+            self.work.wait()
+            self.work = None
+            self.doit = None
 
         rank0_log(f"Saving a checkpoint in step {curr_step}.")
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
+<<<<<<< HEAD
         self.reset(curr_step)
         rank0_log(
+=======
+        self.reset()
+        logging.warning(
+>>>>>>> a0257bc (Simplify the code and use steps instead of seconds as the default unit of measurement.)
             f"Finish saving the checkpoint in step {curr_step}. "
             f"{time.monotonic() - begin} seconds"
         )

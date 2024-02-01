@@ -268,10 +268,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--checkpoint-interval-type",
-        type=str, default="seconds",
+        type=str, default="steps",
         help=(
             "The checkpointing interval unit of measurement."
-            "The default value is seconds."
+            "The default value is step."
         )
     )
     parser.add_argument(
