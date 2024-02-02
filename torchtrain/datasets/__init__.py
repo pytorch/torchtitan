@@ -1,6 +1,7 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 from torchtrain.datasets.alpaca import AlpacaDataset
-from torchtrain.datasets.tokenizer import create_tokenizer
-from torchtrain.datasets.pad_batch_sequence import pad_batch_to_longest_seq
 
 
 dataset_cls_map = {

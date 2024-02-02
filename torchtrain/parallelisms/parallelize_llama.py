@@ -1,16 +1,22 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 # this file applies the PTD parallelisms and various training techniques to the
 # llama model, i.e. activation checkpoint, etc.
 
-import os
-import torch
-import logging
 
-from torch.distributed.device_mesh import init_device_mesh
+import logging
+import os
+from dataclasses import dataclass
+
+import torch
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
+
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import (
     BackwardPrefetch,
     FullyShardedDataParallel as FSDP,
@@ -20,14 +26,15 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import enable_wrap, wrap
 
 from torchtrain.logging_utils import rank0_log
-from typing import Dict
-from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 # Uses PTD FSDP AC wrapper
 def checkpoint_wrapper(module, config):
-    return ptd_checkpoint_wrapper(module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False)
+    return ptd_checkpoint_wrapper(
+        module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
+    )
+
 
 @dataclass
 class ParallelDims:
@@ -46,14 +53,16 @@ class ParallelDims:
         assert dp >= 1, dp
         assert sp >= 1, sp
         assert pp >= 1, pp
-        assert dp * sp * pp == self.world_size, (
-            f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        )
+        assert (
+            dp * sp * pp == self.world_size
+        ), f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
 
     def build_mesh(self, device_type):
         dims = []
         names = []
-        for d, name in zip([self.dp, self.sp, self.pp], ["dp", "sp", "pp"]):
+        for d, name in zip(
+            [self.dp, self.sp, self.pp], ["dp", "sp", "pp"], strict=True
+        ):
             if d > 1:
                 dims.append(d)
                 names.append(name)
@@ -72,6 +81,7 @@ class ParallelDims:
     def pp_enabled(self):
         return self.pp > 1
 
+
 def parallelize_llama(model, args):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
@@ -85,7 +95,9 @@ def parallelize_llama(model, args):
     device_type = "cuda"
     # distributed init
     world_size = int(os.environ["WORLD_SIZE"])
-    parallel_dims = ParallelDims(dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size)
+    parallel_dims = ParallelDims(
+        dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size
+    )
     world_mesh = parallel_dims.build_mesh(device_type)
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
@@ -116,11 +128,11 @@ def parallelize_llama(model, args):
                 transformer_block = checkpoint_wrapper(transformer_block, args)
 
                 # Wraps each layer with FSDP
-                model.layers[layer_id]= wrap(transformer_block)
+                model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
             model = wrap(model.cuda())
 
-    rank0_log(f"Applied parallelisms to the model...")
+    rank0_log("Applied parallelisms to the model...")
 
     return model
