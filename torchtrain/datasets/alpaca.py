@@ -1,17 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-from typing import List, Tuple
+from typing import List
 
 import torch
-
-from datasets import load_dataset
-from torch.utils.data import IterableDataset, DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, IterableDataset
 
 from torchtrain.datasets.tokenizer import TokenizerIf
+
+from datasets import load_dataset
 
 
 class AlpacaDataset(IterableDataset):
@@ -37,11 +34,7 @@ class AlpacaDataset(IterableDataset):
         Batch size: 8
     """
 
-    def __init__(self,
-        tokenizer: TokenizerIf,
-        seq_len: int = 2048,
-        **kwargs
-    ) -> None:
+    def __init__(self, tokenizer: TokenizerIf, seq_len: int = 2048, **kwargs) -> None:
         self._data = load_dataset("tatsu-lab/alpaca", split="train")
         self._tokenizer = tokenizer
         self.data_iterator = iter(self._data)
@@ -52,7 +45,7 @@ class AlpacaDataset(IterableDataset):
         return len(self._data)
 
     def __iter__(self):
-        max_buffer_token_len = (1 + self.seq_len)
+        max_buffer_token_len = 1 + self.seq_len
         all_tokens: List[int] = []
 
         for sample in self.data_iterator:
@@ -71,11 +64,7 @@ class AlpacaDataset(IterableDataset):
 
 
 def build_alpaca_data_loader(
-    tokenizer: TokenizerIf,
-    batch_size: int,
-    seq_len: int,
-    world_size,
-    rank
+    tokenizer: TokenizerIf, batch_size: int, seq_len: int, world_size, rank
 ):
     alpaca_ds = AlpacaDataset(tokenizer=tokenizer, seq_len=seq_len)
     # TOOD: sampler can't work with iterable dataset, figure out a way

@@ -1,4 +1,6 @@
-import os
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 import logging
 from dataclasses import dataclass
 
@@ -31,14 +33,16 @@ class ParallelDims:
         assert dp >= 1, dp
         assert sp >= 1, sp
         assert pp >= 1, pp
-        assert dp * sp * pp == self.world_size, (
-            f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        )
+        assert (
+            dp * sp * pp == self.world_size
+        ), f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
 
     def build_mesh(self, device_type):
         dims = []
         names = []
-        for d, name in zip([self.dp, self.sp, self.pp], ["dp", "sp", "pp"]):
+        for d, name in zip(
+            [self.dp, self.sp, self.pp], ["dp", "sp", "pp"], strict=True
+        ):
             if d > 1:
                 dims.append(d)
                 names.append(name)
