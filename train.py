@@ -189,10 +189,7 @@ def main(args):
             )
             scheduler.step()
 
-            checkpoint.save(train_state.step)
-
-            if train_state.step == args.steps:
-                checkpoint.save(train_state.step, force=True)
+            checkpoint.save(train_state.step, force=(train_state.step == args.steps))
 
 
 if __name__ == "__main__":

@@ -110,13 +110,8 @@ class CheckpointManager:
         rank0_log(f"Saving a checkpoint in step {curr_step}.")
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
-<<<<<<< HEAD
-        self.reset(curr_step)
-        rank0_log(
-=======
         self.reset()
-        logging.warning(
->>>>>>> a0257bc (Simplify the code and use steps instead of seconds as the default unit of measurement.)
+        rank0_log(
             f"Finish saving the checkpoint in step {curr_step}. "
             f"{time.monotonic() - begin} seconds"
         )
