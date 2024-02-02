@@ -11,7 +11,10 @@ import numpy as np
 # torch imports
 import torch
 import torch.nn.functional as F
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from pippy.microbatch import shard_dict_of_args
+from pippy.PipelineSchedule import PipelineScheduleGPipe
+
+# from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
@@ -25,6 +28,7 @@ from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMon
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.parallelisms.parallelize_llama import build_pipeline_stage
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import dist_max, dist_mean
@@ -73,6 +77,25 @@ def build_grad_scaler(model):
         rank0_log("Gradient scaling not enabled.")
 
     return ShardedGradScaler(enabled=enable_grad_scaling)
+
+
+def split_batches(batch, num_microbatches=2):
+    input_ids, _ = batch
+    microbatches = shard_dict_of_args(
+        {"input_ids": input_ids},
+        {
+            "input_ids": None
+        },  # defaults to dim0 sharding, use TensorChunkSpec to override
+        num_microbatches,
+    )
+    # hacking around PipelineStage.forward doing *args, and, ?
+    microbatches = [
+        [
+            mb["input_ids"],
+        ]
+        for mb in microbatches
+    ]
+    return microbatches
 
 
 def main(job_config: JobConfig):
@@ -129,13 +152,14 @@ def main(job_config: JobConfig):
     )
 
     # to use FSDP-customized gradient scaler and gradient clipping solutions
-    assert isinstance(model, FSDP)
+    # assert isinstance(model, FSDP)
 
     # build optimizer after apply parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    scaler = build_grad_scaler(model)
+    # TODO hacked out since debugging w/o fsdp
+    # scaler = build_grad_scaler(model)
 
     metric_logger = build_metric_logger(job_config)
 
@@ -165,6 +189,11 @@ def main(job_config: JobConfig):
     )
     checkpoint.load()
 
+    if parallel_dims.pp_enabled:
+        rank0_log("Using pipeline parallelism.")
+        pp_stage = build_pipeline_stage(world_mesh, model)
+        pp_schedule = PipelineScheduleGPipe(pp_stage)
+
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
         # variables used to keep info for metrics logging
@@ -185,27 +214,35 @@ def main(job_config: JobConfig):
 
             optimizer.zero_grad()
 
-            # forward
-            pred = model(input_ids)
-            tok_loss = F.cross_entropy(
-                pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
-            )
-            loss = tok_loss.mean()
+            if parallel_dims.pp_enabled:
+                microbatches = split_batches((input_ids, labels), num_microbatches=2)
+                pp_schedule.step(microbatches)
+                # hack for integration WIP
+                loss = torch.Tensor([-1.0]).cuda()
+            else:
+                # forward
+                pred = model(input_ids)
+                tok_loss = F.cross_entropy(
+                    pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
+                )
+                loss = tok_loss.mean()
 
-            # backward on scaled loss to create scaled gradients
-            scaler.scale(loss).backward()
+                # backward on scaled loss to create scaled gradients
+                # scaler.scale(loss).backward()
 
             # clip gradients (after unscaling gradients of the optimizer's params)
-            scaler.unscale_(optimizer)
-            model.clip_grad_norm_(job_config.training.max_norm)
+            # TODO (re-enable scaler once re-adding FSDP)
+            # scaler.unscale_(optimizer)
+            # TODO (TransformerChunk missing this)
+            # model.clip_grad_norm_(job_config.training.max_norm)
 
             # optimizer step
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
             # otherwise, optimizer.step() is skipped.
-            scaler.step(optimizer)
+            # scaler.step(optimizer)
 
             # updates the scale for next iteration
-            scaler.update()
+            # scaler.update()
 
             # if profiler is active
             if torch_profiler:
