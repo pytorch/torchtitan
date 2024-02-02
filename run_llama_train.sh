@@ -9,8 +9,8 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 # LOG_RANK=0,1 NGPU=4 SP=2 ./run_llama_train.sh
 
 MODEL=${MODEL:-"debugmodel"}
-NGPU=${NGPU:-"8"}
-PP=${PP:-"1"}
+NGPU=${NGPU:-"2"}
+PP=${PP:-"2"}
 SP=${SP:-"1"}
 DP=${DP:-"-1"}
 
