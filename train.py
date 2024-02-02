@@ -2,6 +2,8 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import contextlib
+import functools
+import logging
 import os
 
 from dataclasses import dataclass, field
@@ -13,7 +15,9 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from pippy.microbatch import shard_dict_of_args
+
+# from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -31,6 +35,11 @@ from torchtrain.metrics import (
 )
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.parallelisms.parallelize_llama import build_pipeline_stage
+
+# from pippy.PipelineSchedule import PipelineScheduleGPipe
+from torchtrain.parallelisms.pippy_copy import PipelineScheduleGPipe
+
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import (
     Color,
@@ -98,6 +107,80 @@ def build_grad_scaler(model):
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
+def split_batches(batch, num_microbatches=2):
+    input_ids, labels = batch
+    microbatches = shard_dict_of_args(
+        {"input_ids": input_ids, "labels": labels},
+        {
+            "input_ids": None,
+            "labels": None,
+        },  # defaults to dim0 sharding, use TensorChunkSpec to override
+        num_microbatches,
+    )
+    # hacking around PipelineStage.forward doing *args, and, ?
+    inputs = [
+        [
+            mb["input_ids"],
+        ]
+        for mb in microbatches
+    ]
+    labels = [mb["labels"] for mb in microbatches]
+    return inputs, labels
+
+
+def loss_fn(pred, labels):
+    tok_loss = F.cross_entropy(
+        pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
+    )
+    loss = tok_loss.mean()
+    return loss
+
+
+def get_nccl_pgs(world_mesh):
+    # This could arguably be implemented by looping over the global map of PGs inside PT-D,
+    # or left as user-responsibility.  I've opted for the latter to keep it explicit and allow
+    # finer control, but it also means if one PG was missed here its timeout will be missed
+    from torch.distributed.distributed_c10d import _get_default_group
+
+    possible_groups = [world_mesh.get_group(dim) for dim in range(world_mesh.ndim)] + [
+        _get_default_group()
+    ]
+    return [pg for pg in possible_groups if pg is not None]
+
+
+def set_timeout_for_nccl_pgs(process_groups, timeout):
+    from torch.distributed.distributed_c10d import ProcessGroup
+
+    def set_default_timeout(pg: ProcessGroup, device: torch.device, timeout: timedelta):
+        # TODO: This is a convenience wrapper around the API that exists in the PTD layer, but we will probably land
+        # the more convenient form (like this wrapper) in the future.
+
+        # currently, there can be e.g. a nccl and gloo backend for the same 'pg' obj, hence needing the 'device'
+        pg._get_backend(device)._set_default_timeout(timeout)  # type: ignore[attr-defined]
+
+    # TODO this assumes each process only 'sees' one gpu and torchrun is managing cuda-visible-device? It looks like
+    # the code below all uses '.cuda()' without specifying idx so that should be right
+    device = torch.device(f"cuda")
+    logger.info(f"Set default nccl timeout to {timeout}")
+    for pg in process_groups:
+        set_default_timeout(pg, device, timeout)
+
+    # the above works today on pytorch main. The below should work but has a bug. Working around locally for now.
+    # https://github.com/pytorch/pytorch/issues/120847
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout,
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=0)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=1)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=2)
+    # )
+
+
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
@@ -116,6 +199,8 @@ def main(job_config: JobConfig):
 
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
+    set_timeout_for_nccl_pgs(get_nccl_pgs(world_mesh), timedelta(seconds=3))
+
     model_name = job_config.model.name
 
     # build tokenizer
@@ -123,6 +208,10 @@ def main(job_config: JobConfig):
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
+    # need dp world size and rank
+    # TODO: dp might not always be 0 so we need to handle that more carefully
+    dp_degree = world_mesh.size(0) if world_mesh.ndim > 0 else 1
+    dp_rank = world_mesh.get_local_rank(0) if world_mesh.ndim > 0 else 0
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
@@ -174,13 +263,15 @@ def main(job_config: JobConfig):
         model, world_mesh, parallel_dims, job_config
     )
 
-    # build optimizer after applying parallelisms to the model
+    # to use FSDP-customized gradient scaler and gradient clipping solutions
+    # assert isinstance(model, FSDP)
+
+    # build optimizer after apply parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    # build grad scaler which is effective only when mixed precision training
-    # is enabled with fp16 param dtype under FSDP
-    scaler = build_grad_scaler(model)
+    # TODO hacked out since debugging w/o fsdp
+    # scaler = build_grad_scaler(model)
 
     metric_logger = build_metric_logger(job_config)
 
@@ -220,6 +311,10 @@ def main(job_config: JobConfig):
     # TODO: plot losses loaded from checkpoint (if any) to TensorBoard
 
     data_iterator = iter(data_loader)
+    if parallel_dims.pp_enabled:
+        rank0_log("Using pipeline parallelism.")
+        pp_stage = build_pipeline_stage(world_mesh, model, loss_fn)
+        pp_schedule = PipelineScheduleGPipe(pp_stage)
 
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
@@ -244,42 +339,96 @@ def main(job_config: JobConfig):
 
             optimizer.zero_grad()
 
-            # forward
-            pred = model(input_ids)
-
-            with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
-                loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
-
-                # backward on scaled loss to create scaled gradients
-                scaler.scale(loss).backward()
-
-            # clip gradients (after unscaling gradients of the optimizer's params)
-            scaler.unscale_(optimizer)
-            if isinstance(model, FSDP):
-                model.clip_grad_norm_(job_config.training.max_norm)
-            else:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm
+            if parallel_dims.pp_enabled:
+                inputs_mb, labels_mb = split_batches(
+                    (input_ids, labels), num_microbatches=2
                 )
+                mb_loss = pp_schedule.step(inputs_mb, labels=labels_mb)
+                loss = None
+                if mb_loss:
+                    loss = functools.reduce(lambda a, b: a + b, mb_loss)
+            else:
+                # forward
+                with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
+                    loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
+                    # backward on scaled loss to create scaled gradients
+                    scaler.scale(loss).backward()
+
+                # clip gradients (after unscaling gradients of the optimizer's params)
+                scaler.unscale_(optimizer)
+                if isinstance(model, FSDP):
+                    model.clip_grad_norm_(job_config.training.max_norm)
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), job_config.training.max_norm
+                    )
+
+                # clip gradients (after unscaling gradients of the optimizer's params)
+                # TODO (re-enable scaler once re-adding FSDP)
+                # scaler.unscale_(optimizer)
+                # TODO (TransformerChunk missing this)
+                # model.clip_grad_norm_(job_config.training.max_norm)
 
             # optimizer step
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
             # otherwise, optimizer.step() is skipped.
-            scaler.step(optimizer)
+            # scaler.step(optimizer)
             scheduler.step()
+            optimizer.step()
 
             # updates the scale for next iteration
-            scaler.update()
+            # scaler.update()
 
-            train_state.current_loss = loss.item()
-            train_state.losses.append(train_state.current_loss)
-            losses_since_last_log.append(train_state.current_loss)
+            # if profiler is active
+            if torch_profiler:
+                torch_profiler.step()
 
-            # log metrics
-            if (train_state.step - 1) % job_config.metrics.log_freq == 0:
-                avg_loss, max_loss = (
-                    np.mean(losses_since_last_log),
-                    np.max(losses_since_last_log),
+            # TODO whats the best way to do metrics/logging in a PP world
+            if loss:
+                train_state.current_loss = loss.item()
+                train_state.losses.append(train_state.current_loss)
+                losses_since_last_log.append(train_state.current_loss)
+                # log metrics
+                if (train_state.step - 1) % job_config.metrics.log_freq == 0:
+                    avg_loss, max_loss = (
+                        np.mean(losses_since_last_log),
+                        np.max(losses_since_last_log),
+                    )
+
+                    # TODO(whc) pp can't compute global loss this way, need only last-stage ranks
+                    global_avg_loss, global_max_loss = (
+                        dist_mean(avg_loss, world_mesh),
+                        dist_max(max_loss, world_mesh),
+                    )
+
+                    time_delta = timer() - time_last_log
+                    wps = nwords_since_last_log / (
+                        time_delta * parallel_dims.model_parallel_size
+                    )
+
+                    gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
+
+                    metrics = {
+                        # "loss_metrics/global_avg_loss": global_avg_loss,
+                        # "loss_metrics/global_max_loss": global_max_loss,
+                        "wps": wps,
+                        "memory_current/active(%)": gpu_mem_stats.active_curr,
+                        "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
+                        "memory_current/reserved(%)": gpu_mem_stats.reserved_curr,
+                        "memory_peak/active(%)": gpu_mem_stats.active_peak,
+                        "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
+                        "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
+                    }
+                    metric_logger.log(metrics, step=train_state.step)
+
+                    losses_since_last_log.clear()
+                    nwords_since_last_log = 0
+                    time_last_log = timer()
+
+                logger.info(
+                    f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
+                    f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
                 )
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
