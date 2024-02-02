@@ -1,9 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -26,25 +25,26 @@ class ModelArgs:
 
 
 class RMSNorm(torch.nn.Module):
+    """
+    Initialize the RMSNorm normalization layer.
+
+    Args:
+        dim (int): The dimension of the input tensor.
+        eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+
+    Attributes:
+        eps (float): A small value added to the denominator for numerical stability.
+        weight (nn.Parameter): Learnable scaling parameter.
+
+    """
+
     def __init__(self, dim: int, eps: float = 1e-6):
-        """
-        Initialize the RMSNorm normalization layer.
-
-        Args:
-            dim (int): The dimension of the input tensor.
-            eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
-
-        Attributes:
-            eps (float): A small value added to the denominator for numerical stability.
-            weight (nn.Parameter): Learnable scaling parameter.
-
-        """
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(dim))
         self.reset_parameters()
 
-    def _norm(self, x):
+    def _norm(self, x: torch.Tensor):
         """
         Apply the RMSNorm normalization to the input tensor.
 
@@ -57,7 +57,7 @@ class RMSNorm(torch.nn.Module):
         """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         """
         Forward pass through the RMSNorm layer.
 
@@ -111,10 +111,6 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
     Returns:
         torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
     """
     ndim = x.ndim
     assert 0 <= 1 < ndim
@@ -165,28 +161,29 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    """Multi-head attention module."""
+    """
+    Multi-head attention module.
+
+    Args:
+        args (ModelArgs): Model configuration parameters.
+
+    Attributes:
+        n_kv_heads (int): Number of key and value heads.
+        n_heads (int): Number of query heads.
+        n_local_kv_heads (int): Number of local key and value heads.
+        n_rep (int): Number of repetitions for local heads.
+        head_dim (int): Dimension size of each attention head.
+        wq (Linear): Linear transformation for queries.
+        wk (Linear): Linear transformation for keys.
+        wv (Linear): Linear transformation for values.
+        wo (Linear): Linear transformation for output.
+        cache_k (torch.Tensor): Cached keys for attention.
+        cache_v (torch.Tensor): Cached values for attention.
+
+    """
+
     def __init__(self, args: ModelArgs):
-        """
-        Initialize the Attention module.
 
-        Args:
-            args (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            n_kv_heads (int): Number of key and value heads.
-            n_heads (int): Number of query heads.
-            n_local_kv_heads (int): Number of local key and value heads.
-            n_rep (int): Number of repetitions for local heads.
-            head_dim (int): Dimension size of each attention head.
-            wq (Linear): Linear transformation for queries.
-            wk (Linear): Linear transformation for keys.
-            wv (Linear): Linear transformation for values.
-            wo (Linear): Linear transformation for output.
-            cache_k (torch.Tensor): Cached keys for attention.
-            cache_v (torch.Tensor): Cached values for attention.
-
-        """
         super().__init__()
         self.n_heads = args.n_heads
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -224,23 +221,43 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(
+            xk, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(
+            xv, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        xv = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
         # we use casual mask for training
-        output = F.scaled_dot_product_attention(
-            xq, xk, xv, is_causal=True
-        )
-        output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
 
 class FeedForward(nn.Module):
+    """
+    FeedForward module
+
+    Args:
+        dim (int): Input dimension.
+        hidden_dim (int): Hidden dimension of the feedforward layer.
+        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+        ffn_dim_multiplier (Optional[float]): Custom multiplier for hidden dimension. Defaults to None.
+
+    Attributes:
+        w1 (Linear): Linear transformation for the first layer.
+        w2 (Linear): Linear transformation for the second layer.
+        w3 (Linear): Linear transformation for the third layer.
+
+    """
+
     def __init__(
         self,
         dim: int,
@@ -248,21 +265,7 @@ class FeedForward(nn.Module):
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
     ):
-        """
-        Initialize the FeedForward module.
 
-        Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-            ffn_dim_multiplier (float, optional): Custom multiplier for hidden dimension. Defaults to None.
-
-        Attributes:
-            w1 (Linear): Linear transformation for the first layer.
-            w2 (Linear): Linear transformation for the second layer.
-            w3 (Linear): Linear transformation for the third layer.
-
-        """
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
@@ -279,20 +282,22 @@ class FeedForward(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
+    """
+    RotaryEmbedding Module
+    """
+
     def __init__(self, params: ModelArgs):
-        """
-        Initialize the embedding module.
-        """
         super().__init__()
         self.params = params
-        self.tok_embeddings = nn.Embedding(
-            params.vocab_size, params.dim
-        )
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.freqs_cis = precompute_freqs_cis(
-            # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096.
-            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
-            self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
+            # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation
+            # of models is 4096.
+            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training
+            # or fine-tuning.
+            self.params.dim // self.params.n_heads,
+            self.params.max_seq_len * 2,
         )
 
     def forward(self, tokens: torch.Tensor):
@@ -308,30 +313,32 @@ class RotaryEmbedding(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[0 : seqlen]
+        freqs_cis = self.freqs_cis[0:seqlen]
         return h, freqs_cis
 
 
 class TransformerBlock(nn.Module):
+    """
+    TransformerBlock Module
+
+    Args:
+        layer_id (int): Identifier for the layer.
+        args (ModelArgs): Model configuration parameters.
+
+    Attributes:
+        n_heads (int): Number of attention heads.
+        dim (int): Dimension size of the model.
+        head_dim (int): Dimension size of each attention head.
+        attention (Attention): Attention module.
+        feed_forward (FeedForward): FeedForward module.
+        layer_id (int): Identifier for the layer.
+        attention_norm (RMSNorm): Layer normalization for attention output.
+        ffn_norm (RMSNorm): Layer normalization for feedforward output.
+
+    """
+
     def __init__(self, layer_id: int, args: ModelArgs):
-        """
-        Initialize a TransformerBlock.
 
-        Args:
-            layer_id (int): Identifier for the layer.
-            args (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            n_heads (int): Number of attention heads.
-            dim (int): Dimension size of the model.
-            head_dim (int): Dimension size of each attention head.
-            attention (Attention): Attention module.
-            feed_forward (FeedForward): FeedForward module.
-            layer_id (int): Identifier for the layer.
-            attention_norm (RMSNorm): Layer normalization for attention output.
-            ffn_norm (RMSNorm): Layer normalization for feedforward output.
-
-        """
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
@@ -363,32 +370,32 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(
-            self.attention_norm(x), freqs_cis
-        )
+        h = x + self.attention(self.attention_norm(x), freqs_cis)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
 
 class Transformer(nn.Module):
+    """
+    Transformer Module
+
+    Args:
+        params (ModelArgs): Model configuration parameters.
+
+    Attributes:
+        params (ModelArgs): Model configuration parameters.
+        vocab_size (int): Vocabulary size.
+        n_layers (int): Number of layers in the model.
+        tok_embeddings (ParallelEmbedding): Token embeddings.
+        layers (torch.nn.ModuleList): List of Transformer blocks.
+        norm (RMSNorm): Layer normalization for the model output.
+        output (ColumnParallelLinear): Linear layer for final output.
+        freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+
+    """
+
     def __init__(self, params: ModelArgs):
-        """
-        Initialize a Transformer model.
 
-        Args:
-            params (ModelArgs): Model configuration parameters.
-
-        Attributes:
-            params (ModelArgs): Model configuration parameters.
-            vocab_size (int): Vocabulary size.
-            n_layers (int): Number of layers in the model.
-            tok_embeddings (ParallelEmbedding): Token embeddings.
-            layers (torch.nn.ModuleList): List of Transformer blocks.
-            norm (RMSNorm): Layer normalization for the model output.
-            output (ColumnParallelLinear): Linear layer for final output.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
-
-        """
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
@@ -401,9 +408,7 @@ class Transformer(nn.Module):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = nn.Linear(
-            params.dim, params.vocab_size, bias=False
-        )
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
     def forward(self, tokens: torch.Tensor):
         """

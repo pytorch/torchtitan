@@ -1,3 +1,6 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 import argparse
 import os
 from dataclasses import dataclass, field
@@ -6,21 +9,18 @@ from typing import List, Union
 # torch imports
 import torch
 import torch.nn.functional as F
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.utils.data import DataLoader
-
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.logging_utils import init_logger, rank0_log
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 # torchtrain related
-from torchtrain.datasets import (
-    create_tokenizer,
-    dataloader_fn,
-)
-from torchtrain.models import models_config, model_name_to_cls, model_name_to_tokenizer
-from torchtrain.parallelisms import ParallelDims, models_parallelize_fns
+from torchtrain.datasets import create_tokenizer, dataloader_fn
+from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
+
+from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+
+from torchtrain.profiling import maybe_run_profiler
 
 
 @dataclass
@@ -58,9 +58,10 @@ def main(args):
     init_logger()
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
-    parallel_dims = ParallelDims(dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size)
+    parallel_dims = ParallelDims(
+        dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size
+    )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
 
     model_name = args.model
     # build tokenizer
@@ -90,12 +91,7 @@ def main(args):
     model = model_cls.from_model_args(model_config)
 
     # apply PTD parallelisms + AC
-    model = models_parallelize_fns[model_name](
-        model,
-        world_mesh,
-        parallel_dims,
-        args
-    )
+    model = models_parallelize_fns[model_name](model, world_mesh, parallel_dims, args)
 
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
