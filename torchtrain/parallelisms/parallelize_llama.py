@@ -34,6 +34,10 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtrain.logging_utils import rank0_log
+from torchtrain.models.llama.model import Transformer, TransformerBlock
+
+# from pippy.PipelineSchedule import PipelineStageV2Impl
+from .pippy_copy import PipelineStageV2Impl
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +77,110 @@ def checkpoint_wrapper(module, config):
     )
 
 
+from typing import List
+
+# this tells which parts of the main model to extract per rank,
+# and what input shapes that sub-model expects.
+# we can automate this in various ways.  a manual way is also powerful.
+pp_config_toy_2_stage = [
+    dict(has_embeddings=True, layer_ids=[], has_output=False),
+    dict(has_embeddings=False, layer_ids=[0], has_output=True),
+]
+
+
+class DummyModule(torch.nn.Module):
+    def forward(self, *args):
+        raise RuntimeError("DummyModule should never be called")
+
+
+class TransformerChunk(torch.nn.Module):
+    def __init__(
+        self,
+        orig_model: Transformer,
+        has_embeddings: bool,
+        layer_ids: List[int],
+        has_output: bool,
+    ):
+        super().__init__()
+
+        self.embeddings = orig_model.embeddings if has_embeddings else None
+
+        # this is a constant tensor that's used by all layers, instead of passing it across PP stages
+        # just start with one copy per stage
+        # TODO hack: model doesn't move this to cuda so we have to handle it ...
+        self.freqs_cis = orig_model.embeddings.freqs_cis.cuda()
+
+        # preserve FQNs of original model by preserving structure
+        # (including preserving position in layers[] list)- use dummy module
+        self.layers = orig_model.layers
+        for i in range(len(self.layers)):
+            if i not in layer_ids:
+                self.layers[i] = DummyModule()
+
+        self.layer_ids = layer_ids
+        self.norm = orig_model.norm if has_output else None
+        self.output = orig_model.output if has_output else None
+
+    def forward(self, input):
+        if self.embeddings is not None:
+            (tokens,) = input
+            h, freqs_cis = self.embeddings(tokens)
+        else:
+            assert len(input) == 1, input
+            (h,) = input
+            bsz_seqlen, _ = h.shape
+            bsz = 4
+            seqlen = bsz_seqlen // bsz
+            # TODO how should i get seqlen now
+            freqs_cis = self.freqs_cis[:seqlen]
+
+        output = (h,)
+
+        for i in self.layer_ids:
+            h = self.layers[i](h, freqs_cis)
+
+        output = (h,)
+
+        if self.norm is not None:
+            h = self.norm(h)
+            output = self.output(h).float()
+
+        return output
+
+
+def build_pipeline_stage(world_mesh, model: torch.nn.Module) -> PipelineStageV2Impl:
+    pp_stage_meta_inputs = [
+        # data batch
+        [torch.empty((4, 2048), dtype=torch.int64, device="cuda")],
+        # h
+        [torch.empty((4 * 2048, 256), dtype=torch.bfloat16, device="cuda")],
+    ]
+
+    from .pippy_copy import PipelineStageV2Impl
+
+    # pp_mesh = world_mesh["pp"] if world_mesh.ndim > 1 else world_mesh
+    # assert (
+    #     pp_mesh.mesh_dim_names[0] == "pp" and pp_mesh.ndim == 1
+    # ), pp_mesh.mesh_dim_names
+    pp_mesh = world_mesh["pp"]
+    pp_rank = pp_mesh.get_local_rank()
+
+    # no virtual stages yet
+    pp_stage_id = pp_rank
+    num_stages = pp_mesh.size()
+    pipeline_stage = PipelineStageV2Impl(
+        module=model,
+        stage_id=pp_stage_id,
+        num_stages=num_stages,
+        # we need to be clearer about whether rank/world refers to global or local
+        rank=world_mesh.get_rank(),
+        world_size=world_mesh.size(),
+        # annoying
+        inputs_meta=pp_stage_meta_inputs[pp_rank],
+    )
+    return pipeline_stage
+
+
 def parallelize_llama(model, world_mesh, parallel_dims, args):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
@@ -81,9 +189,51 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
     otherwise the model needs to be small enough on GPU or can fit into CPU.
     # TODO: apply SP
     """
+
+    # TODO - nice utility for mapping from mesh+parallelisms to local cuda device idx
+    # hack: works okish for <8gpu runs for now
+    device = "cuda"
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
-        raise NotImplementedError("PP not implemented yet.")
+        """
+        Currently, we just select part of the model for this rank and then continue to wrap that model with SP/DP.
+
+        Later, we have to further wrap it with a PipelineStage object and hook that up to a PipelineSchedule.
+        The PipelineSchedule necessarily replaces parts of the main train loop, so it seems reasonable to construct it
+        in the trainer file just before using it.
+
+        The PipelineStage object is less clear- we could construct it here, and then make sure it 'acts like a module'
+        from the perspective of the TP/DP wrapping, or we can argue that it does not need to mimic a module at all,
+        and we just  apply PipelineStages at the point we use the PipelineSchedule.  Then we can work directly with
+        more 'vanilla' modules up till that point.
+
+        It should not matter if the model is on meta device or real device at this point- PP stage spliting should
+        just leave that alone and let device movement and initialization happen after parallelisms are applied.
+
+        FQNs are important- we aim to preserve original model FQNs so checkpointing is easy.  For virtual stages, we
+        add a burden to the trainer code, since there is a list of model chunks rather than a single model chunk. This
+        is easy to solve with a helper to apply checkpoint loading/saving to this list.  The FQNs should still match
+        the original model if possible, or simply add a PP prefix if needed.
+
+        TODO: however, we still have to deal with one model-chunk per virtual pp stage here in this function. For
+        example: world_size=4, PP=2, DP=2, virtual_pp_stages=2 -> we would split the model into 4 PP chunks, putting
+        chunks 0, 2 on global ranks 0, 1 and putting chunks 1, 3 on global ranks 2,3.  (Assuming  DP operates between
+        global ranks 0-1 and 2-3)
+
+        Note: we use manual model splitting here. It's quite a hack at the moment.  But it could either be cleaned up
+        or replaced by pippy's frontend.  In either case, we can try to produce model chunks for stage(s) in this
+        function.
+        """
+        logger.info("Splitting model for pipeline parallelism")
+        # todo rebase pytorch and delete slice hack
+        pp_mesh = world_mesh["pp"] if world_mesh.ndim > 1 else world_mesh
+        assert (
+            pp_mesh.mesh_dim_names[0] == "pp" and pp_mesh.ndim == 1
+        ), pp_mesh.mesh_dim_names
+        pp_rank = pp_mesh.get_local_rank()
+        pp_config = pp_config_toy_2_stage
+        model = TransformerChunk(model, **pp_config[pp_rank])
+        logger.info("Split Model: %s", model)
     if parallel_dims.sp_enabled:
         # First we apply Sequence Parallelism if it's enabled
         tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
@@ -169,19 +319,24 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
             "use_orig_params": True,
             "device_mesh": dp_mesh,
         }
-
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
-            for layer_id, transformer_block in enumerate(model.layers):
-                # apply AC to each layer
-                # before wrapping with FSDP, we need to make sure the layer is on GPU
-                transformer_block = transformer_block.cuda()
-                transformer_block = checkpoint_wrapper(transformer_block, args)
+            for layer_id, maybe_transformer_block in enumerate(model.layers):
+                if isinstance(maybe_transformer_block, TransformerBlock):
+                    # apply AC to each layer
+                    # before wrapping with FSDP, we need to make sure the layer is on GPU
+                    transformer_block = maybe_transformer_block.to(device)
+                    transformer_block = checkpoint_wrapper(transformer_block, args)
 
-                # Wraps each layer with FSDP
-                model.layers[layer_id] = wrap(transformer_block)
+                    # Wraps each layer with FSDP
+                    model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
-            model = wrap(model.cuda())
+            model = wrap(model.to(device))
+    else:
+        # TODO can we make it so that the model doesn't require FSDP (so DP can be disabled for debugging)
+        # and can we make device-movement always outside of apply-parellelisms so which parallelisms you apply is orthogonal?
+        logger.warning("using ugly hack to move to device without DP applied")
+        model = model.to(device)
 
         rank0_log("Applied FSDP to the model...")
 

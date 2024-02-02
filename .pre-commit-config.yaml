@@ -1,4 +1,4 @@
-exclude: 'build'
+exclude: ^(build/|torchtrain/parallelisms/pippy_copy.py)
 
 default_language_version:
     python: python3

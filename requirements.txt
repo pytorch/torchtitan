@@ -2,3 +2,4 @@ torch >= 2.2.0.dev
 sentencepiece
 datasets
 tomli >= 1.1.0 ; python_version < "3.11"
+pippy @ git+https://github.com/owner/repo@41b95ec
