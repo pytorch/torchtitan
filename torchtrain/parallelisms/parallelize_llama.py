@@ -31,6 +31,12 @@ def checkpoint_wrapper(module, config):
     )
 
 
+def slice_submesh(world_mesh: DeviceMesh, name: str):
+    mesh = world_mesh[name] if world_mesh.ndim > 1 else world_mesh
+    assert mesh.mesh_dim_names[0] == name and mesh.ndim == 1, mesh.mesh_dim_names
+    return mesh
+
+
 def parallelize_llama(model, world_mesh, parallel_dims, args):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
@@ -45,8 +51,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
     if parallel_dims.sp_enabled:
         raise NotImplementedError("SP not implemented yet.")
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-        assert dp_mesh.mesh_dim_names == ["dp"], dp_mesh.mesh_dim_names
+        dp_mesh = slice_submesh(world_mesh, "dp")
+
         fsdp_config = {
             "mixed_precision": MixedPrecision(
                 param_dtype=torch.bfloat16,
