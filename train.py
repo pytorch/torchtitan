@@ -13,6 +13,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
+
 # torchtrain related
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
@@ -261,15 +262,16 @@ if __name__ == "__main__":
         help=(
             "Checkpointing interval. The unit of measurement is in seconds or "
             "steps depending on --checkpoint-internval-type."
-        )
+        ),
     )
     parser.add_argument(
         "--checkpoint-interval-type",
-        type=str, default="steps",
+        type=str,
+        default="steps",
         help=(
             "The checkpointing interval unit of measurement."
             "The default value is step."
-        )
+        ),
     )
     parser.add_argument(
         "--checkpoint-folder",
@@ -278,7 +280,7 @@ if __name__ == "__main__":
         help=(
             "The folder to store the checkpoints. If this is not specified or "
             "is an empty string, checkpointing is disabled."
-        )
+        ),
     )
 
     args = parser.parse_args()

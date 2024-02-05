@@ -8,13 +8,13 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torchtrain.logging_utils import rank0_log
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torchtrain.logging_utils import rank0_log
 
 
 class IntervalType(enum.Enum):
@@ -81,9 +81,8 @@ class CheckpointManager:
             return
 
         if not force:
-            if (
-                self.interval_type == IntervalType.STEPS
-                and not (curr_step % self.interval == 0)
+            if self.interval_type == IntervalType.STEPS and not (
+                curr_step % self.interval == 0
             ):
                 return
             if self.interval_type == IntervalType.SECONDS:
@@ -140,7 +139,5 @@ class CheckpointManager:
             self.states,
             checkpoint_id=self.create_checkpoint_id(step),
         )
-        rank0_log(
-            f"Finish loading a checkpoint. {time.monotonic() - begin} seconds."
-        )
+        rank0_log(f"Finish loading a checkpoint. {time.monotonic() - begin} seconds.")
         return True
