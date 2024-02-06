@@ -13,5 +13,5 @@ CHECKPOINT_FOLDER=""
 CHECKPOINT_INTERVAL=5
 
 torchrun --nproc_per_node=${NGPU} \
-train.py --steps 10 --compile \
+train.py --steps 10 \
 --checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
