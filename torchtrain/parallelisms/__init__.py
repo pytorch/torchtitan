@@ -46,6 +46,7 @@ class ParallelDims:
             if d > 1:
                 dims.append(d)
                 names.append(name)
+        names = tuple(names)
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         return init_device_mesh(device_type, dims, mesh_dim_names=names)
 
