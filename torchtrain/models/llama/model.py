@@ -236,10 +236,10 @@ class Attention(nn.Module):
         xv = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
         # we use casual mask for training
-        output = F.scaled_dot_product_attention(
-            xq, xk, xv, is_causal=True
-        )
-        output = output.transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         # output stay folded with batch and sequence dimension
         output = output.view(bsz * seqlen, -1)
         return self.wo(output)
@@ -435,7 +435,7 @@ class Transformer(nn.Module):
         # unfold batch and sequence dimension
         bsz = tokens.shape[0]
         bs_seqlen = h.shape[0]
-        h = h.view(bsz, bs_seqlen//bsz, self.params.dim)
+        h = h.view(bsz, bs_seqlen // bsz, self.params.dim)
         output = self.output(h).float()
         return output
 

@@ -7,7 +7,13 @@
 import logging
 
 import torch
-from torch.distributed._tensor import DTensor, Shard, Replicate, distribute_tensor, distribute_module
+from torch.distributed._tensor import (
+    distribute_module,
+    distribute_tensor,
+    DTensor,
+    Replicate,
+    Shard,
+)
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -22,14 +28,15 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import enable_wrap, wrap
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    RowwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    RowwiseParallel,
 )
 
 from torchtrain.logging_utils import rank0_log
 
 logger = logging.getLogger(__name__)
+
 
 def distribute_rmsnorm(module, device_mesh):
     # temp sharding API until PTD API is added
@@ -37,7 +44,9 @@ def distribute_rmsnorm(module, device_mesh):
         if isinstance(inputs[0], DTensor):
             return inputs
         elif isinstance(inputs[0], torch.Tensor):
-            shard_tensor = DTensor.from_local(inputs[0], device_mesh, [Shard(0)], run_check=False)
+            shard_tensor = DTensor.from_local(
+                inputs[0], device_mesh, [Shard(0)], run_check=False
+            )
             return shard_tensor
         else:
             raise NotImplementedError("!!")
@@ -53,7 +62,7 @@ def distribute_rmsnorm(module, device_mesh):
         module,
         device_mesh,
         partition_fn,
-        input_fn = prepare_input_fn,
+        input_fn=prepare_input_fn,
     )
 
 
@@ -88,8 +97,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
             tp_mesh,
             {
                 "embeddings.tok_embeddings": RowwiseParallel(
-                        input_layouts=Replicate(),
-                    ),
+                    input_layouts=Replicate(),
+                ),
                 "output": ColwiseParallel(
                     input_layouts=Shard(0),
                     output_layouts=Replicate(),
@@ -98,8 +107,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
                     input_layouts=(Replicate(), None),
                     desired_input_layouts=(Shard(0), None),
                     use_local_output=True,
-                )
-            }
+                ),
+            },
         )
 
         # apply sequence parallelism to every transformer block
@@ -143,7 +152,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
                 parallelize_plan=layer_plan,
             )
 
-        rank0_log(f"Applied Sequence Parallelism to the model...")
+        rank0_log("Applied Sequence Parallelism to the model...")
 
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
@@ -174,6 +183,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
             # wrap the rest layers with FSDP
             model = wrap(model.cuda())
 
-        rank0_log(f"Applied FSDP to the model...")
+        rank0_log("Applied FSDP to the model...")
 
     return model
