@@ -1,10 +1,12 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 # this file applies the PTD parallelisms and various training techniques to the
 # llama model, i.e. activation checkpoint, etc.
 
-import os
-import torch
 import logging
 
+import torch
 from torch.distributed._tensor import DTensor, Shard, Replicate, distribute_tensor, distribute_module
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -26,7 +28,6 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtrain.logging_utils import rank0_log
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,9 @@ def distribute_rmsnorm(module, device_mesh):
 
 # Uses PTD FSDP AC wrapper
 def checkpoint_wrapper(module, config):
-    return ptd_checkpoint_wrapper(module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False)
-
+    return ptd_checkpoint_wrapper(
+        module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
+    )
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, args):
@@ -74,8 +76,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
     if parallel_dims.sp_enabled:
-        # First we apply Sequnece Parallelism if it's enabled
-        tp_mesh = world_mesh["sp"]
+        # First we apply Sequence Parallelism if it's enabled
+        tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
         sp_degree = args.sp_degree
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
@@ -85,7 +87,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
             model,
             tp_mesh,
             {
-                "tok_embeddings": RowwiseParallel(
+                "embeddings.tok_embeddings": RowwiseParallel(
                         input_layouts=Replicate(),
                     ),
                 "output": ColwiseParallel(
@@ -167,7 +169,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
                 transformer_block = checkpoint_wrapper(transformer_block, args)
 
                 # Wraps each layer with FSDP
-                model.layers[layer_id]= wrap(transformer_block)
+                model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
             model = wrap(model.cuda())
