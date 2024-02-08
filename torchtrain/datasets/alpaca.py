@@ -17,6 +17,8 @@ class AlpacaDataset(IterableDataset):
     Args:
         tokenizer (Tokenizer): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
+        world_size (int): number of data parallel processes participating in training
+        rank (int): rank of the current data parallel process
 
     Data input format:
     {
@@ -34,11 +36,20 @@ class AlpacaDataset(IterableDataset):
         Batch size: 8
     """
 
-    def __init__(self, tokenizer: TokenizerIf, seq_len: int = 2048, **kwargs) -> None:
+    def __init__(
+        self,
+        tokenizer: TokenizerIf,
+        seq_len: int = 2048,
+        world_size: int = 1,
+        rank: int = 0,
+        **kwargs
+    ) -> None:
         self._data = load_dataset("tatsu-lab/alpaca", split="train")
         self._tokenizer = tokenizer
         self.data_iterator = iter(self._data)
         self.seq_len = seq_len
+        self.world_size = world_size
+        self.rank = rank
         self.response_tag = "\n\n### Response:\n"
 
     def __len__(self):
@@ -48,7 +59,12 @@ class AlpacaDataset(IterableDataset):
         max_buffer_token_len = 1 + self.seq_len
         all_tokens: List[int] = []
 
-        for sample in self.data_iterator:
+        for idx, sample in enumerate(self.data_iterator):
+            # select samples to pack in a round-robin fashion
+            # TODO: This is a temporary solution for small datasets like Alpaca.
+            #       For larger datasets we need to use a more scalable approach.
+            if idx % self.world_size != self.rank:
+                continue
             sample_text = sample["text"]
             sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
             all_tokens.extend(sample_tokens)
@@ -66,14 +82,6 @@ class AlpacaDataset(IterableDataset):
 def build_alpaca_data_loader(
     tokenizer: TokenizerIf, batch_size: int, seq_len: int, world_size, rank
 ):
-    alpaca_ds = AlpacaDataset(tokenizer=tokenizer, seq_len=seq_len)
-    # TOOD: sampler can't work with iterable dataset, figure out a way
-    # to sample in a distributed manner
-    # dist_sampler = DistributedSampler(
-    #     alpaca_ds,
-    #     world_size,
-    #     rank,
-    #     shuffle=True,
-    # )
+    alpaca_ds = AlpacaDataset(tokenizer, seq_len, world_size, rank)
 
     return DataLoader(alpaca_ds, batch_size=batch_size)
