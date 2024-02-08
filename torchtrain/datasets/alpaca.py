@@ -61,6 +61,8 @@ class AlpacaDataset(IterableDataset):
 
         for idx, sample in enumerate(self.data_iterator):
             # select samples to pack in a round-robin fashion
+            # TODO: This is a temporary solution for small datasets like Alpaca.
+            #       For larger datasets we need to use a more scalable approach.
             if idx % self.world_size != self.rank:
                 continue
             sample_text = sample["text"]
