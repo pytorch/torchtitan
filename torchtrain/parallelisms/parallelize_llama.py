@@ -185,4 +185,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
 
         rank0_log("Applied FSDP to the model...")
 
+    # redundant if FSDP is enabled, but ensure the model is on device regardless of which parallelisms were used
+    model.cuda()
     return model
