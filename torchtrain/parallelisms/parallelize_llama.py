@@ -332,12 +332,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
 
             # wrap the rest layers with FSDP
             model = wrap(model.to(device))
-    else:
-        # TODO can we make it so that the model doesn't require FSDP (so DP can be disabled for debugging)
-        # and can we make device-movement always outside of apply-parellelisms so which parallelisms you apply is orthogonal?
-        logger.warning("using ugly hack to move to device without DP applied")
-        model = model.to(device)
-
         rank0_log("Applied FSDP to the model...")
 
     # redundant if FSDP is enabled, but ensure the model is on device regardless of which parallelisms were used

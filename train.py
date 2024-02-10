@@ -151,6 +151,17 @@ def main(args):
         )
 
     train_state = TrainState()
+    from datetime import timedelta
+
+    torch.distributed.distributed_c10d._set_pg_timeout(
+        timedelta(seconds=2), world_mesh.get_group(mesh_dim=0)
+    )
+    torch.distributed.distributed_c10d._set_pg_timeout(
+        timedelta(seconds=2), world_mesh.get_group(mesh_dim=1)
+    )
+    torch.distributed.distributed_c10d._set_pg_timeout(
+        timedelta(seconds=2), world_mesh.get_group(mesh_dim=2)
+    )
 
     # train loop
     model.train()
