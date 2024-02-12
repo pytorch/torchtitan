@@ -8,7 +8,8 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 SP=2 ./run_llama_train.sh
 
-MODEL_CONF=${MODEL_CONF:-"7B"}
+MODEL=${MODEL:-"llama"}
+MODEL_CONF=${MODEL_CONF:-"debugmodel"}
 NGPU=${NGPU:-"8"}
 PP=${PP:-"1"}
 SP=${SP:-"1"}
@@ -22,9 +23,10 @@ CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-""}
 # Please adjust this to a longer interval period. The unit of measurement is in steps.
 CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-5}
 
-torchrun --nproc_per_node=${NGPU} train.py --steps 25
-# --compile --local-ranks-filter ${LOG_RANK}
-# --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
- \
-#--pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP}
-#--checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
+torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
+--local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
+train.py --steps 10 \
+--model ${MODEL} --model_conf ${MODEL_CONF} \
+--pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP} \
+# --compile \
+# --checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}

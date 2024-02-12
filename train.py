@@ -204,7 +204,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_conf",
         type=str,
-        default="40B",
+        default="debugmodel",
         help="which model config to train",
     )
     parser.add_argument("--dataset", type=str, default="alpaca", help="dataset to use")

@@ -77,7 +77,6 @@ class RMSNorm(torch.nn.Module):
         torch.nn.init.ones_(self.weight)
 
 
-
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
@@ -186,7 +185,6 @@ class Attention(nn.Module):
     """
 
     def __init__(self, args: ModelArgs):
-
         super().__init__()
         self.n_heads = args.n_heads
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -203,12 +201,14 @@ class Attention(nn.Module):
             nn.init.trunc_normal_(
                 item.weight,
                 mean=0.0,
-                std=0.02,)
+                std=0.02,
+            )
 
         nn.init.trunc_normal_(
-                self.wo.weight,
-                mean=0.0,
-                std=init_std,)
+            self.wo.weight,
+            mean=0.0,
+            std=init_std,
+        )
 
     def forward(
         self,
@@ -284,7 +284,6 @@ class FeedForward(nn.Module):
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
     ):
-
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
@@ -299,18 +298,19 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-    def reset_parameters(self,init_std):
+    def reset_parameters(self, init_std):
         nn.init.trunc_normal_(
-                self.w1.weight,
-                mean=0.0,
-                std=0.02,)
+            self.w1.weight,
+            mean=0.0,
+            std=0.02,
+        )
 
         for item in (self.w2, self.w3):
             nn.init.trunc_normal_(
                 item.weight,
                 mean=0.0,
-                std=init_std,)
-
+                std=init_std,
+            )
 
 
 class RotaryEmbedding(nn.Module):
@@ -370,7 +370,6 @@ class TransformerBlock(nn.Module):
     """
 
     def __init__(self, layer_id: int, args: ModelArgs):
-
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
@@ -386,7 +385,7 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-        self.weight_init_std = 0.02 / (2 * self.num_layers)**0.5
+        self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
 
     def forward(
         self,
@@ -409,13 +408,12 @@ class TransformerBlock(nn.Module):
         return out
 
     def reset_parameters(self):
-        """ reset params and norms for entire block """
+        """reset params and norms for entire block"""
         self.attention_norm.reset_parameters()
         self.ffn_norm.reset_parameters()
 
         self.attention.reset_parameters(self.weight_init_std)
         self.feed_forward.reset_parameters(self.weight_init_std)
-
 
 
 class Transformer(nn.Module):
@@ -438,7 +436,6 @@ class Transformer(nn.Module):
     """
 
     def __init__(self, params: ModelArgs):
-
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
@@ -457,7 +454,9 @@ class Transformer(nn.Module):
         self.reset_parameters()
         rank0_log(f"{self.params=}")
 
-    def reset_parameters(self,):
+    def reset_parameters(
+        self,
+    ):
         for layer in self.layers:
             layer.reset_parameters()
         self.norm.reset_parameters()
@@ -470,9 +469,7 @@ class Transformer(nn.Module):
             a=-cutoff_factor * final_out_std,
             b=cutoff_factor * final_out_std,
         )
-        rank0_log(f"Model params initialized via reset_params")
-
-
+        rank0_log("Model params initialized via reset_params")
 
     def forward(self, tokens: torch.Tensor):
         """
