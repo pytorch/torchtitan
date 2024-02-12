@@ -2,7 +2,7 @@
 
 set -ex
 
-# TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
+TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 
 # use envs as local overrides for convenience
 # e.g.
