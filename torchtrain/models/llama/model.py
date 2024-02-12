@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchtrain.logging_utils import rank0_log
+
 
 @dataclass
 class ModelArgs:
@@ -73,6 +75,7 @@ class RMSNorm(torch.nn.Module):
 
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
+
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -195,6 +198,18 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
+    def reset_parameters(self, init_std):
+        for item in (self.wq, self.wk, self.wv):
+            nn.init.trunc_normal_(
+                item.weight,
+                mean=0.0,
+                std=0.02,)
+
+        nn.init.trunc_normal_(
+                self.wo.weight,
+                mean=0.0,
+                std=init_std,)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -284,6 +299,19 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
+    def reset_parameters(self,init_std):
+        nn.init.trunc_normal_(
+                self.w1.weight,
+                mean=0.0,
+                std=0.02,)
+
+        for item in (self.w2, self.w3):
+            nn.init.trunc_normal_(
+                item.weight,
+                mean=0.0,
+                std=init_std,)
+
+
 
 class RotaryEmbedding(nn.Module):
     """
@@ -354,8 +382,11 @@ class TransformerBlock(nn.Module):
             ffn_dim_multiplier=args.ffn_dim_multiplier,
         )
         self.layer_id = layer_id
+        self.num_layers = args.n_layers
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+        self.weight_init_std = 0.02 / (2 * self.num_layers)**0.5
 
     def forward(
         self,
@@ -376,6 +407,15 @@ class TransformerBlock(nn.Module):
         h = x + self.attention(self.attention_norm(x), freqs_cis)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
+
+    def reset_parameters(self):
+        """ reset params and norms for entire block """
+        self.attention_norm.reset_parameters()
+        self.ffn_norm.reset_parameters()
+
+        self.attention.reset_parameters(self.weight_init_std)
+        self.feed_forward.reset_parameters(self.weight_init_std)
+
 
 
 class Transformer(nn.Module):
@@ -403,6 +443,7 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        self.model_dim = params.dim
 
         self.embeddings = RotaryEmbedding(params)
 
@@ -412,6 +453,26 @@ class Transformer(nn.Module):
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+        # init model weights
+        self.reset_parameters()
+        rank0_log(f"{self.params=}")
+
+    def reset_parameters(self,):
+        for layer in self.layers:
+            layer.reset_parameters()
+        self.norm.reset_parameters()
+        final_out_std = self.model_dim**-0.5
+        cutoff_factor = 3
+        nn.init.trunc_normal_(
+            self.output.weight,
+            mean=0.0,
+            std=final_out_std,
+            a=-cutoff_factor * final_out_std,
+            b=cutoff_factor * final_out_std,
+        )
+        rank0_log(f"Model params initialized via reset_params")
+
+
 
     def forward(self, tokens: torch.Tensor):
         """
