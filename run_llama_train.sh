@@ -10,7 +10,7 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 
 MODEL=${MODEL:-"llama"}
 MODEL_CONF=${MODEL_CONF:-"debugmodel"}
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"2"}
 PP=${PP:-"1"}
 SP=${SP:-"1"}
 DP=${DP:-"-1"}

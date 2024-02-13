@@ -3,7 +3,7 @@
 dump_folder = "./torchtrain/outputs"
 
 [profiling]
-run_profiler = true
+run_profiler = false
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
 profile_every_x_iter = 10
