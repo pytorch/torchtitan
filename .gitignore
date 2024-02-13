@@ -9,5 +9,4 @@ outputs
 data
 out
 wandb
-*.model
 *.json
