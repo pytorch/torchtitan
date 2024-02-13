@@ -18,12 +18,12 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
+from torchtrain.metrics_utils import get_num_params
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
-from torchtrain.metrics_utils import get_num_params
 
 
 @dataclass
@@ -107,7 +107,9 @@ def main(args):
 
     # log model size
     model_param_count = get_num_params(model)
-    rank0_log(f"Model {model_name} {args.model_conf} size: {model_param_count:,} total parameters")
+    rank0_log(
+        f"Model {model_name} {args.model_conf} size: {model_param_count:,} total parameters"
+    )
 
     # apply PTD parallelisms + AC
     model = models_parallelize_fns[model_name](model, world_mesh, parallel_dims, args)

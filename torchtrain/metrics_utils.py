@@ -1,12 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
 import torch.nn as nn
 
-def get_num_params(model: nn.Module, only_trainable: bool = False)-> int:
+
+def get_num_params(model: nn.Module, only_trainable: bool = False) -> int:
     """
     Get the total model params
-    Args: only_trainable: whether to only count trainable params
+    Args : only_trainable: whether to only count trainable params
     """
     param_list = list(model.parameters())
     if only_trainable:
