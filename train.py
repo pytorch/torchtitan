@@ -18,7 +18,7 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics_utils import get_num_params, GPU_Memory_Monitor
+from torchtrain.metrics_utils import get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
@@ -110,7 +110,7 @@ def main(args):
     rank0_log(
         f"Model {model_name} {args.model_conf} size: {model_param_count:,} total parameters"
     )
-    gpu_metrics = GPU_Memory_Monitor("cuda")
+    gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
     # apply PTD parallelisms + AC
