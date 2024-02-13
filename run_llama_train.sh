@@ -24,6 +24,6 @@ CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-5}
 
 torchrun --nproc_per_node=${NGPU} \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-train.py --steps 10 --compile \
---pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP}
+train.py --steps 41 --compile \
+--pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP} \
 --checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
