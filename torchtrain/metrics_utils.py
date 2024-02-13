@@ -1,14 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-import torch
 import torch.nn as nn
 
 def get_num_params(model: nn.Module, only_trainable: bool = False)-> int:
-    """ Get the total model params
-    args: only_trainable - only count trainable params
     """
-
+    Get the total model params
+    Args: only_trainable: whether to only count trainable params
+    """
     param_list = list(model.parameters())
     if only_trainable:
         param_list = [p for p in param_list if p.requires_grad]
