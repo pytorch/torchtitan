@@ -452,7 +452,7 @@ class Transformer(nn.Module):
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
         # init model weights
         self.reset_parameters()
-        rank0_log(f"{self.params=}")
+        rank0_log(f"Model built with: {self.params}")
 
     def reset_parameters(
         self,
@@ -469,7 +469,7 @@ class Transformer(nn.Module):
             a=-cutoff_factor * final_out_std,
             b=cutoff_factor * final_out_std,
         )
-        rank0_log("Model params initialized via reset_params")
+        rank0_log("Model fully initialized via reset_params")
 
     def forward(self, tokens: torch.Tensor):
         """
