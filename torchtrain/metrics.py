@@ -65,30 +65,57 @@ class GPUMemoryMonitor:
         return gb_memory
 
     def get_current_stats(self):
-        self.device_memory_usage = torch.cuda.memory_allocated(self.device)
-        self.device_memory_usage_gb = format_to_gb(self.device_memory_usage)
-        self.device_memory_utilization = convert_to_gpu_pct(
+        """ get the CudaCachingAllocator stats for the current device"""
+        curr_mem = torch.cuda.memory_stats(self.device)
+        self.device_alloc_memory_usage = curr_mem["allocated_bytes.all"]
+        self.device_alloc_memory_usage_gb = format_to_gb(self.device_memory_usage)
+        self.device_alloc_memory_usage_pct = convert_to_gpu_pct(
             self.device_memory_usage, self.device_capacity
         )
-        self.device_memory_utilization_str = f"{self.device_memory_utilization:.2f}%"
+
+        self.device_reserved_memory_usage = curr_mem["reserved_bytes.all"]
+        self.device_reserved_memory_usage_gb = format_to_gb(self.device_reserved_memory_usage)
+        self.device_reserved_memory_usage_pct = convert_to_gpu_pct(self.device_reserved_memory_usage, self.device_capacity)
+
+        self.device_active_memory_usage = curr_mem["active_bytes.all"]
+        self.device_active_memory_usage_gb = format_to_gb(self.device_active_memory_usage)
+        self.device_active_memory_usage_pct = convert_to_gpu_pct(self.device_active_memory_usage, self.device_capacity)
+
+        display_str = ""
+        display_str += f"Memory stats: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_usage_pct}%, Alloc {self.device_alloc_memory_usage_pct}%,  Active: {self.device_active_memory_usage_pct}%\n"
+
+        self.get_peak_stats(curr_mem)
+
+        peak_active_pct = self.get_pct_memory(self.peak_active_memory)
+        peak_allocated_pct = self.get_pct_memory(self.peak_allocated_memory)
+        peak_reserved_pct = self.get_pct_memory(self.peak_reserved_memory)
+        display_str += f"Peak Memory: Reserved {peak_reserved_pct}, Alloc {peak_allocated_pct},  Active: {peak_active_pct}\n"
+
+        display_str += f"num retries: {self.num_retries}, num ooms: {self.num_ooms}"
+        if self.num_retries > 0:
+            display_str += f"\nWARNING: {self.num_retries} retries -- recommend lowering batch size for max performance\n"
+
+        return display_str
 
     def start_monitoring(self):
         """reset all monitoring stats"""
         self.reset_peak_stats()
 
-    def stop_monitoring(self):
-        """capture peak memory stats"""
-        cuda_info = torch.cuda.memory_stats()
+    def get_peak_stats(self, cuda_info=None):
+        """capture current peak memory stats"""
+        if not cuda_info:
+            cuda_info = torch.cuda.memory_stats()
 
         self.peak_active_memory = cuda_info.get("active_bytes.all.peak", 0)
-        self.peak_allocated_memory = torch.cuda.max_memory_allocated(self.device)
-        self.peak_reserved_memory = torch.cuda.max_memory_reserved(self.device)
+        self.peak_allocated_memory = cuda_info.get("allocated_bytes.all.peak", 0)
+        self.peak_reserved_memory = cuda_info.get("reserved_bytes.all.peak", 0)
 
         self.num_retries = cuda_info.get("num_alloc_retries", 0)
         self.num_ooms = cuda_info.get("num_ooms", 0)
 
     def get_peak_stats_str(self) -> str:
         """return string to show overall peak memory stats, warn user re: cudacache retries"""
+        self.get
         display_str = ""
         display_str += f"{self.device_name} ({self.device_index}): {self.device_capacity_gb} GB capacity. Peak memory usage:\n"
         peak_active_gb = self.get_gb_memory(self.peak_active_memory)

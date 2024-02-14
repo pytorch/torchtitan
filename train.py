@@ -18,7 +18,7 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics_utils import get_num_params, GPUMemoryMonitor
+from torchtrain.metrics import get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
@@ -153,8 +153,6 @@ def main(args):
     )
     checkpoint.load()
 
-    gpu_metrics.start_monitoring()
-
     with maybe_run_profiler() as torch_profiler:
         checkpoint.reset()
         while train_state.step < args.steps or args.steps == -1:
@@ -201,11 +199,14 @@ def main(args):
             )
             scheduler.step()
 
+            if train_state.step % 5 == 0:
+                rank0_log(f"{gpu_metrics.get_current_stats()}")
+
             checkpoint.save(train_state.step, force=(train_state.step == args.steps))
 
-    gpu_metrics.stop_monitoring()
-    peak_stats_str = gpu_metrics.get_peak_stats_str()
-    rank0_log(f"{peak_stats_str}")
+
+
+    rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
 if __name__ == "__main__":
