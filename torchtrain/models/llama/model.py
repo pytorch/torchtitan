@@ -394,7 +394,6 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
 
-
     def forward(
         self,
         x: torch.Tensor,
