@@ -21,7 +21,7 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics import build_metric_logger
+from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
@@ -83,6 +83,7 @@ def main(args):
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     model_name = args.model
+    rank0_log(f"Building {model_name}")
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, args.tokenizer_path)
@@ -108,6 +109,14 @@ def main(args):
     model_config.vocab_size = tokenizer.n_words
 
     model = model_cls.from_model_args(model_config)
+
+    # log model size
+    model_param_count = get_num_params(model)
+    rank0_log(
+        f"Model {model_name} {args.model_conf} size: {model_param_count:,} total parameters"
+    )
+    gpu_metrics = GPUMemoryMonitor("cuda")
+    rank0_log(f"GPU memory usage: {gpu_metrics}")
 
     # apply PTD parallelisms + AC
     model = models_parallelize_fns[model_name](model, world_mesh, parallel_dims, args)
@@ -207,7 +216,7 @@ def main(args):
 
                 time_delta = timer() - time_last_log
                 wps = nwords_since_last_log / (
-                    time_delta * parallel_dims.sp * parallel_dims.pp
+                    time_delta * parallel_dims.model_parallel_size
                 )
 
                 metrics = {
@@ -228,7 +237,8 @@ def main(args):
 
             checkpoint.save(train_state.step, force=(train_state.step == args.steps))
 
-        metric_logger.close()
+    metric_logger.close()
+    rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
 if __name__ == "__main__":
@@ -260,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--warmup_pct",
         type=float,
-        default=0.10,
+        default=0.20,
         help="percentage of total training steps to use for warmup",
     )
     parser.add_argument(

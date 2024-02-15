@@ -3,6 +3,7 @@
 
 import logging
 from dataclasses import dataclass
+from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -61,3 +62,7 @@ class ParallelDims:
     @property
     def pp_enabled(self):
         return self.pp > 1
+
+    @cached_property
+    def model_parallel_size(self):
+        return self.sp * self.pp
