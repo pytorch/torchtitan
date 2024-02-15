@@ -22,3 +22,21 @@ run the llama debug model locally to verify the setup is correct:
 ```
 ./run_llama_train.sh
 ```
+
+# TensorBoard
+
+To visualize training metrics on TensorBoard:
+
+1. (by default) set `enable_tensorboard = true` in `torchtrain/train_configs/train_config.toml`
+
+2. set up SSH tunneling
+```
+ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
+```
+
+3. then in the torchtrain repo
+```
+tensorboard --logdir=./torchtrain/outputs/tb
+```
+
+4. go to the URL it provides OR to http://localhost:6006/
