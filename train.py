@@ -4,7 +4,10 @@
 import argparse
 import os
 from dataclasses import dataclass, field
+from timeit import default_timer as timer
 from typing import Any, Dict, List, Union
+
+import numpy as np
 
 # torch imports
 import torch
@@ -18,12 +21,13 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics import get_num_params, GPUMemoryMonitor
+from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
+from torchtrain.utils import dist_max, dist_mean
 
 
 @dataclass
@@ -126,7 +130,7 @@ def main(args):
 
     scaler = build_grad_scaler(model)
 
-    # TODO: add metrics
+    metric_logger = build_metric_logger()
 
     # torch.compile model for improved performance
     if args.compile:
@@ -156,6 +160,10 @@ def main(args):
 
     with maybe_run_profiler() as torch_profiler:
         checkpoint.reset()
+        # variables used to keep info for metrics logging
+        losses_since_last_log: List[float] = []
+        nwords_since_last_log = 0
+        time_last_log = timer()
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
             # get batch
@@ -163,6 +171,7 @@ def main(args):
             input_ids, labels = batch
             input_ids = input_ids.cuda()
             labels = labels.cuda()
+            nwords_since_last_log += labels.numel()
 
             optimizer.zero_grad()
 
@@ -194,6 +203,32 @@ def main(args):
 
             train_state.current_loss = loss.item()
             train_state.losses.append(train_state.current_loss)
+            losses_since_last_log.append(train_state.current_loss)
+
+            # log metrics
+            if (train_state.step - 1) % args.log_freq == 0:
+                avg_loss, max_loss = np.mean(losses_since_last_log), np.max(
+                    losses_since_last_log
+                )
+                global_avg_loss, global_max_loss = dist_mean(
+                    avg_loss, world_mesh
+                ), dist_max(max_loss, world_mesh)
+
+                time_delta = timer() - time_last_log
+                wps = nwords_since_last_log / (
+                    time_delta * parallel_dims.model_parallel_size
+                )
+
+                metrics = {
+                    "global_avg_loss": global_avg_loss,
+                    "global_max_loss": global_max_loss,
+                    "wps": wps,
+                }
+                metric_logger.log(metrics, step=train_state.step)
+
+                losses_since_last_log.clear()
+                nwords_since_last_log = 0
+                time_last_log = timer()
 
             rank0_log(
                 f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
@@ -202,6 +237,7 @@ def main(args):
 
             checkpoint.save(train_state.step, force=(train_state.step == args.steps))
 
+    metric_logger.close()
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
@@ -293,6 +329,12 @@ if __name__ == "__main__":
             "The folder to store the checkpoints. If this is not specified or "
             "is an empty string, checkpointing is disabled."
         ),
+    )
+    parser.add_argument(
+        "--log_freq",
+        type=int,
+        default=10,
+        help="how often to log metrics to TensorBoard",
     )
 
     args = parser.parse_args()
