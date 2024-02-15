@@ -79,6 +79,7 @@ def main(args):
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     model_name = args.model
+    rank0_log(f"Building {model_name}")
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, args.tokenizer_path)
@@ -233,7 +234,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--warmup_pct",
         type=float,
-        default=0.10,
+        default=0.20,
         help="percentage of total training steps to use for warmup",
     )
     parser.add_argument(

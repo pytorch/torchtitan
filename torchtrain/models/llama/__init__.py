@@ -6,9 +6,11 @@ from torchtrain.models.llama.model import ModelArgs, Transformer
 __all__ = ["Transformer"]
 
 llama_configs = {
-    "debugmodel": ModelArgs(dim=256, n_layers=1, n_heads=16),
+    "debugmodel": ModelArgs(dim=256, n_layers=2, n_heads=16),
+    "1B": ModelArgs(dim=1024, n_layers=16, n_heads=8),
     "7B": ModelArgs(dim=4096, n_layers=32, n_heads=32),
     "13B": ModelArgs(dim=5120, n_layers=40, n_heads=40),
+    "40B": ModelArgs(dim=5120, n_layers=80, n_heads=40),
     "70B": ModelArgs(
         dim=8192,
         n_layers=80,
