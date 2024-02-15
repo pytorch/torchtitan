@@ -10,7 +10,7 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 
 MODEL=${MODEL:-"llama"}
 MODEL_CONF=${MODEL_CONF:-"debugmodel"}
-NGPU=${NGPU:-"2"}
+NGPU=${NGPU:-"8"}
 PP=${PP:-"1"}
 SP=${SP:-"1"}
 DP=${DP:-"-1"}
@@ -28,5 +28,5 @@ torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
 train.py --steps 10 \
 --model ${MODEL} --model_conf ${MODEL_CONF} \
 --pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP} \
-# --compile \
-# --checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
+--compile \
+--checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
