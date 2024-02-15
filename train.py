@@ -199,12 +199,7 @@ def main(args):
             )
             scheduler.step()
 
-            if train_state.step % 5 == 0:
-                rank0_log(f"{gpu_metrics.get_current_stats()}")
-
             checkpoint.save(train_state.step, force=(train_state.step == args.steps))
-
-
 
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
