@@ -4,9 +4,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved
 
+from collections import namedtuple
+
 import torch
 import torch.nn as nn
-from collections import namedtuple
 
 _gb_in_bytes = 1024 * 1024 * 1024
 _mb_in_bytes = 1024 * 1024
@@ -90,8 +91,8 @@ class GPUMemoryMonitor:
     def get_current_stats(self, return_data: bool = False):
         """
         get the CudaCachingAllocator stats for the current device
-        Args:
-            return_data: bool, if True, return the data as a named tuple
+
+        return_data: bool, if True, return the data as a named tuple
         """
         curr_mem = torch.cuda.memory_stats(self.device)
 
@@ -114,7 +115,8 @@ class GPUMemoryMonitor:
         )
 
         display_str = ""
-        display_str += f"Current Memory: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_pct}%, Alloc {self.device_alloc_memory_pct}%,  Active: {self.device_active_memory_pct}%\n"
+        display_str += f"Current Memory: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_pct}%,"
+        display_str += f"Alloc {self.device_alloc_memory_pct}%,  Active: {self.device_active_memory_pct}%\n"
 
         self.get_peak_stats(curr_mem)
 
