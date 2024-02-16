@@ -219,10 +219,18 @@ def main(args):
                     time_delta * parallel_dims.model_parallel_size
                 )
 
+                gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
+
                 metrics = {
-                    "global_avg_loss": global_avg_loss,
-                    "global_max_loss": global_max_loss,
+                    "loss/global_avg": global_avg_loss,
+                    "loss/global_max": global_max_loss,
                     "wps": wps,
+                    "memory_current/active(%)": gpu_mem_stats.active_curr,
+                    "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
+                    "memory_current/reserved(%)": gpu_mem_stats.reserved_curr,
+                    "memory_peak/active(%)": gpu_mem_stats.active_peak,
+                    "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
+                    "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
