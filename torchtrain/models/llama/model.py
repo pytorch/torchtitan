@@ -24,7 +24,7 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 32768
-
+    unique_layer_init: bool = True  # initialization uses each unique layer_id or total model layer count
 
 class RMSNorm(torch.nn.Module):
     """
@@ -392,7 +392,11 @@ class TransformerBlock(nn.Module):
         self.num_layers = model_args.n_layers
         self.attention_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+
+        if model_args.unique_layer_init:
+            self.weight_init_std = 0.02 /(2 * (self.layer_id + 1)) ** 0.5
+        else:
+            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
 
     def forward(
         self,
