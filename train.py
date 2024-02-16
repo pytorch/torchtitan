@@ -233,7 +233,8 @@ def main(args):
                 time_last_log = timer()
 
             rank0_log(
-                f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
+                f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
+                f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
             )
             scheduler.step()
 
