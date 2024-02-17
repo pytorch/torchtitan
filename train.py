@@ -222,8 +222,8 @@ def main(args):
                 gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
 
                 metrics = {
-                    "loss/global_avg": global_avg_loss,
-                    "loss/global_max": global_max_loss,
+                    "loss_metrics/global_avg_loss": global_avg_loss,
+                    "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
                     "memory_current/active(%)": gpu_mem_stats.active_curr,
                     "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
