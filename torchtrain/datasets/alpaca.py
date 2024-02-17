@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from torchtrain.datasets.tokenizer import TokenizerIf
 
 from datasets import load_dataset
+from datasets.distributed import split_dataset_by_node
 
 
 class AlpacaDataset(IterableDataset):
@@ -44,27 +45,19 @@ class AlpacaDataset(IterableDataset):
         rank: int = 0,
         **kwargs
     ) -> None:
-        self._data = load_dataset("tatsu-lab/alpaca", split="train")
+        # TODO: This is a temporary solution for small datasets like Alpaca.
+        #       For larger datasets we need to use a more scalable approach.
+        # Setting `streaming=True` works for large dataset, but the speed is slow.
+        ds = load_dataset("tatsu-lab/alpaca", split="train")
+        self.data_iterator = iter(split_dataset_by_node(ds, rank, world_size))
         self._tokenizer = tokenizer
-        self.data_iterator = iter(self._data)
         self.seq_len = seq_len
-        self.world_size = world_size
-        self.rank = rank
-        self.response_tag = "\n\n### Response:\n"
-
-    def __len__(self):
-        return len(self._data)
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
         all_tokens: List[int] = []
 
-        for idx, sample in enumerate(self.data_iterator):
-            # select samples to pack in a round-robin fashion
-            # TODO: This is a temporary solution for small datasets like Alpaca.
-            #       For larger datasets we need to use a more scalable approach.
-            if idx % self.world_size != self.rank:
-                continue
+        for sample in self.data_iterator:
             sample_text = sample["text"]
             sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
             all_tokens.extend(sample_tokens)
