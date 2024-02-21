@@ -62,7 +62,7 @@ class AlpacaDataset(IterableDataset):
             sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
             all_tokens.extend(sample_tokens)
 
-            if len(all_tokens) >= max_buffer_token_len:
+            while len(all_tokens) >= max_buffer_token_len:
                 x = torch.LongTensor(all_tokens[:max_buffer_token_len])
                 # batched_x = x.reshape(self.batch_size, -1)
                 # update tokens to the remaining tokens
