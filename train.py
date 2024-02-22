@@ -158,6 +158,8 @@ def main(args):
     )
     checkpoint.load()
 
+    data_iterator = iter(data_loader)
+
     with maybe_run_profiler() as torch_profiler:
         checkpoint.reset()
         # variables used to keep info for metrics logging
@@ -167,7 +169,7 @@ def main(args):
         while train_state.step < args.steps or args.steps == -1:
             train_state.step += 1
             # get batch
-            batch = next(iter(data_loader))
+            batch = next(data_iterator)
             input_ids, labels = batch
             input_ids = input_ids.cuda()
             labels = labels.cuda()
