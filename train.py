@@ -15,7 +15,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -25,7 +24,6 @@ from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
@@ -74,11 +72,11 @@ def build_optimizer(model, job_config: JobConfig):
     if name == "Adam":
         # TODO: make the optimizer options configurable by toml/cmd args
         optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
         )
     elif name == "AdamW":
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
         )
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
@@ -87,15 +85,9 @@ def build_optimizer(model, job_config: JobConfig):
 
 
 def build_grad_scaler(model):
-    # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
-    # NOTE: currently mixed precision training is supported only when FSDP is used
-    if isinstance(model, FSDP) and model.mixed_precision.param_dtype == torch.float16:
-        enable_grad_scaling = True
-        logger.info("Enabling gradient scaling for mixed precision training")
-    else:
-        enable_grad_scaling = False
-        logger.info("Gradient scaling not enabled")
-
+    # TODO: FSDP2 does not support sharded grad scaler yet.
+    enable_grad_scaling = False
+    logger.info("Gradient scaling not enabled")
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
@@ -152,7 +144,8 @@ def main(job_config: JobConfig):
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
-    with meta_model_init():
+
+    with torch.device("meta"):
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
@@ -186,6 +179,11 @@ def main(job_config: JobConfig):
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
+    # set this as required by DTensor to work with `to_empty`
+    # TODO: remove in the future when enabled by default for wrapper subclasses
+    torch.__future__.set_swap_module_params_on_conversion(True)
+    model.to_empty(device="cuda")
+    model.init_weights()
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -199,7 +197,6 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
-        torch._inductor.config.allow_buffer_reuse = False
         if (
             job_config.activation_checkpoint.mode == "selective"
             and job_config.activation_checkpoint.selective_ac_option == "op"
@@ -208,9 +205,7 @@ def main(job_config: JobConfig):
                 True
             )
         logger.info("Compiling model with torch.compile")
-        model = torch.compile(
-            model,
-        )
+        model = torch.compile(model)
 
     train_state = TrainState()
 
@@ -264,7 +259,11 @@ def main(job_config: JobConfig):
             # forward
             pred = model(input_ids)
 
-            with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
+            with (
+                loss_parallel()
+                if parallel_dims.loss_parallel_enabled
+                else contextlib.nullcontext()
+            ):
                 loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
                 # backward on scaled loss to create scaled gradients
@@ -272,12 +271,9 @@ def main(job_config: JobConfig):
 
             # clip gradients (after unscaling gradients of the optimizer's params)
             scaler.unscale_(optimizer)
-            if isinstance(model, FSDP):
-                model.clip_grad_norm_(job_config.training.max_norm)
-            else:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm
-                )
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), job_config.training.max_norm, foreach=True
+            )
 
             # optimizer step
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
