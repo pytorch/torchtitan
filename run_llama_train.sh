@@ -17,8 +17,8 @@ NGPU=${NGPU:-"8"}
 LOG_RANK=${LOG_RANK:-0}
 
 
-CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama_7b.toml"}
 
-torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
+torchrun --nproc_per_node=${NGPU} --rdzv-backend=c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 train.py --job.config_file ${CONFIG_FILE}

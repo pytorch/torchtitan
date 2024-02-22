@@ -4,10 +4,10 @@ dump_folder = "./outputs"
 description = "llama 7b training"
 
 [profiling]
-run_profiler = true
+run_profiler = false
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
-profile_every_x_iter = 100
+profile_every_x_iter = 10
 
 [metrics]
 enable_tensorboard = true
@@ -34,9 +34,11 @@ steps = 1000
 data_parallel_degree = -1
 sequence_parallel_degree = 1
 pipeline_parallel_degree = 1
+enable_selective_ac = true
 fp8_linear = ""
 compile = false
 checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
-dataset = "alpaca"
+# checkpoint_folder = "/tmp/checkpoint_andgu"
+dataset = "minipile"
