@@ -8,6 +8,7 @@ import logging
 from collections import defaultdict
 
 import torch
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import (
     distribute_module,
     distribute_tensor,
@@ -20,13 +21,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.fsdp import (
-    BackwardPrefetch,
-    FullyShardedDataParallel as FSDP,
-    MixedPrecision,
-    ShardingStrategy,
-)
-from torch.distributed.fsdp.wrap import enable_wrap, wrap
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -35,7 +29,6 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
-from torchtrain.meta_init import meta_to_real_init_fn
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +68,7 @@ no_recompute_list = {
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.c10d_functional.reduce_scatter_tensor.default,
 }
+
 
 # Uses PTD FSDP AC wrapper
 def checkpoint_wrapper(module, enable_selective_ac):
@@ -153,6 +147,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
             },
         )
+        distribute_rmsnorm(model.norm, tp_mesh)
 
         # apply sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
@@ -194,40 +189,26 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
-
-        fsdp_config = {
-            "mixed_precision": MixedPrecision(
-                param_dtype=torch.bfloat16,
-                # TODO: see whether we should expose a option to user
-                reduce_dtype=torch.float32,
-            ),
-            "sharding_strategy": ShardingStrategy.FULL_SHARD,
-            "backward_prefetch": BackwardPrefetch.BACKWARD_PRE,
-            # When torch.compile is active, it requires us to set use_orig_params=True
-            "use_orig_params": True,
-            "device_mesh": dp_mesh,
-            "param_init_fn": meta_to_real_init_fn,
-        }
-
-        with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
-            for layer_id, transformer_block in enumerate(model.layers):
-
-                # apply selective AC
-                transformer_block = checkpoint_wrapper(
-                    transformer_block, job_config.training.enable_selective_ac
-                )
-
-                # Wraps each layer with FSDP
-                model.layers[layer_id] = wrap(transformer_block)
-
-            # wrap the rest layers with FSDP
-            model = wrap(model)
-
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+        )
+        fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+        for layer_id, transformer_block in enumerate(model.layers):
+            transformer_block = checkpoint_wrapper(
+                transformer_block, job_config.training.enable_selective_ac
+            )
+            # As an optimization, do not reshard after forward for the last
+            # transformer block since FSDP would prefetch it immediately
+            reshard_after_forward = layer_id < len(model.layers) - 1
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            model.layers[layer_id] = transformer_block
+        model = fully_shard(model, **fsdp_config)
         rank0_log("Applied FSDP to the model...")
     else:
         model.cuda()
 
-    # we have now moved from meta to device,
-    # reset parameters for proper initialization
-    model.reset_parameters()
     return model
