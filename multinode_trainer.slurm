@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# --- This script is optimized for AWS with EFA
+# --- adjust NCCL_BUFFSIZE if you encounter memory
+# --- constraint issues or to tune for improved performance.
+# ---
+
 #SBATCH --job-name=torchtrain_multi_node
 
 #SBATCH --ntasks=2
