@@ -207,12 +207,14 @@ def main(args):
 
             # log metrics
             if (train_state.step - 1) % args.log_freq == 0:
-                avg_loss, max_loss = np.mean(losses_since_last_log), np.max(
-                    losses_since_last_log
+                avg_loss, max_loss = (
+                    np.mean(losses_since_last_log),
+                    np.max(losses_since_last_log),
                 )
-                global_avg_loss, global_max_loss = dist_mean(
-                    avg_loss, world_mesh
-                ), dist_max(max_loss, world_mesh)
+                global_avg_loss, global_max_loss = (
+                    dist_mean(avg_loss, world_mesh),
+                    dist_max(max_loss, world_mesh),
+                )
 
                 time_delta = timer() - time_last_log
                 wps = nwords_since_last_log / (
@@ -239,7 +241,8 @@ def main(args):
                 time_last_log = timer()
 
             rank0_log(
-                f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
+                f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
+                f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
             )
             scheduler.step()
 
