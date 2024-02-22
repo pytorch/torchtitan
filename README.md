@@ -40,3 +40,30 @@ tensorboard --logdir=./torchtrain/outputs/tb
 ```
 
 4. go to the URL it provides OR to http://localhost:6006/
+
+## Multi-Node Training
+For training on ParallelCluster/Slurm type configurations, you can use the multinode_trainer.slurm file to submit your sbatch job.</br>
+Note that you will need to adjust the number of nodes and gpu count to your cluster configs.</br>
+<b>To adjust total nodes:</b>
+```
+#SBATCH --ntasks=2
+#SBATCH --nodes=2
+```
+should both be set to your total node count.
+Then update the srun launch parameters to match:
+```
+srun torchrun --nnodes 2
+```
+where nnodes is your total node count, matching the sbatch node count above.
+
+<b>To adjust gpu count per node:</b>
+
+If your gpu count per node is not 8, adjust:
+
+```--nproc_per_node```
+
+ in the torchrun command and
+
+```#SBATCH --gpus-per-task```
+
+in the SBATCH command section.

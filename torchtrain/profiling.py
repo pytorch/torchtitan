@@ -1,8 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import contextlib
 import os
+
 import torch
 
 try:
@@ -47,7 +48,7 @@ def maybe_run_profiler(*pos_args, **kwargs):
             curr_trace_dir_name = "iteration_" + str(_global_iter_count)
             curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
             if not os.path.exists(curr_trace_dir):
-                os.makedirs(curr_trace_dir)
+                os.makedirs(curr_trace_dir, exist_ok=True)
             rank0_log(f"exporting profile traces to {curr_trace_dir}")
 
             prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
@@ -55,7 +56,7 @@ def maybe_run_profiler(*pos_args, **kwargs):
         rank0_log(f"Profiling active.  Traces will be saved at {trace_dir}")
 
         if not os.path.exists(trace_dir):
-            os.makedirs(trace_dir)
+            os.makedirs(trace_dir, exist_ok=True)
 
         with torch.profiler.profile(
             activities=[
