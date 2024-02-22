@@ -122,15 +122,15 @@ class GPUMemoryMonitor:
         )
 
         display_str = ""
-        display_str += f"Current Memory: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_pct}%,"
-        display_str += f"Alloc {self.device_alloc_memory_pct}%,  Active: {self.device_active_memory_pct}%\n"
+        display_str += f"Current Memory: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_pct}%, "
+        display_str += f"Alloc {self.device_alloc_memory_pct}%, Active: {self.device_active_memory_pct}%\n"
 
         self.get_peak_stats(curr_mem)
 
         peak_active_pct = self.get_pct_memory(self.peak_active_memory)
         peak_allocated_pct = self.get_pct_memory(self.peak_allocated_memory)
         peak_reserved_pct = self.get_pct_memory(self.peak_reserved_memory)
-        display_str += f"Peak Memory: Reserved {peak_reserved_pct}%, Alloc {peak_allocated_pct}%,  Active: {peak_active_pct}%\n"
+        display_str += f"Peak Memory: Reserved {peak_reserved_pct}%, Alloc {peak_allocated_pct}%, Active: {peak_active_pct}%\n"
 
         display_str += f"num retries: {self.num_retries}, num ooms: {self.num_ooms}"
         if self.num_retries > 0:
