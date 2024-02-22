@@ -45,9 +45,7 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(dim))
-
-        # re-enable if not using meta-init
-        # self.reset_parameters()
+        self.reset_parameters()
 
     def _norm(self, x: torch.Tensor):
         """
@@ -207,19 +205,10 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-    def reset_parameters(self, init_std):
-        for item in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(
-                item.weight,
-                mean=0.0,
-                std=0.02,
-            )
-
-        nn.init.trunc_normal_(
-            self.wo.weight,
-            mean=0.0,
-            std=init_std,
-        )
+    def init_weights(self, init_std: float):
+        for linear in (self.wq, self.wk, self.wv):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
     def forward(
         self,
@@ -309,19 +298,10 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-    def reset_parameters(self, init_std):
-        nn.init.trunc_normal_(
-            self.w1.weight,
-            mean=0.0,
-            std=0.02,
-        )
-
-        for item in (self.w2, self.w3):
-            nn.init.trunc_normal_(
-                item.weight,
-                mean=0.0,
-                std=init_std,
-            )
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 class RotaryEmbedding(nn.Module):
@@ -333,13 +313,13 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.model_args = model_args
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.init_weights()
 
-        self.freqs_cis = precompute_freqs_cis(
-            # Note that self.model_args.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation
-            # of models is 4096.
-            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training
-            # or fine-tuning.
+    def _precompute_freqs_cis(self):
+        return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
+            # Need to compute until at least the max token limit for generation
+            # (use 2x max sequence length to be safe)
             self.model_args.max_seq_len * 2,
         )
 
@@ -358,6 +338,16 @@ class RotaryEmbedding(nn.Module):
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[0:seqlen]
         return h, freqs_cis
+
+    def init_weights(self):
+        if hasattr(self, "freqs_cis"):
+            with torch.device(self.freqs_cis.device):
+                self.freqs_cis = self._precompute_freqs_cis()
+        else:
+            self.register_buffer(
+                "freqs_cis", self._precompute_freqs_cis(), persistent=False
+            )
+        nn.init.normal_(self.tok_embeddings.weight)
 
 
 class TransformerBlock(nn.Module):
@@ -400,6 +390,7 @@ class TransformerBlock(nn.Module):
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
         else:
             self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+        self.init_weights()
 
     def forward(
         self,
@@ -421,13 +412,11 @@ class TransformerBlock(nn.Module):
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def reset_parameters(self):
-        """reset params and norms for entire block"""
-        self.attention_norm.reset_parameters()
-        self.ffn_norm.reset_parameters()
-
-        self.attention.reset_parameters(self.weight_init_std)
-        self.feed_forward.reset_parameters(self.weight_init_std)
+    def init_weights(self):
+        for norm in (self.attention_norm, self.ffn_norm):
+            norm.reset_parameters()
+        self.attention.init_weights(self.weight_init_std)
+        self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Transformer(nn.Module):
@@ -457,29 +446,19 @@ class Transformer(nn.Module):
         self.model_dim = model_args.dim
 
         self.embeddings = RotaryEmbedding(model_args)
-
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
         self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.init_weights()
 
-        # init model weights
-
-        # we are doing meta_init, which will call reset_parameters() after
-        # the model is moved to actual device.
-        # If you modify and are not using meta_init, you will need to call
-        # reset_parameters() manually as below:
-
-        # self.reset_parameters()
-
-    def reset_parameters(
-        self,
-    ):
+    def init_weights(self):
         for layer in self.layers:
-            layer.reset_parameters()
+            layer.init_weights()
         self.norm.reset_parameters()
+        self.embeddings.init_weights()
         final_out_std = self.model_dim**-0.5
         cutoff_factor = 3
         nn.init.trunc_normal_(

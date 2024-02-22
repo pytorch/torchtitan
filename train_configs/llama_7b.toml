@@ -4,10 +4,10 @@ dump_folder = "./outputs"
 description = "LLaMA 7B training"
 
 [profiling]
-run_profiler = true
+run_profiler = false
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
-profile_every_x_iter = 100
+profile_every_x_iter = 10
 
 [metrics]
 log_freq = 10
@@ -35,8 +35,16 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
-compile = false
+compile = true
 checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
-dataset = "alpaca"
+# checkpoint_folder = "/tmp/checkpoint_andgu"
+dataset = "minipile"
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "full", "selective"]
+selective_ac_option = "op"  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[comm]
+timeout_seconds = 30
