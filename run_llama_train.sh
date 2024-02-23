@@ -27,4 +27,4 @@ CONFIG_FILE=${CONFIG_FILE:-"./torchtrain/train_configs/train_config.toml"}
 
 torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-train.py --config_file ${CONFIG_FILE}
+train.py --global_config_file ${CONFIG_FILE}
