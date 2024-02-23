@@ -1,4 +1,4 @@
-from pippy.PipelineSchedule import PipelineStage
+from pippy.PipelineSchedule import PipelineStage, PipelineSchedule
 
 
 # copied from hhuang's refactor PR https://github.com/pytorch/PiPPy/blob/916f26092f8cac52383040c19a47feb6fd473b88/pippy/PipelineSchedule.py
@@ -214,3 +214,39 @@ class PipelineStageV2Impl(PipelineStage):
             raise RuntimeError("forward() must be called before compute_loss()")
         # TODO: use a real loss function passed in
         return self.fwd_outputs[0].mean()
+
+
+class PipelineScheduleGPipe(PipelineSchedule):
+    def __init__(self, stage: PipelineStage):
+        self._stage = stage
+
+    def step(self, microbatches):
+        for i, mb in enumerate(microbatches):
+            with record_function(f"Forward {i}"):
+                ops = self._stage.get_fwd_recv_ops()
+                if ops:
+                    dist.batch_isend_irecv(ops).pop().wait()
+
+                self._stage.forward(mb)
+
+                ops = self._stage.get_fwd_send_ops()
+                if ops:
+                    dist.batch_isend_irecv(ops)
+
+                logger.info(
+                    f"{self._stage.stage_id} forward mb {i} finished, microbatch: {[inp.shape for inp in mb]}"
+                )
+
+        for i, _ in enumerate(microbatches):
+            with record_function(f"Backward {i}"):
+                ops = self._stage.get_bwd_recv_ops()
+                if ops:
+                    dist.batch_isend_irecv(ops).pop().wait()
+
+                self._stage.backward()
+
+                ops = self._stage.get_bwd_send_ops()
+                if ops:
+                    dist.batch_isend_irecv(ops)
+
+            logger.info(f"{self._stage.stage_id} backward mb {i} finished")

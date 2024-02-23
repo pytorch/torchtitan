@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Union
 import torch
 import torch.nn.functional as F
 from pippy.microbatch import shard_dict_of_args
-from pippy.PipelineSchedule import PipelineScheduleGPipe
+from torch._C._distributed_c10d import _dump_nccl_trace
 
 # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -25,6 +25,9 @@ from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.parallelisms.parallelize_llama import build_pipeline_stage
+
+# from pippy.PipelineSchedule import PipelineScheduleGPipe
+from torchtrain.parallelisms.pippy_copy import PipelineScheduleGPipe
 
 from torchtrain.profiling import maybe_run_profiler
 
@@ -92,6 +95,11 @@ def split_batches(batch, num_microbatches=2):
 
 
 def main(args):
+    import os
+    import time
+
+    print(f"Sleeping; pid = {os.getpid()}")
+    time.sleep(3)
     init_logger()
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
@@ -197,8 +205,19 @@ def main(args):
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
+
                 microbatches = split_batches((input_ids, labels), num_microbatches=2)
+                print(
+                    f"Starting a step with batches {[b[0].shape for b in microbatches]}"
+                )
                 pp_schedule.step(microbatches)
+                print("finished step")
+                trace = _dump_nccl_trace()
+                print("dumped trace!")
+                with open(
+                    f"trace_step_{train_state.step}_rank_{world_mesh.get_rank()}", "wb"
+                ) as f:
+                    f.write(trace)
                 # hack for integration WIP
                 loss = torch.Tensor([-1.0]).cuda()
             else:
@@ -233,12 +252,17 @@ def main(args):
             train_state.current_loss = loss.item()
             train_state.losses.append(train_state.current_loss)
 
-            rank0_log(
+            print(
                 f"step: {train_state.step}, current loss: {train_state.current_loss}, lr: {scheduler.get_last_lr()}"
             )
             scheduler.step()
 
             checkpoint.save(train_state.step, force=(train_state.step == args.steps))
+
+    print("exiting in 10 sec!")
+    import time
+
+    time.sleep(10)
 
 
 if __name__ == "__main__":
