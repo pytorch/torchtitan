@@ -32,6 +32,7 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     RowwiseParallel,
 )
+from torchtrain.config_manager import JobConfig
 
 from torchtrain.logging_utils import rank0_log
 
@@ -67,13 +68,14 @@ def distribute_rmsnorm(module, device_mesh):
 
 
 # Uses PTD FSDP AC wrapper
-def checkpoint_wrapper(module, config):
+# TODO: why is config needed here?
+def checkpoint_wrapper(module, job_config: JobConfig):
     return ptd_checkpoint_wrapper(
         module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
     )
 
 
-def parallelize_llama(model, world_mesh, parallel_dims, args):
+def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
 
@@ -87,7 +89,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
     if parallel_dims.sp_enabled:
         # First we apply Sequence Parallelism if it's enabled
         tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
-        sp_degree = args.sp_degree
+        sp_degree = job_config.training.sequence_parallelism_degree
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
@@ -169,7 +171,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
                 # apply AC to each layer
                 # before wrapping with FSDP, we need to make sure the layer is on GPU
                 transformer_block = transformer_block.cuda()
-                transformer_block = checkpoint_wrapper(transformer_block, args)
+                transformer_block = checkpoint_wrapper(transformer_block, job_config)
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)

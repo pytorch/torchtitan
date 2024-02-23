@@ -5,38 +5,20 @@ import contextlib
 import os
 
 import torch
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
+from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
-
-_config_file = "./torchtrain/train_configs/train_config.toml"
-
-
-def get_config_from_toml(config_path: str = _config_file) -> dict:
-    """
-    Reads a config file in TOML format and returns a dictionary.
-    """
-    with open(config_path, "rb") as f:
-        config = tomllib.load(f)
-    return config
 
 
 @contextlib.contextmanager
-def maybe_run_profiler(*pos_args, **kwargs):
-    config = get_config_from_toml()
-
+def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
     # get user defined profiler settings
-    run_profiler = config["profiling"].get("run_profiler", False)
+    run_profiler = config.profiling.run_profiler
 
     if run_profiler:
-        dump_dir = config["global"]["dump_folder"]
-        save_trace_dir = config["profiling"]["save_traces_folder"]
+        dump_dir = config.job.dump_folder
+        save_trace_dir = config.profiling.save_traces_folder
         trace_dir = os.path.join(dump_dir, save_trace_dir)
-        iter_frequency = config["profiling"]["profile_every_x_iter"]
+        iter_frequency = config.profiling.profile_every_x_iter
 
         _global_iter_count = 0
 

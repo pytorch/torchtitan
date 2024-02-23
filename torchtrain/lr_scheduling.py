@@ -2,6 +2,7 @@
 # All rights reserved.
 
 from torch.optim.lr_scheduler import LambdaLR
+from torchtrain.config_manager import JobConfig
 
 # global states for scheduling
 # these are needed as LambdaLR does not support argument passing
@@ -29,11 +30,13 @@ def linear_warmup_linear_decay(current_step: int) -> float:
     return curr_adjustment
 
 
-def get_lr_scheduler(optimizer, args):
+def get_lr_scheduler(optimizer, job_config: JobConfig):
     """Build a linear warmup and linear decay scheduler"""
     global _warmup_steps, _decay_steps
-    _warmup_steps = max(int(args.steps * args.warmup_pct), 2)
-    _decay_steps = float(max(1, args.steps - _warmup_steps))
+    _warmup_steps = max(
+        int(job_config.training.steps * job_config.training.warmup_pct), 2
+    )
+    _decay_steps = float(max(1, job_config.training.steps - _warmup_steps))
 
     warmup_scheduler = LambdaLR(optimizer, lr_lambda=linear_warmup_linear_decay)
     return warmup_scheduler
