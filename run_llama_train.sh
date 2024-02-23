@@ -23,10 +23,8 @@ CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-""}
 # Please adjust this to a longer interval period. The unit of measurement is in steps.
 CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-5}
 
+CONFIG_FILE=${CONFIG_FILE:-"./torchtrain/train_configs/train_config.toml"}
+
 torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-train.py --steps 10 \
---model ${MODEL} --model_conf ${MODEL_CONF} \
---pp_degree ${PP} --sp_degree ${SP} --dp_degree ${DP} \
---compile \
---checkpoint-folder=${CHECKPOINT_FOLDER} --checkpoint-interval=${CHECKPOINT_INTERVAL}
+train.py --config_file ${CONFIG_FILE}
