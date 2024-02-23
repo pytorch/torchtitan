@@ -130,12 +130,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, args):
                 "feed_forward.w2": RowwiseParallel(output_layouts=Shard(0)),
                 "feed_forward.w3": ColwiseParallel(),
             }
-            # if layer_id == 0:
-            #     # in first transformer block we need to shard the input
-            #     layer_plan[""] = PrepareModuleInput(
-            #         input_layouts=(Replicate(), None),
-            #         desired_input_layouts=(Shard(0), None),
-            #     )
 
             # adjust num_heads in attention layer to local heads
             attn_layer = transformer_block.attention
