@@ -76,9 +76,8 @@ def build_grad_scaler(model):
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
-def main(args):
+def main(job_config: JobConfig):
     init_logger()
-    job_config = JobConfig(args.config_file)
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -112,7 +111,7 @@ def main(args):
     # build model
     # TODO: add meta initialization
     model_cls = model_name_to_cls[model_name]
-    model_config = models_config[model_name][job_config.model.model_conf]
+    model_config = models_config[model_name][job_config.model.config]
     model_config.vocab_size = tokenizer.n_words
 
     model = model_cls.from_model_args(model_config)
@@ -120,7 +119,7 @@ def main(args):
     # log model size
     model_param_count = get_num_params(model)
     rank0_log(
-        f"Model {model_name} {job_config.model.model_conf} size: {model_param_count:,} total parameters"
+        f"Model {model_name} {job_config.model.config} size: {model_param_count:,} total parameters"
     )
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
@@ -255,108 +254,6 @@ def main(args):
     metric_logger.close()
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TorchTrain arg parser.")
-    LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
-
-    parser.add_argument(
-        "--config_file",
-        type=str,
-        default="./torchtrain/train_configs/train_config.toml",
-        help="job config file",
-    )
-    parser.add_argument(
-        "--model", type=str, default="llama", help="which model to train"
-    )
-    parser.add_argument(
-        "--model_conf",
-        type=str,
-        default="debugmodel",
-        help="which model config to train",
-    )
-    parser.add_argument("--dataset", type=str, default="alpaca", help="dataset to use")
-    parser.add_argument(
-        "--tokenizer_path",
-        type=str,
-        default="./torchtrain/datasets/tokenizer/tokenizer.model",
-        help="tokenizer path",
-    )
-    parser.add_argument("--batch_size", type=int, default=8, help="batch size")
-    parser.add_argument("--seq_len", type=int, default=2048, help="sequence length")
-    parser.add_argument(
-        "--optimizer", type=str, default="AdamW", help="optimizer to use"
-    )
-    parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
-    parser.add_argument(
-        "--warmup_pct",
-        type=float,
-        default=0.20,
-        help="percentage of total training steps to use for warmup",
-    )
-    parser.add_argument(
-        "--max_norm",
-        type=Union[float, int],
-        default=1.0,
-        help="max norm for gradient clipping",
-    )
-    parser.add_argument(
-        "--steps", type=int, default=-1, help="how many train steps to run"
-    )
-    parser.add_argument(
-        "--dp_degree",
-        type=int,
-        default=-1,
-        help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
-    )
-    parser.add_argument(
-        "--sp_degree",
-        type=int,
-        default=1,
-        help="Sequence Parallelism degree.  1 means disabled.",
-    )
-    parser.add_argument(
-        "--pp_degree",
-        type=int,
-        default=1,
-        help="Pipeline Parallelism degree (default of 1 means disabled)",
-    )
-    parser.add_argument(
-        "--compile", action="store_true", help="Whether to compile the model."
-    )
-    parser.add_argument(
-        "--checkpoint-interval",
-        type=int,
-        default=3600,
-        help=(
-            "Checkpointing interval. The unit of measurement is in seconds or "
-            "steps depending on --checkpoint-internval-type."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-interval-type",
-        type=str,
-        default="steps",
-        help=(
-            "The checkpointing interval unit of measurement."
-            "The default value is step."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-folder",
-        type=str,
-        default="",
-        help=(
-            "The folder to store the checkpoints. If this is not specified or "
-            "is an empty string, checkpointing is disabled."
-        ),
-    )
-    parser.add_argument(
-        "--log_freq",
-        type=int,
-        default=10,
-        help="how often to log metrics to TensorBoard",
-    )
-
-    args = parser.parse_args()
-    main(args)
+    config = JobConfig()
+    main(config)
