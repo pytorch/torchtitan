@@ -67,3 +67,12 @@ If your gpu count per node is not 8, adjust:
 ```#SBATCH --gpus-per-task```
 
 in the SBATCH command section.
+
+
+## Design Principles
+
+TorchTrain is a native PyTorch library with various training techniques, it utilizes the PyTorch ecosystem for things like data loading (i.e. HuggingFace datasets), the core functionality is written in PyTorch.
+
+* Designed to be easy to understand, use and extend for different training purposes.
+* Minimal code changes to the model code, when applying 2D/3D Parallelisms.
+* Modular components instead of monolithic codebase
