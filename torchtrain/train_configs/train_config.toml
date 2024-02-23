@@ -11,3 +11,29 @@ profile_every_x_iter = 10
 [metrics]
 enable_tensorboard = true
 save_tb_folder = "tb"
+log_freq = 10
+
+[model]
+name = "llama"
+model_conf = "debugmodel"
+tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+
+
+[training]
+batch_size = 8
+seq_len = 2048
+warmup_pct = 0.20
+max_norm = 1.0
+steps = -1
+data_parallel_degree = -1
+sequence_parallel_degree = 1
+pipeline_parallel_degree = 1
+compile = true
+checkpoint_interval = 3600
+checkpoint_interval_type = "steps"
+checkpoint_folder = ""
+data_set = "alpaca"
