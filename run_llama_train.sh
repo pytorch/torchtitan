@@ -22,6 +22,9 @@ CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-""}
 # Please adjust this to a longer interval period. The unit of measurement is in steps.
 CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-5}
 
+export TORCH_NCCL_TRACE_BUFFER_SIZE=20000
+export TORCH_NCCL_DEBUG_INFO_PIPE_FILE="/tmp/nccl_dump_pipe_"
+export TORCH_CPP_LOG_LEVEL=INFO
 torchrun --nproc_per_node=${NGPU} \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 train.py --steps 10 --compile \
