@@ -11,7 +11,7 @@ class TestJobConfig:
     def test_job_config_file(self):
         config = JobConfig()
         config.parse_args(
-            ["--job.config_file", "./torchtrain/train_configs/train_config.toml"]
+            ["--job.config_file", "./train_configs/debug_model.toml"]
         )
         assert config.model.name == "llama"
 
