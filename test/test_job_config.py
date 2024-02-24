@@ -10,9 +10,7 @@ class TestJobConfig:
 
     def test_job_config_file(self):
         config = JobConfig()
-        config.parse_args(
-            ["--job.config_file", "./train_configs/debug_model.toml"]
-        )
+        config.parse_args(["--job.config_file", "./train_configs/debug_model.toml"])
         assert config.model.name == "llama"
 
     def test_job_file_does_not_exist(self):
