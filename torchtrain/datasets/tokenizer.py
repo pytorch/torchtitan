@@ -8,8 +8,8 @@
 
 import os
 from abc import ABC, abstractmethod
-from typing import List
 from logging import getLogger
+from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
@@ -48,6 +48,7 @@ def create_tokenizer(tokenizer_type: str, tokenizer_path: str) -> TokenizerIf:
 
 class SentencePieceTokenizer(TokenizerIf):
     """tokenizing and encoding/decoding text using SentencePiece."""
+
     def __init__(self, tokenizer_path: str):
         """
         Initializes the Tokenizer with a SentencePiece model.

@@ -12,9 +12,9 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
+from torchtrain.config_manager import JobConfig
 
 from torchtrain.logging_utils import rank0_log
-from torchtrain.profiling import get_config_from_toml
 
 _gb_in_bytes = 1024 * 1024 * 1024
 _mb_in_bytes = 1024 * 1024
@@ -214,16 +214,14 @@ class MetricLogger:
             self.writer.close()
 
 
-def build_metric_logger(tag: Optional[str] = None):
-    config = get_config_from_toml()
-
-    dump_dir = config["global"]["dump_folder"]
-    save_tb_folder = config["metrics"]["save_tb_folder"]
+def build_metric_logger(config: JobConfig, tag: Optional[str] = None):
+    dump_dir = config.job.dump_folder
+    save_tb_folder = config.metrics.save_tb_folder
     # since we don't have run id yet, use current minute as identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
     log_dir = os.path.join(dump_dir, save_tb_folder, datetime_str)
 
-    enable_tb = config["metrics"].get("enable_tensorboard", False)
+    enable_tb = config.metrics.enable_tensorboard
     if enable_tb:
         rank0_log(
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}."
