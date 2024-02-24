@@ -1,6 +1,6 @@
 # TorchTrain Config.toml
 [job]
-dump_folder = "./torchtrain/outputs"
+dump_folder = "./outputs"
 
 [profiling]
 run_profiler = true
@@ -26,8 +26,8 @@ lr = 8e-4
 [training]
 batch_size = 8
 seq_len = 2048
-warmup_pct = 0.20
-max_norm = 1.0
+warmup_pct = 0.20  # lr scheduler warm up
+max_norm = 1.0  # grad norm clipping
 steps = 10
 data_parallel_degree = -1
 sequence_parallel_degree = 1
