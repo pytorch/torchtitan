@@ -1,4 +1,4 @@
-name: Unit Test
+name: CPU Unit Test
 
 on:
   push:
@@ -14,7 +14,7 @@ defaults:
     shell: bash -l -eo pipefail {0}
 
 jobs:
-  unit_tests:
+  cpu_unit_tests:
     runs-on: ubuntu-latest
     strategy:
       matrix:
