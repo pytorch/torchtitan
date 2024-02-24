@@ -2,7 +2,7 @@
 
 Note: This repository is currently under heavy development.
 
-TorchTrain is a native PyTorch library with PyTorch native parallelisms and various training techniques to train large models.
+torchtrain is a native PyTorch library with PyTorch native parallelisms and various training techniques to train large models.
 ## Design Principles
 
 While torchtrain utilizes the PyTorch ecosystem for things like data loading (i.e. HuggingFace datasets), the core functionality is written in PyTorch.
