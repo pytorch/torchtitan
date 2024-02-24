@@ -256,6 +256,8 @@ def main(job_config: JobConfig):
             )
             scheduler.step()
 
+            raise RuntimeError("Testing that CI notices breakage")
+
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
