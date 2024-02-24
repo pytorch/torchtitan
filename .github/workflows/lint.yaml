@@ -32,8 +32,5 @@ jobs:
           pre-commit install-hooks
       - id: file_changes
         uses: trilom/file-changes-action@v1.2.4
-        with:
-          prNumber: ${{ github.event.number }}
-          output: ' '
       - name: Lint modified files
         run: pre-commit run --files ${{ steps.file_changes.outputs.files }}
