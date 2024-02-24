@@ -1,11 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-import argparse
 import os
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -16,6 +15,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
+from torchtrain.config_manager import JobConfig
 
 # torchtrain related
 from torchtrain.datasets import create_tokenizer, dataloader_fn
@@ -49,14 +49,16 @@ class TrainState:
         self.losses = state_dict["losses"].tolist()
 
 
-def build_optimizer(model, args):
+def build_optimizer(model, job_config: JobConfig):
     # build optimizer
-    if args.optimizer == "Adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    elif args.optimizer == "AdamW":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    name = job_config.optimizer.name
+    lr = job_config.optimizer.lr
+    if name == "Adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    elif name == "AdamW":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     else:
-        raise NotImplementedError(f"optimizer {args.optimizer} not added")
+        raise NotImplementedError(f"optimizer {name} not added")
 
     return optimizer
 
@@ -73,31 +75,34 @@ def build_grad_scaler(model):
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
-def main(args):
+def main(job_config: JobConfig):
     init_logger()
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
-        dp=args.dp_degree, sp=args.sp_degree, pp=args.pp_degree, world_size=world_size
+        dp=job_config.training.data_parallel_degree,
+        sp=job_config.training.sequence_parallel_degree,
+        pp=job_config.training.pipeline_parallel_degree,
+        world_size=world_size,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
-    model_name = args.model
+    model_name = job_config.model.name
     rank0_log(f"Building {model_name}")
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
-    tokenizer = create_tokenizer(tokenizer_type, args.tokenizer_path)
+    tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
     # need dp world size and rank
     # TODO: dp might not always be 0 so we need to handle that more carefully
     dp_degree = world_mesh.size(0)
     dp_rank = world_mesh.get_local_rank(0)
-    build_dataloader_fn = dataloader_fn[args.dataset]
+    build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
         tokenizer,
-        args.batch_size,
-        args.seq_len,
+        job_config.training.batch_size,
+        job_config.training.seq_len,
         dp_degree,
         dp_rank,
     )
@@ -105,7 +110,7 @@ def main(args):
     # build model
     # TODO: add meta initialization
     model_cls = model_name_to_cls[model_name]
-    model_config = models_config[model_name][args.model_conf]
+    model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
 
     model = model_cls.from_model_args(model_config)
@@ -113,27 +118,29 @@ def main(args):
     # log model size
     model_param_count = get_num_params(model)
     rank0_log(
-        f"Model {model_name} {args.model_conf} size: {model_param_count:,} total parameters"
+        f"Model {model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
     )
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
     # apply PTD parallelisms + AC
-    model = models_parallelize_fns[model_name](model, world_mesh, parallel_dims, args)
+    model = models_parallelize_fns[model_name](
+        model, world_mesh, parallel_dims, job_config
+    )
 
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
 
     # build optimizer after apply parallelisms to the model
-    optimizer = build_optimizer(model, args)
-    scheduler = get_lr_scheduler(optimizer, args)
+    optimizer = build_optimizer(model, job_config)
+    scheduler = get_lr_scheduler(optimizer, job_config)
 
     scaler = build_grad_scaler(model)
 
-    metric_logger = build_metric_logger()
+    metric_logger = build_metric_logger(job_config)
 
     # torch.compile model for improved performance
-    if args.compile:
+    if job_config.training.compile:
         rank0_log(f"Compiling model {model_name} with torch.compile...")
         model = torch.compile(
             model,
@@ -148,23 +155,26 @@ def main(args):
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=args.checkpoint_folder,
+        folder=job_config.training.checkpoint_folder,
         interval_type=(
             IntervalType.SECONDS
-            if args.checkpoint_interval_type == "seconds"
+            if job_config.training.checkpoint_interval_type == "seconds"
             else IntervalType.STEPS
         ),
-        interval=args.checkpoint_interval,
+        interval=job_config.training.checkpoint_interval,
     )
     checkpoint.load()
 
-    with maybe_run_profiler() as torch_profiler:
+    with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
         # variables used to keep info for metrics logging
         losses_since_last_log: List[float] = []
         nwords_since_last_log = 0
         time_last_log = timer()
-        while train_state.step < args.steps or args.steps == -1:
+        while (
+            train_state.step < job_config.training.steps
+            or job_config.training.steps == -1
+        ):
             train_state.step += 1
             # get batch
             batch = next(iter(data_loader))
@@ -187,7 +197,7 @@ def main(args):
 
             # clip gradients (after unscaling gradients of the optimizer's params)
             scaler.unscale_(optimizer)
-            model.clip_grad_norm_(args.max_norm)
+            model.clip_grad_norm_(job_config.training.max_norm)
 
             # optimizer step
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
@@ -206,7 +216,7 @@ def main(args):
             losses_since_last_log.append(train_state.current_loss)
 
             # log metrics
-            if (train_state.step - 1) % args.log_freq == 0:
+            if (train_state.step - 1) % job_config.metrics.log_freq == 0:
                 avg_loss, max_loss = (
                     np.mean(losses_since_last_log),
                     np.max(losses_since_last_log),
@@ -246,107 +256,15 @@ def main(args):
             )
             scheduler.step()
 
-            checkpoint.save(train_state.step, force=(train_state.step == args.steps))
+            checkpoint.save(
+                train_state.step, force=(train_state.step == job_config.training.steps)
+            )
 
     metric_logger.close()
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TorchTrain arg parser.")
-    LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
-
-    parser.add_argument(
-        "--model", type=str, default="llama", help="which model to train"
-    )
-    parser.add_argument(
-        "--model_conf",
-        type=str,
-        default="debugmodel",
-        help="which model config to train",
-    )
-    parser.add_argument("--dataset", type=str, default="alpaca", help="dataset to use")
-    parser.add_argument(
-        "--tokenizer_path",
-        type=str,
-        default="./torchtrain/datasets/tokenizer/tokenizer.model",
-        help="tokenizer path",
-    )
-    parser.add_argument("--batch_size", type=int, default=8, help="batch size")
-    parser.add_argument("--seq_len", type=int, default=2048, help="sequence length")
-    parser.add_argument(
-        "--optimizer", type=str, default="AdamW", help="optimizer to use"
-    )
-    parser.add_argument("--lr", type=float, default=8e-4, help="learning rate to use")
-    parser.add_argument(
-        "--warmup_pct",
-        type=float,
-        default=0.20,
-        help="percentage of total training steps to use for warmup",
-    )
-    parser.add_argument(
-        "--max_norm",
-        type=Union[float, int],
-        default=1.0,
-        help="max norm for gradient clipping",
-    )
-    parser.add_argument(
-        "--steps", type=int, default=-1, help="how many train steps to run"
-    )
-    parser.add_argument(
-        "--dp_degree",
-        type=int,
-        default=-1,
-        help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
-    )
-    parser.add_argument(
-        "--sp_degree",
-        type=int,
-        default=1,
-        help="Sequence Parallelism degree.  1 means disabled.",
-    )
-    parser.add_argument(
-        "--pp_degree",
-        type=int,
-        default=1,
-        help="Pipeline Parallelism degree (default of 1 means disabled)",
-    )
-    parser.add_argument(
-        "--compile", action="store_true", help="Whether to compile the model."
-    )
-    parser.add_argument(
-        "--checkpoint-interval",
-        type=int,
-        default=3600,
-        help=(
-            "Checkpointing interval. The unit of measurement is in seconds or "
-            "steps depending on --checkpoint-internval-type."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-interval-type",
-        type=str,
-        default="steps",
-        help=(
-            "The checkpointing interval unit of measurement."
-            "The default value is step."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-folder",
-        type=str,
-        default="",
-        help=(
-            "The folder to store the checkpoints. If this is not specified or "
-            "is an empty string, checkpointing is disabled."
-        ),
-    )
-    parser.add_argument(
-        "--log_freq",
-        type=int,
-        default=10,
-        help="how often to log metrics to TensorBoard",
-    )
-
-    args = parser.parse_args()
-    main(args)
+    config = JobConfig()
+    config.parse_args()
+    main(config)
