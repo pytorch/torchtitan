@@ -28,6 +28,7 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import dist_max, dist_mean
+from torchtrain.meta_init import meta_model_init
 
 
 @dataclass
@@ -113,8 +114,10 @@ def main(job_config: JobConfig):
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
 
-    model = model_cls.from_model_args(model_config)
-
+    # build model
+    with meta_model_init():
+        model = model_cls.from_model_args(model_config)
+    model.reset_parameters()
     # log model size
     model_param_count = get_num_params(model)
     rank0_log(
