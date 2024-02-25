@@ -21,6 +21,7 @@ from torchtrain.config_manager import JobConfig
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
+from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
@@ -28,7 +29,6 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import dist_max, dist_mean
-from torchtrain.meta_init import meta_model_init
 
 
 @dataclass

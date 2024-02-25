@@ -1,11 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
+from contextlib import contextmanager
 
 import torch
 from torch import nn
 from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
-
-from contextlib import contextmanager
 
 
 @contextmanager

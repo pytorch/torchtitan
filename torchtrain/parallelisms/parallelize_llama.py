@@ -33,9 +33,9 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtrain.config_manager import JobConfig
-from torchtrain.meta_init import meta_to_real_init_fn
 
 from torchtrain.logging_utils import rank0_log
+from torchtrain.meta_init import meta_to_real_init_fn
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +155,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
-
-
         fsdp_config = {
             "mixed_precision": MixedPrecision(
                 param_dtype=torch.bfloat16,
@@ -182,7 +180,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
-            model = wrap(model) # .cuda())
+            model = wrap(model)  # .cuda())
 
         rank0_log("Applied FSDP to the model...")
 
