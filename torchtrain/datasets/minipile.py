@@ -14,6 +14,8 @@ from datasets.distributed import split_dataset_by_node
 
 class MiniPileDataset(IterableDataset):
     """PyTorch Representation of the MiniPile Dataset from Hugging Face.
+    MiniPile dataset is detailed in the following paper:
+    https://arxiv.org/abs/2304.08442
 
     Args:
         tokenizer (Tokenizer): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
@@ -23,16 +25,14 @@ class MiniPileDataset(IterableDataset):
 
     Data input format:
     {
-        "instruction": "Create a classification task by clustering the given list of items.",
-        "input": "Apples, oranges, bananas, strawberries, pineapples",
-        "output": "Class 1: Apples, Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",
-        "text": "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\nCreate a classification task by clustering the given list of items.\n\n### Input:\nApples, oranges, bananas, strawberries, pineapples\n\n### Response:\nClass 1: Apples,
-        Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
+        "text": "Open-end spinning devices with such rotor bearing arrangements are known in
+                various different embodiments, and have been extensively described,
+                for example in German Patent Publications"
     }
 
     Example:
-    >>> alpaca_ds = AlpacaDataset(tokenizer=tokenizer)
-    >>> for batch in Dataloader(alpaca_ds, batch_size=8):
+    >>> minipile_ds = MiniPileDataset(tokenizer=tokenizer)
+    >>> for batch in Dataloader(minipile_ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
     """
