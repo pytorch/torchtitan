@@ -109,20 +109,20 @@ def main(job_config: JobConfig):
     )
 
     # build model
-    # TODO: add meta initialization
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
 
-    # build model
+    # build model using meta init
     with meta_model_init():
         model = model_cls.from_model_args(model_config)
-    model.reset_parameters()
+
     # log model size
     model_param_count = get_num_params(model)
     rank0_log(
         f"Model {model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
     )
+
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
@@ -130,6 +130,10 @@ def main(job_config: JobConfig):
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
+
+    # we have now moved from meta to device,
+    # reset parameters for proper initialization
+    model.reset_parameters()
 
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
