@@ -28,6 +28,7 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import dist_max, dist_mean
+from time import perf_counter
 
 
 @dataclass
@@ -35,6 +36,7 @@ class TrainState:
     step: int = 0
     current_loss: float = -1
     losses: List[float] = field(default_factory=list)
+    iter_times: List[float] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -186,6 +188,8 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             # forward
+            iter_start_time = perf_counter()
+
             pred = model(input_ids)
             tok_loss = F.cross_entropy(
                 pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
@@ -206,6 +210,11 @@ def main(job_config: JobConfig):
 
             # updates the scale for next iteration
             scaler.update()
+
+            # training iteration complete
+            iter_end_time = perf_counter()
+            curr_iter_time = round(iter_end_time - iter_start_time, 4)
+            train_state.iter_times.append(curr_iter_time)
 
             # if profiler is active
             if torch_profiler:
@@ -251,8 +260,8 @@ def main(job_config: JobConfig):
                 time_last_log = timer()
 
             rank0_log(
-                f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
-                f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
+                f"step: {train_state.step},  loss: {round(train_state.current_loss,4)},"
+                f"  time: {curr_iter_time},   lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
             )
             scheduler.step()
 
@@ -261,6 +270,11 @@ def main(job_config: JobConfig):
             )
 
     metric_logger.close()
+    # calc and show average iter time, disregard first three iterations (warmup)
+    if len(train_state.iter_times) > 3:
+        avg_iter_time = np.mean(train_state.iter_times[3:])
+        rank0_log(f"Average iter time: {avg_iter_time:.4f} seconds")
+
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
