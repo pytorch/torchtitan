@@ -3,6 +3,7 @@
 
 import os
 from dataclasses import dataclass, field
+from time import perf_counter
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -28,7 +29,6 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import dist_max, dist_mean
-from time import perf_counter
 
 
 @dataclass
