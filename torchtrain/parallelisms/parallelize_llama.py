@@ -171,19 +171,16 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
+
                 # apply AC to each layer
-                # before wrapping with FSDP, we need to make sure the layer is on GPU
-                # transformer_block = transformer_block.cuda()
                 transformer_block = checkpoint_wrapper(transformer_block, job_config)
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
-            model = wrap(model)  # .cuda())
+            model = wrap(model)
 
         rank0_log("Applied FSDP to the model...")
 
-    # redundant if FSDP is enabled, but ensure the model is on device regardless of which parallelisms were used
-    # model.cuda()
     return model
