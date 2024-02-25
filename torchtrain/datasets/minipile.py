@@ -18,7 +18,7 @@ class MiniPileDataset(IterableDataset):
     https://arxiv.org/abs/2304.08442
 
     Args:
-        tokenizer (Tokenizer): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+        tokenizer (TokenizerIf): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
         world_size (int): number of data parallel processes participating in training
         rank (int): rank of the current data parallel process
@@ -43,7 +43,6 @@ class MiniPileDataset(IterableDataset):
         seq_len: int = 2048,
         world_size: int = 1,
         rank: int = 0,
-        **kwargs
     ) -> None:
         # TODO: This is a temporary solution for small datasets like Alpaca.
         #       For larger datasets we need to use a more scalable approach.
