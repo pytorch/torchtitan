@@ -18,7 +18,8 @@ from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.config_manager import JobConfig
 
 # torchtrain related
-from torchtrain.datasets import create_tokenizer, dataloader_fn
+from torchtrain.datasets import dataloader_fn
+from torchtrain.datasets.tokenizer import create_tokenizer
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
