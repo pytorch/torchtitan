@@ -267,8 +267,8 @@ def main(job_config: JobConfig):
                 time_last_log = timer()
 
             rank0_log(
-                f"step: {train_state.step},  loss: {round(train_state.current_loss,4)},"
-                f"  iter: {curr_iter_time},  data: {data_load_time},  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
+                f"step: {train_state.step:>2}  loss: {round(train_state.current_loss,4):>7}"
+                f"  iter: {curr_iter_time:>7}  data: {data_load_time:>5}  lr: {round(float(scheduler.get_last_lr()[0]), 8):<6}"
             )
             scheduler.step()
 
