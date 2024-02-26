@@ -7,6 +7,13 @@
 import logging
 
 import torch
+
+from pippy.PipelineSchedule import (
+    get_stage_shapes,
+    # PipelineStageV2Impl,
+    validate_stage_shapes,
+)
+
 from torch.distributed._tensor import (
     distribute_module,
     distribute_tensor,
@@ -37,7 +44,6 @@ from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
 from torchtrain.models.llama.model import Transformer, TransformerBlock
 
-# from pippy.PipelineSchedule import PipelineStageV2Impl
 from .pippy_copy import PipelineStageV2Impl
 
 logger = logging.getLogger(__name__)
@@ -122,26 +128,29 @@ class TransformerChunk(torch.nn.Module):
         self.layer_ids = layer_ids
         self.norm = orig_model.norm if has_output else None
         self.output = orig_model.output if has_output else None
+        self.dim = orig_model.model_args.dim
 
     def forward(self, input):
+        assert isinstance(input, torch.Tensor), type(input)
         if self.embeddings is not None:
-            (tokens,) = input
-            h, freqs_cis = self.embeddings(tokens)
+            tokens = input
+            h, _ = self.embeddings(tokens)
         else:
-            assert len(input) == 1, input
-            (h,) = input
-            bsz_seqlen, _ = h.shape
-            bsz = 4
-            seqlen = bsz_seqlen // bsz
-            # TODO how should i get seqlen now
-            freqs_cis = self.freqs_cis[:seqlen]
+            h = input
 
-        output = (h,)
+        assert len(h.shape) == 3, h.shape
+        bsz, seqlen, _ = h.shape
+        freqs_cis = self.freqs_cis[:seqlen]
+        output = h
 
+        # fold batch and sequence dimension for more efficient allgather/reduce_scatter
+        folded_h = h.view(-1, self.dim)
         for i in self.layer_ids:
-            h = self.layers[i](h, freqs_cis)
+            folded_h = self.layers[i](folded_h, freqs_cis)
 
-        output = (h,)
+        # always output/communicate unfolded shape to preserve shape info for next pp stage
+        h = folded_h.view(bsz, seqlen, self.dim)
+        output = h
 
         if self.norm is not None:
             h = self.norm(h)
@@ -150,26 +159,47 @@ class TransformerChunk(torch.nn.Module):
         return output
 
 
-def build_pipeline_stage(world_mesh, model: torch.nn.Module) -> PipelineStageV2Impl:
-    pp_stage_meta_inputs = [
-        # data batch
-        [torch.empty((4, 2048), dtype=torch.int64, device="cuda")],
-        # h
-        [torch.empty((4 * 2048, 256), dtype=torch.bfloat16, device="cuda")],
-    ]
-
-    from .pippy_copy import PipelineStageV2Impl
-
-    # pp_mesh = world_mesh["pp"] if world_mesh.ndim > 1 else world_mesh
-    # assert (
-    #     pp_mesh.mesh_dim_names[0] == "pp" and pp_mesh.ndim == 1
-    # ), pp_mesh.mesh_dim_names
+def build_pipeline_stage(
+    world_mesh, model: torch.nn.Module, loss_fn
+) -> PipelineStageV2Impl:
+    """
+    Notes on get_stage_shapes helper
+    - unclear which device microbatch should be on
+    - rank and device mapping should be more clear (is it local rank or global rank?)
+    - its good to have manual helpers if needed, but user should be able to skip most of this,
+      just have it happen on first forward()
+    - get_stage_shapes is breaking with my transformer, the way it expects its inputs structured.
+      cant we be more flexible?
+    - should get_stage_shapes just do validation automatically? is it too expensive? make it a flag?
+    i realize that might be hard with the current code structure.
+    - if we make you call get_stage_shape manually, we should accept its data repr as input to Stage without manual work
+    """
+    input_shape = label_shape = (4, 2048)
+    microbatch = torch.empty(input_shape, dtype=torch.int64, device="cuda")
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
-
+    device = "cuda"
     # no virtual stages yet
     pp_stage_id = pp_rank
     num_stages = pp_mesh.size()
+
+    shape_meta = get_stage_shapes(
+        models=[model],
+        stage_ids=[pp_stage_id],
+        num_stages=num_stages,
+        rank=world_mesh.get_rank(),
+        world_size=world_mesh.size(),
+        device=device,
+        microbatch=[microbatch],
+    )
+    input_args = [
+        torch.empty(s, device=device) for s in shape_meta[pp_stage_id]["inputs"]
+    ]
+    output_args = [
+        torch.empty(s, device=device) for s in shape_meta[pp_stage_id]["outputs"]
+    ]
+    label_arg = torch.empty(label_shape, device=device, dtype=torch.int64)
+
     pipeline_stage = PipelineStageV2Impl(
         module=model,
         stage_id=pp_stage_id,
@@ -177,9 +207,14 @@ def build_pipeline_stage(world_mesh, model: torch.nn.Module) -> PipelineStageV2I
         # we need to be clearer about whether rank/world refers to global or local
         rank=world_mesh.get_rank(),
         world_size=world_mesh.size(),
-        # annoying
-        inputs_meta=pp_stage_meta_inputs[pp_rank],
+        device=device,
+        input_args=input_args,
+        output_args=output_args,
+        label_arg=label_arg,
+        loss_fn=loss_fn,
     )
+
+    validate_stage_shapes([pipeline_stage])
     return pipeline_stage
 
 
@@ -321,7 +356,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     # apply AC to each layer
                     # before wrapping with FSDP, we need to make sure the layer is on GPU
                     transformer_block = maybe_transformer_block.to(device)
-                    transformer_block = checkpoint_wrapper(transformer_block, job_config)
+                    transformer_block = checkpoint_wrapper(
+                        transformer_block, job_config
+                    )
 
                     # Wraps each layer with FSDP
                     model.layers[layer_id] = wrap(transformer_block)

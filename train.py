@@ -1,6 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+import functools
+import logging
 import os
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
@@ -12,7 +14,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from pippy.microbatch import shard_dict_of_args
-from pippy.PipelineSchedule import PipelineScheduleGPipe
 
 # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -30,8 +31,14 @@ from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.parallelisms.parallelize_llama import build_pipeline_stage
 
+# from pippy.PipelineSchedule import PipelineScheduleGPipe
+from torchtrain.parallelisms.pippy_copy import PipelineScheduleGPipe
+
 from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import dist_max, dist_mean
+
+# from torchtrain.utils import dist_max, dist_mean
+
+logger = logging.getLogger()
 
 
 @dataclass
@@ -80,22 +87,32 @@ def build_grad_scaler(model):
 
 
 def split_batches(batch, num_microbatches=2):
-    input_ids, _ = batch
+    input_ids, labels = batch
     microbatches = shard_dict_of_args(
-        {"input_ids": input_ids},
+        {"input_ids": input_ids, "labels": labels},
         {
-            "input_ids": None
+            "input_ids": None,
+            "labels": None,
         },  # defaults to dim0 sharding, use TensorChunkSpec to override
         num_microbatches,
     )
     # hacking around PipelineStage.forward doing *args, and, ?
-    microbatches = [
+    inputs = [
         [
             mb["input_ids"],
         ]
         for mb in microbatches
     ]
-    return microbatches
+    labels = [mb["labels"] for mb in microbatches]
+    return inputs, labels
+
+
+def loss_fn(pred, labels):
+    tok_loss = F.cross_entropy(
+        pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
+    )
+    loss = tok_loss.mean()
+    return loss
 
 
 def main(job_config: JobConfig):
@@ -109,7 +126,19 @@ def main(job_config: JobConfig):
         world_size=world_size,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
+    # from datetime import timedelta
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timedelta(seconds=5)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=0)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=1)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=2)
+    # )
     model_name = job_config.model.name
     rank0_log(f"Building {model_name}")
     # build tokenizer
@@ -171,17 +200,6 @@ def main(job_config: JobConfig):
         )
 
     train_state = TrainState()
-    from datetime import timedelta
-
-    torch.distributed.distributed_c10d._set_pg_timeout(
-        timedelta(seconds=2), world_mesh.get_group(mesh_dim=0)
-    )
-    torch.distributed.distributed_c10d._set_pg_timeout(
-        timedelta(seconds=2), world_mesh.get_group(mesh_dim=1)
-    )
-    torch.distributed.distributed_c10d._set_pg_timeout(
-        timedelta(seconds=2), world_mesh.get_group(mesh_dim=2)
-    )
 
     # train loop
     model.train()
@@ -202,7 +220,7 @@ def main(job_config: JobConfig):
 
     if parallel_dims.pp_enabled:
         rank0_log("Using pipeline parallelism.")
-        pp_stage = build_pipeline_stage(world_mesh, model)
+        pp_stage = build_pipeline_stage(world_mesh, model, loss_fn)
         pp_schedule = PipelineScheduleGPipe(pp_stage)
 
     with maybe_run_profiler(job_config) as torch_profiler:
@@ -226,17 +244,17 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
-                microbatches = split_batches((input_ids, labels), num_microbatches=2)
-                pp_schedule.step(microbatches)
-                # hack for integration WIP
-                loss = torch.Tensor([-1.0]).cuda()
+                inputs_mb, labels_mb = split_batches(
+                    (input_ids, labels), num_microbatches=2
+                )
+                mb_loss = pp_schedule.step(inputs_mb, labels=labels_mb)
+                loss = None
+                if mb_loss:
+                    loss = functools.reduce(lambda a, b: a + b, mb_loss)
             else:
                 # forward
                 pred = model(input_ids)
-                tok_loss = F.cross_entropy(
-                    pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
-                )
-                loss = tok_loss.mean()
+                loss = loss_fn(pred, labels)
 
                 # backward on scaled loss to create scaled gradients
                 # scaler.scale(loss).backward()
@@ -251,6 +269,7 @@ def main(job_config: JobConfig):
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
             # otherwise, optimizer.step() is skipped.
             # scaler.step(optimizer)
+            optimizer.step()
 
             # updates the scale for next iteration
             # scaler.update()
@@ -259,49 +278,52 @@ def main(job_config: JobConfig):
             if torch_profiler:
                 torch_profiler.step()
 
-            train_state.current_loss = loss.item()
-            train_state.losses.append(train_state.current_loss)
-            losses_since_last_log.append(train_state.current_loss)
+            # TODO whats the best way to do metrics/logging in a PP world
+            if loss:
+                train_state.current_loss = loss.item()
+                train_state.losses.append(train_state.current_loss)
+                losses_since_last_log.append(train_state.current_loss)
+                # log metrics
+                if (train_state.step - 1) % job_config.metrics.log_freq == 0:
+                    avg_loss, max_loss = (
+                        np.mean(losses_since_last_log),
+                        np.max(losses_since_last_log),
+                    )
 
-            # log metrics
-            if (train_state.step - 1) % job_config.metrics.log_freq == 0:
-                avg_loss, max_loss = (
-                    np.mean(losses_since_last_log),
-                    np.max(losses_since_last_log),
+                    # TODO(whc) pp can't compute global loss this way, need only last-stage ranks
+                    # global_avg_loss, global_max_loss = (
+                    #     dist_mean(avg_loss, world_mesh),
+                    #     dist_max(max_loss, world_mesh),
+                    # )
+
+                    time_delta = timer() - time_last_log
+                    wps = nwords_since_last_log / (
+                        time_delta * parallel_dims.model_parallel_size
+                    )
+
+                    gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
+
+                    metrics = {
+                        # "loss_metrics/global_avg_loss": global_avg_loss,
+                        # "loss_metrics/global_max_loss": global_max_loss,
+                        "wps": wps,
+                        "memory_current/active(%)": gpu_mem_stats.active_curr,
+                        "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
+                        "memory_current/reserved(%)": gpu_mem_stats.reserved_curr,
+                        "memory_peak/active(%)": gpu_mem_stats.active_peak,
+                        "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
+                        "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
+                    }
+                    metric_logger.log(metrics, step=train_state.step)
+
+                    losses_since_last_log.clear()
+                    nwords_since_last_log = 0
+                    time_last_log = timer()
+
+                logger.info(
+                    f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
+                    f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
                 )
-                global_avg_loss, global_max_loss = (
-                    dist_mean(avg_loss, world_mesh),
-                    dist_max(max_loss, world_mesh),
-                )
-
-                time_delta = timer() - time_last_log
-                wps = nwords_since_last_log / (
-                    time_delta * parallel_dims.model_parallel_size
-                )
-
-                gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
-
-                metrics = {
-                    "loss_metrics/global_avg_loss": global_avg_loss,
-                    "loss_metrics/global_max_loss": global_max_loss,
-                    "wps": wps,
-                    "memory_current/active(%)": gpu_mem_stats.active_curr,
-                    "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
-                    "memory_current/reserved(%)": gpu_mem_stats.reserved_curr,
-                    "memory_peak/active(%)": gpu_mem_stats.active_peak,
-                    "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
-                    "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
-                }
-                metric_logger.log(metrics, step=train_state.step)
-
-                losses_since_last_log.clear()
-                nwords_since_last_log = 0
-                time_last_log = timer()
-
-            rank0_log(
-                f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
-                f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
-            )
             scheduler.step()
 
             checkpoint.save(

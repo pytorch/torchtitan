@@ -8,11 +8,7 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
 
-MODEL=${MODEL:-"debugmodel"}
 NGPU=${NGPU:-"2"}
-PP=${PP:-"2"}
-SP=${SP:-"1"}
-DP=${DP:-"-1"}
 
 # by default log just rank 0 output,
 LOG_RANK=${LOG_RANK:-0}

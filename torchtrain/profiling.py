@@ -13,8 +13,6 @@ from torchtrain.logging_utils import rank0_log
 def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
     # get user defined profiler settings
     run_profiler = config.profiling.run_profiler
-    # TODO hack
-    run_profiler = False
 
     if run_profiler:
         dump_dir = config.job.dump_folder
