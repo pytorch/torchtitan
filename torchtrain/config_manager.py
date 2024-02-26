@@ -17,16 +17,16 @@ class JobConfig:
     Semantics:
     - Default config is loaded from a toml file. If no toml file is provided,
     then the default config is loaded from argparse defaults.
+    - if toml file has missing keys, they are filled with argparse defaults.
     """
 
     def parse_args(self, args_list: list = sys.argv[1:]):
         args = JobConfig.init_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
-        if config_file is None:
-            args_dict = self._args_to_two_level_dict(args)
-        else:
+        args_dict = self._args_to_two_level_dict(args)
+        if config_file is not None:
             with open(config_file, "rb") as f:
-                args_dict = tomllib.load(f)
+                args_dict |= tomllib.load(f)
         for k, v in args_dict.items():
             class_type = type(k.title(), (), v)
             setattr(self, k, class_type())
