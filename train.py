@@ -3,7 +3,6 @@
 
 import os
 from dataclasses import dataclass, field
-from time import perf_counter
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -188,7 +187,9 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             # forward
-            iter_start_time = perf_counter()
+            start_timer = torch.cuda.Event(enable_timing=True)
+            end_timer = torch.cuda.Event(enable_timing=True)
+            start_timer.record()
 
             pred = model(input_ids)
             tok_loss = F.cross_entropy(
@@ -212,8 +213,10 @@ def main(job_config: JobConfig):
             scaler.update()
 
             # training iteration complete
-            iter_end_time = perf_counter()
-            curr_iter_time = round(iter_end_time - iter_start_time, 4)
+            end_timer.record()
+            torch.cuda.synchronize()
+
+            curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3,4)
             train_state.iter_times.append(curr_iter_time)
 
             # if profiler is active
