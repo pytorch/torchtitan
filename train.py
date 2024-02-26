@@ -216,7 +216,7 @@ def main(job_config: JobConfig):
             end_timer.record()
             torch.cuda.synchronize()
 
-            curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3,4)
+            curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3, 4)
             train_state.iter_times.append(curr_iter_time)
 
             # if profiler is active
