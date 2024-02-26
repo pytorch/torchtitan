@@ -36,6 +36,7 @@ class TrainState:
     current_loss: float = -1
     losses: List[float] = field(default_factory=list)
     iter_times: List[float] = field(default_factory=list)
+    data_load_times: List[float] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -178,10 +179,13 @@ def main(job_config: JobConfig):
         ):
             train_state.step += 1
             # get batch
+            data_load_start = timer()
             batch = next(iter(data_loader))
             input_ids, labels = batch
             input_ids = input_ids.cuda()
             labels = labels.cuda()
+            data_load_time = round(timer() - data_load_start, 4)
+            train_state.data_load_times.append(data_load_time)
             nwords_since_last_log += labels.numel()
 
             optimizer.zero_grad()
@@ -264,7 +268,7 @@ def main(job_config: JobConfig):
 
             rank0_log(
                 f"step: {train_state.step},  loss: {round(train_state.current_loss,4)},"
-                f"  time: {curr_iter_time},   lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
+                f"  iter: {curr_iter_time},  data: {data_load_time},  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
             )
             scheduler.step()
 
@@ -277,6 +281,8 @@ def main(job_config: JobConfig):
     if len(train_state.iter_times) > 3:
         avg_iter_time = np.mean(train_state.iter_times[3:])
         rank0_log(f"Average iter time: {avg_iter_time:.4f} seconds")
+        avg_data_load_time = np.mean(train_state.data_load_times[3:])
+        rank0_log(f"Average data load time: {avg_data_load_time:.4f} seconds")
 
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
