@@ -32,21 +32,21 @@ run the llama debug model locally to verify the setup is correct:
 
 # TensorBoard
 
-To visualize training metrics on TensorBoard:
+To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
 
-1. (by default) set `enable_tensorboard = true` in `torchtrain/train_configs/train_config.toml`
+1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a .toml file or from CLI).
 
-2. set up SSH tunneling
+2. Set up SSH tunneling, by running the following from local CLI
 ```
 ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
 ```
 
-3. then in the torchtrain repo
+3. On the remote server, in the torchtrain repo, start the TensorBoard backend
 ```
 tensorboard --logdir=./torchtrain/outputs/tb
 ```
 
-4. go to the URL it provides OR to http://localhost:6006/
+4. In the local web browser, go to the URL it provides OR to http://localhost:6006/.
 
 ## Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the multinode_trainer.slurm file to submit your sbatch job.</br>
