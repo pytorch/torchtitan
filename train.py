@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import os
+
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
 from typing import Any, Dict, List
@@ -28,7 +29,11 @@ from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import dist_max, dist_mean
+from torchtrain.utils import Color, dist_max, dist_mean
+
+_is_local_logging = True
+if "SLURM_JOB_ID" in os.environ:
+    _is_local_logging = False
 
 
 @dataclass
@@ -36,6 +41,8 @@ class TrainState:
     step: int = 0
     current_loss: float = -1
     losses: List[float] = field(default_factory=list)
+    iter_times: List[float] = field(default_factory=list)
+    data_load_times: List[float] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -118,9 +125,16 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = get_num_params(model)
-    rank0_log(
-        f"Model {model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
-    )
+    if _is_local_logging:
+        rank0_log(
+            f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
+            f" total parameters{Color.reset}"
+        )
+    else:
+        rank0_log(
+            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
+        )
+
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
@@ -166,6 +180,8 @@ def main(job_config: JobConfig):
     )
     checkpoint.load()
 
+    data_iterator = iter(data_loader)
+
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
         # variables used to keep info for metrics logging
@@ -178,15 +194,22 @@ def main(job_config: JobConfig):
         ):
             train_state.step += 1
             # get batch
-            batch = next(iter(data_loader))
+            data_load_start = timer()
+            batch = next(data_iterator)
             input_ids, labels = batch
             input_ids = input_ids.cuda()
             labels = labels.cuda()
+            data_load_time = round(timer() - data_load_start, 4)
+            train_state.data_load_times.append(data_load_time)
             nwords_since_last_log += labels.numel()
 
             optimizer.zero_grad()
 
             # forward
+            start_timer = torch.cuda.Event(enable_timing=True)
+            end_timer = torch.cuda.Event(enable_timing=True)
+            start_timer.record()
+
             pred = model(input_ids)
             tok_loss = F.cross_entropy(
                 pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
@@ -207,6 +230,13 @@ def main(job_config: JobConfig):
 
             # updates the scale for next iteration
             scaler.update()
+
+            # training iteration complete
+            end_timer.record()
+            torch.cuda.synchronize()
+
+            curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3, 4)
+            train_state.iter_times.append(curr_iter_time)
 
             # if profiler is active
             if torch_profiler:
@@ -251,10 +281,21 @@ def main(job_config: JobConfig):
                 nwords_since_last_log = 0
                 time_last_log = timer()
 
-            rank0_log(
-                f"step: {train_state.step},  current loss: {round(train_state.current_loss,4)},"
-                f"  lr: {round(float(scheduler.get_last_lr()[0]), 8)}"
-            )
+            if _is_local_logging:
+                rank0_log(
+                    f"{Color.cyan}step: {train_state.step:>2}  {Color.green}loss: {round(train_state.current_loss,4):>7}"
+                    f"  {Color.reset}iter: {Color.blue}{curr_iter_time:>7}{Color.reset}"
+                    f"  data: {Color.blue}{data_load_time:>5}  {Color.reset}"
+                    f"lr: {Color.yellow}{round(float(scheduler.get_last_lr()[0]), 8):<6}{Color.reset}"
+                )
+            else:
+                rank0_log(
+                    f"step: {train_state.step:>2}  loss: {round(train_state.current_loss,4):>7}"
+                    f"  iter: {curr_iter_time:>7}"
+                    f"  data: {data_load_time:>5}  "
+                    f"lr: {round(float(scheduler.get_last_lr()[0]), 8):<6}"
+                )
+
             scheduler.step()
 
             checkpoint.save(
@@ -262,6 +303,13 @@ def main(job_config: JobConfig):
             )
 
     metric_logger.close()
+    # calc and show average iter time, disregard first three iterations (warmup)
+    if len(train_state.iter_times) > 3:
+        avg_iter_time = np.mean(train_state.iter_times[3:])
+        rank0_log(f"Average iter time: {avg_iter_time:.4f} seconds")
+        avg_data_load_time = np.mean(train_state.data_load_times[3:])
+        rank0_log(f"Average data load time: {avg_data_load_time:.4f} seconds")
+
     rank0_log(f"{gpu_metrics.get_current_stats()}")
 
 
