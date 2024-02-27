@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import os
+
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
 from typing import Any, Dict, List
@@ -28,6 +29,10 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import Color, dist_max, dist_mean
+
+_is_local_logging = True
+if "SLURM_JOB_ID" in os.environ:
+    _is_local_logging = False
 
 
 @dataclass
@@ -119,10 +124,16 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = get_num_params(model)
-    rank0_log(
-        f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
-        f" total parameters{Color.reset}"
-    )
+    if _is_local_logging:
+        rank0_log(
+            f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
+            f" total parameters{Color.reset}"
+        )
+    else:
+        rank0_log(
+            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
+        )
+
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
@@ -269,12 +280,21 @@ def main(job_config: JobConfig):
                 nwords_since_last_log = 0
                 time_last_log = timer()
 
-            rank0_log(
-                f"{Color.cyan}step: {train_state.step:>2}  {Color.green}loss: {round(train_state.current_loss,4):>7}"
-                f"  {Color.reset}iter: {Color.blue}{curr_iter_time:>7}{Color.reset}"
-                f"  data: {Color.blue}{data_load_time:>5}  {Color.reset}"
-                f"lr: {Color.yellow}{round(float(scheduler.get_last_lr()[0]), 8):<6}{Color.reset}"
-            )
+            if _is_local_logging:
+                rank0_log(
+                    f"{Color.cyan}step: {train_state.step:>2}  {Color.green}loss: {round(train_state.current_loss,4):>7}"
+                    f"  {Color.reset}iter: {Color.blue}{curr_iter_time:>7}{Color.reset}"
+                    f"  data: {Color.blue}{data_load_time:>5}  {Color.reset}"
+                    f"lr: {Color.yellow}{round(float(scheduler.get_last_lr()[0]), 8):<6}{Color.reset}"
+                )
+            else:
+                rank0_log(
+                    f"step: {train_state.step:>2}  loss: {round(train_state.current_loss,4):>7}"
+                    f"  iter: {curr_iter_time:>7}"
+                    f"  data: {data_load_time:>5}  "
+                    f"lr: {round(float(scheduler.get_last_lr()[0]), 8):<6}"
+                )
+
             scheduler.step()
 
             checkpoint.save(
