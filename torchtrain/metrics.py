@@ -16,19 +16,20 @@ from torchtrain.config_manager import JobConfig
 
 from torchtrain.logging_utils import rank0_log
 
-_gb_in_bytes = 1024 * 1024 * 1024
-_mb_in_bytes = 1024 * 1024
+# note that GiB (gibibyte) is 1024, vs GB is 1000
+_gib_in_bytes = 1024 * 1024 * 1024
+_mib_in_bytes = 1024 * 1024
 
 
-def format_to_gb(item, precision=4):
-    """quick function to format numbers to gigabyte and round to (default) 4 digit precision"""
-    metric_num = item / _gb_in_bytes
+def _format_to_gib(item, precision=4):
+    """quick function to format numbers to gibibyte and round to (default) 4 digit precision"""
+    metric_num = item / _gib_in_bytes
     metric_num = round(metric_num, ndigits=precision)
     return metric_num
 
 
-def convert_to_gpu_pct(value, total_gpu_memory):
-    return round(100 * (value / total_gpu_memory), 2)
+def _convert_to_gpu_pct(value, total_gpu_memory, precision=4):
+    return round(100 * (value / total_gpu_memory), precision)
 
 
 # named tuple for passing memory stats (as % of device capacity) for Tensorboard logging
@@ -58,7 +59,7 @@ class GPUMemoryMonitor:
         self.device_capacity = torch.cuda.get_device_properties(
             self.device
         ).total_memory
-        self.device_capacity_gb = format_to_gb(self.device_capacity)
+        self.device_capacity_gib = _format_to_gib(self.device_capacity)
         self.num_retries = 0
         self.num_ooms = 0
         self.peak_active_memory = 0
@@ -67,17 +68,17 @@ class GPUMemoryMonitor:
         self.curr_reserved_memory = 0
 
         self.device_reserved_memory_usage = 0
-        self.device_reserved_memory_gb = 0
+        self.device_reserved_memory_gib = 0
         self.device_reserved_memory_pct = 0
 
         self.device_active_memory_usage = 0
-        self.device_active_memory_gb = 0
+        self.device_active_memory_gib = 0
         self.device_active_memory_pct = 0
 
         # current stats
         self.device_alloc_memory_usage = torch.cuda.memory_allocated(self.device)
-        self.device_alloc_memory_gb = format_to_gb(self.device_alloc_memory_usage)
-        self.device_alloc_memory_pct = convert_to_gpu_pct(
+        self.device_alloc_memory_gib = _format_to_gib(self.device_alloc_memory_usage)
+        self.device_alloc_memory_pct = _convert_to_gpu_pct(
             self.device_alloc_memory_usage, self.device_capacity
         )
 
@@ -90,10 +91,8 @@ class GPUMemoryMonitor:
         pct_memory = round(100 * (pct_memory), 2)
         return pct_memory
 
-    def get_gb_memory(self, memory_num):
-        gb_memory = memory_num / _gb_in_bytes
-        gb_memory = round(gb_memory, 2)
-        return gb_memory
+    def get_gib_memory(self, memory_num):
+        return _format_to_gib(memory_num, precision=2)
 
     def get_current_stats(self, return_data: bool = False):
         """
@@ -104,21 +103,23 @@ class GPUMemoryMonitor:
         curr_mem = torch.cuda.memory_stats(self.device)
 
         self.device_alloc_memory_usage = curr_mem["allocated_bytes.all.current"]
-        self.device_alloc_memory_gb = format_to_gb(self.device_alloc_memory_usage)
-        self.device_alloc_memory_pct = convert_to_gpu_pct(
+        self.device_alloc_memory_gib = _format_to_gib(self.device_alloc_memory_usage)
+        self.device_alloc_memory_pct = _convert_to_gpu_pct(
             self.device_alloc_memory_usage, self.device_capacity
         )
 
         self.device_reserved_memory_usage = curr_mem["reserved_bytes.all.current"]
-        self.device_reserved_memory_gb = format_to_gb(self.device_reserved_memory_usage)
-        self.device_reserved_memory_pct = convert_to_gpu_pct(
+        self.device_reserved_memory_gib = _format_to_gib(
+            self.device_reserved_memory_usage
+        )
+        self.device_reserved_memory_pct = _convert_to_gpu_pct(
             self.device_reserved_memory_usage, self.device_capacity
         )
 
         self.device_active_memory_usage = curr_mem["active_bytes.all.current"]
-        self.device_active_memory_gb = format_to_gb(self.device_active_memory_usage)
-        self.device_active_memory_pct = convert_to_gpu_pct(
-            self.device_active_memory_usage, self.device_capacity
+        self.device_active_memory_gib = _format_to_gib(self.device_active_memory_usage)
+        self.device_active_memory_pct = _convert_to_gpu_pct(
+            self.device_active_memory_usage, self.device_capacity, precision=2
         )
 
         display_str = ""
@@ -179,8 +180,8 @@ class GPUMemoryMonitor:
 
     def __str__(self):
         _ = self.get_current_stats()
-        display_str = f"{self.device_name} ({self.device_index}): {self.device_capacity_gb} GB capacity, "
-        display_str += f"{self.device_alloc_memory_gb} GB in-use, {self.device_alloc_memory_pct}% in-use"
+        display_str = f"{self.device_name} ({self.device_index}): {self.device_capacity_gib} GiB capacity, "
+        display_str += f"{self.device_alloc_memory_gib} GiB in-use, {self.device_alloc_memory_pct}% in-use"
         return f"{display_str}"
 
 
