@@ -41,7 +41,7 @@ To visualize TensorBoard metrics of models trained on a remote server via a loca
 ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
 ```
 
-3. On the remote server, in the torchtrain repo, start the TensorBoard backend
+3. Inside the SSH tunnel that logged into the remote server, go to the torchtrain repo, and start the TensorBoard backend
 ```
 tensorboard --logdir=./torchtrain/outputs/tb
 ```
