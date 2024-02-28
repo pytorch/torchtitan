@@ -5,6 +5,7 @@
 # llama model, i.e. activation checkpoint, etc.
 
 import logging
+from collections import defaultdict
 
 import torch
 from torch.distributed._tensor import (
@@ -66,7 +67,7 @@ def distribute_rmsnorm(module, device_mesh):
     )
 
 
-# AC/selective AC
+# for selective AC
 no_recompute_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
@@ -85,8 +86,6 @@ def checkpoint_wrapper(module, enable_selective_ac=False):
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
                 mm_count_key = f"{mode}_mm_count"
-                if mm_count_key not in meta:
-                    meta[mm_count_key] = 0
                 if func == torch.ops.aten.mm.default:
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
@@ -97,7 +96,7 @@ def checkpoint_wrapper(module, enable_selective_ac=False):
             return _custom_policy
 
         def selective_checkpointing_context_fn():
-            meta = {}
+            meta = defaultdict(int)
             return _pt2_selective_checkpoint_context_fn_gen(_get_custom_policy(meta))
 
         return ptd_checkpoint_wrapper(
