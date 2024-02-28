@@ -33,7 +33,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtrain.config_manager import JobConfig
-
 from torchtrain.logging_utils import rank0_log
 
 logger = logging.getLogger(__name__)
@@ -67,12 +66,54 @@ def distribute_rmsnorm(module, device_mesh):
     )
 
 
+# AC/selective AC
+no_recompute_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.c10d_functional.reduce_scatter_tensor.default,
+}
+
 # Uses PTD FSDP AC wrapper
-# TODO: why is config needed here?
-def checkpoint_wrapper(module, job_config: JobConfig):
-    return ptd_checkpoint_wrapper(
-        module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
-    )
+def checkpoint_wrapper(module, enable_selective_ac=False):
+    if enable_selective_ac:
+        from torch.utils.checkpoint import (
+            _pt2_selective_checkpoint_context_fn_gen,
+            checkpoint,
+        )
+
+        def _get_custom_policy(meta):
+            def _custom_policy(mode, func, *args, **kwargs):
+                mm_count_key = f"{mode}_mm_count"
+                if mm_count_key not in meta:
+                    meta[mm_count_key] = 0
+                if func == torch.ops.aten.mm.default:
+                    meta[mm_count_key] += 1
+                # Saves output of all compute ops, except every second mm
+                return func in no_recompute_list and not (
+                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                )
+
+            return _custom_policy
+
+        def selective_checkpointing_context_fn():
+            meta = {}
+            return _pt2_selective_checkpoint_context_fn_gen(_get_custom_policy(meta))
+
+        return ptd_checkpoint_wrapper(
+            module,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_fn=checkpoint,
+            context_fn=selective_checkpointing_context_fn,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+    else:
+        return ptd_checkpoint_wrapper(
+            module,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            preserve_rng_state=False,
+        )
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
@@ -168,10 +209,13 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
-                # apply AC to each layer
                 # before wrapping with FSDP, we need to make sure the layer is on GPU
                 transformer_block = transformer_block.cuda()
-                transformer_block = checkpoint_wrapper(transformer_block, job_config)
+
+                # apply selective AC
+                transformer_block = checkpoint_wrapper(
+                    transformer_block, job_config.training.enable_selective_ac
+                )
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)

@@ -95,14 +95,14 @@ class JobConfig:
         )
         # metrics configs
         parser.add_argument(
+            "--metrics.enable_tensorboard",
+            action="store_true",
+            help="whether to log metrics to TensorBoard",
+        )
+        parser.add_argument(
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="how often to log metrics to TensorBoard",
-        )
-        parser.add_argument(
-            "--metrics.enable_tensorboard",
-            action="store_true",
             help="how often to log metrics to TensorBoard",
         )
         parser.add_argument(
@@ -214,5 +214,10 @@ class JobConfig:
                 "The folder to store the checkpoints. If this is not specified or "
                 "is an empty string, checkpointing is disabled."
             ),
+        )
+        parser.add_argument(
+            "--metrics.enable_selective_ac",
+            action="store_false",
+            help="whether to enable selective activation checkpointing",
         )
         return parser.parse_args(args_list)
