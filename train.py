@@ -145,10 +145,6 @@ def main(job_config: JobConfig):
         model, world_mesh, parallel_dims, job_config
     )
 
-    # we have now moved from meta to device,
-    # reset parameters for proper initialization
-    model.reset_parameters()
-
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
 
