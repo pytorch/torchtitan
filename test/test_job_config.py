@@ -9,7 +9,7 @@ class TestJobConfig:
     def test_command_line_args(self):
         config = JobConfig()
         config.parse_args([])
-        assert config.training.steps == -1
+        assert config.training.steps == 10000
 
     def test_job_config_file(self):
         config = JobConfig()
