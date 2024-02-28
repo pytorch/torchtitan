@@ -2,6 +2,7 @@
 
 set -ex
 
+export USE_LIBUV=1
 TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 
 # use envs as local overrides for convenience
