@@ -182,5 +182,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             model = wrap(model)
 
         rank0_log("Applied FSDP to the model...")
+    else:
+        model.cuda()
 
+    # we have now moved from meta to device,
+    # reset parameters for proper initialization
+    model.reset_parameters()
     return model

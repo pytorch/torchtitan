@@ -15,7 +15,7 @@ log_freq = 10
 
 [model]
 name = "llama"
-flavor = "1B"
+flavor = "debugmodel"
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
