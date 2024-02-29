@@ -151,10 +151,10 @@ class JobConfig:
             "--training.seq_len", type=int, default=2048, help="sequence length"
         )
         parser.add_argument(
-            "--training.warmup_pct",
-            type=float,
-            default=0.20,
-            help="percentage of total training steps to use for warmup",
+            "--training.warmup_steps",
+            type=int,
+            default=200,
+            help="steps for lr scheduler warmup",
         )
         parser.add_argument(
             "--training.max_norm",
@@ -163,7 +163,10 @@ class JobConfig:
             help="max norm for gradient clipping",
         )
         parser.add_argument(
-            "--training.steps", type=int, default=-1, help="how many train steps to run"
+            "--training.steps",
+            type=int,
+            default=10000,
+            help="how many train steps to run",
         )
         parser.add_argument(
             "--training.data_parallel_degree",
