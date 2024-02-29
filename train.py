@@ -155,6 +155,10 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
+        if job_config.training.enable_selective_ac:
+            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+                True
+            )
         rank0_log(f"Compiling model {model_name} with torch.compile...")
         model = torch.compile(
             model,
