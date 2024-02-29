@@ -8,11 +8,11 @@ import logging
 
 import torch
 
-from pippy.PipelineSchedule import (
-    get_stage_shapes,
-    # PipelineStageV2Impl,
-    validate_stage_shapes,
-)
+# from pippy.PipelineSchedule import (
+# get_stage_shapes,
+# PipelineStageV2Impl,
+# validate_stage_shapes,
+# )
 
 from torch.distributed._tensor import (
     distribute_module,
@@ -44,7 +44,7 @@ from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
 from torchtrain.models.llama.model import Transformer, TransformerBlock
 
-from .pippy_copy import PipelineStageV2Impl
+from .pippy_copy import get_stage_shapes, PipelineStageV2Impl, validate_stage_shapes
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +187,9 @@ def build_pipeline_stage(
         models=[model],
         stage_ids=[pp_stage_id],
         num_stages=num_stages,
-        rank=world_mesh.get_rank(),
-        world_size=world_mesh.size(),
+        rank=pp_mesh.get_rank(),
+        world_size=pp_mesh.size(),
+        group=pp_mesh.get_group(),
         device=device,
         microbatch=[microbatch],
     )
@@ -205,16 +206,26 @@ def build_pipeline_stage(
         stage_id=pp_stage_id,
         num_stages=num_stages,
         # we need to be clearer about whether rank/world refers to global or local
-        rank=world_mesh.get_rank(),
-        world_size=world_mesh.size(),
+        rank=pp_mesh.get_rank(),
+        world_size=pp_mesh.size(),
+        group=pp_mesh.get_group(),
         device=device,
         input_args=input_args,
         output_args=output_args,
         label_arg=label_arg,
         loss_fn=loss_fn,
     )
+    """
+    - ValueError: Number of stages (2) must be a multiple of the world_size (4
+      - this is thrown when using 2-D parallelism, WS=4 and 2 stages exist.
+       - I think we should change to using PP mesh not world ranks
 
-    validate_stage_shapes([pipeline_stage])
+       ok i think i worked around the above by using pg.all_gather,
+
+       but now i am seeing validate_stage_shapes trip up labels send/recv
+    """
+    # validate_stage_shapes([pipeline_stage], pp_mesh.get_group())
+
     return pipeline_stage
 
 

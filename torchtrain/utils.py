@@ -11,9 +11,15 @@ from torch.distributed.device_mesh import DeviceMesh
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh)
+    if mesh.ndim > 0:
+        return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh)
+    else:
+        return tensor
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    if mesh.ndim > 0:
+        return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    else:
+        return tensor

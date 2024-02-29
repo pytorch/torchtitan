@@ -5,6 +5,7 @@ import functools
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -36,7 +37,7 @@ from torchtrain.parallelisms.pippy_copy import PipelineScheduleGPipe
 
 from torchtrain.profiling import maybe_run_profiler
 
-# from torchtrain.utils import dist_max, dist_mean
+from torchtrain.utils import dist_max, dist_mean
 
 logger = logging.getLogger()
 
@@ -115,6 +116,51 @@ def loss_fn(pred, labels):
     return loss
 
 
+def get_nccl_pgs(world_mesh):
+    # This could arguably be implemented by looping over the global map of PGs inside PT-D,
+    # or left as user-responsibility.  I've opted for the latter to keep it explicit and allow
+    # finer control, but it also means if one PG was missed here its timeout will be missed
+    from torch.distributed.distributed_c10d import _get_default_group
+
+    possible_groups = [world_mesh.get_group(dim) for dim in range(world_mesh.ndim)] + [
+        _get_default_group()
+    ]
+    return [pg for pg in possible_groups if pg is not None]
+
+
+def set_timeout_for_nccl_pgs(process_groups, timeout):
+    from torch.distributed.distributed_c10d import ProcessGroup
+
+    def set_default_timeout(pg: ProcessGroup, device: torch.device, timeout: timedelta):
+        # TODO: This is a convenience wrapper around the API that exists in the PTD layer, but we will probably land
+        # the more convenient form (like this wrapper) in the future.
+
+        # currently, there can be e.g. a nccl and gloo backend for the same 'pg' obj, hence needing the 'device'
+        pg._get_backend(device)._set_default_timeout(timeout)  # type: ignore[attr-defined]
+
+    # TODO this assumes each process only 'sees' one gpu and torchrun is managing cuda-visible-device? It looks like
+    # the code below all uses '.cuda()' without specifying idx so that should be right
+    device = torch.device(f"cuda")
+    logger.info(f"Set default nccl timeout to {timeout}")
+    for pg in process_groups:
+        set_default_timeout(pg, device, timeout)
+
+    # the above works today on pytorch main. The below should work but has a bug. Working around locally for now.
+    # https://github.com/pytorch/pytorch/issues/120847
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout,
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=0)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=1)
+    # )
+    # torch.distributed.distributed_c10d._set_pg_timeout(
+    #     timeout, world_mesh.get_group(mesh_dim=2)
+    # )
+
+
 def main(job_config: JobConfig):
     init_logger()
     # init world mesh
@@ -126,19 +172,9 @@ def main(job_config: JobConfig):
         world_size=world_size,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-    # from datetime import timedelta
-    # torch.distributed.distributed_c10d._set_pg_timeout(
-    #     timedelta(seconds=5)
-    # )
-    # torch.distributed.distributed_c10d._set_pg_timeout(
-    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=0)
-    # )
-    # torch.distributed.distributed_c10d._set_pg_timeout(
-    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=1)
-    # )
-    # torch.distributed.distributed_c10d._set_pg_timeout(
-    #     timedelta(seconds=5), world_mesh.get_group(mesh_dim=2)
-    # )
+
+    set_timeout_for_nccl_pgs(get_nccl_pgs(world_mesh), timedelta(seconds=3))
+
     model_name = job_config.model.name
     rank0_log(f"Building {model_name}")
     # build tokenizer
@@ -148,8 +184,8 @@ def main(job_config: JobConfig):
     # build dataloader
     # need dp world size and rank
     # TODO: dp might not always be 0 so we need to handle that more carefully
-    dp_degree = world_mesh.size(0)
-    dp_rank = world_mesh.get_local_rank(0)
+    dp_degree = world_mesh.size(0) if world_mesh.ndim > 0 else 1
+    dp_rank = world_mesh.get_local_rank(0) if world_mesh.ndim > 0 else 0
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
         tokenizer,
@@ -247,6 +283,9 @@ def main(job_config: JobConfig):
                 inputs_mb, labels_mb = split_batches(
                     (input_ids, labels), num_microbatches=2
                 )
+                logger.info(
+                    f"dataloader split-batch labels are: {labels_mb[0][:10]}, dtype is {labels_mb[0].dtype}, shape is {labels_mb[0].shape}"
+                )
                 mb_loss = pp_schedule.step(inputs_mb, labels=labels_mb)
                 loss = None
                 if mb_loss:
@@ -291,10 +330,10 @@ def main(job_config: JobConfig):
                     )
 
                     # TODO(whc) pp can't compute global loss this way, need only last-stage ranks
-                    # global_avg_loss, global_max_loss = (
-                    #     dist_mean(avg_loss, world_mesh),
-                    #     dist_max(max_loss, world_mesh),
-                    # )
+                    global_avg_loss, global_max_loss = (
+                        dist_mean(avg_loss, world_mesh),
+                        dist_max(max_loss, world_mesh),
+                    )
 
                     time_delta = timer() - time_last_log
                     wps = nwords_since_last_log / (
