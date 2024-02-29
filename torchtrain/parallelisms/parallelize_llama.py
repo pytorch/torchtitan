@@ -76,7 +76,7 @@ no_recompute_list = {
 }
 
 # Uses PTD FSDP AC wrapper
-def checkpoint_wrapper(module, enable_selective_ac=False):
+def checkpoint_wrapper(module, enable_selective_ac):
     if enable_selective_ac:
         from torch.utils.checkpoint import (
             _pt2_selective_checkpoint_context_fn_gen,
