@@ -187,10 +187,7 @@ def main(job_config: JobConfig):
         losses_since_last_log: List[float] = []
         nwords_since_last_log = 0
         time_last_log = timer()
-        while (
-            train_state.step < job_config.training.steps
-            or job_config.training.steps == -1
-        ):
+        while train_state.step < job_config.training.steps:
             train_state.step += 1
             # get batch
             data_load_start = timer()
