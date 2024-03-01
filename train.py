@@ -93,7 +93,7 @@ def main(job_config: JobConfig):
         world_size=world_size,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
+    rank0_log(f"Starting job: {job_config.job.description}")
     model_name = job_config.model.name
     rank0_log(f"Building {model_name}")
     # build tokenizer
