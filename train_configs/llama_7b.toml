@@ -1,6 +1,7 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
+description = "llama 7b training"
 
 [profiling]
 run_profiler = true
