@@ -229,7 +229,10 @@ class JobConfig:
             "--training.fp8_linear_type",
             type=str,
             default="",
-            choices=["delayed", "dynamic", ""],
+            choices=[
+                "dynamic",
+                "",
+            ],  # TODO: add "delayed" option back in when supported
             help="Type of fp8 linear quantization to apply to the model",
         )
         parser.add_argument(

@@ -91,7 +91,8 @@ def build_fp8_linear(model, job_config: JobConfig):
     liner_type = job_config.training.fp8_linear_type.lower()
     try:
         from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
-        from float8_experimental.float8_linear import Float8Linear
+
+        # from float8_experimental.float8_linear import Float8Linear
         from float8_experimental.float8_linear_utils import (
             swap_linear_with_float8_linear,
         )
@@ -101,10 +102,12 @@ def build_fp8_linear(model, job_config: JobConfig):
         ) from exc
     if liner_type:
         linear_type_map = {
-            "delayed": Float8Linear,
+            # "delayed": Float8Linear, # TODO: add "delayed" option back in when supported
             "dynamic": Float8DynamicLinear,
         }
-        assert liner_type in linear_type_map, f"Invalid fp8 linear type: {liner_type}"
+        assert (
+            liner_type in linear_type_map
+        ), f"Invalid fp8 linear type: {liner_type}, supported types: {', '.join(linear_type_map.keys())}."
         float8_linear_type = linear_type_map[liner_type.lower()]
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
