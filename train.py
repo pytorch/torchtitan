@@ -90,24 +90,24 @@ def build_fp8_linear(model, job_config: JobConfig):
     """
     liner_type = job_config.training.fp8_linear_type.lower()
     try:
-        import float8_experimental
-    except ImportError:
+        from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
+        from float8_experimental.float8_linear import Float8Linear
+        from float8_experimental.float8_linear_utils import (
+            swap_linear_with_float8_linear,
+        )
+    except ImportError as exc:
         raise ImportError(
             "float8_experimental is not installed. Please install it to use fp8 linear layers."
-        )
+        ) from exc
     if liner_type:
-        from float8_experimental.float8_linear_utils import swap_linear_with_float8_linear
-        from float8_experimental.float8_linear import Float8Linear
-        from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
-
-        LINEAR_TYPE_MAP = {
+        linear_type_map = {
             "delayed": Float8Linear,
             "dynamic": Float8DynamicLinear,
         }
-        assert liner_type in LINEAR_TYPE_MAP, f"Invalid fp8 linear type: {liner_type}"
-        float8_linear_type = LINEAR_TYPE_MAP[liner_type]
+        assert liner_type in linear_type_map, f"Invalid fp8 linear type: {liner_type}"
+        float8_linear_type = linear_type_map[liner_type.lower()]
 
-        # swap linear layers with float8 linear layers
+        # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
         swap_linear_with_float8_linear(model, float8_linear_type)
         rank0_log(f"{Color.green}Using {liner_type} float8 linear layers{Color.reset}")
 
