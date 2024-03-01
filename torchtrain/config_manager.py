@@ -226,7 +226,7 @@ class JobConfig:
             ),
         )
         parser.add_argument(
-            "--training.fp8_linear_type",
+            "--training.fp8_linear",
             type=str,
             default="",
             choices=[

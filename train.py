@@ -88,7 +88,7 @@ def build_fp8_linear(model, job_config: JobConfig):
     - Float8DynamicLinear: Dynamic quantization of the weights and the activations
     - Float8Linear: Uses a history of amaxs to quantize the weights and activations
     """
-    liner_type = job_config.training.fp8_linear_type.lower()
+    linear_type = job_config.training.fp8_linear.lower()
     try:
         from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
 
@@ -100,19 +100,19 @@ def build_fp8_linear(model, job_config: JobConfig):
         raise ImportError(
             "float8_experimental is not installed. Please install it to use fp8 linear layers."
         ) from exc
-    if liner_type:
+    if linear_type:
         linear_type_map = {
             # "delayed": Float8Linear, # TODO: add "delayed" option back in when supported
             "dynamic": Float8DynamicLinear,
         }
         assert (
-            liner_type in linear_type_map
-        ), f"Invalid fp8 linear type: {liner_type}, supported types: {', '.join(linear_type_map.keys())}."
-        float8_linear_type = linear_type_map[liner_type.lower()]
+            linear_type in linear_type_map
+        ), f"Invalid fp8 linear type: {linear_type}, supported types: {', '.join(linear_type_map.keys())}."
+        float8_linear_type = linear_type_map[linear_type.lower()]
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
         swap_linear_with_float8_linear(model, float8_linear_type)
-        rank0_log(f"{Color.green}Using {liner_type} float8 linear layers{Color.reset}")
+        rank0_log(f"{Color.green}Using {linear_type} float8 linear layers{Color.reset}")
 
 
 def main(job_config: JobConfig):
@@ -156,8 +156,9 @@ def main(job_config: JobConfig):
     with meta_model_init():
         model = model_cls.from_model_args(model_config)
 
-    # apply fp8 linear
-    build_fp8_linear(model, job_config)
+    # apply fp8 linear module swap
+    if job_config.training.fp8_linear:
+        build_fp8_linear(model, job_config)
 
     # log model size
     model_param_count = get_num_params(model)
