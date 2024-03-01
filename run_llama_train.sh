@@ -15,6 +15,9 @@ LOG_RANK=${LOG_RANK:-0}
 
 
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
+export TORCH_NCCL_TRACE_BUFFER_SIZE=20000
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${HOME}/dumps/nccl_trace_rank_"
 
 torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \

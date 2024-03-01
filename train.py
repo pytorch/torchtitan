@@ -283,9 +283,6 @@ def main(job_config: JobConfig):
                 inputs_mb, labels_mb = split_batches(
                     (input_ids, labels), num_microbatches=2
                 )
-                logger.info(
-                    f"dataloader split-batch labels are: {labels_mb[0][:10]}, dtype is {labels_mb[0].dtype}, shape is {labels_mb[0].shape}"
-                )
                 mb_loss = pp_schedule.step(inputs_mb, labels=labels_mb)
                 loss = None
                 if mb_loss:

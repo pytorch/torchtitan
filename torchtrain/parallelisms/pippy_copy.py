@@ -247,7 +247,9 @@ class PipelineStageV2Impl(PipelineStageV2ImplOrig):
     def get_fwd_recv_ops(self) -> List[dist.P2POp]:
         if self.is_first_stage:
             return []
-        dist.recv(self.inputs[0], self.prev_stage)
+        # dist.recv(self.inputs[0], self.prev_stage)
+        assert isinstance(self.inputs, list)
+        assert isinstance(self.inputs[0], torch.Tensor)
         dist.recv(self.label, self.prev_stage)
         return []
         # return [
@@ -261,12 +263,15 @@ class PipelineStageV2Impl(PipelineStageV2ImplOrig):
         assert (
             len(self.outputs) != 0
         ), "forward() must be called before get_fwd_send_ops"
-        assert self.label[0,0] > 0 and self.label[0,0] < 65000, "bad label before send"
         if self.is_last_stage:
             return []
 
-            # WTF. coalesced mode seems to give garbage, individual sends seem ok
-        dist.send(self.inputs[0], self.next_stage)
+        # assert self.label[0,0] > 0 and self.label[0,0] < 65000, f"bad label before send, {self.label[0,0]}"
+
+        # WTF. coalesced mode seems to give garbage, individual sends seem ok
+        assert isinstance(self.outputs, list)
+        assert isinstance(self.outputs[0], torch.Tensor)
+        # dist.send(self.outputs[0], self.next_stage)
         dist.send(self.label, self.next_stage)
         return []
         # return [
@@ -280,7 +285,8 @@ class PipelineStageV2Impl(PipelineStageV2ImplOrig):
     def compute_loss(self):
         if self.outputs is None:
             raise RuntimeError("forward() must be called before compute_loss()")
-        return self.loss_fn(self.outputs[0], self.label)
+        # return self.loss_fn(self.outputs[0], self.label)
+        return self.outputs[0].sum()
 
     def forward(self, args: Union[torch.Tensor, List[torch.tensor]], *, label) -> Any:
         if self.is_first_stage:
@@ -356,7 +362,14 @@ class PipelineScheduleGPipe(PipelineScheduleGPipeOrig):
                 if ops:
                     dist.batch_isend_irecv(ops).pop().wait()
 
-                self._stage.backward()
+                if i < len(microbatches) - 1:
+                    with self._stage.module.no_sync():
+                        logger.info("run backward with no_sync()")
+                        self._stage.backward()
+                else:
+                    logger.info("run backward without no_sync()")
+                    self._stage.backward()
+
 
                 ops = self._stage.get_bwd_send_ops()
                 if ops:

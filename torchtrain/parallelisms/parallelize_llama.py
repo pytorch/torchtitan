@@ -91,8 +91,8 @@ from typing import List
 # and what input shapes that sub-model expects.
 # we can automate this in various ways.  a manual way is also powerful.
 pp_config_toy_2_stage = [
-    dict(has_embeddings=True, layer_ids=[], has_output=False),
-    dict(has_embeddings=False, layer_ids=[0], has_output=True),
+    dict(has_embeddings=True, layer_ids=[0], has_output=False),
+    dict(has_embeddings=False, layer_ids=[1], has_output=True),
 ]
 
 
