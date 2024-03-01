@@ -25,7 +25,11 @@ from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.parallelisms import (
+    init_distributed,
+    models_parallelize_fns,
+    ParallelDims,
+)
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import Color, dist_max, dist_mean
 
@@ -100,6 +104,9 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    init_distributed(job_config)
+
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     model_name = job_config.model.name
