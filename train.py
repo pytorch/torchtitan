@@ -109,7 +109,7 @@ def build_fp8_linear(model, job_config: JobConfig):
 
         # swap linear layers with float8 linear layers
         swap_linear_with_float8_linear(model, float8_linear_type)
-        rank0_log(f"nn.linears have been swapped with {liner_type} float8 linear layers.")
+        rank0_log(f"{Color.green}Using {liner_type} float8 linear layers{Color.reset}")
 
 
 def main(job_config: JobConfig):
