@@ -83,6 +83,35 @@ def build_grad_scaler(model):
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
+def build_fp8_linear(model, job_config: JobConfig):
+    """This functions converts the linear layers to one of the fp8 types:
+    - Float8DynamicLinear: Dynamic quantization of the weights and the activations
+    - Float8Linear: Uses a history of amaxs to quantize the weights and activations
+    """
+    liner_type = job_config.training.fp8_linear_type.lower()
+    try:
+        import float8_experimental
+    except ImportError:
+        raise ImportError(
+            "float8_experimental is not installed. Please install it to use fp8 linear layers."
+        )
+    if liner_type:
+        from float8_experimental.float8_linear_utils import swap_linear_with_float8_linear
+        from float8_experimental.float8_linear import Float8Linear
+        from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
+
+        LINEAR_TYPE_MAP = {
+            "delayed": Float8Linear,
+            "dynamic": Float8DynamicLinear,
+        }
+        assert liner_type in LINEAR_TYPE_MAP, f"Invalid fp8 linear type: {liner_type}"
+        float8_linear_type = LINEAR_TYPE_MAP[liner_type]
+
+        # swap linear layers with float8 linear layers
+        swap_linear_with_float8_linear(model, float8_linear_type)
+        rank0_log(f"nn.linears have been swapped with {liner_type} float8 linear layers.")
+
+
 def main(job_config: JobConfig):
     init_logger()
     # init world mesh
@@ -123,6 +152,9 @@ def main(job_config: JobConfig):
     # build model using meta init
     with meta_model_init():
         model = model_cls.from_model_args(model_config)
+
+    # apply fp8 linear
+    build_fp8_linear(model, job_config)
 
     # log model size
     model_param_count = get_num_params(model)

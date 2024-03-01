@@ -226,6 +226,13 @@ class JobConfig:
             ),
         )
         parser.add_argument(
+            "--training.fp8_linear_type",
+            type=str,
+            default="",
+            choices=["delayed", "dynamic", ""],
+            help="Type of fp8 linear quantization to apply to the model",
+        )
+        parser.add_argument(
             "--training.enable_selective_ac",
             action="store_true",
             help="whether to enable selective activation checkpointing",
