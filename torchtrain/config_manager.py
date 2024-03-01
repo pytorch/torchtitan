@@ -74,7 +74,12 @@ class JobConfig:
             default="./torchtrain/outputs",
             help="folder to dump job outputs",
         )
-
+        parser.add_argument(
+            "--job.description",
+            type=str,
+            default="default job",
+            help="description of the job",
+        )
         # profiling configs
         parser.add_argument(
             "--profiling.run_profiler",
