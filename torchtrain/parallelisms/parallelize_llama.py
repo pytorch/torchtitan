@@ -129,7 +129,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if parallel_dims.sp_enabled:
         # First we apply Sequence Parallelism if it's enabled
         tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
-        sp_degree = job_config.training.sequence_parallelism_degree
+        sp_degree = job_config.training.sequence_parallel_degree
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
