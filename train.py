@@ -102,9 +102,9 @@ def main(job_config: JobConfig):
 
     # build dataloader
     # need dp world size and rank
-    # TODO: dp might not always be 0 so we need to handle that more carefully
-    dp_degree = world_mesh.size(0)
-    dp_rank = world_mesh.get_local_rank(0)
+    dp_mesh = world_mesh["dp"]
+    dp_degree = dp_mesh.size()
+    dp_rank = dp_mesh.get_local_rank()
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
         tokenizer,
@@ -253,8 +253,8 @@ def main(job_config: JobConfig):
                     np.max(losses_since_last_log),
                 )
                 global_avg_loss, global_max_loss = (
-                    dist_mean(avg_loss, world_mesh),
-                    dist_max(max_loss, world_mesh),
+                    dist_mean(avg_loss, dp_mesh),
+                    dist_max(max_loss, dp_mesh),
                 )
 
                 time_delta = timer() - time_last_log
