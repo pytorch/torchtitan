@@ -105,7 +105,6 @@ def main(job_config: JobConfig):
     dp_mesh = world_mesh["dp"]
     dp_degree = dp_mesh.size()
     dp_rank = dp_mesh.get_local_rank()
-    print("testtest: ", torch.distributed.get_rank(), dp_degree, dp_rank)
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
         tokenizer,
