@@ -1,13 +1,13 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
-description = "debug training"
+description = "llama 7b training"
 
 [profiling]
-run_profiler = false
+run_profiler = true
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
-profile_every_x_iter = 10
+profile_every_x_iter = 100
 
 [metrics]
 enable_tensorboard = true
@@ -16,20 +16,21 @@ log_freq = 10
 
 [model]
 name = "llama"
-flavor = "debugmodel"
+flavor = "7B"
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 3e-4
 
 
 [training]
 batch_size = 8
 seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 1000
+# only dp would be sufficient for 7B
 data_parallel_degree = -1
 sequence_parallel_degree = 1
 pipeline_parallel_degree = 1
@@ -38,4 +39,3 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"
-enable_selective_ac = false
