@@ -35,6 +35,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
+from torchtrain.meta_init import meta_to_real_init_fn
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+
         fsdp_config = {
             "mixed_precision": MixedPrecision(
                 param_dtype=torch.bfloat16,
@@ -204,12 +206,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # When torch.compile is active, it requires us to set use_orig_params=True
             "use_orig_params": True,
             "device_mesh": dp_mesh,
+            "param_init_fn": meta_to_real_init_fn,
         }
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
-                # before wrapping with FSDP, we need to make sure the layer is on GPU
-                transformer_block = transformer_block.cuda()
 
                 # apply selective AC
                 transformer_block = checkpoint_wrapper(
@@ -220,10 +221,13 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
-            model = wrap(model.cuda())
+            model = wrap(model)
 
         rank0_log("Applied FSDP to the model...")
+    else:
+        model.cuda()
 
-    # redundant if FSDP is enabled, but ensure the model is on device regardless of which parallelisms were used
-    model.cuda()
+    # we have now moved from meta to device,
+    # reset parameters for proper initialization
+    model.reset_parameters()
     return model
