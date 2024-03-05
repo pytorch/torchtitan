@@ -29,7 +29,9 @@ class JobConfig:
         args_dict = self._args_to_two_level_dict(args)
         if config_file is not None:
             with open(config_file, "rb") as f:
-                args_dict |= tomllib.load(f)
+                for k, v in tomllib.load(f).items():
+                    # to prevent overwrite of non-specified keys
+                    args_dict[k] |= v
         for k, v in args_dict.items():
             class_type = type(k.title(), (), v)
             setattr(self, k, class_type())
@@ -225,7 +227,8 @@ class JobConfig:
         )
         parser.add_argument(
             "--training.enable_selective_ac",
-            action="store_false",
+            default=False,
+            action="store_true",
             help="whether to enable selective activation checkpointing",
         )
         return parser.parse_args(args_list)
