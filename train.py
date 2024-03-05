@@ -22,6 +22,7 @@ from torchtrain.config_manager import JobConfig
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
+from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
@@ -115,15 +116,17 @@ def main(job_config: JobConfig):
     )
 
     # build model
-    # TODO: add meta initialization
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
 
-    model = model_cls.from_model_args(model_config)
+    # build model using meta init
+    with meta_model_init():
+        model = model_cls.from_model_args(model_config)
 
     # log model size
     model_param_count = get_num_params(model)
+
     if _is_local_logging:
         rank0_log(
             f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
