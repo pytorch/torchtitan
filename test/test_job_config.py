@@ -25,7 +25,6 @@ class TestJobConfig:
 
     def test_empty_config_file(self):
         with tempfile.NamedTemporaryFile() as fp:
-            print(fp.name)
             config = JobConfig()
             config.parse_args(["--job.config_file", fp.name])
             assert config.job.description
