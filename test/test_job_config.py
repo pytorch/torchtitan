@@ -1,6 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+import tempfile
+
 import pytest
 from torchtrain.config_manager import JobConfig
 
@@ -9,7 +11,7 @@ class TestJobConfig:
     def test_command_line_args(self):
         config = JobConfig()
         config.parse_args([])
-        assert config.training.steps == -1
+        assert config.training.steps == 10000
 
     def test_job_config_file(self):
         config = JobConfig()
@@ -20,3 +22,9 @@ class TestJobConfig:
         with pytest.raises(FileNotFoundError):
             config = JobConfig()
             config.parse_args(["--job.config_file", "ohno.toml"])
+
+    def test_empty_config_file(self):
+        with tempfile.NamedTemporaryFile() as fp:
+            config = JobConfig()
+            config.parse_args(["--job.config_file", fp.name])
+            assert config.job.description

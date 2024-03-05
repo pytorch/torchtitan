@@ -29,7 +29,9 @@ class JobConfig:
         args_dict = self._args_to_two_level_dict(args)
         if config_file is not None:
             with open(config_file, "rb") as f:
-                args_dict |= tomllib.load(f)
+                for k, v in tomllib.load(f).items():
+                    # to prevent overwrite of non-specified keys
+                    args_dict[k] |= v
         for k, v in args_dict.items():
             class_type = type(k.title(), (), v)
             setattr(self, k, class_type())
@@ -74,7 +76,12 @@ class JobConfig:
             default="./torchtrain/outputs",
             help="folder to dump job outputs",
         )
-
+        parser.add_argument(
+            "--job.description",
+            type=str,
+            default="default job",
+            help="description of the job",
+        )
         # profiling configs
         parser.add_argument(
             "--profiling.run_profiler",
@@ -95,14 +102,14 @@ class JobConfig:
         )
         # metrics configs
         parser.add_argument(
+            "--metrics.enable_tensorboard",
+            action="store_true",
+            help="whether to log metrics to TensorBoard",
+        )
+        parser.add_argument(
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="how often to log metrics to TensorBoard",
-        )
-        parser.add_argument(
-            "--metrics.enable_tensorboard",
-            action="store_true",
             help="how often to log metrics to TensorBoard",
         )
         parser.add_argument(
@@ -151,10 +158,10 @@ class JobConfig:
             "--training.seq_len", type=int, default=2048, help="sequence length"
         )
         parser.add_argument(
-            "--training.warmup_pct",
-            type=float,
-            default=0.20,
-            help="percentage of total training steps to use for warmup",
+            "--training.warmup_steps",
+            type=int,
+            default=200,
+            help="steps for lr scheduler warmup",
         )
         parser.add_argument(
             "--training.max_norm",
@@ -163,7 +170,10 @@ class JobConfig:
             help="max norm for gradient clipping",
         )
         parser.add_argument(
-            "--training.steps", type=int, default=-1, help="how many train steps to run"
+            "--training.steps",
+            type=int,
+            default=10000,
+            help="how many train steps to run",
         )
         parser.add_argument(
             "--training.data_parallel_degree",
@@ -214,5 +224,10 @@ class JobConfig:
                 "The folder to store the checkpoints. If this is not specified or "
                 "is an empty string, checkpointing is disabled."
             ),
+        )
+        parser.add_argument(
+            "--training.enable_selective_ac",
+            action="store_true",
+            help="whether to enable selective activation checkpointing",
         )
         return parser.parse_args(args_list)

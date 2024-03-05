@@ -23,6 +23,7 @@ from torchtrain.datasets import dataloader_fn
 from torchtrain.datasets.tokenizer import create_tokenizer
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
+from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
 
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
@@ -94,7 +95,7 @@ def main(job_config: JobConfig):
         world_size=world_size,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
+    rank0_log(f"Starting job: {job_config.job.description}")
     model_name = job_config.model.name
     rank0_log(f"Building {model_name}")
     # build tokenizer
@@ -103,9 +104,9 @@ def main(job_config: JobConfig):
 
     # build dataloader
     # need dp world size and rank
-    # TODO: dp might not always be 0 so we need to handle that more carefully
-    dp_degree = world_mesh.size(0)
-    dp_rank = world_mesh.get_local_rank(0)
+    dp_mesh = world_mesh["dp"]
+    dp_degree = dp_mesh.size()
+    dp_rank = dp_mesh.get_local_rank()
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
         tokenizer,
@@ -116,15 +117,17 @@ def main(job_config: JobConfig):
     )
 
     # build model
-    # TODO: add meta initialization
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
 
-    model = model_cls.from_model_args(model_config)
+    # build model using meta init
+    with meta_model_init():
+        model = model_cls.from_model_args(model_config)
 
     # log model size
     model_param_count = get_num_params(model)
+
     if _is_local_logging:
         rank0_log(
             f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
@@ -156,6 +159,10 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
+        if job_config.training.enable_selective_ac:
+            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+                True
+            )
         rank0_log(f"Compiling model {model_name} with torch.compile...")
         model = torch.compile(
             model,
@@ -188,10 +195,7 @@ def main(job_config: JobConfig):
         losses_since_last_log: List[float] = []
         nwords_since_last_log = 0
         time_last_log = timer()
-        while (
-            train_state.step < job_config.training.steps
-            or job_config.training.steps == -1
-        ):
+        while train_state.step < job_config.training.steps:
             train_state.step += 1
             # get batch
             data_load_start = timer()
@@ -253,8 +257,8 @@ def main(job_config: JobConfig):
                     np.max(losses_since_last_log),
                 )
                 global_avg_loss, global_max_loss = (
-                    dist_mean(avg_loss, world_mesh),
-                    dist_max(max_loss, world_mesh),
+                    dist_mean(avg_loss, dp_mesh),
+                    dist_max(max_loss, dp_mesh),
                 )
 
                 time_delta = timer() - time_last_log
