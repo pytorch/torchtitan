@@ -185,7 +185,13 @@ class JobConfig:
             "--training.sequence_parallel_degree",
             type=int,
             default=1,
-            help="Sequence Parallelism degree.  1 means disabled.",
+            help="Sequence Parallelism degree. 1 means disabled.",
+        )
+        parser.add_argument(
+            "--training.enable_loss_parallel",
+            default=True,
+            action="store_true",
+            help="whether to enable loss parallel when sequence parallel is enabled",
         )
         parser.add_argument(
             "--training.pipeline_parallel_degree",

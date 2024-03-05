@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+import contextlib
 import os
 
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.config_manager import JobConfig
@@ -214,13 +216,15 @@ def main(job_config: JobConfig):
             start_timer.record()
 
             pred = model(input_ids)
-            tok_loss = F.cross_entropy(
-                pred.flatten(0, 1), labels.flatten(0, 1), reduction="none"
-            )
-            loss = tok_loss.mean()
 
-            # backward on scaled loss to create scaled gradients
-            scaler.scale(loss).backward()
+            loss_parallel_enabled = (
+                parallel_dims.sp_enabled and job_config.training.enable_loss_parallel
+            )
+            with loss_parallel() if loss_parallel_enabled else contextlib.nullcontext():
+                loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
+                # backward on scaled loss to create scaled gradients
+                scaler.scale(loss).backward()
 
             # clip gradients (after unscaling gradients of the optimizer's params)
             scaler.unscale_(optimizer)

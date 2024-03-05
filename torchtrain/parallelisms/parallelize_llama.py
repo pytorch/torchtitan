@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 def distribute_rmsnorm(module, device_mesh):
     # temp sharding API until PTD API is added
-    def prepare_input_fn(inputs, device_mesh):
+    def prepare_input_fn(mod, inputs, device_mesh):
         if isinstance(inputs[0], DTensor):
             return inputs
         elif isinstance(inputs[0], torch.Tensor):
@@ -134,7 +134,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
-        # TODO: enable loss parallel once it's ready
         model = parallelize_module(
             model,
             tp_mesh,
@@ -144,7 +143,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": ColwiseParallel(
                     input_layouts=Shard(0),
-                    output_layouts=Replicate(),
+                    output_layouts=Shard(-1)
+                    if job_config.training.enable_loss_parallel
+                    else Replicate(),
+                    use_local_output=not job_config.training.enable_loss_parallel,
                 ),
                 "layers.0": PrepareModuleInput(
                     input_layouts=(Replicate(), None),
@@ -212,7 +214,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
 
-                # apply selective AC
+                # apply AC/selective AC
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.training.enable_selective_ac
                 )
