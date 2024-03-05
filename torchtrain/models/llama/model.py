@@ -47,7 +47,9 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(dim))
-        self.reset_parameters()
+
+        # re-enable if not using meta-init
+        # self.reset_parameters()
 
     def _norm(self, x: torch.Tensor):
         """
