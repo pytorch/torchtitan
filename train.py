@@ -102,11 +102,13 @@ def main(job_config: JobConfig):
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
-    # need dp world size and rank
-    dp_mesh = world_mesh["dp"]
-    dp_degree = dp_mesh.size()
-    dp_rank = dp_mesh.get_local_rank()
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
+    if parallel_dims.dp_enabled:
+        dp_mesh = world_mesh["dp"]
+        dp_degree = dp_mesh.size()
+        dp_rank = dp_mesh.get_local_rank()
+    else:
+        dp_degree, dp_rank = 1, 0
     data_loader = build_dataloader_fn(
         tokenizer,
         job_config.training.batch_size,
@@ -255,10 +257,13 @@ def main(job_config: JobConfig):
                     np.mean(losses_since_last_log),
                     np.max(losses_since_last_log),
                 )
-                global_avg_loss, global_max_loss = (
-                    dist_mean(avg_loss, dp_mesh),
-                    dist_max(max_loss, dp_mesh),
-                )
+                if parallel_dims.dp_enabled:
+                    global_avg_loss, global_max_loss = (
+                        dist_mean(avg_loss, dp_mesh),
+                        dist_max(max_loss, dp_mesh),
+                    )
+                else:
+                    global_avg_loss, global_max_loss = avg_loss, max_loss
 
                 time_delta = timer() - time_last_log
                 wps = nwords_since_last_log / (
