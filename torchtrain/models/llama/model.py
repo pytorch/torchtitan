@@ -466,7 +466,14 @@ class Transformer(nn.Module):
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
         # init model weights
-        self.reset_parameters()
+
+        # we are doing meta_init, which will call reset_parameters() after
+        # the model is moved to actual device.
+        # If you modify and are not using meta_init, you will need to call
+        # reset_parameters() manually as below:
+
+        # self.reset_parameters()
+
         rank0_log(f"Model built with: {self.model_args}")
 
     def reset_parameters(
