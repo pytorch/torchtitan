@@ -113,6 +113,8 @@ def build_hf_data_loader(
     rank,
     infinite: bool = True,
 ):
-    hf_ds = HuggingFaceDataset(dataset_name, tokenizer, seq_len, world_size, rank, infinite)
+    hf_ds = HuggingFaceDataset(
+        dataset_name, tokenizer, seq_len, world_size, rank, infinite
+    )
 
     return DataLoader(hf_ds, batch_size=batch_size)
