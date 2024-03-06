@@ -36,7 +36,8 @@ class HuggingFaceDataset(IterableDataset):
 
     Example:
     >>> alpaca_ds = HuggingFaceDataset.from_dataset_name(
-            "tatsu-lab/alpaca", "text", tokenizer)
+            "tatsu-lab/alpaca", "text", tokenizer
+        )
     >>> for batch in Dataloader(alpaca_ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
@@ -117,7 +118,7 @@ def build_alpaca_data_loader(
             dataset_path, "text", tokenizer, seq_len, world_size, rank, infinite
         )
     else:
-        rank0_log(f"Downloading training data from HuggingFace...")
+        rank0_log("Downloading training data from HuggingFace...")
         alpaca_ds = HuggingFaceDataset.from_dataset_name(
             "tatsu-lab/alpaca", "text", tokenizer, seq_len, world_size, rank, infinite
         )
