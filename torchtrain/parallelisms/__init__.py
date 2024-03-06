@@ -23,6 +23,7 @@ class ParallelDims:
     sp: int
     pp: int
     world_size: int
+    enable_loss_parallel: bool
 
     def __post_init__(self):
         self._validate()
@@ -62,6 +63,10 @@ class ParallelDims:
     @property
     def pp_enabled(self):
         return self.pp > 1
+
+    @property
+    def loss_parallel_enabled(self):
+        return self.sp > 1 and self.enable_loss_parallel
 
     @cached_property
     def model_parallel_size(self):
