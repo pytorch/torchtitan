@@ -7,6 +7,8 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset
 
 from torchtrain.datasets.tokenizer import TokenizerIf
+from torchtrain.logging_utils import rank0_log
+from torchtrain.utils import Color
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -78,6 +80,7 @@ class HuggingFaceDataset(IterableDataset):
             )
 
         ds = load_dataset(_supported_datasets[dataset_name], split="train")
+        self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
         self._tokenizer = tokenizer
         self.seq_len = seq_len
@@ -102,6 +105,12 @@ class HuggingFaceDataset(IterableDataset):
                     yield input, label
             if not self.infinite:
                 break
+            else:
+                # we are re-looping on the same dataset, warn user
+                rank0_log(
+                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} is being re-looped. "
+                    f"Loss related metrics might be misleading.{Color.reset}"
+                )
 
 
 def build_hf_data_loader(
