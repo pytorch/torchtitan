@@ -122,15 +122,16 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     NOTE: the model passed in preferrablably shoule be a meta device model,
     otherwise the model needs to be small enough on GPU or can fit into CPU.
-    # TODO: apply SP
     """
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
+
+    # First we apply Sequence Parallelism if it's enabled
     if parallel_dims.sp_enabled:
-        # First we apply Sequence Parallelism if it's enabled
-        tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
+        tp_mesh = world_mesh["sp"]
         sp_degree = job_config.training.sequence_parallel_degree
+
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
@@ -144,9 +145,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "output": ColwiseParallel(
                     input_layouts=Shard(0),
                     output_layouts=Shard(-1)
-                    if job_config.training.enable_loss_parallel
+                    if parallel_dims.loss_parallel_enabled
                     else Replicate(),
-                    use_local_output=not job_config.training.enable_loss_parallel,
+                    use_local_output=not parallel_dims.loss_parallel_enabled,
                 ),
                 "layers.0": PrepareModuleInput(
                     input_layouts=(Replicate(), None),
@@ -155,6 +156,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
             },
         )
+
+        # shard the RMSNorm layer before last linear proj layer
+        distribute_rmsnorm(model.norm, tp_mesh)
 
         # apply sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
@@ -194,8 +198,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         rank0_log("Applied Sequence Parallelism to the model...")
 
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-        assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+        dp_mesh = world_mesh["dp"]
 
         fsdp_config = {
             "mixed_precision": MixedPrecision(
@@ -227,6 +230,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         rank0_log("Applied FSDP to the model...")
     else:
+        meta_to_real_init_fn(model)
         model.cuda()
 
     # we have now moved from meta to device,

@@ -233,7 +233,6 @@ class JobConfig:
         )
         parser.add_argument(
             "--training.enable_selective_ac",
-            default=False,
             action="store_true",
             help="whether to enable selective activation checkpointing",
         )
