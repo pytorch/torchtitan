@@ -108,8 +108,8 @@ class HuggingFaceDataset(IterableDataset):
             else:
                 # we are re-looping on the same dataset, warn user
                 rank0_log(
-                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} is being re-looped. "
-                    f"Loss related metrics might be misleading.{Color.reset}"
+                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} is "
+                    f"being re-looped. Loss related metrics might be misleading.{Color.reset}"
                 )
 
 
