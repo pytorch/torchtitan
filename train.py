@@ -22,6 +22,7 @@ from torchtrain.config_manager import JobConfig
 
 # torchtrain related
 from torchtrain.datasets import create_tokenizer, dataloader_fn
+from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, rank0_log
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
@@ -128,6 +129,10 @@ def main(job_config: JobConfig):
     # build model using meta init
     with meta_model_init():
         model = model_cls.from_model_args(model_config)
+
+    # apply fp8 linear module swap
+    if job_config.training.fp8_linear:
+        build_fp8_linear(model, job_config)
 
     # log model size
     model_param_count = get_num_params(model)
