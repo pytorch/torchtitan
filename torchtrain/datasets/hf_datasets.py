@@ -16,6 +16,7 @@ _supported_datasets = {
     "minipile": "JeanKaddour/minipile",
 }
 
+
 class HuggingFaceDataset(IterableDataset):
     """PyTorch Representation of a Dataset from Hugging Face.
 
@@ -74,7 +75,7 @@ class HuggingFaceDataset(IterableDataset):
                 f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}"
             )
         ds = load_dataset(_supported_datasets[dataset_name], split="train")
-        #ds = load_dataset("JeanKaddour/minipile", split="train")
+        # ds = load_dataset("JeanKaddour/minipile", split="train")
         self.data_iterator = iter(split_dataset_by_node(ds, rank, world_size))
         self._tokenizer = tokenizer
         self.seq_len = seq_len
@@ -99,7 +100,12 @@ class HuggingFaceDataset(IterableDataset):
 
 
 def build_hf_data_loader(
-    dataset_name: str, tokenizer: TokenizerIf, batch_size: int, seq_len: int, world_size, rank
+    dataset_name: str,
+    tokenizer: TokenizerIf,
+    batch_size: int,
+    seq_len: int,
+    world_size,
+    rank,
 ):
     hf_ds = HuggingFaceDataset(dataset_name, tokenizer, seq_len, world_size, rank)
 

@@ -116,7 +116,9 @@ def main(job_config: JobConfig):
         dp_degree,
         dp_rank,
     )
-    rank0_log(f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}")
+    rank0_log(
+        f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}"
+    )
 
     # build model
     model_cls = model_name_to_cls[model_name]
