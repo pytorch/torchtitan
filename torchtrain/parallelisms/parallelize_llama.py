@@ -135,7 +135,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
-        # TODO: enable loss parallel once it's ready
         model = parallelize_module(
             model,
             tp_mesh,
@@ -145,7 +144,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": ColwiseParallel(
                     input_layouts=Shard(0),
-                    output_layouts=Replicate(),
+                    output_layouts=Shard(-1)
+                    if parallel_dims.loss_parallel_enabled
+                    else Replicate(),
+                    use_local_output=not parallel_dims.loss_parallel_enabled,
                 ),
                 "layers.0": PrepareModuleInput(
                     input_layouts=(Replicate(), None),
