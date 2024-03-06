@@ -11,23 +11,44 @@ from torchtrain.datasets.tokenizer import TokenizerIf
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
 
+_supported_datasets = {
+    "alpaca": "tatsu-lab/alpaca",
+    "minipile": "JeanKaddour/minipile",
+}
 
-class MiniPileDataset(IterableDataset):
-    """PyTorch Representation of the MiniPile Dataset from Hugging Face.
+class HuggingFaceDataset(IterableDataset):
+    """PyTorch Representation of a Dataset from Hugging Face.
+
+    We currently support two datasets:
+    minipile (1M training entries)
+    alpaca (57K training entries)
+
+    >> MiniPile <<:
     MiniPile dataset is detailed in the following paper:
     https://arxiv.org/abs/2304.08442
 
     Args:
+        dataset_name (str): name of the dataset to load
         tokenizer (TokenizerIf): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
         world_size (int): number of data parallel processes participating in training
         rank (int): rank of the current data parallel process
 
-    Data input format:
+    Data input format (minipile):
     {
         "text": "Open-end spinning devices with such rotor bearing arrangements are known in
                 various different embodiments, and have been extensively described,
                 for example in German Patent Publications"
+    }
+
+    >> Alpaca <<:
+    Data input format (alpaca):
+    {
+        "instruction": "Create a classification task by clustering the given list of items.",
+        "input": "Apples, oranges, bananas, strawberries, pineapples",
+        "output": "Class 1: Apples, Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",
+        "text": "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\nCreate a classification task by clustering the given list of items.\n\n### Input:\nApples, oranges, bananas, strawberries, pineapples\n\n### Response:\nClass 1: Apples,
+        Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
     }
 
     Example:
@@ -39,6 +60,7 @@ class MiniPileDataset(IterableDataset):
 
     def __init__(
         self,
+        dataset_name: str,
         tokenizer: TokenizerIf,
         seq_len: int = 2048,
         world_size: int = 1,
@@ -47,7 +69,12 @@ class MiniPileDataset(IterableDataset):
         # TODO: This is a temporary solution for small datasets like Alpaca.
         #       For larger datasets we need to use a more scalable approach.
         # Setting `streaming=True` works for large dataset, but the speed is slow.
-        ds = load_dataset("JeanKaddour/minipile", split="train")
+        if dataset_name not in _supported_datasets:
+            raise ValueError(
+                f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}"
+            )
+        ds = load_dataset(_supported_datasets[dataset_name], split="train")
+        #ds = load_dataset("JeanKaddour/minipile", split="train")
         self.data_iterator = iter(split_dataset_by_node(ds, rank, world_size))
         self._tokenizer = tokenizer
         self.seq_len = seq_len
@@ -71,9 +98,9 @@ class MiniPileDataset(IterableDataset):
                 yield input, label
 
 
-def build_minipile_data_loader(
-    tokenizer: TokenizerIf, batch_size: int, seq_len: int, world_size, rank
+def build_hf_data_loader(
+    dataset_name: str, tokenizer: TokenizerIf, batch_size: int, seq_len: int, world_size, rank
 ):
-    minipile_ds = MiniPileDataset(tokenizer, seq_len, world_size, rank)
+    hf_ds = HuggingFaceDataset(dataset_name, tokenizer, seq_len, world_size, rank)
 
-    return DataLoader(minipile_ds, batch_size=batch_size)
+    return DataLoader(hf_ds, batch_size=batch_size)

@@ -109,12 +109,14 @@ def main(job_config: JobConfig):
     dp_rank = dp_mesh.get_local_rank()
     build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     data_loader = build_dataloader_fn(
+        job_config.training.dataset,
         tokenizer,
         job_config.training.batch_size,
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
     )
+    rank0_log(f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}")
 
     # build model
     model_cls = model_name_to_cls[model_name]
