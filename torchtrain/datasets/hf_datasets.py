@@ -24,7 +24,7 @@ class HuggingFaceDataset(IterableDataset):
 
     We currently support two datasets:
     minipile (1M training entries)
-    alpaca (57K training entries)
+    alpaca (52K training entries)
 
     >> MiniPile <<:
     MiniPile dataset is detailed in the following paper:
