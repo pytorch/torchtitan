@@ -113,6 +113,7 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
+        job_config.training.dataset_path,
     )
 
     # build model
