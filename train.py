@@ -115,6 +115,7 @@ def main(job_config: JobConfig):
         dp_degree, dp_rank = 1, 0
     data_loader = build_dataloader_fn(
         job_config.training.dataset,
+        job_config.training.dataset_path,
         tokenizer,
         job_config.training.batch_size,
         job_config.training.seq_len,
