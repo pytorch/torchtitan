@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-from typing import List
+from typing import List, Optional
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset
@@ -10,7 +10,7 @@ from torchtrain.datasets.tokenizer import TokenizerIf
 from torchtrain.logging_utils import rank0_log
 from torchtrain.utils import Color
 
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
@@ -20,15 +20,7 @@ _supported_datasets = {
 
 
 class HuggingFaceDataset(IterableDataset):
-    """PyTorch Representation of a Dataset from Hugging Face.
-
-    We currently support two datasets:
-    minipile (1M training entries)
-    alpaca (52K training entries)
-
-    >> MiniPile <<:
-    MiniPile dataset is detailed in the following paper:
-    https://arxiv.org/abs/2304.08442
+    """PyTorch Representation of the HuggingFace Dataset.
 
     Args:
         dataset_name (str): name of the dataset to load
@@ -38,12 +30,9 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    Data input format (minipile):
-    {
-        "text": "Open-end spinning devices with such rotor bearing arrangements are known in
-                various different embodiments, and have been extensively described,
-                for example in German Patent Publications"
-    }
+    We currently support two datasets:
+    minipile (1M training entries)
+    alpaca (52K training entries)
 
     >> Alpaca <<:
     Data input format (alpaca):
@@ -53,6 +42,15 @@ class HuggingFaceDataset(IterableDataset):
         "output": "Class 1: Apples, Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",
         "text": "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\nCreate a classification task by clustering the given list of items.\n\n### Input:\nApples, oranges, bananas, strawberries, pineapples\n\n### Response:\nClass 1: Apples,
         Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
+    }
+
+    >> MiniPile <<:
+    MiniPile dataset is detailed in the following paper: https://arxiv.org/abs/2304.08442
+    Data input format (minipile):
+    {
+        "text": "Open-end spinning devices with such rotor bearing arrangements are known in
+                various different embodiments, and have been extensively described,
+                for example in German Patent Publications"
     }
 
     Example:
@@ -65,21 +63,28 @@ class HuggingFaceDataset(IterableDataset):
     def __init__(
         self,
         dataset_name: str,
+        dataset_path: Optional[str],
         tokenizer: TokenizerIf,
         seq_len: int = 2048,
         world_size: int = 1,
         rank: int = 0,
         infinite: bool = False,
     ) -> None:
-        # TODO: This is a temporary solution for small datasets like Alpaca.
-        #       For larger datasets we need to use a more scalable approach.
-        # Setting `streaming=True` works for large dataset, but the speed is slow.
         if dataset_name not in _supported_datasets:
             raise ValueError(
                 f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}"
             )
 
-        ds = load_dataset(_supported_datasets[dataset_name], split="train")
+        # TODO: This is a temporary solution for small datasets like Alpaca.
+        #       For larger datasets we need to use a more scalable approach.
+        if dataset_path:
+            rank0_log(f"{Color.green}Loading '{dataset_name}' dataset locally from {dataset_path}...{Color.reset}")
+            ds = load_from_disk(dataset_path)
+        else:
+            rank0_log(f"{Color.green}Downloading '{dataset_name}' dataset from HuggingFace...{Color.reset}")
+            # Setting `streaming=True` works for large dataset, but the speed is slow.
+            ds = load_dataset(_supported_datasets[dataset_name], split="train")
+
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
         self._tokenizer = tokenizer
@@ -115,6 +120,7 @@ class HuggingFaceDataset(IterableDataset):
 
 def build_hf_data_loader(
     dataset_name: str,
+    dataset_path: Optional[str],
     tokenizer: TokenizerIf,
     batch_size: int,
     seq_len: int,
@@ -123,7 +129,7 @@ def build_hf_data_loader(
     infinite: bool = True,
 ):
     hf_ds = HuggingFaceDataset(
-        dataset_name, tokenizer, seq_len, world_size, rank, infinite
+        dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
     return DataLoader(hf_ds, batch_size=batch_size)
