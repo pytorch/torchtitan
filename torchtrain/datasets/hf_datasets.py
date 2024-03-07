@@ -78,10 +78,14 @@ class HuggingFaceDataset(IterableDataset):
         # TODO: This is a temporary solution for small datasets like Alpaca.
         #       For larger datasets we need to use a more scalable approach.
         if dataset_path:
-            rank0_log(f"{Color.green}Loading '{dataset_name}' dataset locally from {dataset_path}...{Color.reset}")
+            rank0_log(
+                f"{Color.green}Loading '{dataset_name}' dataset locally from {dataset_path}...{Color.reset}"
+            )
             ds = load_from_disk(dataset_path)
         else:
-            rank0_log(f"{Color.green}Downloading '{dataset_name}' dataset from HuggingFace...{Color.reset}")
+            rank0_log(
+                f"{Color.green}Downloading '{dataset_name}' dataset from HuggingFace...{Color.reset}"
+            )
             # Setting `streaming=True` works for large dataset, but the speed is slow.
             ds = load_dataset(_supported_datasets[dataset_name], split="train")
 
