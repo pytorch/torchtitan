@@ -157,7 +157,7 @@ class JobConfig:
             help=(
                 "Path to the dataset in the file system. If provided, data will be"
                 "loaded from this path instead of downloaded.",
-            )
+            ),
         )
         parser.add_argument(
             "--training.batch_size", type=int, default=8, help="batch size"
