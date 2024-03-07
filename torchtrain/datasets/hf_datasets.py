@@ -24,6 +24,7 @@ class HuggingFaceDataset(IterableDataset):
 
     Args:
         dataset_name (str): name of the dataset to load
+        dataset_path (Optional[str]): Path to the dataset in the file system. If provided, data will be loaded from this path instead of downloaded.
         tokenizer (TokenizerIf): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
         world_size (int): number of data parallel processes participating in training
@@ -31,8 +32,8 @@ class HuggingFaceDataset(IterableDataset):
         infinite (bool): whether to loop infinitely over the dataset
 
     We currently support two datasets:
-    minipile (1M training entries)
     alpaca (52K training entries)
+    minipile (1M training entries)
 
     >> Alpaca <<:
     Data input format (alpaca):
@@ -45,7 +46,7 @@ class HuggingFaceDataset(IterableDataset):
     }
 
     >> MiniPile <<:
-    MiniPile dataset is detailed in the following paper: https://arxiv.org/abs/2304.08442
+    MiniPile dataset is detailed in the paper: https://arxiv.org/abs/2304.08442
     Data input format (minipile):
     {
         "text": "Open-end spinning devices with such rotor bearing arrangements are known in
@@ -54,7 +55,7 @@ class HuggingFaceDataset(IterableDataset):
     }
 
     Example:
-    >>> alpaca_ds = HuggingFaceDataset(tokenizer=tokenizer)
+    >>> alpaca_ds = HuggingFaceDataset(dataset_name="alpaca", dataset_path=None, tokenizer=tokenizer)
     >>> for batch in Dataloader(alpaca_ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
