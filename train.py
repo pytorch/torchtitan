@@ -114,11 +114,15 @@ def main(job_config: JobConfig):
     else:
         dp_degree, dp_rank = 1, 0
     data_loader = build_dataloader_fn(
+        job_config.training.dataset,
         tokenizer,
         job_config.training.batch_size,
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
+    )
+    rank0_log(
+        f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}"
     )
 
     # build model
