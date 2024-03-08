@@ -66,9 +66,13 @@ def build_optimizer(model, job_config: JobConfig):
     lr = job_config.optimizer.lr
     if name == "Adam":
         # TODO: make the optimizer options configurable by toml/cmd args
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
+        )
     elif name == "AdamW":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
+        )
     else:
         raise NotImplementedError(f"optimizer {name} not added")
 
