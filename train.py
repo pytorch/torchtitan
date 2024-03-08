@@ -181,6 +181,50 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
+    #### INITIALIZE COPILOT OFFLOAD ####
+    for name, module in self._model.named_modules():
+        if (
+            "DHENLayer" in str(type(module))
+            or "TanhAndCatEmbeddings" in str(type(module))
+            or "EmbeddingFeatureArch" in str(type(module))
+            or "DenseArch" in str(type(module))
+            or "COPILOT_THUNK_REGROUP_BY_DICT" in str(type(module))
+            or "EmbeddingBagCollectionsSparseArch" in str(type(module))
+        ):
+            offload_candidates.append(name)
+            offload_candidate_modules[name] = module
+
+        # globally, perform a set interaction to filter out modules not n all candidates
+    allgather_handle = [None] * torch.distributed.get_world_size()
+
+    torch.distributed.all_gather_object(allgather_handle, offload_candidates)
+
+    # intersect
+    allgather_handle_sets = [set(x) for x in allgather_handle]
+
+    final_offload_candidates = set.intersection(*allgather_handle_sets)
+
+    final_offload_candidates_ordered = sorted(final_offload_candidates)
+
+    for name in final_offload_candidates_ordered:
+        module = offload_candidate_modules[name]
+        logging.info(
+            f"INIT:: registering {type(module)}'s forward as {digest_forward_name(module.forward)}"
+        )
+        self._legokit_original_fwd[module] = module.forward
+        self.name_to_module[name] = module
+        self.module_sequencer[name] = len(self.module_sequencer)
+        self.module_offloaded[name] = 1
+
+        toggle_offload_simple(
+            module, self._legokit_original_fwd[module], True, False
+        )
+
+        if torch.distributed.get_rank() == 0:
+            logging.info(f"{name} identified as a candidate for offloading")
+
+    logging.info(f"registered {len(self.module_sequencer)} modules")
+
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
         # variables used to keep info for metrics logging
