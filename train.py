@@ -57,7 +57,10 @@ class TrainState:
     def load_state_dict(self, state_dict) -> None:
         self.step = state_dict["step"].item()
         self.current_loss = state_dict["current_loss"].item()
-        self.losses = state_dict["losses"].tolist()
+        losses = state_dict["losses"].tolist()
+        if not isinstance(losses, list):
+            losses = [losses]
+        self.losses = losses
 
 
 def build_optimizer(model, job_config: JobConfig):
