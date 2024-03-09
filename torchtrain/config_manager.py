@@ -249,9 +249,32 @@ class JobConfig:
             ],  # TODO: add "delayed" option back in when supported
             help="Type of fp8 linear quantization to apply to the model",
         )
+
+        parser.add_argument(
+            "--activation_checkpointing.enable_ac",
+            action="store_true",
+            default=True,
+            help="whether to enable activation checkpointing at all",
+        )
+
+        parser.add_argument(
+            "--activation_checkpointing.enable_per_layer_ac",
+            action="store_true",
+            default=True,
+            help="whether to enable per layer activation checkpointing ",
+        )
+
+        parser.add_argument(
+            "--activation_checkpointing.enable_every_xth_layer",
+            type=int,
+            default=2, # checkpoint every other layer
+            help="select which layers to checkpoint. 1 = all, 2 = every other, etc.",
+        )
+
         parser.add_argument(
             "--training.enable_selective_ac",
             action="store_true",
-            help="whether to enable selective activation checkpointing",
+            default=False,
+            help="whether to enable selective op (pt2) activation checkpointing",
         )
         return parser.parse_args(args_list)
