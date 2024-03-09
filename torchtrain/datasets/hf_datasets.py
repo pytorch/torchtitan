@@ -102,8 +102,13 @@ class HuggingFaceDataset(IterableDataset):
             )
             # Setting `streaming=True` works for large dataset, but the speed is slow.
             # c4 is huge, and requires both streaming and language selection (we default to en)
-            if dataset_name == 'c4':
-                ds = load_dataset(_supported_datasets[dataset_name], 'en', split="train", streaming=True)
+            if dataset_name == "c4":
+                ds = load_dataset(
+                    _supported_datasets[dataset_name],
+                    "en",
+                    split="train",
+                    streaming=True,
+                )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")
 
