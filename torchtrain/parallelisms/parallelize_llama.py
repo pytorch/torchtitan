@@ -78,13 +78,14 @@ no_recompute_list = {
 
 # Uses PTD FSDP AC wrapper
 def checkpoint_wrapper(module, config):
-    rank0_log(f"Using PTD AC with {config.every_x_layer=}")
-    if config.enable_selective_ac:
-        rank0_log(f"Using selective AC ")
-        from torch.utils.checkpoint import (
+    from torch.utils.checkpoint import (
             _pt2_selective_checkpoint_context_fn_gen,
             checkpoint,
         )
+    rank0_log(f"Using PTD AC with {config.every_x_layer=}")
+    if config.enable_selective_ac:
+        rank0_log(f"Using selective AC ")
+
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
@@ -110,12 +111,39 @@ def checkpoint_wrapper(module, config):
             use_reentrant=False,
             preserve_rng_state=False,
         )
+    elif config.enable_per_layer_ac:
+        rank0_log(f"Using per layer AC ")
+
+        """enables selective checkpointing of candidate layers.
+        Usage:
+        every_xth_item controls which items to checkpoint.
+        None, 0 == checkpointing filtering not active, checkpoint all instances
+        1 == checkpointing every one (all).
+        2 == checkpoint every 2nd one
+        """
+        every_xth_layer = config.every_x_layer
+        rank0_log(f"selective layer checkpointing every {every_xth_layer}th layer")
+
+        checkpoint_wrapper.__dict__.setdefault("_count", 0)
+
+        checkpoint_wrapper._count += 1
+        if (
+            not every_xth_layer
+            or checkpoint_wrapper._count % every_xth_layer == 0
+            ):
+                rank0_log(f"checkpointing layer {checkpoint_wrapper._count}")
+                return ptd_checkpoint_wrapper(
+                    module,
+                    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                    checkpoint_fn=checkpoint,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+        rank0_log(f"skipping layer {checkpoint_wrapper._count}")
+        return module
+
     else:
-        return ptd_checkpoint_wrapper(
-            module,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            preserve_rng_state=False,
-        )
+        raise NotImplementedError("Unknown AC type. Only selective ac and per layer ac implemented currently.")
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
