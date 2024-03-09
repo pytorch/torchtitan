@@ -77,8 +77,10 @@ no_recompute_list = {
 }
 
 # Uses PTD FSDP AC wrapper
-def checkpoint_wrapper(module, enable_selective_ac):
-    if enable_selective_ac:
+def checkpoint_wrapper(module, config):
+    rank0_log(f"Using PTD AC with {config.every_x_layer=}")
+    if config.enable_selective_ac:
+        rank0_log(f"Using selective AC ")
         from torch.utils.checkpoint import (
             _pt2_selective_checkpoint_context_fn_gen,
             checkpoint,
@@ -218,9 +220,12 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             for layer_id, transformer_block in enumerate(model.layers):
 
                 # apply AC/selective AC
-                transformer_block = checkpoint_wrapper(
-                    transformer_block, job_config.training.enable_selective_ac
-                )
+                if job_config.activation_checkpointing.enable_ac:
+                    rank0_log("enabling ac....")
+
+                    # wrap the transformer block with checkpoint wrapper, using config settings
+                    transformer_block = checkpoint_wrapper(transformer_block, job_config.activation_checkpointing)
+
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)

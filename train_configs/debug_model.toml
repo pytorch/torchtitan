@@ -4,13 +4,13 @@ dump_folder = "./outputs"
 description = "debug training"
 
 [profiling]
-run_profiler = true
+run_profiler = false
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
 profile_every_x_iter = 10
 
 [metrics]
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 log_freq = 10
 
@@ -29,7 +29,7 @@ batch_size = 8
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 20
 data_parallel_degree = -1
 sequence_parallel_degree = 1
 pipeline_parallel_degree = 1
@@ -38,3 +38,12 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
+
+
+[activation_checkpointing]
+enable_ac = true  # master switch, any activation checkpointing at all...(true/false)
+# ac type selection
+enable_per_layer_ac = true
+every_x_layer = 0 # 0 is every layer (all), 1 is every other layer, 2 is every 2nd layer...
+# or
+enable_selective_ac = false  # checkpoint based on arithmetic intensity (op level)
