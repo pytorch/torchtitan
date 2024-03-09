@@ -2,7 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 # this file applies the PTD parallelisms and various training techniques to the
-# llama model, i.e. activation checkpoint, etc.
+# llama model, i.e. activation checkpointing, etc.
 
 import logging
 from collections import defaultdict
@@ -33,6 +33,11 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     RowwiseParallel,
 )
+
+from torch.utils.checkpoint import (
+            _pt2_selective_checkpoint_context_fn_gen,
+            checkpoint,)
+
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
 from torchtrain.meta_init import meta_to_real_init_fn
@@ -77,15 +82,14 @@ no_recompute_list = {
 }
 
 # Uses PTD FSDP AC wrapper
+# currently selective per op and per layer checkpointing are supported
 def checkpoint_wrapper(module, config):
-    from torch.utils.checkpoint import (
-            _pt2_selective_checkpoint_context_fn_gen,
-            checkpoint,
-        )
-    rank0_log(f"Using PTD AC with {config.every_x_layer=}")
-    if config.enable_selective_ac:
-        rank0_log(f"Using selective AC ")
 
+    # ensure only one type of checkpointing is enabled
+    assert config.enable_selective_ac != config.enable_per_layer_ac, \
+    f"Config error: only one type of activation checkpointing can be enabled at a time."
+
+    if config.enable_selective_ac:
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
@@ -112,7 +116,6 @@ def checkpoint_wrapper(module, config):
             preserve_rng_state=False,
         )
     elif config.enable_per_layer_ac:
-        rank0_log(f"Using per layer AC ")
 
         """enables selective checkpointing of candidate layers.
         Usage:
@@ -122,7 +125,6 @@ def checkpoint_wrapper(module, config):
         2 == checkpoint every 2nd one
         """
         every_xth_layer = config.every_x_layer
-        rank0_log(f"selective layer checkpointing every {every_xth_layer}th layer")
 
         checkpoint_wrapper.__dict__.setdefault("_count", 0)
 
@@ -131,7 +133,6 @@ def checkpoint_wrapper(module, config):
             not every_xth_layer
             or checkpoint_wrapper._count % every_xth_layer == 0
             ):
-                rank0_log(f"checkpointing layer {checkpoint_wrapper._count}")
                 return ptd_checkpoint_wrapper(
                     module,
                     checkpoint_impl=CheckpointImpl.NO_REENTRANT,
@@ -139,11 +140,11 @@ def checkpoint_wrapper(module, config):
                     use_reentrant=False,
                     preserve_rng_state=False,
                 )
-        rank0_log(f"skipping layer {checkpoint_wrapper._count}")
+        # skipping this layer...
         return module
 
     else:
-        raise NotImplementedError("Unknown AC type. Only selective ac and per layer ac implemented currently.")
+        raise NotImplementedError("Unknown AC type. Only selective op and selective layer ac implemented currently.")
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
@@ -249,7 +250,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
                 # apply AC/selective AC
                 if job_config.activation_checkpointing.enable_ac:
-                    rank0_log("enabling ac....")
 
                     # wrap the transformer block with checkpoint wrapper, using config settings
                     transformer_block = checkpoint_wrapper(transformer_block, job_config.activation_checkpointing)

@@ -44,6 +44,6 @@ dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177
 enable_ac = true  # master switch, any activation checkpointing at all...(true/false)
 # ac type selection
 enable_per_layer_ac = true
-every_x_layer = 0 # 0 is every layer (all), 1 is every other layer, 2 is every 2nd layer...
+every_x_layer = 2 # 1 is every layer (all), 2 is every 2nd layer, 3 is every 3rd layer etc....
 # or
 enable_selective_ac = false  # checkpoint based on arithmetic intensity (op level)
