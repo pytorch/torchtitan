@@ -7,9 +7,9 @@
 
 #SBATCH --job-name=torchtrain_multi_node
 
-#SBATCH --ntasks=2
+#SBATCH --ntasks=4
 
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 
 #SBATCH --gpus-per-task=8
 
@@ -48,9 +48,11 @@ export NCCL_SOCKET_IFNAME="eth0,en,eth,em,bond"
 export NCCL_BUFFSIZE=2097152
 #export TORCH_DIST_INIT_BARRIER=1
 export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
+#export USE_LIBUV=1
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama_13b.toml"}
 
 dcgmi profile --pause
 # adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
 # to your specific node count, and update target launch file.
-srun torchrun --nnodes 2 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./train.py --steps 10
+srun torchrun --nnodes 4 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./train.py --job.config_file ${CONFIG_FILE}
 dcgmi profile --resume

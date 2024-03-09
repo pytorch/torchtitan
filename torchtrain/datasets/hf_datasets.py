@@ -16,6 +16,7 @@ from datasets.distributed import split_dataset_by_node
 _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
     "minipile": "JeanKaddour/minipile",
+    "c4": "allenai/c4",
 }
 
 
@@ -31,9 +32,10 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support two datasets:
+    We currently support three datasets:
     alpaca (52K training entries)
     minipile (1M training entries)
+    c4 (177M training entries - this dataset is streamed due to the size)
 
     >> Alpaca <<:
     Data input format (alpaca):
@@ -54,11 +56,22 @@ class HuggingFaceDataset(IterableDataset):
                 for example in German Patent Publications"
     }
 
-    Example:
+     >> c4 (EN) <<:
+    c4 cleaned, English version
+    Data input format (c4):
+    {
+    'url': 'https://klyq.com/beginners-bbq-class-taking-place-in-missoula/',
+    'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at making delicious BBQ? You will have the opportunity, put this on your calendar now. Thursday, September 22nd join World Class BBQ Champion, Tony Balay from Lonestar Smoke Rangers. He will be teaching a beginner level class for everyone who wants to get better with their culinary skills.\nHe will teach you everything you need to know to compete in a KCBS BBQ competition, including techniques, recipes, timelines, meat selection and trimming, plus smoker and fire information.\nThe cost to be in the class is $35 per person, and for spectators it is free. Included in the cost will be either a t-shirt or apron and you will be tasting samples of each meat that is prepared.',
+    'timestamp': '2019-04-25T12:57:54Z'
+    }
+
+    Example use (alpaca):
     >>> alpaca_ds = HuggingFaceDataset(dataset_name="alpaca", dataset_path=None, tokenizer=tokenizer)
     >>> for batch in Dataloader(alpaca_ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
+
+
     """
 
     def __init__(
@@ -85,10 +98,19 @@ class HuggingFaceDataset(IterableDataset):
             ds = load_from_disk(dataset_path)
         else:
             rank0_log(
-                f"{Color.green}Downloading '{dataset_name}' dataset from HuggingFace...{Color.reset}"
+                f"{Color.green}Preparing '{dataset_name}' dataset from HuggingFace...{Color.reset}"
             )
             # Setting `streaming=True` works for large dataset, but the speed is slow.
-            ds = load_dataset(_supported_datasets[dataset_name], split="train")
+            # c4 is huge, and requires both streaming and language selection (we default to en)
+            if dataset_name == "c4":
+                ds = load_dataset(
+                    _supported_datasets[dataset_name],
+                    "en",
+                    split="train",
+                    streaming=True,
+                )
+            else:
+                ds = load_dataset(_supported_datasets[dataset_name], split="train")
 
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
@@ -114,6 +136,10 @@ class HuggingFaceDataset(IterableDataset):
                     label = x[1:]
                     yield input, label
             if not self.infinite:
+                rank0_log(
+                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} has "
+                    f"run out of data.{Color.reset}"
+                )
                 break
             else:
                 # we are re-looping on the same dataset, warn user
