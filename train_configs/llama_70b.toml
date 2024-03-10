@@ -1,10 +1,10 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
-description = "llama 13b training"
+description = "llama 70b training"
 
 [profiling]
-run_profiler = true
+run_profiler = false
 save_traces_folder = "profiling/traces"
 # profiling frequency - example: 10 means every 10th iter will be profiled
 profile_every_x_iter = 100
