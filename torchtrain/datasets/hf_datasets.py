@@ -64,6 +64,7 @@ class HuggingFaceDataset(IterableDataset):
 
     Data input format (pajama):
     {
+        "meta" : "redpajama_set_name": "RedPajamaC4"
         "text": "Business events are very much beneficial for the growth of every business.
         It is the fresh and updated way to provide the business with a positive jump in the market
         where almost every client is present for the promotion of their brands respectively."
