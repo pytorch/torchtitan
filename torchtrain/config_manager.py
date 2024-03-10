@@ -267,7 +267,7 @@ class JobConfig:
         parser.add_argument(
             "--activation_checkpointing.enable_every_xth_layer",
             type=int,
-            default=2, # checkpoint every other layer
+            default=2,  # checkpoint every other layer
             help="select which layers to checkpoint. 1 = all, 2 = every other, etc.",
         )
 

@@ -34,9 +34,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 
-from torch.utils.checkpoint import (
-            _pt2_selective_checkpoint_context_fn_gen,
-            checkpoint,)
+from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import rank0_log
@@ -86,8 +84,9 @@ no_recompute_list = {
 def checkpoint_wrapper(module, config):
 
     # ensure only one type of checkpointing is enabled
-    assert config.enable_selective_ac != config.enable_per_layer_ac, \
-    f"Config error: only one type of activation checkpointing can be enabled at a time."
+    assert (
+        config.enable_selective_ac != config.enable_per_layer_ac
+    ), "Config error: only one type of activation checkpointing can be enabled at a time."
 
     if config.enable_selective_ac:
 
@@ -129,22 +128,21 @@ def checkpoint_wrapper(module, config):
         checkpoint_wrapper.__dict__.setdefault("_count", 0)
 
         checkpoint_wrapper._count += 1
-        if (
-            not every_xth_layer
-            or checkpoint_wrapper._count % every_xth_layer == 0
-            ):
-                return ptd_checkpoint_wrapper(
-                    module,
-                    checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                    checkpoint_fn=checkpoint,
-                    use_reentrant=False,
-                    preserve_rng_state=False,
-                )
+        if not every_xth_layer or checkpoint_wrapper._count % every_xth_layer == 0:
+            return ptd_checkpoint_wrapper(
+                module,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                checkpoint_fn=checkpoint,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
         # skipping this layer...
         return module
 
     else:
-        raise NotImplementedError("Unknown AC type. Only selective op and selective layer ac implemented currently.")
+        raise NotImplementedError(
+            "Unknown AC type. Only selective op and selective layer ac implemented currently."
+        )
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
@@ -252,8 +250,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 if job_config.activation_checkpointing.enable_ac:
 
                     # wrap the transformer block with checkpoint wrapper, using config settings
-                    transformer_block = checkpoint_wrapper(transformer_block, job_config.activation_checkpointing)
-
+                    transformer_block = checkpoint_wrapper(
+                        transformer_block, job_config.activation_checkpointing
+                    )
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)
