@@ -58,6 +58,17 @@ class HuggingFaceDataset(IterableDataset):
                 for example in German Patent Publications"
     }
 
+    >> SlimPajama <<:
+    ~1% of SlimPajama-627B, evenly sampled across sub-categories.
+    5.5M entries, 14GB in size.
+
+    Data input format (pajama):
+    {
+        "text": "Business events are very much beneficial for the growth of every business.
+        It is the fresh and updated way to provide the business with a positive jump in the market
+        where almost every client is present for the promotion of their brands respectively."
+    }
+
      >> c4 (EN) <<:
     c4 cleaned, English version
     Data input format (c4):
