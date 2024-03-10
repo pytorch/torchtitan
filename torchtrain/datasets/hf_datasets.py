@@ -17,7 +17,7 @@ _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
     "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
-    "pajama": "DKYoon/SlimPajama-6B"
+    "pajama": "DKYoon/SlimPajama-6B",
 }
 
 
