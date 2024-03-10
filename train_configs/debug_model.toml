@@ -37,4 +37,4 @@ compile = false
 checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
-dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), pajama (5.5M), c4 (177M)
+dataset = "pajama"   # supported datasets = alpaca (52K), minipile (1M), pajama (5.5M), c4 (177M)

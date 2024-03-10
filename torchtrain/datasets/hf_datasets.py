@@ -12,6 +12,7 @@ from torchtrain.utils import Color
 
 from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
+import random
 
 _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
@@ -97,6 +98,7 @@ class HuggingFaceDataset(IterableDataset):
         world_size: int = 1,
         rank: int = 0,
         infinite: bool = False,
+        shuffle_buffer_size: int = 1000,
     ) -> None:
         if dataset_name not in _supported_datasets:
             raise ValueError(
@@ -125,6 +127,7 @@ class HuggingFaceDataset(IterableDataset):
                 )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")
+
 
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
@@ -162,6 +165,29 @@ class HuggingFaceDataset(IterableDataset):
                     f"being re-looped. Loss related metrics might be misleading.{Color.reset}"
                 )
 
+class ShuffleDataset(IterableDataset):
+  def __init__(self, dataset, buffer_size):
+    super().__init__()
+    self.dataset = dataset
+    self.buffer_size = buffer_size
+
+  def __iter__(self):
+    shuffle_buffer = []
+    try:
+      dataset_iter = iter(self.dataset)
+      for i in range(self.buffer_size):
+        shuffle_buffer.append(next(dataset_iter))
+    except:
+      self.buffer_size = len(shuffle_buffer)
+
+    while True:
+        try:
+            item = next(dataset_iter)
+            evict_idx = random.randint(0, self.buffer_size - 1)
+            yield shuffle_buffer[evict_idx]
+            shuffle_buffer[evict_idx] = item
+        except StopIteration:
+            break
 
 def build_hf_data_loader(
     dataset_name: str,
@@ -177,4 +203,6 @@ def build_hf_data_loader(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    return DataLoader(hf_ds, batch_size=batch_size)
+    shuffled_dataset = ShuffleDataset(hf_ds, 100)
+    sequential_ds = DataLoader(shuffled_dataset, batch_size=batch_size)
+    return sequential_ds

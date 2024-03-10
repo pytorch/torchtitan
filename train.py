@@ -128,7 +128,7 @@ def main(job_config: JobConfig):
         dp_rank,
     )
     rank0_log(
-        f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}"
+        f"{Color.green}Built Dataloader {data_loader} for '{job_config.training.dataset}' dataset.{Color.reset}"
     )
 
     # build model
