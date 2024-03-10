@@ -17,6 +17,7 @@ _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
     "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
+    "pajama": "DKYoon/SlimPajama-6B"
 }
 
 
@@ -32,9 +33,10 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support three datasets:
+    We currently support four datasets:
     alpaca (52K training entries)
     minipile (1M training entries)
+    slimpajama (5M training entries)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> Alpaca <<:
