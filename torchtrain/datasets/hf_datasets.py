@@ -187,6 +187,7 @@ class ShuffleDataset(IterableDataset):
             yield shuffle_buffer[evict_idx]
             shuffle_buffer[evict_idx] = item
         except StopIteration:
+            print("StopIteration hit in shuffle dataset! ")
             break
 
 def build_hf_data_loader(
@@ -203,6 +204,6 @@ def build_hf_data_loader(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    shuffled_dataset = ShuffleDataset(hf_ds, 100)
+    shuffled_dataset = ShuffleDataset(hf_ds, 1024)
     sequential_ds = DataLoader(shuffled_dataset, batch_size=batch_size)
     return sequential_ds
