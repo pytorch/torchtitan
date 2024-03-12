@@ -157,13 +157,14 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             "mixed_precision": MixedPrecision(
                 param_dtype=torch.bfloat16,
                 # TODO: see whether we should expose a option to user
-                reduce_dtype=torch.float32,
+                reduce_dtype=torch.float16,
             ),
             "sharding_strategy": ShardingStrategy.FULL_SHARD,
-            "backward_prefetch": BackwardPrefetch.BACKWARD_PRE,
+            "backward_prefetch": None,
             # When torch.compile is active, it requires us to set use_orig_params=True
             "use_orig_params": True,
             "device_mesh": dp_mesh,
+            # "cpu_offload": torch.distributed.fsdp.CPUOffload(offload_params=True)
         }
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
