@@ -17,7 +17,7 @@ _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
     "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
-    "openwebtext": "Skylion007/openwebtext"
+    "openwebtext": "Skylion007/openwebtext",
 }
 
 
