@@ -11,13 +11,13 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
 
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"6"}
 
 # by default log just rank 0 output,
 LOG_RANK=${LOG_RANK:-0}
 
 
-CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama_13b.toml"}
 
 torchrun --nproc_per_node=${NGPU} --rdzv_endpoint="localhost:5972" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \

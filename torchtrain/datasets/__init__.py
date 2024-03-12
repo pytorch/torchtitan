@@ -14,4 +14,5 @@ dataloader_fn = {
     "minipile": build_hf_data_loader,
     "c4": build_hf_data_loader,
     "pajama": build_hf_data_loader,
+    "openwebtext": build_hf_data_loader,
 }

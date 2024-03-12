@@ -19,6 +19,7 @@ _supported_datasets = {
     "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
     "pajama": "DKYoon/SlimPajama-6B",
+    "openwebtext": "Skylion007/openwebtext"
 }
 
 
@@ -34,9 +35,10 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support four datasets:
+    We currently support five datasets:
     alpaca (52K training entries)
     minipile (1M training entries)
+    openwebtext (1M training entries)
     slimpajama (5M training entries)
     c4 (177M training entries - this dataset is streamed due to the size)
 
@@ -204,6 +206,6 @@ def build_hf_data_loader(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    shuffled_dataset = ShuffleDataset(hf_ds, 1024)
-    sequential_ds = DataLoader(shuffled_dataset, batch_size=batch_size)
+    # shuffled_dataset = ShuffleDataset(hf_ds, 1024)
+    sequential_ds = DataLoader(hf_ds, batch_size=batch_size)
     return sequential_ds
