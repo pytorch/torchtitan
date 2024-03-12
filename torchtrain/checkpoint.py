@@ -6,7 +6,7 @@ import os
 import re
 import time
 from contextlib import nullcontext
-from multiprocessing import get_context, Process, Queue
+from multiprocessing import get_context
 from typing import Any, Dict
 
 import torch
