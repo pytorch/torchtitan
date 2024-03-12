@@ -17,6 +17,7 @@ _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
     "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
+    "openwebtext": "Skylion007/openwebtext"
 }
 
 
@@ -32,9 +33,10 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support three datasets:
+    We currently support four datasets:
     alpaca (52K training entries)
-    minipile (1M training entries)
+    minipile (1M training entries, amalgamated from other datasets)
+    openwebtext (1M training entries, same type of data for entire dataset)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> Alpaca <<:
@@ -63,6 +65,15 @@ class HuggingFaceDataset(IterableDataset):
     'url': 'https://klyq.com/beginners-bbq-class-taking-place-in-missoula/',
     'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at making delicious BBQ? You will have the opportunity, put this on your calendar now. Thursday, September 22nd join World Class BBQ Champion, Tony Balay from Lonestar Smoke Rangers. He will be teaching a beginner level class for everyone who wants to get better with their culinary skills.\nHe will teach you everything you need to know to compete in a KCBS BBQ competition, including techniques, recipes, timelines, meat selection and trimming, plus smoker and fire information.\nThe cost to be in the class is $35 per person, and for spectators it is free. Included in the cost will be either a t-shirt or apron and you will be tasting samples of each meat that is prepared.',
     'timestamp': '2019-04-25T12:57:54Z'
+    }
+
+    >> OpenWebText <<:
+    OpenWeb crawl, English
+    Example:
+    {
+        'text': "Amazon has launched a new cheaper version of its Echo Dot voice-controlled device today.
+    The launch comes six months after Amazon first introduced two new Echo devices —
+    one of which was the $90 Echo Dot,..."
     }
 
     Example use (alpaca):
