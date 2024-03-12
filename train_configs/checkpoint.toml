@@ -1,0 +1,42 @@
+# TorchTrain Config.toml
+[job]
+dump_folder = "./outputs"
+description = "llama 1b training"
+
+[profiling]
+run_profiler = true
+save_traces_folder = "profiling/traces"
+# profiling frequency - example: 10 means every 10th iter will be profiled
+profile_every_x_iter = 100
+
+[metrics]
+enable_tensorboard = true
+save_tb_folder = "tb"
+log_freq = 10
+
+[model]
+name = "llama"
+flavor = "1B"
+tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+
+
+[training]
+batch_size = 8
+seq_len = 2048
+warmup_steps = 10  # lr scheduler warm up
+max_norm = 1.0  # grad norm clipping
+steps = 50
+# only dp would be sufficient for 1B
+data_parallel_degree = -1
+#sequence_parallel_degree = 1
+#pipeline_parallel_degree = 1
+fp8_linear = ""
+compile = false
+checkpoint_interval = 20
+checkpoint_interval_type = "steps"
+checkpoint_folder = "/tmp/torchtrain_checkpoint"
+dataset = "alpaca"
