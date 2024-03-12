@@ -51,7 +51,7 @@ class TrainState:
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
             "current_loss": torch.tensor(self.current_loss, dtype=torch.float32),
-            "losses": torch.tensor(self.current_loss, dtype=torch.float32),
+            "losses": torch.tensor(self.losses, dtype=torch.float32),
         }
 
     def load_state_dict(self, state_dict) -> None:
