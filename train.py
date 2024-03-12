@@ -192,17 +192,23 @@ def main(job_config: JobConfig):
     # train loop
     model.train()
 
+    if job_config.training.checkpoint_folder:
+        folder = f"{job_config.training.checkpoint_folder}_{os.environ['USER']}"
+    else:
+        folder = ""
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=job_config.training.checkpoint_folder,
+        folder=folder,
         interval_type=(
             IntervalType.SECONDS
             if job_config.training.checkpoint_interval_type == "seconds"
             else IntervalType.STEPS
         ),
         interval=job_config.training.checkpoint_interval,
+        enable_mp=False,
+        overlap_with_training=False,
     )
     checkpoint.load()
 
@@ -240,6 +246,10 @@ def main(job_config: JobConfig):
 
                 # backward on scaled loss to create scaled gradients
                 scaler.scale(loss).backward()
+
+            # This is a simple if statement if checkpoint does not happen and doesn't
+            # affect the performance.
+            checkpoint.wait_staging()
 
             # clip gradients (after unscaling gradients of the optimizer's params)
             scaler.unscale_(optimizer)
