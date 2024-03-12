@@ -1,6 +1,7 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
+description = "llama 7b training"
 
 [profiling]
 run_profiler = true
@@ -33,6 +34,7 @@ steps = 1000
 data_parallel_degree = -1
 sequence_parallel_degree = 1
 pipeline_parallel_degree = 1
+fp8_linear = ""
 compile = false
 checkpoint_interval = 3600
 checkpoint_interval_type = "steps"

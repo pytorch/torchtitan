@@ -5,6 +5,7 @@
 # llama model, i.e. activation checkpoint, etc.
 
 import logging
+from collections import defaultdict
 
 import torch
 from torch.distributed._tensor import (
@@ -33,15 +34,15 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtrain.config_manager import JobConfig
-
 from torchtrain.logging_utils import rank0_log
+from torchtrain.meta_init import meta_to_real_init_fn
 
 logger = logging.getLogger(__name__)
 
 
 def distribute_rmsnorm(module, device_mesh):
     # temp sharding API until PTD API is added
-    def prepare_input_fn(inputs, device_mesh):
+    def prepare_input_fn(mod, inputs, device_mesh):
         if isinstance(inputs[0], DTensor):
             return inputs
         elif isinstance(inputs[0], torch.Tensor):
@@ -67,12 +68,52 @@ def distribute_rmsnorm(module, device_mesh):
     )
 
 
+# for selective AC
+no_recompute_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.c10d_functional.reduce_scatter_tensor.default,
+}
+
 # Uses PTD FSDP AC wrapper
-# TODO: why is config needed here?
-def checkpoint_wrapper(module, job_config: JobConfig):
-    return ptd_checkpoint_wrapper(
-        module, checkpoint_impl=CheckpointImpl.NO_REENTRANT, preserve_rng_state=False
-    )
+def checkpoint_wrapper(module, enable_selective_ac):
+    if enable_selective_ac:
+        from torch.utils.checkpoint import (
+            _pt2_selective_checkpoint_context_fn_gen,
+            checkpoint,
+        )
+
+        def _get_custom_policy(meta):
+            def _custom_policy(mode, func, *args, **kwargs):
+                mm_count_key = f"{mode}_mm_count"
+                if func == torch.ops.aten.mm.default:
+                    meta[mm_count_key] += 1
+                # Saves output of all compute ops, except every second mm
+                return func in no_recompute_list and not (
+                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                )
+
+            return _custom_policy
+
+        def selective_checkpointing_context_fn():
+            meta = defaultdict(int)
+            return _pt2_selective_checkpoint_context_fn_gen(_get_custom_policy(meta))
+
+        return ptd_checkpoint_wrapper(
+            module,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_fn=checkpoint,
+            context_fn=selective_checkpointing_context_fn,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+    else:
+        return ptd_checkpoint_wrapper(
+            module,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            preserve_rng_state=False,
+        )
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
@@ -81,19 +122,19 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     NOTE: the model passed in preferrablably shoule be a meta device model,
     otherwise the model needs to be small enough on GPU or can fit into CPU.
-    # TODO: apply SP
     """
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
+
+    # First we apply Sequence Parallelism if it's enabled
     if parallel_dims.sp_enabled:
-        # First we apply Sequence Parallelism if it's enabled
-        tp_mesh = world_mesh["sp"] if world_mesh.ndim > 1 else world_mesh
-        sp_degree = job_config.training.sequence_parallelism_degree
+        tp_mesh = world_mesh["sp"]
+        sp_degree = job_config.training.sequence_parallel_degree
+
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
         # 2. shard the first layer of transformer block
-        # TODO: enable loss parallel once it's ready
         model = parallelize_module(
             model,
             tp_mesh,
@@ -103,7 +144,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": ColwiseParallel(
                     input_layouts=Shard(0),
-                    output_layouts=Replicate(),
+                    output_layouts=Shard(-1)
+                    if parallel_dims.loss_parallel_enabled
+                    else Replicate(),
+                    use_local_output=not parallel_dims.loss_parallel_enabled,
                 ),
                 "layers.0": PrepareModuleInput(
                     input_layouts=(Replicate(), None),
@@ -112,6 +156,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
             },
         )
+
+        # shard the RMSNorm layer before last linear proj layer
+        distribute_rmsnorm(model.norm, tp_mesh)
 
         # apply sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
@@ -151,8 +198,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         rank0_log("Applied Sequence Parallelism to the model...")
 
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-        assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+        dp_mesh = world_mesh["dp"]
+
         fsdp_config = {
             "mixed_precision": MixedPrecision(
                 param_dtype=torch.bfloat16,
@@ -165,23 +212,29 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             "use_orig_params": True,
             "device_mesh": dp_mesh,
             # "cpu_offload": torch.distributed.fsdp.CPUOffload(offload_params=True)
+            "param_init_fn": meta_to_real_init_fn,
         }
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
-                # apply AC to each layer
-                # before wrapping with FSDP, we need to make sure the layer is on GPU
-                transformer_block = transformer_block.cuda()
-                transformer_block = checkpoint_wrapper(transformer_block, job_config)
+
+                # apply AC/selective AC
+                transformer_block = checkpoint_wrapper(
+                    transformer_block, job_config.training.enable_selective_ac
+                )
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)
 
             # wrap the rest layers with FSDP
-            model = wrap(model.cuda())
+            model = wrap(model)
 
         rank0_log("Applied FSDP to the model...")
+    else:
+        meta_to_real_init_fn(model)
+        model.cuda()
 
-    # redundant if FSDP is enabled, but ensure the model is on device regardless of which parallelisms were used
-    model.cuda()
+    # we have now moved from meta to device,
+    # reset parameters for proper initialization
+    model.reset_parameters()
     return model
