@@ -124,7 +124,9 @@ def checkpoint_wrapper(module, config):
         2 == checkpoint every 2nd one
         """
         every_x_layer = config.per_layer_ac_frequency
-        assert every_x_layer >= 0, f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
+        assert (
+            every_x_layer >= 0
+        ), f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
 
         checkpoint_wrapper.__dict__.setdefault("_count", 0)
 
@@ -138,7 +140,8 @@ def checkpoint_wrapper(module, config):
                 preserve_rng_state=False,
             )
         # skipping this layer...
-        return module
+        else:
+            return module
 
     else:
         raise NotImplementedError(
