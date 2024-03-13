@@ -264,23 +264,18 @@ def main(job_config: JobConfig):
             if torch_profiler:
                 torch_profiler.step()
 
-            train_state.current_loss = loss.item()
+
+            avg_loss = dist_mean(loss.item(), world_mesh)
+            train_state.current_loss = avg_loss
             train_state.losses.append(train_state.current_loss)
             losses_since_last_log.append(train_state.current_loss)
 
             # log metrics
             if (train_state.step - 1) % job_config.metrics.log_freq == 0:
-                avg_loss, max_loss = (
+                global_avg_loss, global_max_loss = (
                     np.mean(losses_since_last_log),
                     np.max(losses_since_last_log),
                 )
-                if parallel_dims.dp_enabled:
-                    global_avg_loss, global_max_loss = (
-                        dist_mean(avg_loss, dp_mesh),
-                        dist_max(max_loss, dp_mesh),
-                    )
-                else:
-                    global_avg_loss, global_max_loss = avg_loss, max_loss
 
                 time_delta = timer() - time_last_log
                 wps = nwords_since_last_log / (
