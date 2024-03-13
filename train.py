@@ -5,6 +5,7 @@ import contextlib
 import os
 
 from dataclasses import dataclass, field
+from io import BytesIO
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -48,16 +49,19 @@ class TrainState:
     data_load_times: List[float] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
+        losses_bytes = BytesIO()
+        torch.save(self.losses, losses_bytes)
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
             "current_loss": torch.tensor(self.current_loss, dtype=torch.float32),
-            "losses": torch.tensor(self.losses, dtype=torch.float32),
+            "losses": losses_bytes,
         }
 
     def load_state_dict(self, state_dict) -> None:
         self.step = state_dict["step"].item()
         self.current_loss = state_dict["current_loss"].item()
-        self.losses = state_dict["losses"].tolist()
+        state_dict["losses"].seek(0)
+        self.losses = torch.load(state_dict["losses"])
 
 
 def build_optimizer(model, job_config: JobConfig):
