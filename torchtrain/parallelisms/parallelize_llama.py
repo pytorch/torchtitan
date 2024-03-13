@@ -7,13 +7,8 @@
 from collections import defaultdict
 
 import torch
-from torch.distributed._tensor import (
-    distribute_module,
-    distribute_tensor,
-    DTensor,
-    Replicate,
-    Shard,
-)
+from torch.distributed._tensor import Replicate, Shard
+
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
