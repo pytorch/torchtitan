@@ -7,7 +7,6 @@
 from torch.optim.lr_scheduler import LambdaLR
 from torchtrain.config_manager import JobConfig
 
-
 # global states for scheduling
 # these are needed as LambdaLR does not support argument passing
 _warmup_steps = 200

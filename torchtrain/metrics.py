@@ -15,7 +15,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import logger
 
-
 # note that GiB (gibibyte) is 1024, vs GB is 1000
 _gib_in_bytes = 1024 * 1024 * 1024
 _mib_in_bytes = 1024 * 1024
