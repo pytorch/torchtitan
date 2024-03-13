@@ -165,7 +165,8 @@ def main(job_config: JobConfig):
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    # build grad scaler which is effective only when mixed precision training is enabled under FSDP
+    # build grad scaler which is effective only when mixed precision training
+    # is enabled with fp16 param dtype under FSDP
     scaler = build_grad_scaler(model)
 
     metric_logger = build_metric_logger(job_config)
