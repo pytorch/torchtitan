@@ -1,13 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
 import logging
 
-import torch
 
 logger = logging.getLogger()
-
-
-def rank0_log(msg):
-    if torch.distributed.get_rank() == 0:
-        logger.info(msg)
 
 
 def init_logger():

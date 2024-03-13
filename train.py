@@ -10,7 +10,6 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-# torch imports
 import torch
 import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -19,18 +18,14 @@ from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.config_manager import JobConfig
-
-# torchtrain related
 from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.float8_linear import build_fp8_linear
-from torchtrain.logging_utils import init_logger, rank0_log
+from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
-
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
-
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import Color, dist_max, dist_mean
 
@@ -74,7 +69,7 @@ def build_optimizer(model, job_config: JobConfig):
             model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
         )
     else:
-        raise NotImplementedError(f"optimizer {name} not added")
+        raise NotImplementedError(f"Optimizer {name} not added.")
 
     return optimizer
 
@@ -83,16 +78,18 @@ def build_grad_scaler(model):
     # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
     if model.mixed_precision.param_dtype == torch.float16:
         enable_grad_scaling = True
-        rank0_log("Enabling gradient scaling for mixed precision training.")
+        logger.info("Enabling gradient scaling for mixed precision training")
     else:
         enable_grad_scaling = False
-        rank0_log("Gradient scaling not enabled.")
+        logger.info("Gradient scaling not enabled")
 
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
 def main(job_config: JobConfig):
     init_logger()
+    logger.info(f"Starting job: {job_config.job.description}")
+
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -103,9 +100,9 @@ def main(job_config: JobConfig):
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-    rank0_log(f"Starting job: {job_config.job.description}")
+
     model_name = job_config.model.name
-    rank0_log(f"Building {model_name}")
+
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
@@ -127,17 +124,15 @@ def main(job_config: JobConfig):
         dp_degree,
         dp_rank,
     )
-    rank0_log(
-        f"{Color.green}Built Dataloader for '{job_config.training.dataset}' dataset.{Color.reset}"
-    )
 
-    # build model
+    # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
-
-    # build model using meta init
     with meta_model_init():
+        logger.info(
+            f"Building {model_name} {job_config.model.flavor} with {model_config}"
+        )
         model = model_cls.from_model_args(model_config)
 
     # apply fp8 linear module swap
@@ -146,21 +141,21 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = get_num_params(model)
-
     if _is_local_logging:
-        rank0_log(
-            f"{Color.blue}Model {model_name} {job_config.model.flavor} {Color.red}size: {model_param_count:,}"
-            f" total parameters{Color.reset}"
+        logger.info(
+            f"{Color.blue}Model {model_name} {job_config.model.flavor} "
+            f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
         )
     else:
-        rank0_log(
+        logger.info(
             f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
         )
 
+    # initialize GPU memory monitor before applying parallelisms to the model
     gpu_metrics = GPUMemoryMonitor("cuda")
-    rank0_log(f"GPU memory usage: {gpu_metrics}")
+    logger.info(f"GPU memory initial condition: {gpu_metrics}")
 
-    # apply PTD parallelisms + AC
+    # apply PTD parallelisms + AC/selective AC
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
@@ -168,7 +163,7 @@ def main(job_config: JobConfig):
     # to use FSDP-customized gradient scaler and gradient clipping solutions
     assert isinstance(model, FSDP)
 
-    # build optimizer after apply parallelisms to the model
+    # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
@@ -182,7 +177,7 @@ def main(job_config: JobConfig):
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
-        rank0_log(f"Compiling model {model_name} with torch.compile...")
+        logger.info("Compiling model with torch.compile")
         model = torch.compile(
             model,
         )
@@ -210,10 +205,12 @@ def main(job_config: JobConfig):
 
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
+
         # variables used to keep info for metrics logging
         losses_since_last_log: List[float] = []
         nwords_since_last_log = 0
         time_last_log = timer()
+
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             # get batch
@@ -306,20 +303,20 @@ def main(job_config: JobConfig):
                 nwords_since_last_log = 0
                 time_last_log = timer()
 
-            if _is_local_logging:
-                rank0_log(
-                    f"{Color.cyan}step: {train_state.step:>2}  {Color.green}loss: {round(train_state.current_loss,4):>7}"
-                    f"  {Color.reset}iter: {Color.blue}{curr_iter_time:>7}{Color.reset}"
-                    f"  data: {Color.blue}{data_load_time:>5}  {Color.reset}"
-                    f"lr: {Color.yellow}{round(float(scheduler.get_last_lr()[0]), 8):<6}{Color.reset}"
-                )
-            else:
-                rank0_log(
-                    f"step: {train_state.step:>2}  loss: {round(train_state.current_loss,4):>7}"
-                    f"  iter: {curr_iter_time:>7}"
-                    f"  data: {data_load_time:>5}  "
-                    f"lr: {round(float(scheduler.get_last_lr()[0]), 8):<6}"
-                )
+                if _is_local_logging:
+                    logger.info(
+                        f"{Color.cyan}step: {train_state.step:2}  "
+                        f"{Color.green}loss: {global_avg_loss.item():7.4f}  "
+                        f"{Color.blue}wps: {round(wps):7,}  "
+                        f"{Color.yellow}peak_memory: {gpu_mem_stats.reserved_peak:5}%{Color.reset}"
+                    )
+                else:
+                    logger.info(
+                        f"step: {train_state.step:2}  "
+                        f"loss: {global_avg_loss.item():7.4f}  "
+                        f"wps: {round(wps):7,}  "
+                        f"peak_memory: {gpu_mem_stats.reserved_peak:5}%"
+                    )
 
             scheduler.step()
 
@@ -331,11 +328,14 @@ def main(job_config: JobConfig):
     # calc and show average iter time, disregard first three iterations (warmup)
     if len(train_state.iter_times) > 3:
         avg_iter_time = np.mean(train_state.iter_times[3:])
-        rank0_log(f"Average iter time: {avg_iter_time:.4f} seconds")
         avg_data_load_time = np.mean(train_state.data_load_times[3:])
-        rank0_log(f"Average data load time: {avg_data_load_time:.4f} seconds")
+        logger.info(
+            "Average time per iteration: "
+            f"training {avg_iter_time:.4f} seconds, "
+            f"data loading {avg_data_load_time:.4f} seconds"
+        )
 
-    rank0_log(f"{gpu_metrics.get_current_stats()}")
+    logger.info(f"GPU memory usage: {gpu_metrics.get_current_stats()}")
 
 
 if __name__ == "__main__":

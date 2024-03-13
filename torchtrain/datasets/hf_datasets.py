@@ -7,8 +7,7 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset
 
 from torchtrain.datasets.tokenizer import TokenizerIf
-from torchtrain.logging_utils import rank0_log
-from torchtrain.utils import Color
+from torchtrain.logging_utils import logger
 
 from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
@@ -86,21 +85,17 @@ class HuggingFaceDataset(IterableDataset):
     ) -> None:
         if dataset_name not in _supported_datasets:
             raise ValueError(
-                f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}"
+                f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}."
             )
 
         # TODO: This is a temporary solution for small datasets like Alpaca.
         #       For larger datasets we need to use a more scalable approach.
         if dataset_path:
-            rank0_log(
-                f"{Color.green}Loading '{dataset_name}' dataset locally from {dataset_path}...{Color.reset}"
-            )
+            logger.info(f"Loading {dataset_name} dataset locally from {dataset_path}")
             ds = load_from_disk(dataset_path)
         else:
-            rank0_log(
-                f"{Color.green}Preparing '{dataset_name}' dataset from HuggingFace...{Color.reset}"
-            )
-            # Setting `streaming=True` works for large dataset, but the speed is slow.
+            logger.info(f"Preparing {dataset_name} dataset from HuggingFace")
+            # Setting `streaming=True` works for large dataset, but is slightly slower and unstable.
             # c4 is huge, and requires both streaming and language selection (we default to en)
             if dataset_name == "c4":
                 ds = load_dataset(
@@ -136,16 +131,12 @@ class HuggingFaceDataset(IterableDataset):
                     label = x[1:]
                     yield input, label
             if not self.infinite:
-                rank0_log(
-                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} has "
-                    f"run out of data.{Color.reset}"
-                )
+                logger.warning(f"Dataset {self.dataset_name} has run out of data.")
                 break
             else:
-                # we are re-looping on the same dataset, warn user
-                rank0_log(
-                    f"{Color.red}WARNING:{Color.reset} dataset {Color.yellow}'{self.dataset_name}'{Color.reset} is "
-                    f"being re-looped. Loss related metrics might be misleading.{Color.reset}"
+                logger.warning(
+                    f"Dataset {self.dataset_name} is being re-looped. "
+                    "Loss related metrics might be misleading."
                 )
 
 
