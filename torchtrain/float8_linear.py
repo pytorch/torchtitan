@@ -5,9 +5,8 @@
 # All rights reserved
 
 from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import rank0_log
+from torchtrain.logging_utils import logger
 from torchtrain.models.llama import Transformer
-from torchtrain.utils import Color
 
 
 def build_fp8_linear(model: Transformer, job_config: JobConfig):
@@ -42,4 +41,4 @@ def build_fp8_linear(model: Transformer, job_config: JobConfig):
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
         swap_linear_with_float8_linear(model, float8_linear_type)
-        rank0_log(f"{Color.green}Using {linear_type} float8 linear layers{Color.reset}")
+        logger.info(f"Swapped to {linear_type} float8 linear layers")

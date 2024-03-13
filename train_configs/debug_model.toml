@@ -1,7 +1,7 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
-description = "debug training"
+description = "LLaMA debug training"
 
 [profiling]
 run_profiler = true
@@ -12,7 +12,7 @@ profile_every_x_iter = 10
 [metrics]
 enable_tensorboard = true
 save_tb_folder = "tb"
-log_freq = 10
+log_freq = 1
 
 [model]
 name = "llama"

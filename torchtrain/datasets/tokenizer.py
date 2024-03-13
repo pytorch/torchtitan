@@ -1,5 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -8,13 +8,11 @@
 
 import os
 from abc import ABC, abstractmethod
-from logging import getLogger
 from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
-
-logger = getLogger()
+from torchtrain.logging_utils import logger
 
 
 class TokenizerIf(ABC):
@@ -40,6 +38,7 @@ class TokenizerIf(ABC):
 
 
 def create_tokenizer(tokenizer_type: str, tokenizer_path: str) -> TokenizerIf:
+    logger.info(f"Building {tokenizer_type} tokenizer locally from {tokenizer_path}")
     if tokenizer_type == "sentencepiece":
         return SentencePieceTokenizer(tokenizer_path)
     else:
@@ -47,19 +46,18 @@ def create_tokenizer(tokenizer_type: str, tokenizer_path: str) -> TokenizerIf:
 
 
 class SentencePieceTokenizer(TokenizerIf):
-    """tokenizing and encoding/decoding text using SentencePiece."""
+    """
+    Tokenizing and encoding/decoding text based on a SentencePiece model.
+
+    Args:
+        tokenizer_path (str): The path to the SentencePiece model file.
+    """
 
     def __init__(self, tokenizer_path: str):
-        """
-        Initializes the Tokenizer with a SentencePiece model.
 
-        Args:
-            tokenizer_path (str): The path to the SentencePiece model file.
-        """
         super().__init__(tokenizer_path)
         # reload tokenizer
         self.sp_model = SentencePieceProcessor(model_file=tokenizer_path)
-        logger.info(f"Reloaded SentencePiece model from {tokenizer_path}")
 
         # BOS / EOS token IDs
         self._n_words: int = self.sp_model.vocab_size()
@@ -67,7 +65,7 @@ class SentencePieceTokenizer(TokenizerIf):
         self.eos_id: int = self.sp_model.eos_id()
         self.pad_id: int = self.sp_model.pad_id()
         logger.info(
-            f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
+            f"SentencePieceTokenizer built: #words {self.n_words}, BOS ID {self.bos_id}, EOS ID {self.eos_id}"
         )
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
