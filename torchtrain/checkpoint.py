@@ -17,7 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torchtrain.logging_utils import rank0_log
+from torchtrain.logging_utils import logger
 
 
 class IntervalType(enum.Enum):
@@ -109,13 +109,13 @@ class CheckpointManager:
             self.work = None
             self.doit = None
 
-        rank0_log(f"Saving a checkpoint in step {curr_step}.")
+        logger.info(f"Saving a checkpoint at step {curr_step}")
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
         self.reset()
-        rank0_log(
-            f"Finish saving the checkpoint in step {curr_step}. "
-            f"{time.monotonic() - begin} seconds"
+        logger.info(
+            f"Finished saving the checkpoint at step {curr_step} "
+            f"in {time.monotonic() - begin} seconds"
         )
 
     def load(self, step: int = -1) -> bool:
@@ -136,11 +136,13 @@ class CheckpointManager:
                 return False
             step = max(step_counts)
 
-        rank0_log("Loading a checkpoint.")
+        logger.info("Loading a checkpoint")
         begin = time.monotonic()
         dcp.load(
             self.states,
             checkpoint_id=self.create_checkpoint_id(step),
         )
-        rank0_log(f"Finish loading a checkpoint. {time.monotonic() - begin} seconds.")
+        logger.info(
+            f"Finished loading the checkpoint in {time.monotonic() - begin} seconds"
+        )
         return True

@@ -8,8 +8,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtrain.logging_utils import rank0_log
-
 
 @dataclass
 class ModelArgs:
@@ -476,8 +474,6 @@ class Transformer(nn.Module):
 
         # self.reset_parameters()
 
-        rank0_log(f"Model built with: {self.model_args}")
-
     def reset_parameters(
         self,
     ):
@@ -493,7 +489,6 @@ class Transformer(nn.Module):
             a=-cutoff_factor * final_out_std,
             b=cutoff_factor * final_out_std,
         )
-        rank0_log("Model fully initialized via reset_params")
 
     def forward(self, tokens: torch.Tensor):
         """

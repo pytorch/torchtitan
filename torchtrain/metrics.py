@@ -13,8 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from torchtrain.config_manager import JobConfig
-
-from torchtrain.logging_utils import rank0_log
+from torchtrain.logging_utils import logger
 
 # note that GiB (gibibyte) is 1024, vs GB is 1000
 _gib_in_bytes = 1024 * 1024 * 1024
@@ -122,18 +121,18 @@ class GPUMemoryMonitor:
             self.device_active_memory_usage, self.device_capacity, precision=2
         )
 
-        display_str = ""
-        display_str += f"Current Memory: {self.device_name} ({self.device_index}): Reserved: {self.device_reserved_memory_pct}%, "
-        display_str += f"Alloc {self.device_alloc_memory_pct}%, Active: {self.device_active_memory_pct}%\n"
+        display_str = f"{self.device_name} ({self.device_index}). "
+        display_str += f"Current memory: reserved {self.device_reserved_memory_pct}%, "
+        display_str += f"alloc {self.device_alloc_memory_pct}%, active {self.device_active_memory_pct}%. "
 
         self.get_peak_stats(curr_mem)
 
         peak_active_pct = self.get_pct_memory(self.peak_active_memory)
         peak_allocated_pct = self.get_pct_memory(self.peak_allocated_memory)
         peak_reserved_pct = self.get_pct_memory(self.peak_reserved_memory)
-        display_str += f"Peak Memory: Reserved {peak_reserved_pct}%, Alloc {peak_allocated_pct}%, Active: {peak_active_pct}%\n"
+        display_str += f"Peak memory: reserved {peak_reserved_pct}%, alloc {peak_allocated_pct}%, active {peak_active_pct}%. "
 
-        display_str += f"num retries: {self.num_retries}, num ooms: {self.num_ooms}"
+        display_str += f"Num retries: {self.num_retries}. Num ooms: {self.num_ooms}."
         if self.num_retries > 0:
             display_str += f"\nWARNING: {self.num_retries} retries -- recommend lowering batch size for max performance\n"
 
@@ -224,8 +223,8 @@ def build_metric_logger(config: JobConfig, tag: Optional[str] = None):
 
     enable_tb = config.metrics.enable_tensorboard
     if enable_tb:
-        rank0_log(
-            f"Metrics logging active. Tensorboard logs will be saved at {log_dir}."
+        logger.info(
+            f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
 
     rank_str = f"rank_{torch.distributed.get_rank()}"

@@ -1,16 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-import logging
 from dataclasses import dataclass
 from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
-
+from torchtrain.logging_utils import logger
 from torchtrain.parallelisms.parallelize_llama import parallelize_llama
-
-logger = logging.getLogger(__name__)
-
 
 models_parallelize_fns = {
     "llama": parallelize_llama,
@@ -48,8 +44,8 @@ class ParallelDims:
             if d > 1:
                 dims.append(d)
                 names.append(name)
-        names = tuple(names)
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        names = tuple(names)
         return init_device_mesh(device_type, dims, mesh_dim_names=names)
 
     @property
