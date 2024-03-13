@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import logging
+import os
 
 
 logger = logging.getLogger()
@@ -16,3 +17,6 @@ def init_logger():
     )
     ch.setFormatter(formatter)
     logger.addHandler(ch)
+
+    # suppress verbose torch.profiler logging
+    os.environ["KINETO_LOG_LEVEL"] = "5"

@@ -31,7 +31,6 @@ def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
             curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
             if not os.path.exists(curr_trace_dir):
                 os.makedirs(curr_trace_dir, exist_ok=True)
-            logger.info(f"Exporting profile traces to {curr_trace_dir}")
 
             prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
 
