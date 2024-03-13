@@ -18,5 +18,5 @@ def init_logger():
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    # this is to disable verbose profiler logging
-    os.environ["KINETO_LOG_LEVEL"] = "3"
+    # suppress verbose torch.profiler logging
+    os.environ["KINETO_LOG_LEVEL"] = "5"
