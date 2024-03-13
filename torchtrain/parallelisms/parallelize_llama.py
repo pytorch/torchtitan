@@ -85,10 +85,10 @@ def checkpoint_wrapper(module, config):
 
     # ensure only one type of checkpointing is enabled
     assert (
-        config.enable_selective_ac != config.enable_per_layer_ac
+        config.enable_selective_op_ac != config.enable_selective_layer_ac
     ), "Config error: only one type of activation checkpointing can be enabled at a time."
 
-    if config.enable_selective_ac:
+    if config.enable_selective_op_ac:
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
@@ -114,21 +114,22 @@ def checkpoint_wrapper(module, config):
             use_reentrant=False,
             preserve_rng_state=False,
         )
-    elif config.enable_per_layer_ac:
+    elif config.enable_selective_layer_ac:
 
         """enables selective checkpointing of candidate layers.
         Usage:
-        every_xth_item controls which items to checkpoint.
+        'per_layer_ac_frequency' in config controls which layers to checkpoint.
         None, 0 == checkpointing filtering not active, checkpoint all instances
         1 == checkpointing every one (all).
         2 == checkpoint every 2nd one
         """
-        every_xth_layer = config.every_x_layer
+        every_x_layer = config.per_layer_ac_frequency
+        assert every_x_layer >= 0, f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
 
         checkpoint_wrapper.__dict__.setdefault("_count", 0)
 
         checkpoint_wrapper._count += 1
-        if not every_xth_layer or checkpoint_wrapper._count % every_xth_layer == 0:
+        if not every_x_layer or checkpoint_wrapper._count % every_x_layer == 0:
             return ptd_checkpoint_wrapper(
                 module,
                 checkpoint_impl=CheckpointImpl.NO_REENTRANT,

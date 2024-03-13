@@ -256,23 +256,20 @@ class JobConfig:
             default=True,
             help="whether to enable activation checkpointing at all",
         )
-
         parser.add_argument(
-            "--activation_checkpointing.enable_per_layer_ac",
+            "--activation_checkpointing.enable_selective_layer_ac",
             action="store_true",
             default=True,
             help="whether to enable per layer activation checkpointing ",
         )
-
         parser.add_argument(
-            "--activation_checkpointing.enable_every_xth_layer",
+            "--activation_checkpointing.per_layer_ac_frequency",
             type=int,
             default=2,  # checkpoint every other layer
             help="select which layers to checkpoint. 1 = all, 2 = every other, etc.",
         )
-
         parser.add_argument(
-            "--training.enable_selective_ac",
+            "--training.enable_selective_op_ac",
             action="store_true",
             default=False,
             help="whether to enable selective op (pt2) activation checkpointing",
