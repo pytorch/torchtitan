@@ -4,7 +4,6 @@
 # this file applies the PTD parallelisms and various training techniques to the
 # llama model, i.e. activation checkpoint, etc.
 
-import logging
 from collections import defaultdict
 
 import torch
@@ -15,7 +14,6 @@ from torch.distributed._tensor import (
     Replicate,
     Shard,
 )
-
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
@@ -34,10 +32,8 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import rank0_log
+from torchtrain.logging_utils import logger
 from torchtrain.meta_init import meta_to_real_init_fn
-
-logger = logging.getLogger(__name__)
 
 
 def distribute_rmsnorm(module, device_mesh):
@@ -195,7 +191,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 parallelize_plan=layer_plan,
             )
 
-        rank0_log("Applied Sequence Parallelism to the model...")
+        logger.info("Applied Sequence Parallelism to the model")
 
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
@@ -228,7 +224,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # wrap the rest layers with FSDP
             model = wrap(model)
 
-        rank0_log("Applied FSDP to the model...")
+        logger.info("Applied FSDP to the model")
     else:
         meta_to_real_init_fn(model)
         model.cuda()
@@ -236,4 +232,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     # we have now moved from meta to device,
     # reset parameters for proper initialization
     model.reset_parameters()
+    logger.info("Model fully initialized via reset_parameters")
+
     return model

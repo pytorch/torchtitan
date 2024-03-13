@@ -6,7 +6,7 @@ import os
 
 import torch
 from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import rank0_log
+from torchtrain.logging_utils import logger
 
 
 @contextlib.contextmanager
@@ -31,11 +31,11 @@ def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
             curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
             if not os.path.exists(curr_trace_dir):
                 os.makedirs(curr_trace_dir, exist_ok=True)
-            rank0_log(f"exporting profile traces to {curr_trace_dir}")
+            logger.info(f"Exporting profile traces to {curr_trace_dir}")
 
             prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
 
-        rank0_log(f"Profiling active.  Traces will be saved at {trace_dir}")
+        logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
         if not os.path.exists(trace_dir):
             os.makedirs(trace_dir, exist_ok=True)

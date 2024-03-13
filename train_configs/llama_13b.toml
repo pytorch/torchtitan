@@ -1,7 +1,7 @@
 # TorchTrain Config.toml
 [job]
 dump_folder = "./outputs"
-description = "llama 13b training"
+description = "LLaMA 13B training"
 
 [profiling]
 run_profiler = true
