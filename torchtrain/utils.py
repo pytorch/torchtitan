@@ -17,7 +17,9 @@ def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    mean = funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    mean.wait()
+    return mean.item()
 
 
 @dataclass
