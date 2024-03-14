@@ -20,8 +20,8 @@ from torchtrain.logging_utils import logger
 GPUMemStats = namedtuple(
     "GPUMemStats",
     [
-        "max_allocated_gib",
-        "max_allocated_pct",
+        "max_active_gib",
+        "max_active_pct",
         "max_reserved_gib",
         "max_reserved_pct",
         "num_alloc_retries",
@@ -53,16 +53,18 @@ class GPUMemoryMonitor:
         return 100 * memory / self.device_capacity
 
     def get_peak_stats(self):
-        max_allocated = torch.cuda.max_memory_allocated()
-        max_reserved = torch.cuda.max_memory_reserved()
-        max_allocated_gib = self._to_gib(max_allocated)
-        max_allocated_pct = self._to_pct(max_allocated)
+        cuda_info = torch.cuda.memory_stats(self.device)
+
+        max_active = cuda_info["active_bytes.all.peak"]
+        max_active_gib = self._to_gib(max_active)
+        max_active_pct = self._to_pct(max_active)
+
+        max_reserved = cuda_info["reserved_bytes.all.peak"]
         max_reserved_gib = self._to_gib(max_reserved)
         max_reserved_pct = self._to_pct(max_reserved)
 
-        cuda_info = torch.cuda.memory_stats(self.device)
-        num_retries = cuda_info.get("num_alloc_retries", 0)
-        num_ooms = cuda_info.get("num_ooms", 0)
+        num_retries = cuda_info["num_alloc_retries"]
+        num_ooms = cuda_info["num_ooms"]
 
         if num_retries > 0:
             logger.warning(f"{num_retries} CUDA memory allocation retries.")
@@ -70,13 +72,13 @@ class GPUMemoryMonitor:
             logger.warning(f"{num_ooms} CUDA OOM errors thrown.")
 
         return GPUMemStats(
-            max_allocated_gib,
-            max_allocated_pct,
+            max_active_gib,
+            max_active_pct,
             max_reserved_gib,
             max_reserved_pct,
             num_retries,
             num_ooms,
-        )
+    )
 
     def reset_peak_stats(self):
         torch.cuda.reset_peak_memory_stats()

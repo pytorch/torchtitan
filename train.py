@@ -286,6 +286,7 @@ def main(job_config: JobConfig):
                     time_delta * parallel_dims.model_parallel_size
                 )
                 time_end_to_end = time_delta / job_config.metrics.log_freq
+                time_data_loading = np.mean(data_loading_times)
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
 
                 gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
@@ -294,13 +295,14 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
-                    "memory/max_allocated(GiB)": gpu_mem_stats.max_allocated_gib,
-                    "memory/max_allocated(%)": gpu_mem_stats.max_allocated_pct,
+                    "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
+                    "memory/max_active(%)": gpu_mem_stats.max_active_pct,
                     "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
                     "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
                     "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
                     "memory/num_ooms": gpu_mem_stats.num_ooms,
-                    "time_metrics/end_to_end": time_end_to_end,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
                 }
                 metric_logger.log(metrics, step=train_state.step)
