@@ -82,13 +82,7 @@ no_recompute_list = {
 # Uses PTD FSDP AC wrapper
 # currently selective per op and per layer checkpointing are supported
 def checkpoint_wrapper(module, config):
-
-    # ensure only one type of checkpointing is enabled
-    assert (
-        config.enable_selective_op_ac != config.enable_selective_layer_ac
-    ), "Config error: only one type of activation checkpointing can be enabled at a time."
-
-    if config.enable_selective_op_ac:
+    if config.mode == "selective" and config.selective_ac_option == "op":
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
@@ -114,16 +108,26 @@ def checkpoint_wrapper(module, config):
             use_reentrant=False,
             preserve_rng_state=False,
         )
-    elif config.enable_selective_layer_ac:
+    elif config.mode == "full":
+        # full AC
+        return ptd_checkpoint_wrapper(
+            module,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_fn=checkpoint,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+
+    elif config.mode == "selective" and config.selective_ac_option.isdigit():
 
         """enables selective checkpointing of candidate layers.
         Usage:
-        'per_layer_ac_frequency' in config controls which layers to checkpoint.
+        'selective_ac_option' with an 'int' value in config controls which layers to checkpoint.
         None, 0 == checkpointing filtering not active, checkpoint all instances
         1 == checkpointing every one (all).
         2 == checkpoint every 2nd one
         """
-        every_x_layer = config.selective_layer_ac_frequency
+        every_x_layer = int(config.selective_ac_option)
         assert (
             every_x_layer >= 0
         ), f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
@@ -145,7 +149,7 @@ def checkpoint_wrapper(module, config):
 
     else:
         raise NotImplementedError(
-            "Unknown AC type. Only selective op and selective layer ac implemented currently."
+            "Unknown AC type or AC config. Only selective op and selective layer ac implemented currently."
         )
 
 
@@ -249,13 +253,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
-
-                # apply AC/selective AC
-                if job_config.activation_checkpointing.enable_ac:
-
+                # apply AC to the transformer block
+                if job_config.activation_checkpoint.mode in ("full", "selective"):
                     # wrap the transformer block with checkpoint wrapper, using config settings
                     transformer_block = checkpoint_wrapper(
-                        transformer_block, job_config.activation_checkpointing
+                        transformer_block, job_config.activation_checkpoint
                     )
 
                 # Wraps each layer with FSDP

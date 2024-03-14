@@ -39,11 +39,6 @@ checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
 
-
-[activation_checkpointing]
-enable_ac = true  # master switch, any activation checkpointing at all...(true/false)
-# ac type selection
-enable_selective_layer_ac = true
-selective_layer_ac_frequency = 2 # 1 is every layer (all), 2 is every 2nd layer, 3 is every 3rd layer etc....
-# or
-enable_selective_op_ac = false  # checkpoint based on arithmetic intensity (op level) in every layer.
+[activation_checkpoint]
+mode = 'selective'  # ['none', 'full', 'selective']
+selective_ac_option = '2'  # 'int' = ac every int layer or 'op', ac based on ops policy
