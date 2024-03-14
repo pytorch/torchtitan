@@ -278,6 +278,7 @@ def main(job_config: JobConfig):
                     time_delta * parallel_dims.model_parallel_size
                 )
                 time_end_to_end = time_delta / job_config.metrics.log_freq
+                time_data_loading = np.mean(data_loading_times)
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
 
                 gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
@@ -292,7 +293,8 @@ def main(job_config: JobConfig):
                     "memory_peak/active(%)": gpu_mem_stats.active_peak,
                     "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
                     "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
-                    "time_metrics/end_to_end": time_end_to_end,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
                 }
                 metric_logger.log(metrics, step=train_state.step)
