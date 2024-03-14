@@ -122,8 +122,7 @@ def checkpoint_wrapper(module, config):
 
         """enables selective checkpointing of candidate layers.
         Usage:
-        'selective_ac_option' with an 'int' value in config controls which layers to checkpoint.
-        None, 0 == checkpointing filtering not active, checkpoint all instances
+        'selective_ac_option' with a positive 'int' value in config controls which layers to checkpoint.
         1 == checkpointing every one (all).
         2 == checkpoint every 2nd one
         """
