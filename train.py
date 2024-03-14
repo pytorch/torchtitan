@@ -23,7 +23,7 @@ from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
-from torchtrain.metrics import build_metric_logger, get_num_params, GPUMemoryMonitor
+from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger, get_num_params
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
@@ -152,9 +152,8 @@ def main(job_config: JobConfig):
             f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
         )
 
-    # initialize GPU memory monitor before applying parallelisms to the model
-    gpu_metrics = GPUMemoryMonitor("cuda")
-    logger.info(f"GPU memory initial condition: {gpu_metrics}")
+    # initialize GPU memory monitor
+    gpu_memory_monitor = build_gpu_memory_monitor()
 
     # apply PTD parallelisms + AC/selective AC
     model = models_parallelize_fns[model_name](
@@ -201,6 +200,8 @@ def main(job_config: JobConfig):
     )
     checkpoint.load()
 
+    # TODO: plot losses loaded from checkpoint (if any) to TensorBoard
+
     data_iterator = iter(data_loader)
 
     with maybe_run_profiler(job_config) as torch_profiler:
@@ -218,10 +219,13 @@ def main(job_config: JobConfig):
             data_load_start = timer()
             batch = next(data_iterator)
             input_ids, labels = batch
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
             nwords_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
+
+            gpu_memory_monitor.reset_peak_stats()
+
+            input_ids = input_ids.cuda()
+            labels = labels.cuda()
 
             optimizer.zero_grad()
 
@@ -280,18 +284,18 @@ def main(job_config: JobConfig):
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
 
-                gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
+                gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
 
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
-                    "memory_current/active(%)": gpu_mem_stats.active_curr,
-                    "memory_current/allocated(%)": gpu_mem_stats.allocated_curr,
-                    "memory_current/reserved(%)": gpu_mem_stats.reserved_curr,
-                    "memory_peak/active(%)": gpu_mem_stats.active_peak,
-                    "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
-                    "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
+                    "memory/max_allocated(GiB)": gpu_mem_stats.max_allocated_gib,
+                    "memory/max_allocated(%)": gpu_mem_stats.max_allocated_pct,
+                    "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
+                    "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
+                    "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
+                    "memory/num_ooms": gpu_mem_stats.num_ooms,
                     "time_metrics/end_to_end": time_end_to_end,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
                 }
@@ -307,14 +311,16 @@ def main(job_config: JobConfig):
                         f"{Color.cyan}step: {train_state.step:2}  "
                         f"{Color.green}loss: {global_avg_loss.item():7.4f}  "
                         f"{Color.blue}wps: {round(wps):7,}  "
-                        f"{Color.yellow}peak_memory: {gpu_mem_stats.reserved_peak:5}%{Color.reset}"
+                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                        f"({gpu_mem_stats.max_reserved_pct:.2f}%){Color.reset}"
                     )
                 else:
                     logger.info(
                         f"step: {train_state.step:2}  "
                         f"loss: {global_avg_loss.item():7.4f}  "
                         f"wps: {round(wps):7,}  "
-                        f"peak_memory: {gpu_mem_stats.reserved_peak:5}%"
+                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
                     )
 
             scheduler.step()
@@ -324,8 +330,6 @@ def main(job_config: JobConfig):
             )
 
     metric_logger.close()
-
-    logger.info(f"GPU memory usage: {gpu_metrics.get_current_stats()}")
 
 
 if __name__ == "__main__":
