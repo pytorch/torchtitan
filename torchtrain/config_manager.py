@@ -250,6 +250,7 @@ class JobConfig:
             help="Type of fp8 linear quantization to apply to the model",
         )
 
+        # activation checkpointing
         parser.add_argument(
             "--activation_checkpointing.enable_ac",
             action="store_true",
@@ -263,7 +264,7 @@ class JobConfig:
             help="whether to enable per layer activation checkpointing ",
         )
         parser.add_argument(
-            "--activation_checkpointing.per_layer_ac_frequency",
+            "--activation_checkpointing.selective_layer_ac_frequency",
             type=int,
             default=2,  # checkpoint every other layer
             help="select which layers to checkpoint. 1 = all, 2 = every other, etc.",

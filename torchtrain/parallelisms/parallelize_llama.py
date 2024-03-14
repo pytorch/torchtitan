@@ -123,7 +123,7 @@ def checkpoint_wrapper(module, config):
         1 == checkpointing every one (all).
         2 == checkpoint every 2nd one
         """
-        every_x_layer = config.per_layer_ac_frequency
+        every_x_layer = config.selective_layer_ac_frequency
         assert (
             every_x_layer >= 0
         ), f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
@@ -139,7 +139,7 @@ def checkpoint_wrapper(module, config):
                 use_reentrant=False,
                 preserve_rng_state=False,
             )
-        # skipping this layer...
+        # skip activation checkpointing and store activations for this layer
         else:
             return module
 
