@@ -23,7 +23,11 @@ from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
-from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger, get_num_params
+from torchtrain.metrics import (
+    build_gpu_memory_monitor,
+    build_metric_logger,
+    get_num_params,
+)
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
