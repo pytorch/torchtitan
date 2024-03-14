@@ -2,7 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 # this file applies the PTD parallelisms and various training techniques to the
-# llama model, i.e. activation checkpoint, etc.
+# llama model, i.e. activation checkpointing, etc.
 
 from collections import defaultdict
 
@@ -27,6 +27,9 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+
+from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
+
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import logger
 from torchtrain.meta_init import meta_to_real_init_fn
@@ -41,12 +44,9 @@ no_recompute_list = {
 }
 
 # Uses PTD FSDP AC wrapper
-def checkpoint_wrapper(module, enable_selective_ac):
-    if enable_selective_ac:
-        from torch.utils.checkpoint import (
-            _pt2_selective_checkpoint_context_fn_gen,
-            checkpoint,
-        )
+# currently selective per op and per layer checkpointing are supported
+def checkpoint_wrapper(module, config):
+    if config.mode == "selective" and config.selective_ac_option == "op":
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
@@ -72,11 +72,47 @@ def checkpoint_wrapper(module, enable_selective_ac):
             use_reentrant=False,
             preserve_rng_state=False,
         )
-    else:
+    elif config.mode == "full":
+        # full AC
         return ptd_checkpoint_wrapper(
             module,
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_fn=checkpoint,
+            use_reentrant=False,
             preserve_rng_state=False,
+        )
+
+    elif config.mode == "selective" and config.selective_ac_option.isdigit():
+
+        """enables selective checkpointing of candidate layers.
+        Usage:
+        'selective_ac_option' with a positive 'int' value in config controls which layers to checkpoint.
+        1 == checkpointing every one (all).
+        2 == checkpoint every 2nd one
+        """
+        every_x_layer = int(config.selective_ac_option)
+        assert (
+            every_x_layer >= 0
+        ), f"selective layer AC policy (every_x_layer) expects a positive integer, received {every_x_layer}"
+
+        checkpoint_wrapper.__dict__.setdefault("_count", 0)
+
+        checkpoint_wrapper._count += 1
+        if not every_x_layer or checkpoint_wrapper._count % every_x_layer == 0:
+            return ptd_checkpoint_wrapper(
+                module,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                checkpoint_fn=checkpoint,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        # skip activation checkpointing and store activations for this layer
+        else:
+            return module
+
+    else:
+        raise NotImplementedError(
+            "Unknown AC type or AC config. Only selective op and selective layer ac implemented currently."
         )
 
 
@@ -176,11 +212,12 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
-
-                # apply AC/selective AC
-                transformer_block = checkpoint_wrapper(
-                    transformer_block, job_config.training.enable_selective_ac
-                )
+                # apply AC to the transformer block
+                if job_config.activation_checkpoint.mode in ("full", "selective"):
+                    # wrap the transformer block with checkpoint wrapper, using config settings
+                    transformer_block = checkpoint_wrapper(
+                        transformer_block, job_config.activation_checkpoint
+                    )
 
                 # Wraps each layer with FSDP
                 model.layers[layer_id] = wrap(transformer_block)

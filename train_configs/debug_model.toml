@@ -38,3 +38,7 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
+
+[activation_checkpoint]
+mode = 'selective'  # ['none', 'full', 'selective']
+selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
