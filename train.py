@@ -209,6 +209,7 @@ def main(job_config: JobConfig):
         # variables used to keep info for metrics logging
         losses_since_last_log: List[float] = []
         nwords_since_last_log = 0
+        data_loading_times: List[float] = []
         time_last_log = timer()
 
         while train_state.step < job_config.training.steps:
@@ -219,17 +220,12 @@ def main(job_config: JobConfig):
             input_ids, labels = batch
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-            data_load_time = round(timer() - data_load_start, 4)
-            train_state.data_load_times.append(data_load_time)
             nwords_since_last_log += labels.numel()
+            data_loading_times.append(timer() - data_load_start)
 
             optimizer.zero_grad()
 
             # forward
-            start_timer = torch.cuda.Event(enable_timing=True)
-            end_timer = torch.cuda.Event(enable_timing=True)
-            start_timer.record()
-
             pred = model(input_ids)
 
             with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
@@ -254,13 +250,6 @@ def main(job_config: JobConfig):
 
             # updates the scale for next iteration
             scaler.update()
-
-            # training iteration complete
-            end_timer.record()
-            torch.cuda.synchronize()
-
-            curr_iter_time = round(start_timer.elapsed_time(end_timer) * 1e-3, 4)
-            train_state.iter_times.append(curr_iter_time)
 
             # if profiler is active
             if torch_profiler:
@@ -288,6 +277,9 @@ def main(job_config: JobConfig):
                 wps = nwords_since_last_log / (
                     time_delta * parallel_dims.model_parallel_size
                 )
+                time_end_to_end = time_delta / job_config.metrics.log_freq
+                time_data_loading = np.mean(data_loading_times)
+                time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
 
                 gpu_mem_stats = gpu_metrics.get_current_stats(return_data=True)
 
@@ -301,11 +293,15 @@ def main(job_config: JobConfig):
                     "memory_peak/active(%)": gpu_mem_stats.active_peak,
                     "memory_peak/allocated(%)": gpu_mem_stats.allocated_peak,
                     "memory_peak/reserved(%)": gpu_mem_stats.reserved_peak,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
+                    "time_metrics/data_loading(%)": time_data_loading_pct,
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
                 losses_since_last_log.clear()
                 nwords_since_last_log = 0
+                data_loading_times.clear()
                 time_last_log = timer()
 
                 if _is_local_logging:
@@ -330,15 +326,6 @@ def main(job_config: JobConfig):
             )
 
     metric_logger.close()
-    # calc and show average iter time, disregard first three iterations (warmup)
-    if len(train_state.iter_times) > 3:
-        avg_iter_time = np.mean(train_state.iter_times[3:])
-        avg_data_load_time = np.mean(train_state.data_load_times[3:])
-        logger.info(
-            "Average time per iteration: "
-            f"training {avg_iter_time:.4f} seconds, "
-            f"data loading {avg_data_load_time:.4f} seconds"
-        )
 
     logger.info(f"GPU memory usage: {gpu_metrics.get_current_stats()}")
 

@@ -43,7 +43,7 @@ ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
 
 3. Inside the SSH tunnel that logged into the remote server, go to the torchtrain repo, and start the TensorBoard backend
 ```
-tensorboard --logdir=./torchtrain/outputs/tb
+tensorboard --logdir=./outputs/tb
 ```
 
 4. In the local web browser, go to the URL it provides OR to http://localhost:6006/.
