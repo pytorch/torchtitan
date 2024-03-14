@@ -78,7 +78,7 @@ class GPUMemoryMonitor:
             max_reserved_pct,
             num_retries,
             num_ooms,
-    )
+        )
 
     def reset_peak_stats(self):
         torch.cuda.reset_peak_memory_stats()
