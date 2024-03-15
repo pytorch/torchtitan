@@ -5,6 +5,7 @@ import contextlib
 import os
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -33,6 +34,7 @@ from torchtrain.parallelisms import (
     init_distributed,
     models_parallelize_fns,
     ParallelDims,
+    set_pg_timeouts,
 )
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import Color, dist_max, dist_mean
@@ -339,6 +341,13 @@ def main(job_config: JobConfig):
             # signals the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
+
+            # Reduce timeout after first train step for faster signal (assumes lazy init, compile are finished)
+            if train_state.step == 1:
+                set_pg_timeouts(
+                    timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
+                    world_mesh=world_mesh,
+                )
 
     metric_logger.close()
 
