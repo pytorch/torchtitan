@@ -225,7 +225,7 @@ def main(job_config: JobConfig):
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
-            if train_state.step % _gc_schedule == 0:
+            if _gc_schedule and train_state.step % _gc_schedule == 0:
                 gc.collect(1)
 
             # get batch
