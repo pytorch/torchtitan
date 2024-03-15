@@ -29,7 +29,11 @@ from torchtrain.metrics import (
     get_num_params,
 )
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.parallelisms import (
+    init_distributed,
+    models_parallelize_fns,
+    ParallelDims,
+)
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import Color, dist_max, dist_mean
 
@@ -104,6 +108,9 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    init_distributed(job_config)
+
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     model_name = job_config.model.name
@@ -156,10 +163,10 @@ def main(job_config: JobConfig):
             f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
         )
 
-    # initialize GPU memory monitor
+    # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
 
-    # apply PTD parallelisms + AC/selective AC
+    # apply PT-D parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
@@ -226,8 +233,6 @@ def main(job_config: JobConfig):
             nwords_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
-            gpu_memory_monitor.reset_peak_stats()
-
             input_ids = input_ids.cuda()
             labels = labels.cuda()
 
@@ -255,13 +260,10 @@ def main(job_config: JobConfig):
             # If gradients don't contain infs/NaNs, optimizer.step() is then called;
             # otherwise, optimizer.step() is skipped.
             scaler.step(optimizer)
+            scheduler.step()
 
             # updates the scale for next iteration
             scaler.update()
-
-            # if profiler is active
-            if torch_profiler:
-                torch_profiler.step()
 
             train_state.current_loss = loss.item()
             train_state.losses.append(train_state.current_loss)
@@ -275,8 +277,8 @@ def main(job_config: JobConfig):
                 )
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
-                        dist_mean(avg_loss, dp_mesh),
-                        dist_max(max_loss, dp_mesh),
+                        dist_mean(avg_loss, dp_mesh).item(),
+                        dist_max(max_loss, dp_mesh).item(),
                     )
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
@@ -295,45 +297,48 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
+                    "time_metrics/data_loading(%)": time_data_loading_pct,
                     "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
                     "memory/max_active(%)": gpu_mem_stats.max_active_pct,
                     "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
                     "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
                     "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
                     "memory/num_ooms": gpu_mem_stats.num_ooms,
-                    "time_metrics/end_to_end(s)": time_end_to_end,
-                    "time_metrics/data_loading(s)": time_data_loading,
-                    "time_metrics/data_loading(%)": time_data_loading_pct,
                 }
                 metric_logger.log(metrics, step=train_state.step)
+
+                if _is_local_logging:
+                    logger.info(
+                        f"{Color.cyan}step: {train_state.step:2}  "
+                        f"{Color.green}loss: {global_avg_loss:7.4f}  "
+                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                        f"{Color.blue}wps: {round(wps):,}{Color.reset}"
+                    )
+                else:
+                    logger.info(
+                        f"step: {train_state.step:2}  "
+                        f"loss: {global_avg_loss:7.4f}  "
+                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                        f"wps: {round(wps):,}"
+                    )
 
                 losses_since_last_log.clear()
                 nwords_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = timer()
-
-                if _is_local_logging:
-                    logger.info(
-                        f"{Color.cyan}step: {train_state.step:2}  "
-                        f"{Color.green}loss: {global_avg_loss.item():7.4f}  "
-                        f"{Color.blue}wps: {round(wps):7,}  "
-                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%){Color.reset}"
-                    )
-                else:
-                    logger.info(
-                        f"step: {train_state.step:2}  "
-                        f"loss: {global_avg_loss.item():7.4f}  "
-                        f"wps: {round(wps):7,}  "
-                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
-                    )
-
-            scheduler.step()
+                gpu_memory_monitor.reset_peak_stats()
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
+
+            # signals the profiler that the next profiling step has started
+            if torch_profiler:
+                torch_profiler.step()
 
     metric_logger.close()
 

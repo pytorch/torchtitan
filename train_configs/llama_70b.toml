@@ -10,9 +10,9 @@ save_traces_folder = "profiling/traces"
 profile_every_x_iter = 100
 
 [metrics]
+log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
-log_freq = 10
 
 [model]
 name = "llama"
