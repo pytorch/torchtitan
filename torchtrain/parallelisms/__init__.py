@@ -32,6 +32,27 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
+def set_pg_timeouts(timeout, world_mesh):
+    logger.info(
+        f"Synchronizing and adjusting timeout for all ProcessGroups to {timeout}"
+    )
+    # Ensure that all the ranks have reached the point of setting the new timeout-
+    # otherwise, some ranks may issue collectives with the new/shorter timeout and
+    # those may time out, before other ranks have finished with initialization done
+    # under the old/slow timeout.
+    torch.distributed.barrier()
+    torch.cuda.synchronize()
+
+    groups = (
+        [world_mesh.get_group()] if world_mesh.ndim == 1 else world_mesh.get_group()
+    )
+
+    # None represents the 'default' PG, not part of the mesh
+    groups.append(None)
+    for group in groups:
+        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+
+
 def init_distributed(job_config):
     # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
     # to get flight recorder dumps. See https://github.com/pytorch/pytorch/issues/121055
@@ -49,7 +70,7 @@ def init_distributed(job_config):
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
     torch.distributed.init_process_group(
-        "nccl", timeout=timedelta(seconds=job_config.comm.timeout_seconds)
+        "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
     )
 
 
