@@ -1,8 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+import os
+
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import cached_property
+
+import torch
 
 from torch.distributed.device_mesh import init_device_mesh
 from torchtrain.logging_utils import logger
@@ -11,6 +16,41 @@ from torchtrain.parallelisms.parallelize_llama import parallelize_llama
 models_parallelize_fns = {
     "llama": parallelize_llama,
 }
+
+TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
+TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
+DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
+ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
+SKIP_CLEANUP = "3"
+
+
+def _warn_overwrite_env(env, val):
+    if env in os.environ:
+        logger.warning(
+            f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
+        )
+    os.environ[env] = val
+
+
+def init_distributed(job_config):
+    # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
+    # to get flight recorder dumps. See https://github.com/pytorch/pytorch/issues/121055
+    # This could be done only when flight recorder is enabled, but its nice to be consistent to avoid subtle
+    # behavior differences
+    _warn_overwrite_env(ASYNC_ERROR_HANDLING, SKIP_CLEANUP)
+
+    # enable torch nccl flight recorder in the mode that would dump files if timeout is detected
+    _warn_overwrite_env(TRACE_BUFFER_SIZE, str(job_config.comm.trace_buf_size))
+    if job_config.comm.trace_buf_size > 0:
+        # dump on timeout by default if trace buffer is enabled
+        _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
+        dump_dir = f"{job_config.job.dump_folder}/comm_trace"
+        os.makedirs(dump_dir, exist_ok=True)
+        _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
+
+    torch.distributed.init_process_group(
+        "nccl", timeout=timedelta(seconds=job_config.comm.timeout_seconds)
+    )
 
 
 @dataclass
