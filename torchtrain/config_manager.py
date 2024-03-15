@@ -256,7 +256,6 @@ class JobConfig:
             help="Python garbage control scheduling interval, in steps",
         )
 
-
         # activation checkpointing
         parser.add_argument(
             "--activation_checkpoint.mode",
