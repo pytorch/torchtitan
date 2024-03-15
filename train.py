@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+import gc
 
 from dataclasses import dataclass, field
 from timeit import default_timer as timer
@@ -90,6 +91,10 @@ def build_grad_scaler(model):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # take control of garbage collection to avoid stragglers
+    gc.disable()
+    gc.collect(1)
 
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
@@ -213,6 +218,7 @@ def main(job_config: JobConfig):
         time_last_log = timer()
 
         while train_state.step < job_config.training.steps:
+            gc.collect(1)
             train_state.step += 1
             # get batch
             data_load_start = timer()
