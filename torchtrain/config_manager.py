@@ -266,10 +266,19 @@ class JobConfig:
 
         # communications library settings
         parser.add_argument(
-            "--comm.timeout_seconds",
+            "--comm.init_timeout_seconds",
+            type=int,
+            default=300,
+            help="Timeout for communication operations, during initialization and first train step.",
+        )
+        parser.add_argument(
+            "--comm.train_timeout_seconds",
             type=int,
             default=5,
-            help="Timeout for async communication operations",
+            help=(
+                "Timeout for communication operations after the first train step-"
+                "usually a tighter bound than during initialization."
+            ),
         )
         parser.add_argument(
             "--comm.trace_buf_size",
