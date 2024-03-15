@@ -38,7 +38,7 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
-gc_scheduling = 50 # [int] Python garbage control scheduling interval, in iters.  0 = not enabled.
+gc_schedule = 50 # [int] Python garbage control scheduling interval, in iters.  0 = not enabled.
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']
