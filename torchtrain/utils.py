@@ -7,10 +7,10 @@ from datetime import timedelta
 from typing import Union
 
 import torch
-
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
+from torchtrain.logging_utils import logger
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
