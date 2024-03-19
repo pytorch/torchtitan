@@ -24,11 +24,7 @@ from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
-from torchtrain.metrics import (
-    build_gpu_memory_monitor,
-    build_metric_logger,
-    get_num_params,
-)
+from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import (
     init_distributed,
@@ -37,7 +33,13 @@ from torchtrain.parallelisms import (
     set_pg_timeouts,
 )
 from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import Color, dist_max, dist_mean
+from torchtrain.utils import (
+    Color,
+    dist_max,
+    dist_mean,
+    get_num_flop_per_token,
+    get_num_params,
+)
 
 _is_local_logging = True
 if "SLURM_JOB_ID" in os.environ:
@@ -155,6 +157,9 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = get_num_params(model)
+    num_flop_per_token = get_num_flop_per_token(
+        model_param_count, model_config, job_config.training.seq_len
+    )
     if _is_local_logging:
         logger.info(
             f"{Color.blue}Model {model_name} {job_config.model.flavor} "
@@ -222,7 +227,7 @@ def main(job_config: JobConfig):
 
         # variables used to keep info for metrics logging
         losses_since_last_log: List[float] = []
-        nwords_since_last_log = 0
+        ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
 
@@ -232,7 +237,7 @@ def main(job_config: JobConfig):
             data_load_start = timer()
             batch = next(data_iterator)
             input_ids, labels = batch
-            nwords_since_last_log += labels.numel()
+            ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
             input_ids = input_ids.cuda()
@@ -286,9 +291,18 @@ def main(job_config: JobConfig):
                     global_avg_loss, global_max_loss = avg_loss, max_loss
 
                 time_delta = timer() - time_last_log
-                wps = nwords_since_last_log / (
+
+                # tokens per second, abbr. as wps by convention
+                wps = ntokens_since_last_log / (
                     time_delta * parallel_dims.model_parallel_size
                 )
+                # model FLOPS utilization
+                # For its definition and calculation, please refer to the PaLM paper:
+                # https://arxiv.org/abs/2204.02311
+                # TODO: 312 TFLOPS is the bf16 peak FLOPS of A100 GPU
+                #       need to have a way to get the peak FLOPS of other GPUs
+                mfu = 100 * num_flop_per_token * wps / 312e12
+
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = np.mean(data_loading_times)
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
@@ -299,6 +313,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
+                    "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -317,7 +332,8 @@ def main(job_config: JobConfig):
                         f"{Color.green}loss: {global_avg_loss:7.4f}  "
                         f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                         f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}{Color.reset}"
+                        f"{Color.blue}wps: {round(wps):,}  "
+                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
                     )
                 else:
                     logger.info(
@@ -325,11 +341,12 @@ def main(job_config: JobConfig):
                         f"loss: {global_avg_loss:7.4f}  "
                         f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                         f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}"
+                        f"wps: {round(wps):,}  "
+                        f"mfu: {mfu:.2f}%"
                     )
 
                 losses_since_last_log.clear()
-                nwords_since_last_log = 0
+                ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = timer()
                 gpu_memory_monitor.reset_peak_stats()

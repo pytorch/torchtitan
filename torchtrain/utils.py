@@ -20,6 +20,29 @@ def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
 
 
+def get_num_params(model: torch.nn.Module, only_trainable: bool = False) -> int:
+    """
+    Get the total model params
+    Args : only_trainable: whether to only count trainable params
+    """
+    param_list = list(model.parameters())
+    if only_trainable:
+        param_list = [p for p in param_list if p.requires_grad]
+    # unique_params = {p.data_ptr(): p for p in param_list}.values()
+    return sum(p.numel() for p in param_list)
+
+
+def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
+    l, h, q, t = (
+        model_config.n_layers,
+        model_config.n_heads,
+        model_config.dim // model_config.n_heads,
+        seq_len,
+    )
+    flop_per_token = 6 * num_params + 12 * l * h * q * t
+    return flop_per_token
+
+
 @dataclass
 class Color:
     black = "\033[30m"

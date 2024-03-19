@@ -210,10 +210,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             "param_init_fn": meta_to_real_init_fn,
         }
 
+        ac_mode = job_config.activation_checkpoint.mode
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
                 # apply AC to the transformer block
-                if job_config.activation_checkpoint.mode in ("full", "selective"):
+                if ac_mode in ("full", "selective"):
                     # wrap the transformer block with checkpoint wrapper, using config settings
                     transformer_block = checkpoint_wrapper(
                         transformer_block, job_config.activation_checkpoint
@@ -225,6 +226,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # wrap the rest layers with FSDP
             model = wrap(model)
 
+        if ac_mode in ("full", "selective"):
+            logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
     else:
         meta_to_real_init_fn(model)
