@@ -185,7 +185,10 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
-        if job_config.activation_checkpoint.mode != "none":
+        if (
+            job_config.activation_checkpoint.mode == "selective"
+            and job_config.activation_checkpoint.selective_ac_option == "op"
+        ):
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
