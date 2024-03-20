@@ -30,14 +30,15 @@ from torchtrain.metrics import (
     get_num_params,
 )
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import (
+from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.profiling import maybe_run_profiler
+from torchtrain.utils import (
+    Color,
+    dist_max,
+    dist_mean,
     init_distributed,
-    models_parallelize_fns,
-    ParallelDims,
     set_pg_timeouts,
 )
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import Color, dist_max, dist_mean
 
 _is_local_logging = True
 if "SLURM_JOB_ID" in os.environ:
