@@ -355,7 +355,9 @@ class RotaryEmbedding(nn.Module):
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
+        # Compile does not support in-place mutation. Better get the module on
+        # the right device during init.
+        # self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[0:seqlen]
         return h, freqs_cis
 
