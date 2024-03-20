@@ -137,6 +137,38 @@ def main(job_config: JobConfig):
     gpu_metrics = GPUMemoryMonitor("cuda")
     rank0_log(f"GPU memory usage: {gpu_metrics}")
 
+    ###### PiPPy ######
+    from pippy import Pipe, PipeSplitWrapper, annotate_split_points, PipelineStage
+
+    print(model_config)
+    print(model)
+    pp_degree = 2
+    rank = int(os.environ["RANK"])  # TODO: use real pp rank instead of global rank
+    device = torch.device(f"cuda:{rank}")
+    layers_per_rank = model_config.n_layers // pp_degree  #TODO
+    for i in range(1, pp_degree):
+        annotate_split_points(model,
+            {f"layers.{i * layers_per_rank}": PipeSplitWrapper.SplitPoint.BEGINNING})
+
+    # Get example input
+    input_ids = torch.randint(model_config.vocab_size, (8, 2048), dtype=torch.int64, device=device)
+    labels = torch.randint(model_config.vocab_size, (8, 2048), dtype=torch.int64, device=device)
+    print("input_ids: ", input_ids.shape, input_ids.dtype)
+    print("labels: ", labels.shape, labels.dtype)
+
+    # Create a pipeline representation from the model
+    pipe = Pipe.from_tracing(model, pp_degree, example_args=(input_ids,))
+
+    stage = PipelineStage(pipe, rank, device=device)
+
+    # Run
+    if rank == 0:
+        args = input_ids
+    else:
+        args = None
+    output = stage(args)
+    exit()
+
     # apply PTD parallelisms + AC
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
