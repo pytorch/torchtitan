@@ -26,12 +26,7 @@ from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import (
-    init_distributed,
-    models_parallelize_fns,
-    ParallelDims,
-    set_pg_timeouts,
-)
+from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import (
     Color,
@@ -39,6 +34,9 @@ from torchtrain.utils import (
     dist_mean,
     get_num_flop_per_token,
     get_num_params,
+    get_peak_flops,
+    init_distributed,
+    set_pg_timeouts,
 )
 
 _is_local_logging = True
@@ -172,6 +170,8 @@ def main(job_config: JobConfig):
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
+    # obtain the peak flops of bf16 type for MFU calculation
+    gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     # apply PT-D parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
@@ -190,7 +190,10 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
-        if job_config.training.enable_selective_ac:
+        if (
+            job_config.activation_checkpoint.mode == "selective"
+            and job_config.activation_checkpoint.selective_ac_option == "op"
+        ):
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
@@ -299,9 +302,7 @@ def main(job_config: JobConfig):
                 # model FLOPS utilization
                 # For its definition and calculation, please refer to the PaLM paper:
                 # https://arxiv.org/abs/2204.02311
-                # TODO: 312 TFLOPS is the bf16 peak FLOPS of A100 GPU
-                #       need to have a way to get the peak FLOPS of other GPUs
-                mfu = 100 * num_flop_per_token * wps / 312e12
+                mfu = 100 * num_flop_per_token * wps / gpu_peak_flops
 
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = np.mean(data_loading_times)
