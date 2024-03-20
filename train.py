@@ -103,14 +103,9 @@ def main(job_config: JobConfig):
     logger.info(f"Starting job: {job_config.job.description}")
 
     # take control of garbage collection to avoid stragglers
-    _gc_schedule = 0
-    if job_config.training.gc_schedule > 0:
-        logger.info(
-            f"Enabling garbage collection every {job_config.training.gc_schedule} iters."
-        )
-        _gc_schedule = job_config.training.gc_schedule
-        gc.disable()
-        gc.collect(1)
+    _gc_freq = job_config.training.gc_freq
+    gc.disable()
+    gc.collect(1)
 
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
@@ -242,7 +237,7 @@ def main(job_config: JobConfig):
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
-            if _gc_schedule and train_state.step % _gc_schedule == 0:
+            if train_state.step >1 and train_state.step % _gc_freq == 0:
                 gc.collect(1)
 
             # get batch

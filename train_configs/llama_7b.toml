@@ -40,4 +40,3 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "alpaca"
-gc_schedule = 50 # [int] Python garbage control scheduling interval, in iters.  0 = not enabled.

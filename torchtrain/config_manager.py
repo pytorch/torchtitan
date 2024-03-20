@@ -250,7 +250,7 @@ class JobConfig:
             help="Type of fp8 linear quantization to apply to the model",
         )
         parser.add_argument(
-            "--training.gc_schedule",
+            "--training.gc_freq",
             type=int,
             default=50,
             help="Python garbage control scheduling interval, in steps",
