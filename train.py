@@ -30,14 +30,15 @@ from torchtrain.metrics import (
     get_num_params,
 )
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import (
+from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
+from torchtrain.profiling import maybe_run_profiler
+from torchtrain.utils import (
+    Color,
+    dist_max,
+    dist_mean,
     init_distributed,
-    models_parallelize_fns,
-    ParallelDims,
     set_pg_timeouts,
 )
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import Color, dist_max, dist_mean
 
 _is_local_logging = True
 if "SLURM_JOB_ID" in os.environ:
@@ -185,7 +186,10 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
-        if job_config.training.enable_selective_ac:
+        if (
+            job_config.activation_checkpoint.mode == "selective"
+            and job_config.activation_checkpoint.selective_ac_option == "op"
+        ):
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
