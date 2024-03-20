@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import contextlib
+import gc
 import os
 
 from dataclasses import dataclass, field
@@ -101,6 +102,11 @@ def build_grad_scaler(model):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # take control of garbage collection to avoid stragglers
+    _gc_freq = job_config.training.gc_freq
+    gc.disable()
+    gc.collect(1)
 
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
@@ -232,6 +238,9 @@ def main(job_config: JobConfig):
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
+            if train_state.step > 1 and train_state.step % _gc_freq == 0:
+                gc.collect(1)
+
             # get batch
             data_load_start = timer()
             batch = next(data_iterator)

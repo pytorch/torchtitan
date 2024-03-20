@@ -249,6 +249,12 @@ class JobConfig:
             ],  # TODO: add "delayed" option back in when supported
             help="Type of fp8 linear quantization to apply to the model",
         )
+        parser.add_argument(
+            "--training.gc_freq",
+            type=int,
+            default=50,
+            help="Python garbage control scheduling interval, in steps",
+        )
 
         # activation checkpointing
         parser.add_argument(
