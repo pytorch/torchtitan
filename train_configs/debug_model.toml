@@ -10,9 +10,9 @@ save_traces_folder = "profiling/traces"
 profile_every_x_iter = 10
 
 [metrics]
+log_freq = 1
 enable_tensorboard = true
 save_tb_folder = "tb"
-log_freq = 1
 
 [model]
 name = "llama"
@@ -33,6 +33,7 @@ steps = 10
 data_parallel_degree = -1
 sequence_parallel_degree = 1
 pipeline_parallel_degree = 1
+fp8_linear = ""
 compile = false
 checkpoint_interval = 3600
 checkpoint_interval_type = "steps"

@@ -269,4 +269,27 @@ class JobConfig:
             default="2",  # 2 = checkpoint every other layer
             help="['int', 'op'] = selective activation checkpointing options, 'int' for every nth layer, or 'op' for op level ac.",
         )
+
+        # communications library settings
+        parser.add_argument(
+            "--comm.init_timeout_seconds",
+            type=int,
+            default=300,
+            help="Timeout for communication operations, during initialization and first train step.",
+        )
+        parser.add_argument(
+            "--comm.train_timeout_seconds",
+            type=int,
+            default=5,
+            help=(
+                "Timeout for communication operations after the first train step-"
+                "usually a tighter bound than during initialization."
+            ),
+        )
+        parser.add_argument(
+            "--comm.trace_buf_size",
+            type=int,
+            default=20000,
+            help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
+        )
         return parser.parse_args(args_list)
