@@ -196,6 +196,7 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
+        torch._inductor.config.allow_buffer_reuse = False
         if (
             job_config.activation_checkpoint.mode == "selective"
             and job_config.activation_checkpoint.selective_ac_option == "op"
