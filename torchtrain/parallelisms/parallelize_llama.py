@@ -44,6 +44,7 @@ no_recompute_list = {
     torch.ops.c10d_functional.reduce_scatter_tensor.default,
 }
 
+
 # Uses PTD FSDP AC wrapper
 # currently selective per op and per layer checkpointing are supported
 def checkpoint_wrapper(module, config):
@@ -84,7 +85,6 @@ def checkpoint_wrapper(module, config):
         )
 
     elif config.mode == "selective" and config.selective_ac_option.isdigit():
-
         """enables selective checkpointing of candidate layers.
         Usage:
         'selective_ac_option' with a positive 'int' value in config controls which layers to checkpoint.

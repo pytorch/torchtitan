@@ -6,7 +6,7 @@
 import argparse
 import sys
 from collections import defaultdict
-from typing import Union, Tuple
+from typing import Tuple, Union
 
 try:
     import tomllib
@@ -23,16 +23,19 @@ class JobConfig:
     - if toml file has missing keys, they are filled with argparse defaults.
     - if additional explicit cmd args are provided in addition to the toml
     file, they will override the toml config and the argparse defaults
+
+
+    Arg parsing semantics:
+
+    Each argument starts with <prefix>_ which is the section name in the toml file
+    followed by name of the option in the toml file. For ex,
+    model.name translates to:
+        [model]
+        name
+    in the toml file
     """
+
     def __init__(self):
-        """
-        Each argument starts with <prefix>_ which is the section name in the toml file
-        followed by name of the option in the toml file. For ex,
-        model.name translates to:
-            [model]
-            name
-        in the toml file
-        """
         # main parser
         self.parser = argparse.ArgumentParser(description="TorchTrain arg parser.")
         self.parser.add_argument(
@@ -300,7 +303,9 @@ class JobConfig:
         assert self.model.name and self.model.flavor and self.model.tokenizer_path
         return True
 
-    def parse_args_from_command_line(self, args_list) -> Tuple[argparse.Namespace, argparse.Namespace]:
+    def parse_args_from_command_line(
+        self, args_list
+    ) -> Tuple[argparse.Namespace, argparse.Namespace]:
         """
         Parse command line arguments and return the parsed args and the command line only args
         """
@@ -310,10 +315,11 @@ class JobConfig:
         aux_parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS)
         for arg, val in vars(args).items():
             if isinstance(val, bool):
-                aux_parser.add_argument('--'+arg,
-                                        action='store_true' if val else 'store_false')
+                aux_parser.add_argument(
+                    "--" + arg, action="store_true" if val else "store_false"
+                )
             else:
-                aux_parser.add_argument('--'+arg, type=type(val))
+                aux_parser.add_argument("--" + arg, type=type(val))
 
         cmd_args, _ = aux_parser.parse_known_args(args_list)
 
