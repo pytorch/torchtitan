@@ -41,3 +41,7 @@ checkpoint_interval = 3600
 checkpoint_interval_type = "steps"
 checkpoint_folder = ""
 dataset = "openwebtext"
+
+[activation_checkpoint]
+mode = 'full'  # ['none', 'full', 'selective']
+# selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
