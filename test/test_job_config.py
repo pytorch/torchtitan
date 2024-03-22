@@ -28,3 +28,8 @@ class TestJobConfig:
             config = JobConfig()
             config.parse_args(["--job.config_file", fp.name])
             assert config.job.description
+
+    def test_job_config_file_cmd_overrides(self):
+        config = JobConfig()
+        config.parse_args(['--job.config_file', './train_configs/debug_model.toml', '--job.dump_folder', '/tmp/test_tt/'])
+        assert config.job.dump_folder == "/tmp/test_tt/"
