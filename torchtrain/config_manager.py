@@ -13,6 +13,8 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
+from torchtrain.logging_utils import logger
+
 
 class JobConfig:
     """
@@ -24,6 +26,7 @@ class JobConfig:
     - if additional explicit cmd args are provided in addition to the toml
     file, they will override the toml config and the argparse defaults
 
+    precedence order: cmdline > toml > argparse default
 
     Arg parsing semantics:
 
@@ -275,10 +278,17 @@ class JobConfig:
         # build up a two level dict
         args_dict = self._args_to_two_level_dict(args)
         if config_file is not None:
-            with open(config_file, "rb") as f:
-                for k, v in tomllib.load(f).items():
-                    # to prevent overwrite of non-specified keys
-                    args_dict[k] |= v
+            try:
+                with open(config_file, "rb") as f:
+                    for k, v in tomllib.load(f).items():
+                        # to prevent overwrite of non-specified keys
+                        args_dict[k] |= v
+            except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
+                logger.info(
+                    f"Error while loading the configuration file: {config_file}"
+                )
+                logger.info(f"Error details: {str(e)}")
+                raise e
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
@@ -298,7 +308,7 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self):
+    def _validate_config(self) -> bool:
         # TODO: Add more mandatory validations
         assert self.model.name and self.model.flavor and self.model.tokenizer_path
         return True
