@@ -111,7 +111,7 @@ def main(job_config: JobConfig):
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
-        sp=job_config.training.sequence_parallel_degree,
+        tp=job_config.training.tensor_parallel_degree,
         pp=job_config.training.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,

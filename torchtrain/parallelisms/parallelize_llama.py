@@ -146,9 +146,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         raise NotImplementedError("PP not implemented yet.")
 
     # First we apply Sequence Parallelism if it's enabled
-    if parallel_dims.sp_enabled:
-        tp_mesh = world_mesh["sp"]
-        sp_degree = job_config.training.sequence_parallel_degree
+    if parallel_dims.tp_enabled:
+        tp_mesh = world_mesh["tp"]
+        tp_degree = job_config.training.tensor_parallel_degree
 
         row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
             job_config
@@ -204,8 +204,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
             # adjust num_heads in attention layer to local heads
             attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // sp_degree
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // sp_degree
+            attn_layer.n_heads = attn_layer.n_heads // tp_degree
+            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_degree
 
             parallelize_module(
                 module=transformer_block,
