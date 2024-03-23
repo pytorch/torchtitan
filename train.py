@@ -241,10 +241,12 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-
+            print("i", input_ids.shape)
+            print("l", labels.shape)
             optimizer.zero_grad()
 
             # forward
+            # TODO - integrate pp batch splitter
             pred = model(input_ids)
 
             with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
