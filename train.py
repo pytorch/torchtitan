@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
 from torchtrain.config_manager import JobConfig
@@ -97,7 +98,8 @@ def build_grad_scaler(model):
 
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
-
+#Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
+@record
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
