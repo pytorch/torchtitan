@@ -169,10 +169,10 @@ class JobConfig:
             help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
         )
         self.parser.add_argument(
-            "--training.sequence_parallel_degree",
+            "--training.tensor_parallel_degree",
             type=int,
             default=1,
-            help="Sequence Parallelism degree. 1 means disabled.",
+            help="Tensor Parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
             "--training.enable_loss_parallel",
