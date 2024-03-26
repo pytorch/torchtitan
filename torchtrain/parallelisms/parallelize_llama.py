@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-from torch.distributed._tensor import Replicate, Shard, distribute_tensor
+from torch.distributed._tensor import distribute_tensor, Replicate, Shard
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
