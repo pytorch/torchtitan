@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-from torch.distributed._tensor import Replicate, Shard
+from torch.distributed._tensor import distribute_tensor, Replicate, Shard
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -187,9 +187,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     input_layouts=(Shard(0), None),
                     desired_input_layouts=(Replicate(), None),
                 ),
-                "attention.wq": col_parallel_strategy(),
-                "attention.wk": col_parallel_strategy(),
-                "attention.wv": col_parallel_strategy(),
+                "attention.wq": col_parallel_strategy(use_local_output=False),
+                "attention.wk": col_parallel_strategy(use_local_output=False),
+                "attention.wv": col_parallel_strategy(use_local_output=False),
                 "attention.wo": row_parallel_strategy(output_layouts=Shard(0)),
                 "attention_norm": SequenceParallel(sequence_dim=0),
                 "feed_forward": PrepareModuleInput(
@@ -202,10 +202,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "ffn_norm": SequenceParallel(sequence_dim=0),
             }
 
-            # adjust num_heads in attention layer to local heads
-            attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // sp_degree
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // sp_degree
+            model.embeddings.freqs_cis = distribute_tensor(
+                model.embeddings.freqs_cis,
+                tp_mesh,
+                [Replicate()] * tp_mesh.ndim,
+            )
 
             parallelize_module(
                 module=transformer_block,
