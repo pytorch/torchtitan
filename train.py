@@ -25,7 +25,6 @@ from torchtrain.datasets import create_tokenizer, dataloader_fn
 from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.meta_init import meta_model_init
 from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
@@ -152,7 +151,7 @@ def main(job_config: JobConfig):
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
     model_config.vocab_size = tokenizer.n_words
-    with meta_model_init():
+    with torch.device("meta"):
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )

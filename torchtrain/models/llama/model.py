@@ -46,9 +46,6 @@ class RMSNorm(torch.nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.empty(dim))
 
-        # re-enable if not using meta-init
-        # self.reset_parameters()
-
     def _norm(self, x: torch.Tensor):
         """
         Apply the RMSNorm normalization to the input tensor.
@@ -80,7 +77,9 @@ class RMSNorm(torch.nn.Module):
         torch.nn.init.ones_(self.weight)
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, device: Optional[torch.device] = None
+):
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
@@ -92,11 +91,14 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
         dim (int): Dimension of the frequency tensor.
         end (int): End index for precomputing frequencies.
         theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+        device (Optional[torch.device], optional): Device to run the computation on.
 
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, dim, 2, device=device)[: (dim // 2)].float() / dim)
+    )
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
@@ -333,15 +335,7 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.model_args = model_args
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-
-        self.freqs_cis = precompute_freqs_cis(
-            # Note that self.model_args.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation
-            # of models is 4096.
-            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training
-            # or fine-tuning.
-            self.model_args.dim // self.model_args.n_heads,
-            self.model_args.max_seq_len * 2,
-        )
+        self.freqs_cis: Optional[torch.Tensor] = None
 
     def forward(self, tokens: torch.Tensor):
         """
@@ -355,9 +349,20 @@ class RotaryEmbedding(nn.Module):
         """
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[0:seqlen]
         return h, freqs_cis
+
+    def reset_parameters(self):
+        nn.init.normal_(self.tok_embeddings.weight)
+        self.freqs_cis = precompute_freqs_cis(
+            # Note that self.model_args.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation
+            # of models is 4096.
+            # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training
+            # or fine-tuning.
+            self.model_args.dim // self.model_args.n_heads,
+            self.model_args.max_seq_len * 2,
+            device=self.tok_embeddings.weight.device,
+        )
 
 
 class TransformerBlock(nn.Module):
@@ -477,6 +482,7 @@ class Transformer(nn.Module):
     def reset_parameters(
         self,
     ):
+        self.embeddings.reset_parameters()
         for layer in self.layers:
             layer.reset_parameters()
         self.norm.reset_parameters()
