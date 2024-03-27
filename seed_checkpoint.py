@@ -36,6 +36,8 @@ def main(job_config: JobConfig):
     if job_config.training.fp8_linear:
         build_fp8_linear(model, job_config)
 
+    model.reset_parameters()
+
     checkpoint_id = os.path.join(job_config.training.checkpoint_folder, "step-0")
     logger.info(f"Creating seed (step-0) checkpoint in {checkpoint_id}")
     DCP.save(
