@@ -7,6 +7,7 @@ import os
 
 from dataclasses import dataclass, field
 from datetime import timedelta
+from io import BytesIO
 from timeit import default_timer as timer
 from typing import Any, Dict, List
 
@@ -49,22 +50,38 @@ if "SLURM_JOB_ID" in os.environ:
 @dataclass
 class TrainState:
     step: int = 0
-    current_loss: float = -1
-    losses: List[float] = field(default_factory=list)
-    iter_times: List[float] = field(default_factory=list)
-    data_load_times: List[float] = field(default_factory=list)
+    global_avg_losses: List[float] = field(default_factory=list)
+    global_max_losses: List[float] = field(default_factory=list)
+    log_steps: List[int] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
+        # Only checkpoint global_avg_losses and global_max_losses per log frequency
+        # to avoid sync overhead in every iteration.
+        global_avg_losses_bytes = BytesIO()
+        torch.save(self.global_avg_losses, global_avg_losses_bytes)
+        global_max_losses_bytes = BytesIO()
+        torch.save(self.global_max_losses, global_max_losses_bytes)
+        log_steps_bytes = BytesIO()
+        torch.save(self.log_steps, log_steps_bytes)
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
-            "current_loss": torch.tensor(self.current_loss, dtype=torch.float32),
-            "losses": torch.tensor(self.losses, dtype=torch.float32),
+            "global_avg_losses": global_avg_losses_bytes,
+            "global_max_losses": global_max_losses_bytes,
+            "log_steps": log_steps_bytes,
         }
 
     def load_state_dict(self, state_dict) -> None:
         self.step = state_dict["step"].item()
-        self.current_loss = state_dict["current_loss"].item()
-        self.losses = state_dict["losses"].tolist()
+        state_dict["global_avg_losses"].seek(0)
+        self.global_avg_losses = torch.load(
+            state_dict["global_avg_losses"], weights_only=False
+        )
+        state_dict["global_max_losses"].seek(0)
+        self.global_max_losses = torch.load(
+            state_dict["global_max_losses"], weights_only=False
+        )
+        state_dict["log_steps"].seek(0)
+        self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
 def build_optimizer(model, job_config: JobConfig):
@@ -264,7 +281,11 @@ def main(job_config: JobConfig):
             # forward
             pred = model(input_ids)
 
-            with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
+            with (
+                loss_parallel()
+                if parallel_dims.loss_parallel_enabled
+                else contextlib.nullcontext()
+            ):
                 loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
                 # backward on scaled loss to create scaled gradients
@@ -288,9 +309,8 @@ def main(job_config: JobConfig):
             # updates the scale for next iteration
             scaler.update()
 
-            train_state.current_loss = loss.item()
-            train_state.losses.append(train_state.current_loss)
-            losses_since_last_log.append(train_state.current_loss)
+            current_loss = loss.item()
+            losses_since_last_log.append(current_loss)
 
             # log metrics
             if (train_state.step - 1) % job_config.metrics.log_freq == 0:
@@ -305,6 +325,10 @@ def main(job_config: JobConfig):
                     )
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
+
+                train_state.log_steps.append(train_state.step)
+                train_state.global_avg_losses.append(global_avg_loss)
+                train_state.global_max_losses.append(global_max_loss)
 
                 time_delta = timer() - time_last_log
 
