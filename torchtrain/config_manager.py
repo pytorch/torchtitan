@@ -61,6 +61,12 @@ class JobConfig:
             default="default job",
             help="description of the job",
         )
+        self.parser.add_argument(
+            "--job.use_for_integration_test",
+            default=False,
+            action="store_true",
+            help="add this config to integration test suite",
+        )
         # profiling configs
         self.parser.add_argument(
             "--profiling.run_profiler",

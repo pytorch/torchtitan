@@ -2,6 +2,7 @@
 [job]
 dump_folder = "./outputs"
 description = "LLaMA debug training"
+use_for_integration_test = true
 
 [profiling]
 run_profiler = true
