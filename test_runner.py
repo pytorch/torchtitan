@@ -19,7 +19,6 @@ for config_file in os.listdir(CONFIG_DIR):
             config = tomllib.load(f)
             is_integration_test = config["job"].get("use_for_integration_test", False)
             if is_integration_test:
-
                 cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
                 print(f"=====Integration test: {cmd}=====")
                 result = subprocess.run(
