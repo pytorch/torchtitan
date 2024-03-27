@@ -50,12 +50,9 @@ if "SLURM_JOB_ID" in os.environ:
 @dataclass
 class TrainState:
     step: int = 0
-    current_loss: float = -1
-    losses: List[float] = field(default_factory=list)
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
-    iter_times: List[float] = field(default_factory=list)
-    data_load_times: List[float] = field(default_factory=list)
+    log_steps: List[int] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:
         # Only checkpoint global_avg_losses and global_max_losses per log frequency
@@ -64,10 +61,13 @@ class TrainState:
         torch.save(self.global_avg_losses, global_avg_losses_bytes)
         global_max_losses_bytes = BytesIO()
         torch.save(self.global_max_losses, global_max_losses_bytes)
+        log_steps_bytes = BytesIO()
+        torch.save(self.log_steps, log_steps_bytes)
         return {
             "step": torch.tensor(self.step, dtype=torch.int32),
             "global_avg_losses": global_avg_losses_bytes,
             "global_max_losses": global_max_losses_bytes,
+            "log_steps": log_steps_bytes,
         }
 
     def load_state_dict(self, state_dict) -> None:
@@ -80,6 +80,8 @@ class TrainState:
         self.global_max_losses = torch.load(
             state_dict["global_max_losses"], weights_only=False
         )
+        state_dict["log_steps"].seek(0)
+        self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
 def build_optimizer(model, job_config: JobConfig):
@@ -307,9 +309,8 @@ def main(job_config: JobConfig):
             # updates the scale for next iteration
             scaler.update()
 
-            train_state.current_loss = loss.item()
-            train_state.losses.append(train_state.current_loss)
-            losses_since_last_log.append(train_state.current_loss)
+            current_loss = loss.item()
+            losses_since_last_log.append(current_loss)
 
             # log metrics
             if (train_state.step - 1) % job_config.metrics.log_freq == 0:
@@ -325,6 +326,7 @@ def main(job_config: JobConfig):
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
 
+                train_state.log_steps.append(train_state.step)
                 train_state.global_avg_losses.append(global_avg_loss)
                 train_state.global_max_losses.append(global_max_loss)
 
