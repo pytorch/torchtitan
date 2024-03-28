@@ -104,14 +104,10 @@ def build_optimizer(model, job_config: JobConfig):
 
 
 def build_grad_scaler(model):
-    # apply gradient scaling if mixed precision training is enabled with fp16 param dtype
-    # NOTE: currently mixed precision training is supported only when FSDP is used
-    if isinstance(model, FSDP) and model.mixed_precision.param_dtype == torch.float16:
-        enable_grad_scaling = True
-        logger.info("Enabling gradient scaling for mixed precision training")
-    else:
-        enable_grad_scaling = False
-        logger.info("Gradient scaling not enabled")
+    # TODO: FSDP2 does not support sharded grad scaler yet.
+    # TODO: if enabled, grad scaler's states need saving & loading in checkpointing
+    enable_grad_scaling = False
+    logger.info("Gradient scaling not enabled")
 
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
@@ -248,7 +244,17 @@ def main(job_config: JobConfig):
     )
     checkpoint.load()
 
-    # TODO: plot losses loaded from checkpoint (if any) to TensorBoard
+    # plot losses loaded from checkpoint (if any) to TensorBoard
+    # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
+    #       This can be avoided by setting training.checkpoint_interval to be a multiple
+    #       of metrics.log_freq
+    if train_state.step > 0:
+        for idx, step in enumerate(train_state.log_steps):
+            metrics = {
+                "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
+                "loss_metrics/global_max_loss": train_state.global_max_losses[idx],
+            }
+            metric_logger.log(metrics, step=step)
 
     data_iterator = iter(data_loader)
 
@@ -313,7 +319,10 @@ def main(job_config: JobConfig):
             losses_since_last_log.append(current_loss)
 
             # log metrics
-            if (train_state.step - 1) % job_config.metrics.log_freq == 0:
+            if (
+                train_state.step == 1
+                or train_state.step % job_config.metrics.log_freq == 0
+            ):
                 avg_loss, max_loss = (
                     np.mean(losses_since_last_log),
                     np.max(losses_since_last_log),

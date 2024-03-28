@@ -290,10 +290,10 @@ class JobConfig:
                         # to prevent overwrite of non-specified keys
                         args_dict[k] |= v
             except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
-                logger.info(
+                logger.exception(
                     f"Error while loading the configuration file: {config_file}"
                 )
-                logger.info(f"Error details: {str(e)}")
+                logger.exception(f"Error details: {str(e)}")
                 raise e
 
         # override args dict with cmd_args
