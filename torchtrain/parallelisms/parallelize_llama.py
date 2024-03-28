@@ -232,7 +232,5 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
-    else:
-        model.cuda()
 
     return model
