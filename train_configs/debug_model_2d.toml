@@ -16,6 +16,11 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 use_for_integration_test = true
 
+[checkpoint]
+interval = 3600
+interval_type = "steps"
+folder = ""
+
 [model]
 name = "llama"
 flavor = "debugmodel"
@@ -37,9 +42,6 @@ tensor_parallel_degree = 2
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-checkpoint_interval = 3600
-checkpoint_interval_type = "steps"
-checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
 
 [activation_checkpoint]
