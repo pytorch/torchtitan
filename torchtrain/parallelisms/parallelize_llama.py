@@ -256,6 +256,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         meta_to_real_init_fn(model)
         model.cuda()
 
+    # TODO(whc) - proposal: remove this call, and assert that we always load a checkpoint
     # we have now moved from meta to device,
     # reset parameters for proper initialization
     model.reset_parameters()

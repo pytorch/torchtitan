@@ -50,6 +50,8 @@ def main(job_config: JobConfig):
 
 """
 1. how do i serialize enough info about the model config to ensure i don't try to load an incompatible checkpoint later?
+ - maybe skip this. users responsible to manage their checkpoints, and we can partially help by managing their 'dump folder'?
+
 2. would i apply fp8 before creating the seed or not?  I think probably before
 3. can i skip optimizer in seed file? i think so. optimizer can later create its states from the model post-sharding
 """
