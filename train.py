@@ -197,7 +197,7 @@ def main(job_config: JobConfig):
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
-    # allocate sharded model on GPU and initialize weights
+    # allocate sharded model on GPU and initialize weights via DTensor
     model.to_empty(device="cuda")
     model.init_weights()
 
