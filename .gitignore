@@ -1,0 +1,12 @@
+__pycache__
+.idea
+.DS_Store
+*.egg-info
+build
+outputs
+
+# data
+data
+out
+wandb
+*.json
