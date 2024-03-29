@@ -54,7 +54,6 @@ class SentencePieceTokenizer(TokenizerIf):
     """
 
     def __init__(self, tokenizer_path: str):
-
         super().__init__(tokenizer_path)
         # reload tokenizer
         self.sp_model = SentencePieceProcessor(model_file=tokenizer_path)
