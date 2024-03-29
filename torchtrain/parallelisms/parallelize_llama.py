@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
+from pippy import annotate_split_points, Pipe, PipeSplitWrapper
 from torch.distributed._tensor import Replicate, Shard
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -143,7 +144,31 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     # apply PTD parallelisms
     if parallel_dims.pp_enabled:
-        raise NotImplementedError("PP not implemented yet.")
+        pp_mesh = world_mesh["pp"]
+        stage_idx = pp_mesh.get_local_rank()
+        layers_per_rank = len(model.layers) // parallel_dims.pp
+        for i in range(1, parallel_dims.pp):
+            annotate_split_points(
+                model,
+                {
+                    f"layers.{i * layers_per_rank}": PipeSplitWrapper.SplitPoint.BEGINNING
+                },
+            )
+
+        # Get example input
+        label_shape = input_shape = (8, 2048)  # TODO
+        input_ids = torch.randint(
+            model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+        )
+        labels = torch.randint(
+            model.vocab_size, label_shape, dtype=torch.int64, device="meta"
+        )
+        print("input_ids: ", input_ids.shape, input_ids.dtype)
+        print("labels: ", labels.shape, labels.dtype)
+
+        # Create a pipeline representation from the model
+        pipe = Pipe.from_tracing(model, parallel_dims.pp, example_args=(input_ids,))
+        model = pipe.get_stage_module(stage_idx)
 
     # First we apply Tensor Parallelism if it's enabled
     if parallel_dims.tp_enabled:
@@ -256,10 +281,14 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         meta_to_real_init_fn(model)
         model.cuda()
 
-    # TODO(whc) - proposal: remove this call, and assert that we always load a checkpoint
-    # we have now moved from meta to device,
-    # reset parameters for proper initialization
-    model.reset_parameters()
-    logger.info("Model fully initialized via reset_parameters")
+    if parallel_dims.pp_enabled:
+        setattr(pipe.split_gm, f"submod_{stage_idx}", model)
+        return pipe
+    else:
+        # TODO(whc) - proposal: remove this call, and assert that we always load a checkpoint
+        # we have now moved from meta to device,
+        # reset parameters for proper initialization
+        model.reset_parameters()
+        logger.info("Model fully initialized via reset_parameters")
 
     return model

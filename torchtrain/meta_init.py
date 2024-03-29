@@ -46,3 +46,9 @@ def meta_to_real_init_fn(module: nn.Module):
                     torch.randn_like(param, device=torch.device("cuda"))
                 )
                 setattr(submodule, param_name, materialized_param)
+        for param_name, param in submodule.named_buffers(recurse=False):
+            if param.is_meta:
+                materialized_param = nn.Parameter(
+                    torch.randn_like(param, device=torch.device("cuda"))
+                )
+                setattr(submodule, param_name, materialized_param)

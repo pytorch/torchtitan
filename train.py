@@ -187,6 +187,18 @@ def main(job_config: JobConfig):
         model, world_mesh, parallel_dims, job_config
     )
 
+    # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
+    # there are virtual stages
+    if parallel_dims.pp_enabled:
+        pmod = model
+        pp_mesh = world_mesh["pp"]
+        pp_degree = pp_mesh.size()
+        pp_rank = pp_mesh.get_local_rank()
+        logger.info(
+            f"{Color.blue}Extracting pipeline module for stage {pp_mesh.get_local_rank()}{Color.reset}"
+        )
+        model = pmod.get_stage_module(pp_mesh.get_local_rank())
+
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
@@ -258,10 +270,12 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-
+            print("i", input_ids.shape)
+            print("l", labels.shape)
             optimizer.zero_grad()
 
             # forward
+            # TODO - integrate pp batch splitter
             pred = model(input_ids)
 
             with loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext():
