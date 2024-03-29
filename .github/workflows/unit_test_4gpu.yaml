@@ -37,7 +37,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r dev-requirements.txt
           python -m pip install -e .
-      - name: Run NGPU=4 ./run_llama_train.sh
-        run: NGPU=4 ./run_llama_train.sh
+      - name: Run test_runner.py
+        run: python ./test/test_runner.py
       - name: Upload Coverage to Codecov
         uses: codecov/codecov-action@v3

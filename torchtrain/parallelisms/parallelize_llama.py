@@ -8,19 +8,13 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-from torch.distributed._tensor import Replicate, Shard
 
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.fsdp import (
-    BackwardPrefetch,
-    FullyShardedDataParallel as FSDP,
-    MixedPrecision,
-    ShardingStrategy,
-)
-from torch.distributed.fsdp.wrap import enable_wrap, wrap
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -33,7 +27,6 @@ from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, che
 
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import logger
-from torchtrain.meta_init import meta_to_real_init_fn
 
 
 # for selective AC
@@ -75,7 +68,6 @@ def checkpoint_wrapper(module, config):
             preserve_rng_state=False,
         )
     elif config.mode == "full":
-        # full AC
         return ptd_checkpoint_wrapper(
             module,
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
@@ -136,28 +128,23 @@ def get_tp_parallel_strategy(
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
-    Apply parallelisms to the model, including PTD parallelisms, and AC.
+    Apply parallelisms and activation checkpointing to the model.
 
-    NOTE: the model passed in preferrablably shoule be a meta device model,
-    otherwise the model needs to be small enough on GPU or can fit into CPU.
+    NOTE: The passed-in model preferably should be on meta device. Otherwise,
+    the model must fit on GPU or CPU memory.
     """
-    # apply PTD parallelisms
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
 
-    # First we apply Tensor Parallelism if it's enabled
     if parallel_dims.tp_enabled:
         tp_mesh = world_mesh["tp"]
-        tp_degree = job_config.training.tensor_parallel_degree
-
         row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
             job_config
         )
 
-        # First:
-        # 1. parallelize the first embedding and the last linear proj layer
-        # 2. parallelize the root norm layer by sequence dim
-        # 3. shard the first layer of transformer block
+        # 1. Parallelize the first embedding and the last linear proj layer
+        # 2. Parallelize the root norm layer over the sequence dim
+        # 3. Shard the first transformer block's inputs
         model = parallelize_module(
             model,
             tp_mesh,
@@ -167,9 +154,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(0),
-                    output_layouts=Shard(-1)
-                    if parallel_dims.loss_parallel_enabled
-                    else Replicate(),
+                    output_layouts=(
+                        Shard(-1)
+                        if parallel_dims.loss_parallel_enabled
+                        else Replicate()
+                    ),
                     use_local_output=not parallel_dims.loss_parallel_enabled,
                 ),
                 "norm": SequenceParallel(sequence_dim=0),
@@ -181,7 +170,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             },
         )
 
-        # apply tensor + sequence parallelism to every transformer block
+        # Apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
             layer_plan = {
                 "attention": PrepareModuleInput(
@@ -203,10 +192,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "ffn_norm": SequenceParallel(sequence_dim=0),
             }
 
-            # adjust num_heads in attention layer to local heads
+            # Adjust attention module to use the local number of heads
             attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // tp_degree
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_degree
+            attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
+            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
 
             parallelize_module(
                 module=transformer_block,
@@ -214,52 +203,34 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 parallelize_plan=layer_plan,
             )
 
-        logger.info("Applied Sequence Parallelism to the model")
+        logger.info("Applied Tensor Parallelism to the model")
 
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"]
-
-        fsdp_config = {
-            "mixed_precision": MixedPrecision(
-                param_dtype=torch.bfloat16,
-                # TODO: see whether we should expose a option to user
-                reduce_dtype=torch.float32,
-            ),
-            "sharding_strategy": ShardingStrategy.FULL_SHARD,
-            "backward_prefetch": BackwardPrefetch.BACKWARD_PRE,
-            # When torch.compile is active, it requires us to set use_orig_params=True
-            "use_orig_params": True,
-            "device_mesh": dp_mesh,
-            "param_init_fn": meta_to_real_init_fn,
-        }
-
+        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+        assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+        # TODO: Expose `reduce_dtype` as a config option.
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+        )
         ac_mode = job_config.activation_checkpoint.mode
-        with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
-            for layer_id, transformer_block in enumerate(model.layers):
-                # apply AC to the transformer block
-                if ac_mode in ("full", "selective"):
-                    # wrap the transformer block with checkpoint wrapper, using config settings
-                    transformer_block = checkpoint_wrapper(
-                        transformer_block, job_config.activation_checkpoint
-                    )
-
-                # Wraps each layer with FSDP
-                model.layers[layer_id] = wrap(transformer_block)
-
-            # wrap the rest layers with FSDP
-            model = wrap(model)
-
+        fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+        for layer_id, transformer_block in enumerate(model.layers):
+            if job_config.activation_checkpoint.mode in ("full", "selective"):
+                transformer_block = checkpoint_wrapper(
+                    transformer_block, job_config.activation_checkpoint
+                )
+            # As an optimization, do not reshard after forward for the last
+            # transformer block since FSDP would prefetch it immediately
+            reshard_after_forward = layer_id < len(model.layers) - 1
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            model.layers[layer_id] = transformer_block
+        model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
-    else:
-        meta_to_real_init_fn(model)
-        model.cuda()
-
-    # TODO(whc) - proposal: remove this call, and assert that we always load a checkpoint
-    # we have now moved from meta to device,
-    # reset parameters for proper initialization
-    model.reset_parameters()
-    logger.info("Model fully initialized via reset_parameters")
 
     return model
