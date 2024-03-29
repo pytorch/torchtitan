@@ -73,6 +73,11 @@ class CheckpointManager:
         self.pg = dist.new_group(backend="gloo")
         self.doit = None
 
+        if self.folder:
+            logger.info(
+                f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
+            )
+
     def reset(self) -> None:
         self.begin = time.monotonic()
 
@@ -114,8 +119,7 @@ class CheckpointManager:
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
         self.reset()
         logger.info(
-            f"Finished saving the checkpoint at step {curr_step} "
-            f"in {time.monotonic() - begin} seconds"
+            f"Finished saving the checkpoint in {time.monotonic() - begin:.2f} seconds"
         )
 
     def load(self, step: int = -1) -> bool:
@@ -136,13 +140,13 @@ class CheckpointManager:
                 return False
             step = max(step_counts)
 
-        logger.info("Loading a checkpoint")
+        logger.info(f"Loading the checkpoint at step {step}")
         begin = time.monotonic()
         dcp.load(
             self.states,
             checkpoint_id=self.create_checkpoint_id(step),
         )
         logger.info(
-            f"Finished loading the checkpoint in {time.monotonic() - begin} seconds"
+            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds"
         )
         return True
