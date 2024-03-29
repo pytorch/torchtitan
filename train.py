@@ -14,6 +14,13 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from pippy.PipelineSchedule import (
+    create_metadata_tensor,
+    extract_metadata_from_tensor,
+    get_stage_shapes,
+    PipelineStageV2Impl,
+    validate_stage_shapes,
+)
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
@@ -195,9 +202,39 @@ def main(job_config: JobConfig):
         pp_degree = pp_mesh.size()
         pp_rank = pp_mesh.get_local_rank()
         logger.info(
-            f"{Color.blue}Extracting pipeline module for stage {pp_mesh.get_local_rank()}{Color.reset}"
+            f"{Color.blue}Extracting pipeline module for stage {pp_rank()}{Color.reset}"
         )
         model = pmod.get_stage_module(pp_mesh.get_local_rank())
+        input_shape = label_shape = (8, 2048)
+        device=torch.device(f"cuda:{int(os.environ["LOCAL_RANK"])}")
+        microbatch = torch.empty(input_shape, dtype=torch.int64, device=device)
+        shape_meta = get_stage_shapes(
+            models=[model],
+            stage_ids=[pp_rank],
+            num_stages=pp_degree,
+            rank=pp_rank,
+            world_size=pp_degree,
+            group=pp_mesh.get_group(),
+            device=device,
+            microbatch=[microbatch],
+        )
+        input_args = [
+            torch.empty(s, device=device) for s in shape_meta[pp_stage_id]["inputs"]
+        ]
+        output_args = [
+            torch.empty(s, device=device) for s in shape_meta[pp_stage_id]["outputs"]
+        ]
+        stage = PipelineStageV2Impl(
+            module=model,
+            stage_id=pp_rank,
+            num_stages: pp_degree,
+            rank=world_mesh.get_rank(),
+            world_size=world_mesh.size(),
+            device=device,
+            input_args=input_args,
+            output_args=output_args,
+        )
+        print(stage)
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
