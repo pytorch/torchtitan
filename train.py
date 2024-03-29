@@ -2,6 +2,7 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import contextlib
+import gc
 import os
 
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
@@ -24,11 +26,7 @@ from torchtrain.float8_linear import build_fp8_linear
 from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.meta_init import meta_model_init
-from torchtrain.metrics import (
-    build_gpu_memory_monitor,
-    build_metric_logger,
-    get_num_params,
-)
+from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
@@ -36,6 +34,9 @@ from torchtrain.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_num_flop_per_token,
+    get_num_params,
+    get_peak_flops,
     init_distributed,
     set_pg_timeouts,
 )
@@ -98,15 +99,22 @@ def build_grad_scaler(model):
     return ShardedGradScaler(enabled=enable_grad_scaling)
 
 
+# Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
+@record
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # take control of garbage collection to avoid stragglers
+    _gc_freq = job_config.training.gc_freq
+    gc.disable()
+    gc.collect(1)
 
     # init world mesh
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
-        sp=job_config.training.sequence_parallel_degree,
+        tp=job_config.training.tensor_parallel_degree,
         pp=job_config.training.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
@@ -156,6 +164,9 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = get_num_params(model)
+    num_flop_per_token = get_num_flop_per_token(
+        model_param_count, model_config, job_config.training.seq_len
+    )
     if _is_local_logging:
         logger.info(
             f"{Color.blue}Model {model_name} {job_config.model.flavor} "
@@ -168,11 +179,25 @@ def main(job_config: JobConfig):
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
+    # obtain the peak flops of bf16 type for MFU calculation
+    gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     # apply PT-D parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
+
+    # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
+    # there are virtual stages
+    if parallel_dims.pp_enabled:
+        pmod = model
+        pp_mesh = world_mesh["pp"]
+        pp_degree = pp_mesh.size()
+        pp_rank = pp_mesh.get_local_rank()
+        logger.info(
+            f"{Color.blue}Extracting pipeline module for stage {pp_mesh.get_local_rank()}{Color.reset}"
+        )
+        model = pmod.get_stage_module(pp_mesh.get_local_rank())
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -186,6 +211,7 @@ def main(job_config: JobConfig):
 
     # torch.compile model for improved performance
     if job_config.training.compile:
+        torch._inductor.config.allow_buffer_reuse = False
         if (
             job_config.activation_checkpoint.mode == "selective"
             and job_config.activation_checkpoint.selective_ac_option == "op"
@@ -226,17 +252,20 @@ def main(job_config: JobConfig):
 
         # variables used to keep info for metrics logging
         losses_since_last_log: List[float] = []
-        nwords_since_last_log = 0
+        ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
+            if train_state.step > 1 and train_state.step % _gc_freq == 0:
+                gc.collect(1)
+
             # get batch
             data_load_start = timer()
             batch = next(data_iterator)
             input_ids, labels = batch
-            nwords_since_last_log += labels.numel()
+            ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
             input_ids = input_ids.cuda()
@@ -292,9 +321,16 @@ def main(job_config: JobConfig):
                     global_avg_loss, global_max_loss = avg_loss, max_loss
 
                 time_delta = timer() - time_last_log
-                wps = nwords_since_last_log / (
+
+                # tokens per second, abbr. as wps by convention
+                wps = ntokens_since_last_log / (
                     time_delta * parallel_dims.model_parallel_size
                 )
+                # model FLOPS utilization
+                # For its definition and calculation, please refer to the PaLM paper:
+                # https://arxiv.org/abs/2204.02311
+                mfu = 100 * num_flop_per_token * wps / gpu_peak_flops
+
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = np.mean(data_loading_times)
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
@@ -305,6 +341,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "wps": wps,
+                    "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -323,7 +360,8 @@ def main(job_config: JobConfig):
                         f"{Color.green}loss: {global_avg_loss:7.4f}  "
                         f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                         f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}{Color.reset}"
+                        f"{Color.blue}wps: {round(wps):,}  "
+                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
                     )
                 else:
                     logger.info(
@@ -331,11 +369,12 @@ def main(job_config: JobConfig):
                         f"loss: {global_avg_loss:7.4f}  "
                         f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                         f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}"
+                        f"wps: {round(wps):,}  "
+                        f"mfu: {mfu:.2f}%"
                     )
 
                 losses_since_last_log.clear()
-                nwords_since_last_log = 0
+                ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = timer()
                 gpu_memory_monitor.reset_peak_stats()

@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from torchtrain.config_manager import JobConfig
 from torchtrain.logging_utils import logger
@@ -92,18 +91,6 @@ def build_gpu_memory_monitor():
     )
 
     return gpu_memory_monitor
-
-
-def get_num_params(model: nn.Module, only_trainable: bool = False) -> int:
-    """
-    Get the total model params
-    Args : only_trainable: whether to only count trainable params
-    """
-    param_list = list(model.parameters())
-    if only_trainable:
-        param_list = [p for p in param_list if p.requires_grad]
-    # unique_params = {p.data_ptr(): p for p in param_list}.values()
-    return sum(p.numel() for p in param_list)
 
 
 class MetricLogger:
