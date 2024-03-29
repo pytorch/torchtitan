@@ -2,6 +2,7 @@
 [job]
 dump_folder = "./outputs"
 description = "LLaMA debug training"
+use_for_integration_test = true
 
 [profiling]
 run_profiler = true
@@ -13,6 +14,11 @@ profile_every_x_iter = 10
 log_freq = 1
 enable_tensorboard = true
 save_tb_folder = "tb"
+
+[checkpoint]
+interval = 3600
+interval_type = "steps"
+folder = ""
 
 [model]
 name = "llama"
@@ -35,9 +41,6 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 2
 fp8_linear = ""
 compile = false
-checkpoint_interval = 3600
-checkpoint_interval_type = "steps"
-checkpoint_folder = ""
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
 
 [activation_checkpoint]
