@@ -119,6 +119,7 @@ class CheckpointManager:
         )
 
     def load(self, step: int = -1) -> bool:
+        logger.info(f"Trying Loading a checkpoint from  '{self.folder}'")
         if not self.folder:
             return False
         if not os.path.isdir(self.folder):
@@ -136,10 +137,12 @@ class CheckpointManager:
                 return False
             step = max(step_counts)
 
-        logger.info("Loading a checkpoint")
+        # We won't have optimizer states to load, if we are loading a seed checkpoint
+        states = {"model": self.states["model"]} if step == 0 else self.states
+        logger.info(f"Loading a checkpoint from step {step}")
         begin = time.monotonic()
         dcp.load(
-            self.states,
+            states,
             checkpoint_id=self.create_checkpoint_id(step),
         )
         logger.info(

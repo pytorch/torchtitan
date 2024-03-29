@@ -5,6 +5,7 @@
 # llama model, i.e. activation checkpointing, etc.
 
 from collections import defaultdict
+from typing import Tuple
 
 import torch
 from torch.distributed._tensor import Replicate, Shard
@@ -42,6 +43,7 @@ no_recompute_list = {
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.c10d_functional.reduce_scatter_tensor.default,
 }
+
 
 # Uses PTD FSDP AC wrapper
 # currently selective per op and per layer checkpointing are supported
@@ -83,7 +85,6 @@ def checkpoint_wrapper(module, config):
         )
 
     elif config.mode == "selective" and config.selective_ac_option.isdigit():
-
         """enables selective checkpointing of candidate layers.
         Usage:
         'selective_ac_option' with a positive 'int' value in config controls which layers to checkpoint.
@@ -116,6 +117,23 @@ def checkpoint_wrapper(module, config):
         )
 
 
+def get_tp_parallel_strategy(
+    job_config: JobConfig,
+) -> Tuple[RowwiseParallel, ColwiseParallel]:
+    """Get the parallel strategy for the transformer model.
+
+    This function handles the special case of using float8 with tensor parallelism.
+    """
+    if job_config.training.fp8_linear == "dynamic":
+        from float8_experimental.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+        )
+
+        return Float8RowwiseParallel, Float8ColwiseParallel
+    return RowwiseParallel, ColwiseParallel
+
+
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply parallelisms to the model, including PTD parallelisms, and AC.
@@ -127,14 +145,19 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if parallel_dims.pp_enabled:
         raise NotImplementedError("PP not implemented yet.")
 
-    # First we apply Sequence Parallelism if it's enabled
-    if parallel_dims.sp_enabled:
-        tp_mesh = world_mesh["sp"]
-        sp_degree = job_config.training.sequence_parallel_degree
+    # First we apply Tensor Parallelism if it's enabled
+    if parallel_dims.tp_enabled:
+        tp_mesh = world_mesh["tp"]
+        tp_degree = job_config.training.tensor_parallel_degree
+
+        row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
+            job_config
+        )
 
         # First:
         # 1. parallelize the first embedding and the last linear proj layer
-        # 2. shard the first layer of transformer block
+        # 2. parallelize the root norm layer by sequence dim
+        # 3. shard the first layer of transformer block
         model = parallelize_module(
             model,
             tp_mesh,
@@ -142,7 +165,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "embeddings.tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
                 ),
-                "output": ColwiseParallel(
+                "output": col_parallel_strategy(
                     input_layouts=Shard(0),
                     output_layouts=Shard(-1)
                     if parallel_dims.loss_parallel_enabled
@@ -158,32 +181,32 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             },
         )
 
-        # apply sequence parallelism to every transformer block
+        # apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(0), None),
                     desired_input_layouts=(Replicate(), None),
                 ),
-                "attention.wq": ColwiseParallel(),
-                "attention.wk": ColwiseParallel(),
-                "attention.wv": ColwiseParallel(),
-                "attention.wo": RowwiseParallel(output_layouts=Shard(0)),
+                "attention.wq": col_parallel_strategy(),
+                "attention.wk": col_parallel_strategy(),
+                "attention.wv": col_parallel_strategy(),
+                "attention.wo": row_parallel_strategy(output_layouts=Shard(0)),
                 "attention_norm": SequenceParallel(sequence_dim=0),
                 "feed_forward": PrepareModuleInput(
                     input_layouts=(Shard(0),),
                     desired_input_layouts=(Replicate(),),
                 ),
-                "feed_forward.w1": ColwiseParallel(),
-                "feed_forward.w2": RowwiseParallel(output_layouts=Shard(0)),
-                "feed_forward.w3": ColwiseParallel(),
+                "feed_forward.w1": col_parallel_strategy(),
+                "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(0)),
+                "feed_forward.w3": col_parallel_strategy(),
                 "ffn_norm": SequenceParallel(sequence_dim=0),
             }
 
             # adjust num_heads in attention layer to local heads
             attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // sp_degree
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // sp_degree
+            attn_layer.n_heads = attn_layer.n_heads // tp_degree
+            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_degree
 
             parallelize_module(
                 module=transformer_block,
@@ -210,10 +233,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             "param_init_fn": meta_to_real_init_fn,
         }
 
+        ac_mode = job_config.activation_checkpoint.mode
         with enable_wrap(wrapper_cls=FSDP, **fsdp_config):
             for layer_id, transformer_block in enumerate(model.layers):
                 # apply AC to the transformer block
-                if job_config.activation_checkpoint.mode in ("full", "selective"):
+                if ac_mode in ("full", "selective"):
                     # wrap the transformer block with checkpoint wrapper, using config settings
                     transformer_block = checkpoint_wrapper(
                         transformer_block, job_config.activation_checkpoint
@@ -225,11 +249,14 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # wrap the rest layers with FSDP
             model = wrap(model)
 
+        if ac_mode in ("full", "selective"):
+            logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
     else:
         meta_to_real_init_fn(model)
         model.cuda()
 
+    # TODO(whc) - proposal: remove this call, and assert that we always load a checkpoint
     # we have now moved from meta to device,
     # reset parameters for proper initialization
     model.reset_parameters()

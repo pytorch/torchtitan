@@ -88,6 +88,46 @@ def init_distributed(job_config):
     )
 
 
+def get_num_params(model: torch.nn.Module, only_trainable: bool = False) -> int:
+    """
+    Get the total model params
+    Args : only_trainable: whether to only count trainable params
+    """
+    param_list = list(model.parameters())
+    if only_trainable:
+        param_list = [p for p in param_list if p.requires_grad]
+    # unique_params = {p.data_ptr(): p for p in param_list}.values()
+    return sum(p.numel() for p in param_list)
+
+
+def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
+    l, h, q, t = (
+        model_config.n_layers,
+        model_config.n_heads,
+        model_config.dim // model_config.n_heads,
+        seq_len,
+    )
+    flop_per_token = 6 * num_params + 12 * l * h * q * t
+    return flop_per_token
+
+
+# hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
+def get_peak_flops(device_name: str) -> int:
+    if "A100" in device_name:
+        return 312e12
+    elif "H100" in device_name:
+        # data from https://www.nvidia.com/en-us/data-center/h100/
+        # NOTE: Specifications are one-half lower without sparsity.
+        if "NVL" in device_name:
+            return 1979e12
+        elif "PCIe" in device_name:
+            return 756e12
+        else:  # for SXM and other variants
+            return 989e12
+    else:  # for other GPU types, assume A100
+        return 312e12
+
+
 @dataclass
 class Color:
     black = "\033[30m"

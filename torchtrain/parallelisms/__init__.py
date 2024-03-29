@@ -16,7 +16,7 @@ models_parallelize_fns = {
 @dataclass
 class ParallelDims:
     dp: int
-    sp: int
+    tp: int
     pp: int
     world_size: int
     enable_loss_parallel: bool
@@ -25,21 +25,21 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp, sp, pp = self.dp, self.sp, self.pp
+        dp, tp, pp = self.dp, self.tp, self.pp
         if dp == -1:
-            self.dp = dp = self.world_size // (sp * pp)
+            self.dp = dp = self.world_size // (tp * pp)
         assert dp >= 1, dp
-        assert sp >= 1, sp
+        assert tp >= 1, tp
         assert pp >= 1, pp
         assert (
-            dp * sp * pp == self.world_size
-        ), f"Invalid parallel dims: dp({dp}) * sp({sp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+            dp * tp * pp == self.world_size
+        ), f"Invalid parallel dims: dp({dp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
 
     def build_mesh(self, device_type):
         dims = []
         names = []
         for d, name in zip(
-            [self.dp, self.sp, self.pp], ["dp", "sp", "pp"], strict=True
+            [self.dp, self.tp, self.pp], ["dp", "tp", "pp"], strict=True
         ):
             if d > 1:
                 dims.append(d)
@@ -53,8 +53,8 @@ class ParallelDims:
         return self.dp > 1
 
     @property
-    def sp_enabled(self):
-        return self.sp > 1
+    def tp_enabled(self):
+        return self.tp > 1
 
     @property
     def pp_enabled(self):
@@ -62,8 +62,8 @@ class ParallelDims:
 
     @property
     def loss_parallel_enabled(self):
-        return self.sp > 1 and self.enable_loss_parallel
+        return self.tp > 1 and self.enable_loss_parallel
 
     @cached_property
     def model_parallel_size(self):
-        return self.sp * self.pp
+        return self.tp * self.pp
