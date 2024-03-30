@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtrain.fused_rms_norm import fused_rms_norm_fn
+from torchtrain.modules.norms import NormType
 
 
 
@@ -28,7 +29,7 @@ class ModelArgs:
     depth_init: bool = (
         True  # initialization uses each unique layer_id or total model layer count
     )
-    norm_type: str = "rmsnorm"
+    norm_type: NormType = NormType.fused_rms
 
 
 
@@ -334,14 +335,9 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        if model_args.norm_type == "rmsnorm":
-            self.attention_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-            self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        elif model_args.norm_type == "fusedrmsnorm":
-            self.attention_norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
-            self.ffn_norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        else:
-            raise NotImplementedError(f"{model_args.norm_type} is not supported")
+        self.attention_norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+        self.ffn_norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
@@ -406,12 +402,7 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        if model_args.norm_type == "rmsnorm":
-            self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        elif model_args.norm_type == "fusedrmsnorm":
-            self.norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        else:
-            raise NotImplementedError(f"{model_args.norm_type} is not supported")
+        self.norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()

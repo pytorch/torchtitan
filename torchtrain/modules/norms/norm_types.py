@@ -12,10 +12,10 @@ class NormType(StrEnum):
     np_layernorm = auto()
 
     # RMSNorm
-    rmsnorm = auto()
+    rms = auto()
 
     # Fused RMSNorm
-    fused_rmsnorm = auto()
+    fused_rms = auto()
 
 
 class NormBase(nn.Module):
@@ -36,7 +36,7 @@ class NormBase(nn.Module):
         self.eps = eps
         self.normalized_shape = size,
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(self.normalized_shape,)
+            self.weight = nn.Parameter(torch.ones(self.normalized_shape,))
         else:
             self.register_parameter("weight", None)
 
@@ -45,19 +45,23 @@ class NormBase(nn.Module):
         raise NotImplementedError
 
     @classmethod
-    def build(cls, config, dim: int, **kwargs) -> NormBase:
-        if config.model.norm_type == NormType.default:
-            return LayerNorm(config, size=dim,  **kwargs)
-        elif config == NormType.np_layernorm:
-            return LayerNorm(config, size=dim, **kwargs)
-        elif config == NormType.rms:
-            return RMSNorm(config, size=dim, **kwargs)
-        elif config.layer_norm_type == NormType.fused_rms:
-            return FusedRMSNorm(config, size=dim, **kwargs)
+    def build(cls, norm_type: NormType, dim: int, **kwargs) -> NormBase:
+        if norm_type == NormType.layernorm:
+            return LayerNorm(size=dim,  **kwargs)
+        elif norm_type == NormType.np_layernorm:
+            return NPLayerNorm(size=dim, **kwargs)
+        elif norm_type == NormType.rms:
+            return RMSNorm(size=dim, **kwargs)
+        elif norm_type == NormType.fused_rms:
+            return FusedRMSNorm(size=dim, **kwargs)
         else:
-            raise NotImplementedError(f"Unknown Norm type: '{config.norm_type}'")
+            raise NotImplementedError(f"Unknown Norm type: '{norm_type}'")
 
     def init_weights(self):
+        if self.weight is not None:
+            torch.nn.init.ones_(self.weight)  # type: ignore
+
+    def reset_parameters(self):
         if self.weight is not None:
             torch.nn.init.ones_(self.weight)  # type: ignore
 
