@@ -1,11 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
+from abc import abstractmethod
+from enum import auto
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchtrain.utils import StrEnum
-from enum import auto
-from abc import abstractmethod
-from typing import Optional, Tuple, Union
+
 
 class NormType(StrEnum):
     # default classical layernorm without bias
@@ -26,20 +30,24 @@ class NormBase(nn.Module):
     Base class for normalization layers.
     Inspiration from OLMo LLM design
     """
+
     def __init__(
         self,
         size: int,
         eps: float = 1e-06,
         *,
         elementwise_affine: Optional[bool] = True,
-
     ):
         super().__init__()
 
         self.eps = eps
-        self.normalized_shape = size,
+        self.normalized_shape = (size,)
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(self.normalized_shape,))
+            self.weight = nn.Parameter(
+                torch.ones(
+                    self.normalized_shape,
+                )
+            )
         else:
             self.register_parameter("weight", None)
 
@@ -50,7 +58,7 @@ class NormBase(nn.Module):
     @classmethod
     def build(cls, norm_type: NormType, dim: int, **kwargs) -> nn.Module:
         if norm_type == NormType.layernorm:
-            return LayerNorm(dim,  **kwargs)
+            return LayerNorm(dim, **kwargs)
         elif norm_type == NormType.np_layernorm:
             return NPLayerNorm(dim, **kwargs)
         elif norm_type == NormType.rms:
@@ -70,14 +78,13 @@ class NormBase(nn.Module):
 
 
 class LayerNorm(NormBase):
-    """ Classical LayerNorm, without bias. """
+    """Classical LayerNorm, without bias."""
 
     def __init__(
         self,
         dim: int,
         eps: float = 1e-06,
         elementwise_affine: Optional[bool] = True,
-
     ):
         super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
 
@@ -86,14 +93,13 @@ class LayerNorm(NormBase):
 
 
 class NPLayerNorm(NormBase):
-    """ Non Parametric LayerNorm - no affine transform. """
+    """Non Parametric LayerNorm - no affine transform."""
 
     def __init__(
         self,
         dim: int,
         eps: float = 1e-6,
         elementwise_affine: Optional[bool] = False,
-
     ):
         super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
 
@@ -102,7 +108,7 @@ class NPLayerNorm(NormBase):
 
 
 class FusedRMSNorm(NormBase):
-    """ Fused RMS Norm """
+    """Fused RMS Norm"""
 
     def __init__(
         self,
@@ -118,7 +124,7 @@ class FusedRMSNorm(NormBase):
         self.fused_rms_norm_fn = fused_rms_norm_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ leverages Triton Fused RMS Norm kernel """
+        """leverages Triton Fused RMS Norm kernel"""
         return self.fused_rms_norm_fn(
             x,
             self.weight,
@@ -141,7 +147,7 @@ class RMSNorm(NormBase):
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__(size=dim, eps = eps)
+        super().__init__(size=dim, eps=eps)
 
     def _norm(self, x: torch.Tensor):
         """

@@ -1,12 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+import enum
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union, Sequence, Mapping, Any
-import enum
-
+from typing import Any, Mapping, Sequence, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -164,11 +163,13 @@ class Style:
     normal = "\033[22m"
     reset = "\033[0m"
 
+
 class StrEnum(str, enum.Enum):
     """
     Comparable to Python 3.11 and higher enum.StrEnum, with enforced lower case for auto.
     Built here for backwards compatibility.
     """
+
     def __new__(cls, value, *args, **kwargs):
         if not isinstance(value, (str, enum.auto)):
             raise TypeError(

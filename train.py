@@ -137,7 +137,6 @@ def main(job_config: JobConfig):
 
     model_name = job_config.model.name
 
-
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)

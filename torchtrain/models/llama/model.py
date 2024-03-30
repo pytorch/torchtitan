@@ -8,8 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtrain.modules.norms import NormType, NormBase
-
+from torchtrain.modules.norms import NormBase, NormType
 
 
 @dataclass
@@ -29,7 +28,6 @@ class ModelArgs:
         True  # initialization uses each unique layer_id or total model layer count
     )
     norm_type: NormType = NormType.fused_rms
-
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -334,9 +332,12 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        self.attention_norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
-        self.ffn_norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
-
+        self.attention_norm = NormBase.build(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+        self.ffn_norm = NormBase.build(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
@@ -401,7 +402,9 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        self.norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+        self.norm = NormBase.build(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
