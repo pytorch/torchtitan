@@ -3,19 +3,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchtrain.utils import StrEnum
+from enum import auto
+from abc import abstractmethod
+from typing import Optional, Tuple, Union
 
 class NormType(StrEnum):
     # default classical layernorm without bias
-    layernorm = auto()
+    layernorm = "layernorm"
 
     # A non-parametric (no affine transform) version of LayerNorm.
-    np_layernorm = auto()
+    np_layernorm = "np_layernorm"
 
     # RMSNorm
-    rms = auto()
+    rms = "rms"
 
     # Fused RMSNorm
-    fused_rms = auto()
+    fused_rms = "fused_rms"
 
 
 class NormBase(nn.Module):
@@ -45,15 +48,15 @@ class NormBase(nn.Module):
         raise NotImplementedError
 
     @classmethod
-    def build(cls, norm_type: NormType, dim: int, **kwargs) -> NormBase:
+    def build(cls, norm_type: NormType, dim: int, **kwargs) -> nn.Module:
         if norm_type == NormType.layernorm:
-            return LayerNorm(size=dim,  **kwargs)
+            return LayerNorm(dim,  **kwargs)
         elif norm_type == NormType.np_layernorm:
-            return NPLayerNorm(size=dim, **kwargs)
+            return NPLayerNorm(dim, **kwargs)
         elif norm_type == NormType.rms:
-            return RMSNorm(size=dim, **kwargs)
+            return RMSNorm(dim, **kwargs)
         elif norm_type == NormType.fused_rms:
-            return FusedRMSNorm(size=dim, **kwargs)
+            return FusedRMSNorm(dim, **kwargs)
         else:
             raise NotImplementedError(f"Unknown Norm type: '{norm_type}'")
 
@@ -106,17 +109,17 @@ class FusedRMSNorm(NormBase):
         dim: int,
         eps: float = 1e-6,
     ):
-        super().__init__(size=size, elementwise_affine=True, eps=eps)
+        super().__init__(size=dim, elementwise_affine=True, eps=eps)
         try:
-            from fused_rms_norm import fused_rms_norm_fn
+            from torchtrain.modules.norms.fused_rms_norm import fused_rms_norm_fn
         except ImportError:
-            raise ImportError("Please ensure fused_rms_norm.py is in the same directory as your python file")
+            raise ImportError("Please ensure fused_rms_norm.py is available.")
 
         self.fused_rms_norm_fn = fused_rms_norm_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ leverages Triton Fused RMS Norm kernel """
-        return fused_rms_norm_fn(
+        return self.fused_rms_norm_fn(
             x,
             self.weight,
             eps=self.eps,

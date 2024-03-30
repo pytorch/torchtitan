@@ -24,6 +24,7 @@ folder = ""
 [model]
 name = "llama"
 flavor = "debugmodel"
+norm_type = "rms"
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]

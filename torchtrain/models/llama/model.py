@@ -8,8 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtrain.fused_rms_norm import fused_rms_norm_fn
-from torchtrain.modules.norms import NormType
+from torchtrain.modules.norms import NormType, NormBase
 
 
 
@@ -335,8 +334,8 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        self.attention_norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
-        self.ffn_norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+        self.attention_norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+        self.ffn_norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
 
 
         if model_args.depth_init:
@@ -402,7 +401,7 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        self.norm = NormBase.Build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
+        self.norm = NormBase.build(model_args.norm_type, dim = model_args.dim, eps = model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
