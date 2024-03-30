@@ -118,6 +118,12 @@ class JobConfig:
             help="which model config to train",
         )
         self.parser.add_argument(
+            "--model.norm_type",
+            type=str,
+            default="rms",
+            help="Layer Normalization type to use [layernorm, np_layernorm, rms, fused_rms]"
+        )
+        self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
             default="./torchtrain/datasets/tokenizer/tokenizer.model",
