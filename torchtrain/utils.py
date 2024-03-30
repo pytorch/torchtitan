@@ -5,7 +5,7 @@ import enum
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Mapping, Sequence, Union
+from typing import Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -180,5 +180,5 @@ class StrEnum(str, enum.Enum):
     def __str__(self):
         return str(self.value)
 
-    def _generate_next_value_(name, *_):
-        return name.lower()
+    def _generate_next_value_(self, item, *_):
+        return item.lower()

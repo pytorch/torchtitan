@@ -2,8 +2,8 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 from abc import abstractmethod
-from enum import auto
-from typing import Optional, Tuple, Union
+from importlib.util import find_spec
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -116,10 +116,13 @@ class FusedRMSNorm(NormBase):
         eps: float = 1e-6,
     ):
         super().__init__(size=dim, elementwise_affine=True, eps=eps)
-        try:
+        if find_spec("torchtrain.modules.norms.fused_rms_norm"):
             from torchtrain.modules.norms.fused_rms_norm import fused_rms_norm_fn
-        except ImportError:
-            raise ImportError("Please ensure fused_rms_norm.py is available.")
+        else:
+            raise ImportError(
+                "The 'torchtrain.modules.norms.fused_rms_norm' module is not available. "
+                "Please ensure that the 'fused_rms_norm.py' file is present in the specified location."
+            )
 
         self.fused_rms_norm_fn = fused_rms_norm_fn
 
