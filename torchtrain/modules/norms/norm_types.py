@@ -25,18 +25,18 @@ class NormBase(nn.Module):
     """
     def __init__(
         self,
-        config: ModelConfig,
+        size: int,
+        eps: float = 1e-06,
         *,
-        size: Optional[int] = None,
         elementwise_affine: Optional[bool] = True,
-        eps: float = 1e-05,
+
     ):
         super().__init__()
-        self.config = config
+
         self.eps = eps
-        self.normalized_shape = (size or config.d_model,)
+        self.normalized_shape = size,
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=config.init_device))
+            self.weight = nn.Parameter(torch.ones(self.normalized_shape,)
         else:
             self.register_parameter("weight", None)
 
@@ -45,15 +45,15 @@ class NormBase(nn.Module):
         raise NotImplementedError
 
     @classmethod
-    def build(cls, config: ModelConfig, size: Optional[int] = None, **kwargs) -> LayerNormBase:
-        if config.layer_norm_type == LayerNormType.default:
-            return LayerNorm(config, size=size,  **kwargs)
-        elif config.layer_norm_type == LayerNormType.nonparametric:
-            return LayerNorm(config, size=size, **kwargs)
-        elif config.layer_norm_type == LayerNormType.rms:
-            return RMSNorm(config, size=size, **kwargs)
-        elif config.layer_norm_type == LayerNormType.fused_rms:
-            return FusedRMSNorm(config, size=size, **kwargs)
+    def build(cls, config, dim: int, **kwargs) -> NormBase:
+        if config.model.norm_type == NormType.default:
+            return LayerNorm(config, size=dim,  **kwargs)
+        elif config == NormType.np_layernorm:
+            return LayerNorm(config, size=dim, **kwargs)
+        elif config == NormType.rms:
+            return RMSNorm(config, size=dim, **kwargs)
+        elif config.layer_norm_type == NormType.fused_rms:
+            return FusedRMSNorm(config, size=dim, **kwargs)
         else:
             raise NotImplementedError(f"Unknown Norm type: '{config.norm_type}'")
 
@@ -67,50 +67,42 @@ class LayerNorm(NormBase):
 
     def __init__(
         self,
-        size: Optional[int] = None,
+        dim: int,
+        eps: float = 1e-06,
         elementwise_affine: Optional[bool] = True,
-        eps: float = 1e-05,
+
     ):
-        super().__init__(size=size, elementwise_affine=elementwise_affine, eps=eps)
+        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
 
-class RMSNorm(NormBase):
-    """ RMS Norm """
+
+class NPLayerNorm(NormBase):
+    """ Non Parametric LayerNorm - no affine transform. """
 
     def __init__(
         self,
-        config: ModelConfig,
-        size: Optional[int] = None,
-        elementwise_affine: Optional[bool] = None,
-        eps: float = 1e-5,
+        dim: int,
+        eps: float = 1e-6,
+        elementwise_affine: Optional[bool] = False,
+
     ):
-        super().__init__(config, size=size, elementwise_affine=elementwise_affine, eps=eps)
+        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        start_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = x.to(start_dtype)
+        return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
 
-        if self.weight is not None:
-            return self.weight * x
-        else:
-            return x
 
 class FusedRMSNorm(NormBase):
     """ Fused RMS Norm """
 
     def __init__(
         self,
-        config: ModelConfig,
-        size: Optional[int] = None,
-        elementwise_affine: Optional[bool] = None,
-        eps: float = 1e-5,
+        dim: int,
+        eps: float = 1e-6,
     ):
-        super().__init__(config, size=size, elementwise_affine=elementwise_affine, eps=eps)
+        super().__init__(size=size, elementwise_affine=True, eps=eps)
         try:
             from fused_rms_norm import fused_rms_norm_fn
         except ImportError:
@@ -125,3 +117,48 @@ class FusedRMSNorm(NormBase):
             self.weight,
             eps=self.eps,
         )
+
+
+class RMSNorm(NormBase):
+    """
+    Initialize the RMSNorm normalization layer.
+
+    Args:
+        dim (int): The dimension of the input tensor.
+        eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+
+    Attributes:
+        eps (float): A small value added to the denominator for numerical stability.
+        weight (nn.Parameter): Learnable scaling parameter.
+
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__(size=dim, eps = eps)
+
+    def _norm(self, x: torch.Tensor):
+        """
+        Apply the RMSNorm normalization to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The normalized tensor.
+
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass through the RMSNorm layer.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The output tensor after applying RMSNorm.
+
+        """
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight

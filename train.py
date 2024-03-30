@@ -136,6 +136,7 @@ def main(job_config: JobConfig):
 
     model_name = job_config.model.name
 
+
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
@@ -161,6 +162,7 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
 
     with torch.device("meta"):
