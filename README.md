@@ -19,6 +19,8 @@ Install PyTorch from source or install the latest pytorch nightly, then install 
 pip install -r requirements.txt
 ```
 
+torchtrain requires `torch >= 2.4.0.dev20240329` (the nightly as of March 29, 2024).
+
 Install additional dev requirements if you want to contribute to the repo:
 ```
 pip install -r dev-requirements.txt

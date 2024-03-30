@@ -1,4 +1,5 @@
-torch >= 2.2.0.dev
+--find-links https://download.pytorch.org/whl/nightly/torch/
+torch >= 2.4.0.dev20240329
 sentencepiece
 datasets
 tomli >= 1.1.0 ; python_version < "3.11"
