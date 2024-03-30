@@ -4,7 +4,9 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import Union, Sequence, Mapping, Any
+import enum
+
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -161,3 +163,21 @@ class Style:
     dim = "\033[2m"
     normal = "\033[22m"
     reset = "\033[0m"
+
+class StrEnum(str, enum.Enum):
+    """
+    Comparable to Python 3.11 and higher enum.StrEnum, with enforced lower case for auto.
+    Built here for backwards compatibility.
+    """
+    def __new__(cls, value, *args, **kwargs):
+        if not isinstance(value, (str, enum.auto)):
+            raise TypeError(
+                f"StrEnum can only hold strings! {value!r} is of {type(value)}"
+            )
+        return super().__new__(cls, value, *args, **kwargs)
+
+    def __str__(self):
+        return str(self.value)
+
+    def _generate_next_value_(name, *_):
+        return name.lower()

@@ -2,6 +2,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchtrain.utils import StrEnum
+
+class NormType(StrEnum):
+    # default classical layernorm without bias
+    layernorm = auto()
+
+    # A non-parametric (no affine transform) version of LayerNorm.
+    np_layernorm = auto()
+
+    # RMSNorm
+    rmsnorm = auto()
+
+    # Fused RMSNorm
+    fused_rmsnorm = auto()
 
 
 class NormBase(nn.Module):
