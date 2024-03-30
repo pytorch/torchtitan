@@ -8,6 +8,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchtrain.fused_rms_norm import fused_rms_norm_fn
+
+
 
 @dataclass
 class ModelArgs:
@@ -25,6 +28,27 @@ class ModelArgs:
     depth_init: bool = (
         True  # initialization uses each unique layer_id or total model layer count
     )
+    norm_type: str = "rmsnorm"
+
+
+class FusedRMSNorm(torch.nn.Module):
+    def __init__(self, hidden_size, eps=1e-5, device=None, dtype=None):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        #self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+
+    def forward(self, x, ):
+        return fused_rms_norm_fn(
+            x,
+            self.weight,
+            eps=self.eps,
+        )
+
 
 
 class RMSNorm(torch.nn.Module):
@@ -379,8 +403,15 @@ class TransformerBlock(nn.Module):
         )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
-        self.attention_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+
+        if model_args.norm_type == "rmsnorm":
+            self.attention_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+            self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        elif model_args.norm_type == "fusedrmsnorm":
+            self.attention_norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
+            self.ffn_norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        else:
+            raise NotImplementedError(f"{model_args.norm_type} is not supported")
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
@@ -445,7 +476,13 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        if model_args.norm_type == "rmsnorm":
+            self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        elif model_args.norm_type == "fusedrmsnorm":
+            self.norm = FusedRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        else:
+            raise NotImplementedError(f"{model_args.norm_type} is not supported")
+
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
