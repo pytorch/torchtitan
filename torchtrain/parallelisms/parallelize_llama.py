@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -143,14 +144,20 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
 
         # 1. Parallelize the first embedding and the last linear proj layer
-        # 2. Parallelize the root norm layer over the sequence dim
-        # 3. Shard the first transformer block's inputs
+        # 2. Prepare the freq_cis in rotary embedding as dtensor
+        # 3. Parallelize the root norm layer over the sequence dim
+        # 4. Shard the first transformer block's inputs
         model = parallelize_module(
             model,
             tp_mesh,
             {
                 "embeddings.tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
+                ),
+                "embeddings": PrepareModuleOutput(
+                    output_layouts=(None, Replicate()),
+                    desired_output_layouts=(None, Replicate()),
+                    use_local_output=False,
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(0),
@@ -174,8 +181,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         for layer_id, transformer_block in enumerate(model.layers):
             layer_plan = {
                 "attention": PrepareModuleInput(
-                    input_layouts=(Shard(0), Replicate()),
-                    desired_input_layouts=(Replicate(), Replicate()),
+                    input_layouts=(Shard(0), None),
+                    desired_input_layouts=(Replicate(), None),
                 ),
                 "attention.wq": col_parallel_strategy(use_local_output=False),
                 "attention.wk": col_parallel_strategy(use_local_output=False),
