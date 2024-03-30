@@ -174,12 +174,12 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         for layer_id, transformer_block in enumerate(model.layers):
             layer_plan = {
                 "attention": PrepareModuleInput(
-                    input_layouts=(Shard(0), None),
-                    desired_input_layouts=(Replicate(), None),
+                    input_layouts=(Shard(0), Replicate()),
+                    desired_input_layouts=(Replicate(), Replicate()),
                 ),
-                "attention.wq": col_parallel_strategy(),
-                "attention.wk": col_parallel_strategy(),
-                "attention.wv": col_parallel_strategy(),
+                "attention.wq": col_parallel_strategy(use_local_output=False),
+                "attention.wk": col_parallel_strategy(use_local_output=False),
+                "attention.wv": col_parallel_strategy(use_local_output=False),
                 "attention.wo": row_parallel_strategy(output_layouts=Shard(0)),
                 "attention_norm": SequenceParallel(sequence_dim=0),
                 "feed_forward": PrepareModuleInput(
@@ -191,11 +191,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "feed_forward.w3": col_parallel_strategy(),
                 "ffn_norm": SequenceParallel(sequence_dim=0),
             }
-
-            # Adjust attention module to use the local number of heads
-            attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
 
             parallelize_module(
                 module=transformer_block,
