@@ -128,57 +128,7 @@ def _rms_norm_bwd_kernel_sm(
     tl.store(DW + row_block_id * N + cols, dw, mask=mask)
 
 
-"""
-# using the sm count to determine the number of rows per program
-# appears to be slightly faster than this bwd kernel below.
-@triton.jit
-def _rms_norm_bwd_kernel(
-    X,  stride_x,
-    W,
-    DY, stride_dy,
-    DX, stride_dx,
-    Rstd,
-    DW,
-    eps,
-    M,  # num rows
-    N,  # num cols
-    rows_per_program,
-    block_N: tl.constexpr,
-):
-    row_block_id = tl.program_id(0)
-    row_start = row_block_id * rows_per_program
-    cols = tl.arange(0, block_N)
-    mask = cols < N
-
-    # Load weights
-    w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
-
-    # Accumulate gradients for weights
-    dw = tl.zeros((block_N,), dtype=tl.float32)
-
-    row_end = min(row_start + rows_per_program, M)
-    for row in range(row_start, row_end):
-        # Load input, output gradient, and reciprocal standard deviation
-        x = tl.load(X + row * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
-        dy = tl.load(DY + row * stride_dy + cols, mask=mask, other=0.0).to(tl.float32)
-        rstd = tl.load(Rstd + row)
-
-        # Compute normalized input and gradients
-        x_hat = x * rstd
-        wdy = w * dy
-        dw += dy * x_hat
-        c1 = tl.sum(x_hat * wdy, axis=0) / N
-        dx = (wdy - x_hat * c1) * rstd
-
-        # Store input gradient
-        tl.store(DX + row * stride_dx + cols, dx, mask=mask)
-
-    # Store weight gradients
-    tl.store(DW + cols, dw, mask=mask)
-"""
-
-
-class ttt_RMSNorm(torch.autograd.Function):
+class TTRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps):
         x_shape_start = x.shape
@@ -268,54 +218,12 @@ class ttt_RMSNorm(torch.autograd.Function):
         return dx, dw, None
 
 
-"""
-    # this is an alternative approach - but it seems to be just slightly slower than sm approach.
-    @staticmethod
-    def backward(ctx, dy):
-        x, weight, rstd = ctx.saved_tensors
-        eps = ctx.eps
-        x_shape_start = ctx.x_shape_start
-
-        # Flatten input and output gradients
-        dy = dy.reshape(-1, dy.shape[-1])
-        if dy.stride(-1) != 1:
-            dy = dy.contiguous()
-
-        M, N = dy.shape
-        dx = torch.empty_like(x)
-        dw = torch.empty_like(weight)
-
-        max_size = 65536 // x.element_size()
-        block_N = min(max_size, triton.next_power_of_2(N))
-        rows_per_program = 1024
-
-        if N > block_N:
-            raise ValueError(f"N {N} must be <= {block_N=}")
-
-        grid = lambda meta: (triton.cdiv(M, rows_per_program),)
-        _rms_norm_bwd_kernel[grid](
-            x, x.stride(0),
-            weight,
-            dy, dy.stride(0),
-            dx, dx.stride(0),
-            rstd,
-            dw,
-            eps,
-            M, N,
-            rows_per_program,
-            block_N,
-        )
-        dx = dx.reshape(x_shape_start)
-        return dx, dw, None
-    """
-
-
 def fused_rms_norm_fn(
     x,
     weight,
     eps=1e-6,
 ):
-    return ttt_RMSNorm.apply(
+    return TTRMSNorm.apply(
         x,
         weight,
         eps,
