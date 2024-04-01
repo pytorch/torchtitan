@@ -214,6 +214,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+        fully_shard(model.embeddings, **fsdp_config)
         for layer_id, transformer_block in enumerate(model.layers):
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
