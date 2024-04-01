@@ -221,7 +221,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 )
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = False  # layer_id < len(model.layers) - 1
+            reshard_after_forward = layer_id < len(model.layers) - 1
             fully_shard(
                 transformer_block,
                 **fsdp_config,
