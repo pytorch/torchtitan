@@ -7,8 +7,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-from torchtrain.modules.norms import NormBase, NormType
+from torchtrain.norms import create_norm
 
 
 @dataclass
@@ -27,7 +26,7 @@ class ModelArgs:
     depth_init: bool = (
         True  # initialization uses each unique layer_id or total model layer count
     )
-    norm_type: NormType = NormType.fused_rms
+    norm_type: str = "fusedrms"
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -332,10 +331,10 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        self.attention_norm = NormBase.build(
+        self.attention_norm = create_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
-        self.ffn_norm = NormBase.build(
+        self.ffn_norm = create_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
@@ -402,7 +401,7 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        self.norm = NormBase.build(
+        self.norm = create_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 

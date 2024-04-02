@@ -4,18 +4,196 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-# Credit
-# Tri Dao's Triton LayerNorm: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/triton/layer_norm.py
-# Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
-
-# pylint: skip-file
-# flake8: noqa
 
 import math
 
+from abc import abstractmethod
+
+from typing import Optional
+
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 import triton
 import triton.language as tl
+
+
+def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
+    """
+    Creates the specified normalization layer based on the norm_type.
+
+    Args:
+        norm_type (str): The type of normalization layer to create.
+            Supported types: 'layernorm', 'nplayernorm', 'rmsnorm', 'fusedrmsnorm'.
+        dim (int): The dimension of the normalization layer.
+        eps (float, optional): The epsilon value for numerical stability. Defaults to 1e-6.
+
+    Returns:
+        The created normalization layer.
+
+    Raises:
+        NotImplementedError: If an unknown norm_type is provided.
+    """
+    norm_type = norm_type.lower()  # Normalize to lowercase
+
+    if norm_type in ("layernorm", "layer_norm"):
+        return LayerNorm(dim, eps=eps)
+    elif norm_type in ("np_layernorm", "np_layer_norm", "nplayernorm"):
+        return NPLayerNorm(dim, eps=eps)
+    elif norm_type in ("rms", "rmsnorm", "rms_norm", "rms_layernorm"):
+        return RMSNorm(dim, eps=eps)
+    elif norm_type in (
+        "fused_rms",
+        "fused_rmsnorm",
+        "fused_rms_norm",
+        "fused_rms_layernorm",
+        "fusedrms",
+        "fusedrmsnorm",
+    ):
+        return FusedRMSNorm(dim, eps=eps)
+    else:
+        raise NotImplementedError(f"Unknown norm_type: '{norm_type}'")
+
+
+class NormBase(nn.Module):
+    """
+    Base class for normalization layers.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        eps: float = 1e-06,
+        *,
+        elementwise_affine: Optional[bool] = True,
+    ):
+        super().__init__()
+
+        self.eps = eps
+        self.normalized_shape = (size,)
+        if elementwise_affine:
+            self.weight = nn.Parameter(
+                torch.ones(
+                    self.normalized_shape,
+                )
+            )
+        else:
+            self.register_parameter("weight", None)
+
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def init_weights(self):
+        if self.weight is not None:
+            torch.nn.init.ones_(self.weight)  # type: ignore
+
+    def reset_parameters(self):
+        if self.weight is not None:
+            torch.nn.init.ones_(self.weight)  # type: ignore
+
+
+class LayerNorm(NormBase):
+    """Classical LayerNorm, without bias."""
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-06,
+        elementwise_affine: Optional[bool] = True,
+    ):
+        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
+
+
+class NPLayerNorm(NormBase):
+    """Non Parametric LayerNorm - no affine transform."""
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        elementwise_affine: Optional[bool] = False,
+    ):
+        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
+
+
+class FusedRMSNorm(NormBase):
+    """Fused RMS Norm"""
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+    ):
+        super().__init__(size=dim, elementwise_affine=True, eps=eps)
+        self.fused_rms_norm_fn = fused_rms_norm_fn
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """leverages Triton Fused RMS Norm kernel"""
+        return self.fused_rms_norm_fn(
+            x,
+            self.weight,
+            eps=self.eps,
+        )
+
+
+class RMSNorm(NormBase):
+    """
+    Initialize the RMSNorm normalization layer.
+
+    Args:
+        dim (int): The dimension of the input tensor.
+        eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+
+    Attributes:
+        eps (float): A small value added to the denominator for numerical stability.
+        weight (nn.Parameter): Learnable scaling parameter.
+
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__(size=dim, eps=eps)
+
+    def _norm(self, x: torch.Tensor):
+        """
+        Apply the RMSNorm normalization to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The normalized tensor.
+
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass through the RMSNorm layer.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The output tensor after applying RMSNorm.
+
+        """
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+# FusedRMSNorm in Triton
+
+# Credit
+# Tri Dao's Triton LayerNorm: https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/triton/layer_norm.py
+# Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 
 
 @triton.autotune(
@@ -218,6 +396,7 @@ class TTRMSNorm(torch.autograd.Function):
         return dx, dw, None
 
 
+# expose fusedRMSNorm as a function
 def fused_rms_norm_fn(
     x,
     weight,
@@ -228,25 +407,3 @@ def fused_rms_norm_fn(
         weight,
         eps,
     )
-
-
-class FusedRMSNorm(torch.nn.Module):
-    def __init__(self, hidden_size, eps=1e-5, dropout_p=0.0, device=None, dtype=None):
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.eps = eps
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
-
-    def forward(
-        self,
-        x,
-    ):
-        return fused_rms_norm_fn(
-            x,
-            self.weight,
-            eps=self.eps,
-        )

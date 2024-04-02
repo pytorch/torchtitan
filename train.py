@@ -27,7 +27,6 @@ from torchtrain.logging_utils import init_logger, logger
 from torchtrain.lr_scheduling import get_lr_scheduler
 from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.modules.norms import NormType
 from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import (
@@ -162,8 +161,7 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
-    model_config.norm_type = NormType(job_config.model.norm_type)
-    logger.info(f"{job_config.model.norm_type=} and {model_config.norm_type=}")
+    model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
 
     with torch.device("meta"):
