@@ -310,8 +310,6 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-            print("i", input_ids.shape)
-            print("l", labels.shape)
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
@@ -322,6 +320,12 @@ def main(job_config: JobConfig):
                     pp_schedule.step(target=labels, losses=losses)
                 else:
                     schedule.step()
+
+                # todo optimizer and scaler stuff
+
+                # todo loss properly
+                current_loss = 10.0
+                losses_since_last_log.append(current_loss)
             else:
                 # forward
                 pred = model(input_ids)
