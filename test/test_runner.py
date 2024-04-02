@@ -7,7 +7,7 @@ import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List
+from typing import Sequence
 
 try:
     import tomllib
@@ -21,7 +21,7 @@ class OverrideDefinitions:
     This class is used to define the override definitions for the integration tests.
     """
 
-    override_args: List[str] = tuple()
+    override_args: Sequence[str] = tuple()
     test_descr: str = "default"
 
 
