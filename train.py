@@ -220,7 +220,10 @@ def main(job_config: JobConfig):
             group=pp_mesh.get_group(),
         )
         pp_schedule = PipelineScheduleGPipe(
-            stage, n_microbatches=parallel_dims.pp, loss_fn=None
+            stage,
+            n_microbatches=parallel_dims.pp,
+            loss_fn=lambda output, target: output.sum()
+            + torch.tensor([123.0], device=output.device),
         )
         model.to_empty(device="cuda")
     else:
@@ -313,9 +316,11 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
+                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+
                 if pp_mesh.get_local_rank() == 0:
                     pp_schedule.step(input_ids)
-                elif pp_mesh.get_local_rank() == pp_mesh.size() - 1:
+                elif is_last_stage:
                     losses = []
                     pp_schedule.step(target=labels, losses=losses)
                 else:
@@ -324,7 +329,9 @@ def main(job_config: JobConfig):
                 # todo optimizer and scaler stuff
 
                 # todo loss properly
-                current_loss = 10.0
+                current_loss = (
+                    torch.mean(torch.stack(losses)).item() if is_last_stage else -1.0
+                )
                 losses_since_last_log.append(current_loss)
             else:
                 # forward
