@@ -198,25 +198,25 @@ class JobConfig:
             help="Whether to compile the model.",
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval",
+            "--checkpoint.interval",
             type=int,
             default=3600,
             help=(
                 "Checkpointing interval. The unit of measurement is in seconds or "
-                "steps depending on --training.checkpoint-internval-type."
+                "steps depending on --checkpoint.interval."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval_type",
+            "--checkpoint.interval_type",
             type=str,
             default="steps",
             help=(
                 "The checkpointing interval unit of measurement."
-                "The default value is step."
+                "The default value is steps."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_folder",
+            "--checkpoint.folder",
             type=str,
             default="",
             help=(
