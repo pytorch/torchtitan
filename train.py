@@ -131,7 +131,9 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    # torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    torch.cuda.set_device(device)
     init_distributed(job_config)
 
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -150,6 +152,14 @@ def main(job_config: JobConfig):
         dp_rank = dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
+
+    if parallel_dims.pp_enabled:
+        pp_mesh = world_mesh["pp"]
+        pp_degree = pp_mesh.size()
+        pp_rank = pp_mesh.get_local_rank()
+    else:
+        pp_degree, pp_rank = 1, 0
+
     data_loader = build_dataloader_fn(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -199,20 +209,29 @@ def main(job_config: JobConfig):
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
+    if parallel_dims.pp_enabled:
+        pipe_meta = model
+        model = pipe_meta.get_stage_module(pp_rank)
+
+    # build grad scaler which is effective only when mixed precision training
+    # is enabled with fp16 param dtype under FSDP
+    scaler = build_grad_scaler(model)
+
+    def loss_fn(pred, labels):
+        with (
+            loss_parallel()
+            if parallel_dims.loss_parallel_enabled
+            else contextlib.nullcontext()
+        ):
+            loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
+            # backward on scaled loss to create scaled gradients
+            scaler.scale(loss)
+        return loss
 
     # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
     # there are virtual stages
     if parallel_dims.pp_enabled:
-        pipe_meta = model
-        pp_mesh = world_mesh["pp"]
-        pp_degree = pp_mesh.size()
-        pp_rank = pp_mesh.get_local_rank()
-        logger.info(
-            f"{Color.blue}Extracting pipeline module for stage {pp_rank}{Color.reset}"
-        )
-        device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-
-        model = pipe_meta.get_stage_module(pp_rank)
         stage = PipelineStage(
             pipe=pipe_meta,
             stage_index=pp_rank,
@@ -222,8 +241,7 @@ def main(job_config: JobConfig):
         pp_schedule = PipelineScheduleGPipe(
             stage,
             n_microbatches=parallel_dims.pp,
-            loss_fn=lambda output, target: output.sum()
-            + torch.tensor([123.0], device=output.device),
+            loss_fn=loss_fn,
         )
         model.to_empty(device="cuda")
     else:
@@ -239,11 +257,6 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
-
-    # build grad scaler which is effective only when mixed precision training
-    # is enabled with fp16 param dtype under FSDP
-    scaler = build_grad_scaler(model)
-
     metric_logger = build_metric_logger(job_config)
 
     # torch.compile model for improved performance
@@ -316,6 +329,7 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
+                # pipeline F/Loss/B
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 if pp_mesh.get_local_rank() == 0:
@@ -326,44 +340,35 @@ def main(job_config: JobConfig):
                 else:
                     schedule.step()
 
-                # todo optimizer and scaler stuff
-
-                # todo loss properly
+                # accumulate losses across pipeline microbatches
                 current_loss = (
                     torch.mean(torch.stack(losses)).item() if is_last_stage else -1.0
                 )
-                losses_since_last_log.append(current_loss)
             else:
-                # forward
+                # non-pipeline F/Loss/B
                 pred = model(input_ids)
 
-                with (
-                    loss_parallel()
-                    if parallel_dims.loss_parallel_enabled
-                    else contextlib.nullcontext()
-                ):
-                    loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
-
-                    # backward on scaled loss to create scaled gradients
-                    scaler.scale(loss).backward()
-
-                # clip gradients (after unscaling gradients of the optimizer's params)
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm, foreach=True
-                )
-
-                # optimizer step
-                # If gradients don't contain infs/NaNs, optimizer.step() is then called;
-                # otherwise, optimizer.step() is skipped.
-                scaler.step(optimizer)
-                scheduler.step()
-
-                # updates the scale for next iteration
-                scaler.update()
+                loss = loss_fn(pred, labels)
+                loss.backward()
 
                 current_loss = loss.item()
-                losses_since_last_log.append(current_loss)
+
+            # clip gradients (after unscaling gradients of the optimizer's params)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), job_config.training.max_norm, foreach=True
+            )
+
+            # optimizer step
+            # If gradients don't contain infs/NaNs, optimizer.step() is then called;
+            # otherwise, optimizer.step() is skipped.
+            scaler.step(optimizer)
+            scheduler.step()
+
+            # updates the scale for next iteration
+            scaler.update()
+
+            losses_since_last_log.append(current_loss)
 
             # log metrics
             if (
