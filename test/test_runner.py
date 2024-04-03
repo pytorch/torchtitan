@@ -4,6 +4,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 import os
+import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,8 +22,8 @@ class OverrideDefinitions:
     This class is used to define the override definitions for the integration tests.
     """
 
-    override_args: Sequence[str] = tuple()
-    test_descr: str = "default"
+    override_args: Sequence[Sequence[str]] = tuple()
+    test_descr: str = ""
 
 
 CONFIG_DIR = "./train_configs"
@@ -34,9 +35,30 @@ same root config file.
 """
 integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
-    OverrideDefinitions(["--training.compile"], "1D compile"),
     OverrideDefinitions(
-        ["--training.tensor_parallel_degree 2"], "Eager mode 2DParallel"
+        [
+            [""],
+        ],
+        "Default Test",
+    ),
+    OverrideDefinitions(
+        [
+            ["--training.compile"],
+        ],
+        "1D compile",
+    ),
+    OverrideDefinitions(
+        [
+            ["--training.tensor_parallel_degree 2"],
+        ],
+        "Eager mode 2DParallel",
+    ),
+    OverrideDefinitions(
+        [
+            ["--checkpoint.folder test_checkpoint"],
+            ["--checkpoint.folder test_checkpoint", "--training.steps 20"],
+        ],
+        "Checkpoint Integration Test",
     ),
 ]
 
@@ -48,21 +70,26 @@ for config_file in os.listdir(CONFIG_DIR):
             config = tomllib.load(f)
             is_integration_test = config["job"].get("use_for_integration_test", False)
             if is_integration_test:
-                test_flavors = [OverrideDefinitions()] + integration_tests_flavors[
-                    config_file
-                ]
+                test_flavors = integration_tests_flavors[config_file]
+
+                # Supports sequence of tests.
                 for test_flavor in test_flavors:
-                    cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
-                    if test_flavor.override_args:
-                        cmd += " " + " ".join(test_flavor.override_args)
-                    print(
-                        f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-                    )
-                    result = subprocess.run(
-                        [cmd],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        shell=True,
-                    )
-                    print(result.stdout)
+                    for override_arg in test_flavor.override_args:
+                        cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
+                        if override_arg:
+                            cmd += " " + " ".join(override_arg)
+                        print(
+                            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
+                        )
+                        result = subprocess.run(
+                            [cmd],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            shell=True,
+                        )
+                        print(result.stdout)
+
+                    # delete checkpoint folder if exists
+                    if os.path.exists("test_checkpoint"):
+                        shutil.rmtree("test_checkpoint")
