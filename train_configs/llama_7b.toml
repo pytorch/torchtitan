@@ -38,5 +38,6 @@ compile = false
 dataset = "alpaca"
 
 [checkpoint]
+interval = 3600
 interval_type = "steps"
 folder = ""
