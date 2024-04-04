@@ -87,6 +87,10 @@ def init_distributed(job_config):
         "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
     )
 
+    # to mitigate the memory issue that collective tensors
+    # in DTensor holding memory longer than they should
+    os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+
 
 def get_num_params(model: torch.nn.Module, only_trainable: bool = False) -> int:
     """

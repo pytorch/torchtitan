@@ -40,10 +40,6 @@ from torchtrain.utils import (
     set_pg_timeouts,
 )
 
-_is_local_logging = True
-if "SLURM_JOB_ID" in os.environ:
-    _is_local_logging = False
-
 
 @dataclass
 class TrainState:
@@ -178,7 +174,7 @@ def main(job_config: JobConfig):
     num_flop_per_token = get_num_flop_per_token(
         model_param_count, model_config, job_config.training.seq_len
     )
-    if _is_local_logging:
+    if job_config.misc.enable_color_printing:
         logger.info(
             f"{Color.blue}Model {model_name} {job_config.model.flavor} "
             f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
@@ -200,6 +196,9 @@ def main(job_config: JobConfig):
     # allocate sharded model on GPU and initialize weights via DTensor
     model.to_empty(device="cuda")
     model.init_weights()
+
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(f"GPU memory usage for model: {gpu_mem_stats.max_reserved_gib:.2f}GiB({gpu_mem_stats.max_reserved_pct:.2f}%)")
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -255,6 +254,7 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
+    logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
 
@@ -263,6 +263,7 @@ def main(job_config: JobConfig):
         ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
+        gpu_memory_monitor.reset_peak_stats()
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
@@ -367,7 +368,7 @@ def main(job_config: JobConfig):
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
-                if _is_local_logging:
+                if job_config.misc.enable_color_printing:
                     logger.info(
                         f"{Color.cyan}step: {train_state.step:2}  "
                         f"{Color.green}loss: {global_avg_loss:7.4f}  "

@@ -46,3 +46,6 @@ dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[misc]
+enable_color_printing = true

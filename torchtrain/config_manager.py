@@ -67,6 +67,7 @@ class JobConfig:
             action="store_true",
             help="add this config to integration test suite",
         )
+
         # profiling configs
         self.parser.add_argument(
             "--profiling.run_profiler",
@@ -85,6 +86,7 @@ class JobConfig:
             default=10,
             help="collect profiler traces every x iterations",
         )
+
         # metrics configs
         self.parser.add_argument(
             "--metrics.enable_tensorboard",
@@ -276,6 +278,14 @@ class JobConfig:
             type=int,
             default=20000,
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
+        )
+
+        # misc settings
+        self.parser.add_argument(
+            "--misc.enable_color_printing",
+            default=False,
+            action="store_true",
+            help="whether to enable color printing",
         )
 
     def parse_args(self, args_list: list = sys.argv[1:]):
