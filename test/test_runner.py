@@ -35,12 +35,12 @@ same root config file.
 """
 integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
-    # OverrideDefinitions(
-    #     [
-    #         ["--training.compile"],
-    #     ],
-    #     "1D compile",
-    # ),
+    OverrideDefinitions(
+        [
+            ["--training.compile"],
+        ],
+        "1D compile",
+    ),
     OverrideDefinitions(
         [
             ["--training.tensor_parallel_degree 2"],
