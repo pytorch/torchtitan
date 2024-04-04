@@ -84,7 +84,7 @@ for config_file in os.listdir(CONFIG_DIR):
             config = tomllib.load(f)
             is_integration_test = config["job"].get("use_for_integration_test", False)
             if is_integration_test:
-                test_flavors = integration_tests_flavors[config_file]
+                test_flavors = [OverrideDefinitions()] + integration_tests_flavors[config_file]
 
                 for test_flavor in test_flavors:
                     run_test(test_flavor, full_path)
