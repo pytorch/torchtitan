@@ -198,7 +198,11 @@ def main(job_config: JobConfig):
     model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
-    logger.info(f"GPU memory usage for model: {gpu_mem_stats.max_reserved_gib:.2f}GiB({gpu_mem_stats.max_reserved_pct:.2f}%)")
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
