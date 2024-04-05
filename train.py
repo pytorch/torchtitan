@@ -151,9 +151,7 @@ def main(job_config: JobConfig):
 
     # loss_parallel enables dispatching to efficient loss operators
     loss_parallel_ctx = (
-        loss_parallel
-        if parallel_dims.loss_parallel_enabled
-        else contextlib.nullcontext
+        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
