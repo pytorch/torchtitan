@@ -1,9 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
 import math
 
 import torch
@@ -64,9 +61,6 @@ class FusedRMSNorm(nn.Module):
             eps=self.eps,
         )
 
-    def init_weights(self):
-        torch.nn.init.ones_(self.weight)  # type: ignore
-
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)  # type: ignore
 
@@ -97,13 +91,8 @@ class RMSNorm(nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
-    def init_weights(self):
-        if self.weight is not None:
-            torch.nn.init.ones_(self.weight)  # type: ignore
-
     def reset_parameters(self):
-        if self.weight is not None:
-            torch.nn.init.ones_(self.weight)  # type: ignore
+        torch.nn.init.ones_(self.weight)  # type: ignore
 
 
 # FusedRMSNorm in Triton
