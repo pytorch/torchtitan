@@ -313,6 +313,14 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.model_args = model_args
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+
+        # TODO persistent should be set to false, since this buffer can be recomputed.
+        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
+        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
+        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
+        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
+        # initialized by the checkpoint, or we need to add a separate initializer for
+        # just the non-persistent buffers that is called after loading checkpoints.
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
     def _precompute_freqs_cis(self):
