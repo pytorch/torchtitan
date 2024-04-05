@@ -38,6 +38,7 @@ compile = false
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
 
 [checkpoint]
+interval = 500
 interval_type = "steps"
 folder = ""
 
