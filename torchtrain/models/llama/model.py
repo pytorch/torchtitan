@@ -26,7 +26,7 @@ class ModelArgs:
     depth_init: bool = (
         True  # initialization uses each unique layer_id or total model layer count
     )
-    norm_type: str = "fusedrms"
+    norm_type: str = "rmsnorm"
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):

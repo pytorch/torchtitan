@@ -21,7 +21,7 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
 
     Args:
         norm_type (str): The type of normalization layer to create.
-            Supported types: 'layernorm', 'nplayernorm', 'rmsnorm', 'fusedrmsnorm'.
+            Supported types: 1. rmsnorm 2. fused_rmsnorm 3. layernorm 4. np_layernorm
         dim (int): The dimension of the normalization layer.
         eps (float, optional): The epsilon value for numerical stability. Defaults to 1e-6.
 
@@ -33,20 +33,13 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     """
     norm_type = norm_type.lower()  # Normalize to lowercase
 
-    if norm_type in ("layernorm", "layer_norm"):
+    if norm_type =="layernorm":
         return LayerNorm(dim, eps=eps)
-    elif norm_type in ("np_layernorm", "np_layer_norm", "nplayernorm"):
+    elif norm_type == "np_layernorm",:
         return NPLayerNorm(dim, eps=eps)
-    elif norm_type in ("rms", "rmsnorm", "rms_norm", "rms_layernorm"):
+    elif norm_type == "rmsnorm":
         return RMSNorm(dim, eps=eps)
-    elif norm_type in (
-        "fused_rms",
-        "fused_rmsnorm",
-        "fused_rms_norm",
-        "fused_rms_layernorm",
-        "fusedrms",
-        "fusedrmsnorm",
-    ):
+    elif norm_type == "fused_rmsnorm":
         return FusedRMSNorm(dim, eps=eps)
     else:
         raise NotImplementedError(f"Unknown norm_type: '{norm_type}'")

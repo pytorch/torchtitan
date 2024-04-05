@@ -120,8 +120,8 @@ class JobConfig:
         self.parser.add_argument(
             "--model.norm_type",
             type=str,
-            default="rms",
-            help="Layer Normalization type to use [layernorm, np_layernorm, rms, fused_rms]",
+            default="rmsnorm",
+            help="Layer Normalization type to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",

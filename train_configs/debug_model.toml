@@ -23,7 +23,7 @@ folder = ""
 [model]
 name = "llama"
 flavor = "debugmodel"
-norm_type = "fusedrms" # layernorm / np_layernorm / rms / fused_rms
+norm_type = "fused_rmsnorm" # layernorm / np_layernorm / rms_norm / fused_rmsnorm
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
