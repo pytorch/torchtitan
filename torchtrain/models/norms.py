@@ -211,7 +211,7 @@ def _rms_norm_bwd_kernel_sm(
     tl.store(DW + row_block_id * N + cols, dw, mask=mask)
 
 
-class TTRMSNorm(torch.autograd.Function):
+class TritonFusedRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps):
         x_shape_start = x.shape
@@ -307,7 +307,7 @@ def fused_rms_norm_fn(
     weight,
     eps=1e-6,
 ):
-    return TTRMSNorm.apply(
+    return TritonFusedRMSNorm.apply(
         x,
         weight,
         eps,
