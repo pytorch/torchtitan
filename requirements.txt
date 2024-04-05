@@ -1,0 +1,5 @@
+torch >= 2.2.0.dev
+sentencepiece
+datasets
+tomli >= 1.1.0 ; python_version < "3.11"
+tensorboard
