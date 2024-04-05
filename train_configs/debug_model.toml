@@ -16,9 +16,9 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 
 [checkpoint]
-interval = 3600
+interval = 10
 interval_type = "steps"
-folder = ""
+folder = "ckpt"
 
 [model]
 name = "llama"
