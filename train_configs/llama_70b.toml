@@ -38,6 +38,7 @@ compile = false
 dataset = "openwebtext"
 
 [checkpoint]
+interval = 500
 interval_type = "steps"
 folder = ""
 
