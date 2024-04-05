@@ -236,20 +236,24 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_id, transformer_block in enumerate(model.layers):
+        for layer_name, transformer_block in model.layers.named_children():
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
                 )
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = layer_id < len(model.layers) - 1
+            # reshard_after_forward = layer_id < len(model.layers) - 1
+            # TODO(whc) need to fix correctly handle layer-ids on pp-split module
+            reshard_after_forward = True
             fully_shard(
                 transformer_block,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            model.layers[layer_id] = transformer_block
+            # model.layers[layer_id] = transformer_block
+            # TODO(whc)
+            setattr(model.layers, layer_name, transformer_block)
         model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
