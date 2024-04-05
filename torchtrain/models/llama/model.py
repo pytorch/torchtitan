@@ -226,10 +226,7 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        seqlen, _ = freqs_cis.shape
-        bs_seqlen, _ = x.shape
-        bsz = bs_seqlen // seqlen
-
+        bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
@@ -255,8 +252,7 @@ class Attention(nn.Module):
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
-        # output stay folded with batch and sequence dimension
-        output = output.view(bsz * seqlen, -1)
+        output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
 
@@ -487,17 +483,9 @@ class Transformer(nn.Module):
 
         """
         h, freqs_cis = self.embeddings(tokens)
-        # fold batch and sequence dimension for more efficient allgather/reduce_scatter
-        h = h.view(-1, self.model_args.dim)
-
         for layer in self.layers:
             h = layer(h, freqs_cis)
-
         h = self.norm(h)
-        # unfold batch and sequence dimension
-        bsz = tokens.shape[0]
-        bs_seqlen = h.shape[0]
-        h = h.view(bsz, bs_seqlen // bsz, self.model_args.dim)
         output = self.output(h).float()
         return output
 
