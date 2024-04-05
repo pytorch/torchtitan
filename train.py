@@ -149,6 +149,17 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
+    # loss_parallel enables dispatching to efficient loss operators
+    loss_parallel_ctx = (
+        loss_parallel()
+        if parallel_dims.loss_parallel_enabled
+        else contextlib.nullcontext()
+    )
+
+    # loss fn can be shared by pipeline-parallel or non-pp execution
+    def loss_fn(pred, labels):
+        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
@@ -268,16 +279,10 @@ def main(job_config: JobConfig):
 
             optimizer.zero_grad()
 
-            # forward
-            pred = model(input_ids)
-
-            with (
-                loss_parallel()
-                if parallel_dims.loss_parallel_enabled
-                else contextlib.nullcontext()
-            ):
-                loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
-                # backward
+            # forward / backward
+            with loss_parallel_ctx:
+                pred = model(input_ids)
+                loss = loss_fn(pred, labels)
                 loss.backward()
 
             # clip gradients
