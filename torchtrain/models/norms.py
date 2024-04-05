@@ -34,9 +34,9 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     norm_type = norm_type.lower()  # Normalize to lowercase
 
     if norm_type =="layernorm":
-        return LayerNorm(dim, eps=eps)
-    elif norm_type == "np_layernorm",:
-        return NPLayerNorm(dim, eps=eps)
+        return nn.LayerNorm(dim, eps=eps, bias=False)
+    elif norm_type == "np_layernorm":
+        return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
     elif norm_type == "rmsnorm":
         return RMSNorm(dim, eps=eps)
     elif norm_type == "fused_rmsnorm":
@@ -45,83 +45,17 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
         raise NotImplementedError(f"Unknown norm_type: '{norm_type}'")
 
 
-class NormBase(nn.Module):
-    """
-    Base class for normalization layers.
-    """
+class FusedRMSNorm(nn.Module):
+    """Fused RMS Norm, wraps a fused Triton Kernel"""
 
     def __init__(
         self,
-        size: int,
-        eps: float = 1e-06,
-        *,
-        elementwise_affine: Optional[bool] = True,
+        dim: int,
+        eps: float = 1e-6,
     ):
         super().__init__()
-
         self.eps = eps
-        self.normalized_shape = (size,)
-        if elementwise_affine:
-            self.weight = nn.Parameter(
-                torch.ones(
-                    self.normalized_shape,
-                )
-            )
-        else:
-            self.register_parameter("weight", None)
-
-    @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def init_weights(self):
-        if self.weight is not None:
-            torch.nn.init.ones_(self.weight)  # type: ignore
-
-    def reset_parameters(self):
-        if self.weight is not None:
-            torch.nn.init.ones_(self.weight)  # type: ignore
-
-
-class LayerNorm(NormBase):
-    """Classical LayerNorm, without bias."""
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-06,
-        elementwise_affine: Optional[bool] = True,
-    ):
-        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
-
-
-class NPLayerNorm(NormBase):
-    """Non Parametric LayerNorm - no affine transform."""
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
-        elementwise_affine: Optional[bool] = False,
-    ):
-        super().__init__(size=dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.layer_norm(x, self.normalized_shape, weight=self.weight, eps=self.eps)
-
-
-class FusedRMSNorm(NormBase):
-    """Fused RMS Norm"""
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
-    ):
-        super().__init__(size=dim, elementwise_affine=True, eps=eps)
+        self.weight = nn.Parameter(torch.ones(dim,))
         self.fused_rms_norm_fn = fused_rms_norm_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -132,8 +66,14 @@ class FusedRMSNorm(NormBase):
             eps=self.eps,
         )
 
+    def init_weights(self):
+        torch.nn.init.ones_(self.weight)  # type: ignore
 
-class RMSNorm(NormBase):
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)  # type: ignore
+
+
+class RMSNorm(nn.Module):
     """
     Initialize the RMSNorm normalization layer.
 
@@ -146,37 +86,26 @@ class RMSNorm(NormBase):
         weight (nn.Parameter): Learnable scaling parameter.
 
     """
-
     def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__(size=dim, eps=eps)
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim,))
+
 
     def _norm(self, x: torch.Tensor):
-        """
-        Apply the RMSNorm normalization to the input tensor.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The normalized tensor.
-
-        """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass through the RMSNorm layer.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The output tensor after applying RMSNorm.
-
-        """
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
+    def init_weights(self):
+        if self.weight is not None:
+            torch.nn.init.ones_(self.weight)  # type: ignore
+
+    def reset_parameters(self):
+        if self.weight is not None:
+            torch.nn.init.ones_(self.weight)  # type: ignore
 
 # FusedRMSNorm in Triton
 
