@@ -313,9 +313,7 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.model_args = model_args
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-        self.register_buffer(
-            "freqs_cis", self._precompute_freqs_cis(), persistent=False
-        )
+        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
     def _precompute_freqs_cis(self):
         return precompute_freqs_cis(
