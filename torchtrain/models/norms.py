@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
-
 import math
 
 from abc import abstractmethod
@@ -227,7 +226,6 @@ def _rms_norm_fwd_kernel(
     w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
 
     # Compute mean and variance
-    # xbar = tl.sum(x, axis=0) / tl.max(tl.sum(mask, axis=0), 1)
     xbar = tl.where(cols < N, x, 0.0)
     var = tl.sum(xbar * xbar, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
@@ -309,7 +307,7 @@ class TTRMSNorm(torch.autograd.Function):
         x_shape_start = x.shape
 
         # Flatten input
-        x = x.reshape(-1, x.shape[-1])
+        x = x.view(-1, x.shape[-1])
         if x.stride(-1) != 1:
             x = x.contiguous()
         if weight.stride(-1) != 1:
@@ -353,7 +351,7 @@ class TTRMSNorm(torch.autograd.Function):
         x_shape_start = ctx.x_shape_start
 
         # Flatten input and output gradients
-        dy = dy.reshape(-1, dy.shape[-1])
+        dy = dy.view(-1, dy.shape[-1])
         if dy.stride(-1) != 1:
             dy = dy.contiguous()
 
@@ -389,7 +387,7 @@ class TTRMSNorm(torch.autograd.Function):
             block_N,
         )
         dw = _dw.sum(0).to(weight.dtype)
-        dx = dx.reshape(x_shape_start)
+        dx = dx.view(x_shape_start)
         return dx, dw, None
 
 
