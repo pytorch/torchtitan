@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchtrain.models.norms import create_norm
 
 
 @dataclass
@@ -25,57 +26,7 @@ class ModelArgs:
     depth_init: bool = (
         True  # initialization uses each unique layer_id or total model layer count
     )
-
-
-class RMSNorm(torch.nn.Module):
-    """
-    Initialize the RMSNorm normalization layer.
-
-    Args:
-        dim (int): The dimension of the input tensor.
-        eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
-
-    Attributes:
-        eps (float): A small value added to the denominator for numerical stability.
-        weight (nn.Parameter): Learnable scaling parameter.
-
-    """
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.empty(dim))
-        self.reset_parameters()
-
-    def _norm(self, x: torch.Tensor):
-        """
-        Apply the RMSNorm normalization to the input tensor.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The normalized tensor.
-
-        """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x: torch.Tensor):
-        """
-        Forward pass through the RMSNorm layer.
-
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The output tensor after applying RMSNorm.
-
-        """
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-    def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
+    norm_type: str = "rmsnorm"
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -381,8 +332,13 @@ class TransformerBlock(nn.Module):
         )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
-        self.attention_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+
+        self.attention_norm = create_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+        self.ffn_norm = create_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
@@ -447,7 +403,10 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
 
-        self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = create_norm(
+            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        )
+
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
