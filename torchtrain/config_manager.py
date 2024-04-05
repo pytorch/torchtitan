@@ -200,10 +200,10 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.interval",
             type=int,
-            default=3600,
+            default=500,
             help=(
                 "Checkpointing interval. The unit of measurement is in seconds or "
-                "steps depending on --checkpoint.interval."
+                "steps depending on --checkpoint.interval_type."
             ),
         )
         self.parser.add_argument(
