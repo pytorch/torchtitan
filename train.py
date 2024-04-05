@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from pippy.PipelineSchedule import PipelineScheduleGPipe
 from pippy.PipelineStage import PipelineStage
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
@@ -103,14 +102,6 @@ def build_optimizer(model, job_config: JobConfig):
     return optimizer
 
 
-def build_grad_scaler(model):
-    # TODO: FSDP2 does not support sharded grad scaler yet.
-    # TODO: if enabled, grad scaler's states need saving & loading in checkpointing
-    enable_grad_scaling = False
-    logger.info("Gradient scaling not enabled")
-    return ShardedGradScaler(enabled=enable_grad_scaling)
-
-
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -170,6 +161,15 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
+    # loss fn can be shared by pipeline-parallel or non-pp execution
+    def loss_fn(pred, labels):
+        with (
+            loss_parallel()
+            if parallel_dims.loss_parallel_enabled
+            else contextlib.nullcontext()
+        ):
+            return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
@@ -213,21 +213,7 @@ def main(job_config: JobConfig):
         pipe_meta = model
         model = pipe_meta.get_stage_module(pp_rank)
 
-    # build grad scaler which is effective only when mixed precision training
-    # is enabled with fp16 param dtype under FSDP
-    scaler = build_grad_scaler(model)
-
-    def loss_fn(pred, labels):
-        with (
-            loss_parallel()
-            if parallel_dims.loss_parallel_enabled
-            else contextlib.nullcontext()
-        ):
-            loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
-
-            # backward on scaled loss to create scaled gradients
-            scaler.scale(loss)
-        return loss
+    model.to_empty(device="cuda")
 
     # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
     # there are virtual stages
@@ -243,7 +229,6 @@ def main(job_config: JobConfig):
             n_microbatches=parallel_dims.pp,
             loss_fn=loss_fn,
         )
-        model.to_empty(device="cuda")
     else:
         # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
         # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
@@ -251,7 +236,6 @@ def main(job_config: JobConfig):
         # becuase it can't find "embedding" layer, for example.
 
         # allocate sharded model on GPU and initialize weights via DTensor
-        model.to_empty(device="cuda")
         model.init_weights()
 
     # build optimizer after applying parallelisms to the model
@@ -329,7 +313,7 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             if parallel_dims.pp_enabled:
-                # pipeline F/Loss/B
+                # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 if pp_mesh.get_local_rank() == 0:
@@ -345,28 +329,20 @@ def main(job_config: JobConfig):
                     torch.mean(torch.stack(losses)).item() if is_last_stage else -1.0
                 )
             else:
-                # non-pipeline F/Loss/B
+                # forward / backward
                 pred = model(input_ids)
-
                 loss = loss_fn(pred, labels)
                 loss.backward()
-
                 current_loss = loss.item()
 
-            # clip gradients (after unscaling gradients of the optimizer's params)
-            scaler.unscale_(optimizer)
+            # clip gradients
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), job_config.training.max_norm, foreach=True
             )
 
             # optimizer step
-            # If gradients don't contain infs/NaNs, optimizer.step() is then called;
-            # otherwise, optimizer.step() is skipped.
-            scaler.step(optimizer)
+            optimizer.step()
             scheduler.step()
-
-            # updates the scale for next iteration
-            scaler.update()
 
             losses_since_last_log.append(current_loss)
 
