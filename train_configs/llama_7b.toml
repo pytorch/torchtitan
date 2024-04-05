@@ -14,11 +14,6 @@ log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
 
-[checkpoint]
-interval = 3600
-interval_type = "steps"
-folder = ""
-
 [model]
 name = "llama"
 flavor = "7B"
@@ -27,7 +22,6 @@ tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 [optimizer]
 name = "AdamW"
 lr = 3e-4
-
 
 [training]
 batch_size = 8
@@ -42,3 +36,7 @@ pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
 dataset = "alpaca"
+
+[checkpoint]
+interval_type = "steps"
+folder = ""
