@@ -161,14 +161,12 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
+    # loss_parallel enables dispatching to efficient loss operators
+    loss_parallel_ctx = loss_parallel() if parallel_dims.loss_parallel_enabled else contextlib.nullcontext()
+
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
-        with (
-            loss_parallel()
-            if parallel_dims.loss_parallel_enabled
-            else contextlib.nullcontext()
-        ):
-            return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
 
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
@@ -316,13 +314,14 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                if pp_mesh.get_local_rank() == 0:
-                    pp_schedule.step(input_ids)
-                elif is_last_stage:
-                    losses = []
-                    pp_schedule.step(target=labels, losses=losses)
-                else:
-                    schedule.step()
+                with loss_parallel_ctx:
+                    if pp_mesh.get_local_rank() == 0:
+                        pp_schedule.step(input_ids)
+                    elif is_last_stage:
+                        losses = []
+                        pp_schedule.step(target=labels, losses=losses)
+                    else:
+                        schedule.step()
 
                 # accumulate losses across pipeline microbatches
                 current_loss = (
@@ -330,9 +329,10 @@ def main(job_config: JobConfig):
                 )
             else:
                 # forward / backward
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels)
-                loss.backward()
+                with loss_parallel_ctx:
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    loss.backward()
                 current_loss = loss.item()
 
             # clip gradients
