@@ -1,15 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
 import math
 
-from abc import abstractmethod
-
-from typing import Optional
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import triton
 import triton.language as tl
@@ -33,7 +31,7 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     """
     norm_type = norm_type.lower()  # Normalize to lowercase
 
-    if norm_type =="layernorm":
+    if norm_type == "layernorm":
         return nn.LayerNorm(dim, eps=eps, bias=False)
     elif norm_type == "np_layernorm":
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
@@ -55,7 +53,11 @@ class FusedRMSNorm(nn.Module):
     ):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim,))
+        self.weight = nn.Parameter(
+            torch.ones(
+                dim,
+            )
+        )
         self.fused_rms_norm_fn = fused_rms_norm_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -86,11 +88,15 @@ class RMSNorm(nn.Module):
         weight (nn.Parameter): Learnable scaling parameter.
 
     """
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim,))
-
+        self.weight = nn.Parameter(
+            torch.ones(
+                dim,
+            )
+        )
 
     def _norm(self, x: torch.Tensor):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -106,6 +112,7 @@ class RMSNorm(nn.Module):
     def reset_parameters(self):
         if self.weight is not None:
             torch.nn.init.ones_(self.weight)  # type: ignore
+
 
 # FusedRMSNorm in Triton
 
