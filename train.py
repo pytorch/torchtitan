@@ -92,8 +92,9 @@ def build_optimizer(model, job_config: JobConfig):
             model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
         )
     elif name == "AdamW":
+        local_params = [p._local_tensor for p in model.parameters()]
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
+            local_params, lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
         )
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
@@ -295,6 +296,12 @@ def main(job_config: JobConfig):
                 scaler.scale(loss).backward()
 
             # clip gradients (after unscaling gradients of the optimizer's params)
+            # HACK: Forward the local gradient to the local parameter for the
+            # local optimizer.
+            from torch.distributed._tensor import DTensor
+            for param in model.parameters():
+                assert isinstance(param, DTensor)
+                param._local_tensor.grad = param.grad._local_tensor
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), job_config.training.max_norm, foreach=True
