@@ -29,8 +29,8 @@ class TorchRMSNorm(nn.Module):
     original impl: https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
     Args:
-        dim(int) = model size
-        eps(float) = epsilon
+        dim(int):  model size
+        eps(float): epsilon
     """
 
     def __init__(self, dim: int, eps: float = 1e-8):

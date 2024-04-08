@@ -2,13 +2,10 @@
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import time
-from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
+from typing import Any, Optional
 
 import pytest
 import torch
-import torch.distributed as dist
-from torch import nn, Tensor
 
 
 def perf_timer(func):
