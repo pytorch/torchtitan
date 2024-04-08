@@ -12,7 +12,7 @@ from torch import Tensor
 sys.path.append("..")
 from torchtrain.models.norms import FusedRMSNorm
 
-from torchtrain.test.testing_utils import assert_expected, set_rng_seed, gpu_test
+from torchtrain.test.testing_utils import assert_expected, gpu_test, set_rng_seed
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +41,7 @@ class TorchRMSNorm(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         x_normed = self._norm(x.float()).type_as(x)
         return x_normed * self.scale
+
 
 @gpu_test(1)
 class TestRMSNorm:
