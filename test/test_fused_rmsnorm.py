@@ -12,7 +12,7 @@ from torch import Tensor
 sys.path.append("..")
 from torchtrain.models.norms import FusedRMSNorm
 
-from torchtrain.test.testing_utils import assert_expected, set_rng_seed
+from torchtrain.test.testing_utils import assert_expected, set_rng_seed, gpu_test
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +28,6 @@ class TorchRMSNorm(nn.Module):
 
     original impl: https://github.com/facebookresearch/llama/blob/main/llama/model.py
 
-    Args:
-        dim(int):  model size
-        eps(float): epsilon
     """
 
     def __init__(self, dim: int, eps: float = 1e-8):
@@ -45,7 +42,7 @@ class TorchRMSNorm(nn.Module):
         x_normed = self._norm(x.float()).type_as(x)
         return x_normed * self.scale
 
-
+@gpu_test(1)
 class TestRMSNorm:
     @pytest.fixture
     def n_dim(
