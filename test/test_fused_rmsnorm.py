@@ -71,7 +71,9 @@ class TestRMSNorm:
         fused_out = fused_rms_norm(sample_x)
 
         # Check forward pass accuracy
-        assert_expected(fused_out, expected_rms, rtol=rtol_precision, atol=atol_precision)
+        assert_expected(
+            fused_out, expected_rms, rtol=rtol_precision, atol=atol_precision
+        )
 
         # Backward pass
         grad_output = torch.randn_like(expected_rms)
