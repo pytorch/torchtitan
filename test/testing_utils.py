@@ -1,22 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-import time
 from typing import Any, Optional
 
 import pytest
 import torch
-
-
-def perf_timer(func):
-    def wrapper(*args, **kwargs):
-        start = time.perf_counter()
-        output = func(*args, **kwargs)
-        elapsed_time = time.perf_counter() - start
-        print(elapsed_time)
-        return output, elapsed_time
-
-    return wrapper
 
 
 def assert_expected(
