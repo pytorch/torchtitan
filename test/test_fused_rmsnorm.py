@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch import Tensor
 
 sys.path.append("..")
-from torchtrain.models.norms import FusedRMSNorm  # fused_rms_norm_fn as triton_rmsnorm
+from torchtrain.models.norms import FusedRMSNorm
 
 from torchtrain.test.testing_utils import assert_expected, set_rng_seed
 
@@ -57,6 +57,8 @@ class TestRMSNorm:
         batch_size = 8
         layer_weight_size = (n_dim,)
         test_eps = 1e-8
+        atol_precision = 1e-7
+        rtol_precision = 1e-5
 
         sample_x = torch.randn(
             layer_weight_size, dtype=torch.float32, device="cuda", requires_grad=True
@@ -69,7 +71,7 @@ class TestRMSNorm:
         fused_out = fused_rms_norm(sample_x)
 
         # Check forward pass accuracy
-        assert_expected(fused_out, expected_rms, rtol=0.0001, atol=0.0001)
+        assert_expected(fused_out, expected_rms, rtol=rtol_precision, atol=atol_precision)
 
         # Backward pass
         grad_output = torch.randn_like(expected_rms)
@@ -83,4 +85,4 @@ class TestRMSNorm:
         dy_fused = sample_x.grad
 
         # Check backward pass accuracy
-        assert_expected(dy_expected, dy_fused, rtol=0.0001, atol=0.0001)
+        assert_expected(dy_expected, dy_fused, rtol=rtol_precision, atol=atol_precision)
