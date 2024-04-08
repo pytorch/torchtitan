@@ -1,20 +1,26 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+
+import time
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 import pytest
 import torch
 import torch.distributed as dist
-from torch import Tensor, nn
-import time
+from torch import nn, Tensor
+
 
 def perf_timer(func):
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
-        output=func(*args, **kwargs)
+        output = func(*args, **kwargs)
         elapsed_time = time.perf_counter() - start
         print(elapsed_time)
         return output, elapsed_time
+
     return wrapper
+
 
 def assert_expected(
     actual: Any,
@@ -31,6 +37,7 @@ def assert_expected(
         check_device=check_device,
         msg=f"actual: {actual}, expected: {expected}",
     )
+
 
 def set_rng_seed(seed):
     """Sets the seed for pytorch random number generators"""
