@@ -55,11 +55,11 @@ class TestRMSNorm:
 
     def test_triton_fused_vs_pytorch_accuracy(self, n_dim):
         batch_size = 8
-        layer_weight_size = (n_dim, n_dim)
+        layer_weight_size = (n_dim,)
         test_eps = 1e-8
 
         sample_x = torch.randn(
-            layer_weight_size, dtype=torch.float32, device="cuda", requires_grad=False
+            layer_weight_size, dtype=torch.float32, device="cuda", requires_grad=True
         )
 
         expected_rms_func = TorchRMSNorm(layer_weight_size, eps=test_eps).to("cuda")
@@ -68,4 +68,19 @@ class TestRMSNorm:
         expected_rms = expected_rms_func(sample_x)
         fused_out = fused_rms_norm(sample_x)
 
+        # Check forward pass accuracy
         assert_expected(fused_out, expected_rms, rtol=0.0001, atol=0.0001)
+
+        # Backward pass
+        grad_output = torch.randn_like(expected_rms)
+
+        expected_rms.backward(grad_output)
+        dy_expected = sample_x.grad
+
+        sample_x.grad = None
+
+        fused_out.backward(grad_output)
+        dy_fused = sample_x.grad
+
+        # Check backward pass accuracy
+        assert_expected(dy_expected, dy_fused, rtol=0.0001, atol=0.0001)
