@@ -49,10 +49,25 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}"],
-            [f"--checkpoint.folder {test_checkpoint_dir}", "--training.steps 20"],
+            [f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer"],
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer",
+                "--training.steps 20",
+            ],
         ],
-        "Checkpoint Integration Test",
+        "Checkpoint Integration Test - Model + Optimizer",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_only --checkpoint.model_only true"
+            ],
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_only --checkpoint.model_only true",
+                "--training.steps 20",
+            ],
+        ],
+        "Checkpoint Integration Test - Model Only",
     ),
 ]
 

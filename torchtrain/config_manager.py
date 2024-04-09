@@ -239,6 +239,14 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
+            "--checkpoint.model_only",
+            type=str,
+            default=False,
+            help=(
+                "Whether to checkpoint model states only." "The default value is false."
+            ),
+        )
+        self.parser.add_argument(
             "--training.fp8_linear",
             type=str,
             default="",

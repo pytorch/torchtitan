@@ -57,15 +57,20 @@ class CheckpointManager:
         folder: str,
         interval_type: IntervalType,
         interval: int,
+        model_only: bool = False,
     ) -> None:
         self.folder = folder
         self.states = states
-        self.states.update(
-            {
+        self.model_only = model_only
+        states_update = (
+            {"model": ModelWrapper(model)}
+            if self.model_only
+            else {
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
             }
         )
+        self.states.update(states_update)
         self.interval_type = interval_type
         self.interval = interval
         self.begin = 0
@@ -114,7 +119,10 @@ class CheckpointManager:
             self.work = None
             self.doit = None
 
-        logger.info(f"Saving a checkpoint at step {curr_step}")
+        model_only_msg = (
+            "Saving model states only" if self.model_only else "Saving a checkpoint"
+        )
+        logger.info(f"{model_only_msg} at step {curr_step}")
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
         self.reset()

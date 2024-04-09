@@ -43,6 +43,7 @@ dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177
 interval = 500
 interval_type = "steps"
 folder = ""
+model_only = false
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']

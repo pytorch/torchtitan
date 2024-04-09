@@ -238,6 +238,7 @@ def main(job_config: JobConfig):
             else IntervalType.STEPS
         ),
         interval=job_config.checkpoint.interval,
+        model_only=job_config.checkpoint.model_only,
     )
     checkpoint.load()
 

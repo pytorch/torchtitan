@@ -42,6 +42,7 @@ dataset = "openwebtext"
 interval = 500
 interval_type = "steps"
 folder = ""
+model_only = false
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']
