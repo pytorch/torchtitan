@@ -30,13 +30,13 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import (
     Color,
-    NoColor,
     dist_max,
     dist_mean,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
     init_distributed,
+    NoColor,
     set_pg_timeouts,
 )
 
