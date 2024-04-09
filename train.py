@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtrain.checkpoint import CheckpointManager, IntervalType
@@ -31,6 +30,7 @@ from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
 from torchtrain.profiling import maybe_run_profiler
 from torchtrain.utils import (
     Color,
+    NoColor,
     dist_max,
     dist_mean,
     get_num_flop_per_token,
@@ -97,19 +97,14 @@ def build_optimizer(model, job_config: JobConfig):
     return optimizer
 
 
-def build_grad_scaler(model):
-    # TODO: FSDP2 does not support sharded grad scaler yet.
-    # TODO: if enabled, grad scaler's states need saving & loading in checkpointing
-    enable_grad_scaling = False
-    logger.info("Gradient scaling not enabled")
-    return ShardedGradScaler(enabled=enable_grad_scaling)
-
-
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # used for colorful printing
+    color = Color if job_config.metrics.enable_color_printing else NoColor
 
     # take control of garbage collection to avoid stragglers
     _gc_freq = job_config.training.gc_freq
@@ -154,9 +149,19 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
+    # loss_parallel enables dispatching to efficient loss operators
+    loss_parallel_ctx = (
+        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
+    )
+
+    # loss fn can be shared by pipeline-parallel or non-pp execution
+    def loss_fn(pred, labels):
+        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
 
     with torch.device("meta"):
@@ -174,15 +179,10 @@ def main(job_config: JobConfig):
     num_flop_per_token = get_num_flop_per_token(
         model_param_count, model_config, job_config.training.seq_len
     )
-    if job_config.misc.enable_color_printing:
-        logger.info(
-            f"{Color.blue}Model {model_name} {job_config.model.flavor} "
-            f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
-        )
-    else:
-        logger.info(
-            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
-        )
+    logger.info(
+        f"{color.blue}Model {model_name} {job_config.model.flavor} "
+        f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+    )
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
@@ -207,10 +207,6 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
-
-    # build grad scaler which is effective only when mixed precision training
-    # is enabled with fp16 param dtype under FSDP
-    scaler = build_grad_scaler(model)
 
     metric_logger = build_metric_logger(job_config)
 
@@ -286,45 +282,32 @@ def main(job_config: JobConfig):
 
             optimizer.zero_grad()
 
-            # forward
-            pred = model(input_ids)
+            # forward / backward
+            with loss_parallel_ctx():
+                pred = model(input_ids)
+                loss = loss_fn(pred, labels)
+                loss.backward()
 
-            with (
-                loss_parallel()
-                if parallel_dims.loss_parallel_enabled
-                else contextlib.nullcontext()
-            ):
-                loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
-
-                # backward on scaled loss to create scaled gradients
-                scaler.scale(loss).backward()
-
-            # clip gradients (after unscaling gradients of the optimizer's params)
-            scaler.unscale_(optimizer)
+            # clip gradients
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), job_config.training.max_norm, foreach=True
             )
 
             # optimizer step
-            # If gradients don't contain infs/NaNs, optimizer.step() is then called;
-            # otherwise, optimizer.step() is skipped.
-            scaler.step(optimizer)
+            optimizer.step()
             scheduler.step()
 
-            # updates the scale for next iteration
-            scaler.update()
-
-            current_loss = loss.item()
-            losses_since_last_log.append(current_loss)
+            losses_since_last_log.append(loss)
 
             # log metrics
             if (
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
+                losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = (
-                    np.mean(losses_since_last_log),
-                    np.max(losses_since_last_log),
+                    np.mean(losses),
+                    np.max(losses),
                 )
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
@@ -372,24 +355,14 @@ def main(job_config: JobConfig):
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
-                if job_config.misc.enable_color_printing:
-                    logger.info(
-                        f"{Color.cyan}step: {train_state.step:2}  "
-                        f"{Color.green}loss: {global_avg_loss:7.4f}  "
-                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}  "
-                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
-                    )
-                else:
-                    logger.info(
-                        f"step: {train_state.step:2}  "
-                        f"loss: {global_avg_loss:7.4f}  "
-                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}  "
-                        f"mfu: {mfu:.2f}%"
-                    )
+                logger.info(
+                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}wps: {round(wps):,}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                )
 
                 losses_since_last_log.clear()
                 ntokens_since_last_log = 0

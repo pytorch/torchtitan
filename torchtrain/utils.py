@@ -87,8 +87,8 @@ def init_distributed(job_config):
         "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
     )
 
-    # to mitigate the memory issue that collective tensors
-    # in DTensor holding memory longer than they should
+    # to mitigate the memory issue that collectives using
+    # async_op=True holds memory longer than they should
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
 
@@ -133,7 +133,7 @@ def get_peak_flops(device_name: str) -> int:
         return 312e12
 
 
-@dataclass
+@dataclass(frozen=True)
 class Color:
     black = "\033[30m"
     red = "\033[31m"
@@ -146,22 +146,14 @@ class Color:
     reset = "\033[39m"
 
 
-@dataclass
-class Background:
-    black = "\033[40m"
-    red = "\033[41m"
-    green = "\033[42m"
-    yellow = "\033[43m"
-    blue = "\033[44m"
-    magenta = "\033[45m"
-    cyan = "\033[46m"
-    white = "\033[47m"
-    reset = "\033[49m"
-
-
-@dataclass
-class Style:
-    bright = "\033[1m"
-    dim = "\033[2m"
-    normal = "\033[22m"
-    reset = "\033[0m"
+@dataclass(frozen=True)
+class NoColor:
+    black = ""
+    red = ""
+    green = ""
+    yellow = ""
+    blue = ""
+    magenta = ""
+    cyan = ""
+    white = ""
+    reset = ""

@@ -89,15 +89,21 @@ class JobConfig:
 
         # metrics configs
         self.parser.add_argument(
-            "--metrics.enable_tensorboard",
-            action="store_true",
-            help="whether to log metrics to TensorBoard",
-        )
-        self.parser.add_argument(
             "--metrics.log_freq",
             type=int,
             default=10,
             help="how often to log metrics to TensorBoard",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_color_printing",
+            default=False,
+            action="store_true",
+            help="whether to enable color printing",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_tensorboard",
+            action="store_true",
+            help="whether to log metrics to TensorBoard",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
@@ -118,6 +124,12 @@ class JobConfig:
             type=str,
             default="debugmodel",
             help="which model config to train",
+        )
+        self.parser.add_argument(
+            "--model.norm_type",
+            type=str,
+            default="rmsnorm",
+            help="Layer Normalization type to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -200,25 +212,25 @@ class JobConfig:
             help="Whether to compile the model.",
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval",
+            "--checkpoint.interval",
             type=int,
-            default=3600,
+            default=500,
             help=(
                 "Checkpointing interval. The unit of measurement is in seconds or "
-                "steps depending on --training.checkpoint-internval-type."
+                "steps depending on --checkpoint.interval_type."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval_type",
+            "--checkpoint.interval_type",
             type=str,
             default="steps",
             help=(
                 "The checkpointing interval unit of measurement."
-                "The default value is step."
+                "The default value is steps."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_folder",
+            "--checkpoint.folder",
             type=str,
             default="",
             help=(
@@ -278,14 +290,6 @@ class JobConfig:
             type=int,
             default=20000,
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
-        )
-
-        # misc settings
-        self.parser.add_argument(
-            "--misc.enable_color_printing",
-            default=False,
-            action="store_true",
-            help="whether to enable color printing",
         )
 
     def parse_args(self, args_list: list = sys.argv[1:]):
