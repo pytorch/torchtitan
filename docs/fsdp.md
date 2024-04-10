@@ -1,7 +1,7 @@
 # FSDP1 -> FSDP2
 
 ## Why FSDP2?
-PyTorch's fully sharded data parallelism (FSDP) API, [`FullyShardedDataParallel`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/fsdp/fully_sharded_data_parallel.py), looks to offer a performant eager-mode implementation, including communication bucketing and communication/computation overlap. It defines a `FlatParameter` by flattening and concatenating a group of parameters to represent a communication bucket. However, this `FlatParameter` complicates applying different behaviors to individual parameters within the `FlatParameter`, e.g. parameter freezing, parameter casting, etc, hurting composability, and complicates the internal implementation, e.g. making state dict logic thousands of lines.
+PyTorch's fully sharded data parallelism (FSDP) API, [`FullyShardedDataParallel`](https://github.com/pytorch/pytorch/blob/main/torch/distributed/fsdp/fully_sharded_data_parallel.py), looks to offer a performant eager-mode implementation, including communication bucketing and communication/computation overlap. It defines a `FlatParameter` by flattening and concatenating a group of parameters to represent a communication bucket. However, this `FlatParameter` complicates applying different behaviors to individual parameters within the `FlatParameter`, e.g. parameter freezing, parameter casting, etc., hurting composability, and it complicates the internal implementation, e.g. making state dict logic thousands of lines.
 
 With these limitations in mind, we designed and implemented an FSDP rewrite removing the `FlatParameter`.  We refer to this rewrite as FSDP2 and the original as FSDP1. FSDP2 targets the same use cases as FSDP1 plus more. FSDP2 still strives for the same performance in eager mode, using several of the same techniques.
 
@@ -15,8 +15,8 @@ We have validated FSDP2 numerics and performance using torchtrain (e.g. see this
 
 For more details on motivation, API, and system design, refer to [here](https://github.com/pytorch/pytorch/issues/114299). In this README, we try to provide more user-facing info and less system design details.
 
-## FSDP1 <> FSDP2 Differences
-We go over some differences between FSDP1 and FSDP2, starting with the FSDP2 API. Overall, we are trying to minimize the API surface (e.g. number of arguments) and avoid having a monolithic API.
+## FSDP1 <> FSDP2 API Differences
+We go over some API differences between FSDP1 and FSDP2. Overall, we hope to minimize the API surface (including the number of arguments) to avoid having a monolithic API.
 ```
 @contract(state_cls=FSDPState)
 def fully_shard(
@@ -26,27 +26,61 @@ def fully_shard(
   reshard_after_forward: Union[bool, int] = True,
   mp_policy: MixedPrecisionPolicy = MixedPrecisionPolicy(),
   offload_policy: OffloadPolicy = OffloadPolicy(),
-) -> nn.Module:  # return value only used by `contract` for checks
+) -> nn.Module:  # returns `module` for `contract` checks
 ```
-- `fully_shard(module)` is similar to `FullyShardedDataParallel(module)`, constructing one communication bucket of `module.parameters()` (except those already assigned to a nested FSDP call).
+
+| FSDP1 | FSDP2 |
+| ----- | ----- |
+| `module` | `module` |
+| `process_group`/`device_mesh` | `mesh` |
+| `sharding_strategy` | `reshard_after_forward` |
+| `cpu_offload` | `offload_policy` |
+| `auto_wrap_policy` | removed |
+| `backward_prefetch` | removed |
+| `mixed_precision` | `mp_policy` |
+| `ignored_modules`/`ignored_states` | not yet implemented |
+| `param_init_fn` | removed |
+| `device_id` | removed |
+| `sync_module_states` | removed |
+| `forward_prefetch` | not yet implemented |
+| `limit_all_gathers` | removed |
+| `use_orig_params` | removed |
+
+- `fully_shard(module)` is similar to `FullyShardedDataParallel(module)`, constructing one communication bucket from `module.parameters()` except those already assigned to a nested `fully_shard`/`FullyShardedDataParallel` call.
     - `fully_shard(module)` adds an `FSDPState` object on `module`, accessible via `fully_shard.state(module)`, instead of being an `nn.Module` wrapper. This is done via the `@contract` decorator.
+    - Calling `model.named_parameters()` for a `model` with FSDP2 applied returns unchanged parameter names and `DTensor` sharded parameters. This means that the optimizer and gradient norm clipping see `DTensor`s.
+    - `fully_shard(module)` performs a dynamic class swap on `module`. E.g., if `type(module) is Transformer`, then FSDP2 constructs a new class `FSDPTransformer` that inherits from a class `FSDP` and `Transformer` and sets `module.__class__` to be `FSDPTransformer`. This allows us to add new methods and override methods via `FSDP` without constructing an `nn.Module` wrapper.
 - FSDP1's `sharding_strategy` and `process_group`/`device_mesh` maps to FSDP2's `mesh` and `reshard_after_forward`.
   - `mesh` should be 1D for FSDP and 2D for HSDP. For HSDP, we assume sharding on the 0th mesh dim and replication on the 1st mesh dim. If `mesh is None`, then FSDP2 initializes a 1D global mesh over the default process group.
-  - `reshard_after_forward=True` means parameters are resharded (freed) after forward and re-all-gathered in backward. This with 1D mesh equals `ShardingStrategy.FULL_SHARD`. This with 2D mesh equals `ShardingStrategy.HYBRID_SHARD`.
-  - `reshard_after_forward=False` means parameters are not resharded (freed) after forward, not needing any all-gather in backward. This with 1D mesh equals `ShardingStrategy.SHARD_GRAD_OP`. This with 2D mesh equals `ShardingStrategy._HYBRID_SHARD_ZERO2`.
+  - `reshard_after_forward=True` or `False` determines whether parameters are resharded (freed) after forward. If `True`, then they are re-all-gathered in backward. This trades off saving memory at the cost of extra communication.
   - (Experimental) `reshard_after_forward: int` means that parameters are resharded to a smaller world size after forward (e.g. `reshard_after_forward=8` can mean intra-node) so that the backward all-gather is over a smaller world size.
-- For the other arguments:
-  - FSDP1's `mixed_precision` maps to FSDP2's `mp_policy`. We remove `buffer_dtype`, simplify `cast_forward_inputs` and `cast_root_forward_inputs` into just `cast_forward_inputs`, and add an `output_dtype`. 
-  - FSDP2 removes `auto_wrap_policy`. Auto wrapping refers to "automatically" traversing `module.modules()`, calling `FullyShardedDataParallel(submodule, **kwargs)` according to the policy, and assigning to the parent module if called. We prefer for this to exist above `fully_shard`.
-  - FSDP2 removes `backward_prefetch` and follows `BACKWARD_PRE` always. Only `BACKWARD_PRE` always prefetches the correct order; `BACKWARD_POST` can prefetch [incorrectly](https://github.com/pytorch/pytorch/issues/108190) in nested cases. FSDP2 does not support `forward_prefetch` yet.
-  - FSDP2 does not support `ignored_modules` or `ignored_states` for now. We want to evaluate the use cases before adding an extra argument.
-  - FSDP2 does not support `param_init_fn` since it supports a hopefully simpler meta-device initialization flow.
-  - FSDP2 does not support `device_id`. It always moves managed modules' parameters/buffers to the current CUDA device if given a CUDA `mesh`.
-  - FSDP2 removes `limit_all_gathers`, instead using an improved memory management system without any CPU rate limiting.
-  - FSDP2 removes `use_orig_params` since the original parameters are always exposed under dim-0 per-parameter sharding.
-- Calling `model.named_parameters()` for a `model` with FSDP2 applied returns unchanged parameter names and `DTensor` sharded parameters. This means that the optimizer and gradient norm clipping see `DTensor`s.
-- `fully_shard(module)` performs a dynamic class swap on `module`. E.g., if `type(module) is Transformer`, then FSDP2 constructs a new class `FSDPTransformer` that inherits from a class `FSDP` and `Transformer` and sets `module.__class__` to be `FSDPTransformer`. This allows us to add new methods and override methods via `FSDP` without constructing an `nn.Module` wrapper.
-- Calling `model.state_dict()` for an FSDP2 `model` returns a "sharded state dict" (without any communication), whereas for FSDP1, it returns a "full state dict".
+  - | FSDP1 | FSDP2 | DeepSpeed |
+    | --- | --- | --- |
+    | 1 `process_group` + `FULL_SHARD` | 1D `mesh` + `reshard_after_forward=True` | ZeRO-3 |
+    | 1 `process_group` + `SHARD_GRAD_OP` | 1D `mesh` + `reshard_after_forward=False` | ZeRO-2 |
+    | 2 `process_group`s/2D `device_mesh` + `HYBRID_SHARD` | 2D `mesh` + `reshard_after_forward=True` | MiCS |
+    | 2 `process_group`s/2D `device_mesh` + `_HYBRID_SHARD_ZERO2` | 2D `mesh` + `reshard_after_forward=False` | - |
+    | - | 1D/2D `mesh` + `reshard_after_forward=8` (`int`) | ZeRO++ hpZ |
+- FSDP2 maps `mixed_precision` to `mp_policy` and `cpu_offload` to `offload_policy`.
+  - For `mp_policy`, we remove `buffer_dtype`, simplify `cast_forward_inputs` and `cast_root_forward_inputs` into just `cast_forward_inputs`, and add an `output_dtype`.
+  - For `offload_policy`, we add a `pin_memory` option to avoid pinning CPU memory. (This feature may not have landed yet.)
+- FSDP2 removes `auto_wrap_policy`, `backward_prefetch`, `param_init_fn`, `device_id`, `sync_module_states`, `limit_all_gathers`, and `use_orig_params`.
+  - `auto_wrap_policy` provides a syntactic sugar for calling `FullyShardedDataParallel` on modules based on a predicate given by the policy and assigning the wrapped module to its parent. FSDP2 is no longer an `nn.Module` wrapper, so there is need to assign the module back to its parent. We prefer for this functionality to exist above `fully_shard`, and we may provide a utility like `auto_wrap_policy` in the future.
+  - FSDP2 always follows `backward_prefetch=BACKWARD_PRE` without option since that is the only way to overlap collectives in backward correctly. `BACKWARD_POST` can prefetch [incorrectly](https://github.com/pytorch/pytorch/issues/108190) in nested-module cases.
+  - FSDP2 supports a new meta-device initialization flow that does not require materializing a module on GPU *before* sharding it, removing the need for `param_init_fn`. See [Meta-Device Initialization](#meta-device-initialization) for more details.
+  - FSDP2 always moves managed parameters/buffers to the `mesh`'s corresponding device, removing the need for `device_id`. For example, if `mesh.device_type` is `"cuda"`, then FSDP2 uses the current CUDA device.
+  - FSDP2 uses a new memory management system that preserves communication/computation overlap while achieving deterministic and lower memory usage than FSDP1. This system does not require any CPU synchronization, so there is no need for `limit_all_gathers`.
+  - FSDP2 always "uses the original parameters" since there is no more `FlatParameter`, removing the need for `use_orig_params`.
+- How to implement `ignored_modules`/`ignored_states` and `forward_prefetch` in FSDP2 is under discussion.
+
+| FSDP1 | FSDP2 |
+| ----- | ----- |
+| `model.state_dict()`: full state dict | `model.state_dict()`: sharded state dict (no communication) |
+| `optim.state_dict()`: local state dict | `optim.state_dict()`: sharded state dict (no communication) |
+| `summon_full_params()` | use `DTensor` APIs like `full_tensor()` |
+| `FSDP.clip_grad_norm_()` | `nn.utils.clip_grad_norm_()` |
+| `ShardedGradScaler` | not yet supported |
+
 
 ## Meta-Device Initialization
 Before with FSDP1:
