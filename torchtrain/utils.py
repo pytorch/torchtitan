@@ -88,7 +88,8 @@ def init_distributed(job_config):
     )
 
     # to mitigate the memory issue that collectives using
-    # async_op=True holds memory longer than they should
+    # async_op=True hold memory longer than they should
+    # such as those in tensor parallelism
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
 

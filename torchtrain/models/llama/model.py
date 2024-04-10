@@ -23,13 +23,13 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 32768
-    depth_init: bool = (
-        True  # initialization uses each unique layer_id or total model layer count
-    )
+    # If `True`, then each transformer block init uses its layer ID, and if
+    # `False`, each uses the total number of transformer blocks
+    depth_init: bool = True
     norm_type: str = "rmsnorm"
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
@@ -46,13 +46,13 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
     Reshape frequency tensor for broadcasting it with another tensor.
 
@@ -131,8 +131,6 @@ class Attention(nn.Module):
         wk (Linear): Linear transformation for keys.
         wv (Linear): Linear transformation for values.
         wo (Linear): Linear transformation for output.
-        cache_k (torch.Tensor): Cached keys for attention.
-        cache_v (torch.Tensor): Cached values for attention.
 
     """
 
@@ -187,16 +185,12 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(
-            xk, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(
-            xv, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
         # we use casual mask for training
         output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
