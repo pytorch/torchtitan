@@ -397,15 +397,15 @@ class Transformer(nn.Module):
         ``Transformer`` root module to avoid reinitializing tensors.
         """
 
-        self.freqs_cis = precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # (use 2x max sequence length to be safe)
-            self.model_args.max_seq_len * 2,
-        )
-
         with torch.device(self.freqs_cis.device):
-            nn.init.normal_(self.tok_embeddings.weight)
+            self.freqs_cis = precompute_freqs_cis(
+                self.model_args.dim // self.model_args.n_heads,
+                # Need to compute until at least the max token limit for generation
+                # (use 2x max sequence length to be safe)
+                self.model_args.max_seq_len * 2,
+            )
+
+        nn.init.normal_(self.tok_embeddings.weight)
 
         for layer in self.layers:
             layer.init_weights()
