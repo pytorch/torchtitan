@@ -12,6 +12,7 @@ profile_every_x_iter = 10
 
 [metrics]
 log_freq = 1
+enable_color_printing = true
 enable_tensorboard = true
 save_tb_folder = "tb"
 

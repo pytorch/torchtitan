@@ -36,12 +36,9 @@ from torchtrain.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
+    NoColor,
     set_pg_timeouts,
 )
-
-_is_local_logging = True
-if "SLURM_JOB_ID" in os.environ:
-    _is_local_logging = False
 
 
 @dataclass
@@ -105,6 +102,9 @@ def build_optimizer(model, job_config: JobConfig):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # used for colorful printing
+    color = Color if job_config.metrics.enable_color_printing else NoColor
 
     # take control of garbage collection to avoid stragglers
     _gc_freq = job_config.training.gc_freq
@@ -179,15 +179,10 @@ def main(job_config: JobConfig):
     num_flop_per_token = get_num_flop_per_token(
         model_param_count, model_config, job_config.training.seq_len
     )
-    if _is_local_logging:
-        logger.info(
-            f"{Color.blue}Model {model_name} {job_config.model.flavor} "
-            f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
-        )
-    else:
-        logger.info(
-            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
-        )
+    logger.info(
+        f"{color.blue}Model {model_name} {job_config.model.flavor} "
+        f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+    )
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
@@ -201,6 +196,13 @@ def main(job_config: JobConfig):
     # allocate sharded model on GPU and initialize weights via DTensor
     model.to_empty(device="cuda")
     model.init_weights()
+
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -252,6 +254,7 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
+    logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_run_profiler(job_config) as torch_profiler:
         checkpoint.reset()
 
@@ -260,6 +263,7 @@ def main(job_config: JobConfig):
         ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
+        gpu_memory_monitor.reset_peak_stats()
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
@@ -351,24 +355,14 @@ def main(job_config: JobConfig):
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
-                if _is_local_logging:
-                    logger.info(
-                        f"{Color.cyan}step: {train_state.step:2}  "
-                        f"{Color.green}loss: {global_avg_loss:7.4f}  "
-                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}  "
-                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
-                    )
-                else:
-                    logger.info(
-                        f"step: {train_state.step:2}  "
-                        f"loss: {global_avg_loss:7.4f}  "
-                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}  "
-                        f"mfu: {mfu:.2f}%"
-                    )
+                logger.info(
+                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}wps: {round(wps):,}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                )
 
                 losses_since_last_log.clear()
                 ntokens_since_last_log = 0

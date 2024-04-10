@@ -67,6 +67,7 @@ class JobConfig:
             action="store_true",
             help="add this config to integration test suite",
         )
+
         # profiling configs
         self.parser.add_argument(
             "--profiling.run_profiler",
@@ -85,17 +86,24 @@ class JobConfig:
             default=10,
             help="collect profiler traces every x iterations",
         )
+
         # metrics configs
-        self.parser.add_argument(
-            "--metrics.enable_tensorboard",
-            action="store_true",
-            help="whether to log metrics to TensorBoard",
-        )
         self.parser.add_argument(
             "--metrics.log_freq",
             type=int,
             default=10,
             help="how often to log metrics to TensorBoard",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_color_printing",
+            default=False,
+            action="store_true",
+            help="whether to enable color printing",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_tensorboard",
+            action="store_true",
+            help="whether to log metrics to TensorBoard",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
