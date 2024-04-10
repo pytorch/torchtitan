@@ -43,7 +43,7 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            ["--training.tensor_parallel_degree 2"],
+            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
         ],
         "Eager mode 2DParallel",
     ),
