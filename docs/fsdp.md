@@ -3,7 +3,7 @@
 ## Why FSDP2?
 PyTorch's fully sharded data parallelism (FSDP) API, [`FullyShardedDataParallel`](https://pytorch.org/docs/stable/fsdp.html), looks to offer a performant eager-mode implementation, including communication bucketing and communication/computation overlap. It defines a `FlatParameter` by flattening and concatenating a group of parameters to represent a communication bucket. However, this `FlatParameter` complicates applying different behaviors to individual parameters within the `FlatParameter`, e.g. parameter freezing, parameter casting, etc., hurting composability, and it complicates the internal implementation, e.g. making state dict logic thousands of lines and requiring additional communications.
 
-With these limitations in mind, we designed and implemented an FSDP rewrite removing the `FlatParameter`.  We refer to this rewrite as FSDP2 and the original as FSDP1. FSDP2 targets the same use cases as FSDP1 plus more. FSDP2 still strives for the same performance in eager mode, using several of the same techniques.
+With these limitations in mind, we designed and implemented an FSDP rewrite removing the `FlatParameter`.  We refer to this rewrite as FSDP2 and the original as FSDP1. FSDP2 targets the same use cases as FSDP1 plus more, and FSDP2 still strives for good performance in eager mode, using several of the same techniques.
 
 Compared to FSDP1:
 - FSDP2 represents sharded parameters as `DTensor`s sharded on dim-0, allowing for easy manipulation of individual parameters, communication-free sharded state dicts, and a simpler meta-device initialization flow.
@@ -11,7 +11,7 @@ Compared to FSDP1:
 
 In the future, FSDP2 will offer an extension point to customize the all-gather (e.g. for fp8 all-gather for fp8 linears) and improved `torch.compile` support.
 
-We have validated FSDP2 numerics and performance using torchtrain (e.g. see this [PR](https://github.com/pytorch/torchtrain/pull/165)).
+We have validated FSDP2 numerics and performance using torchtrain (e.g. see this [PR](https://github.com/pytorch/torchtrain/pull/165)). For example, on some Llama-7B runs on 8x H100s, FSDP2 achieves higher MFU at 7% lower peak memory than FSDP1, matching the same loss curve.
 
 For more details on motivation, API, and system design, refer to [here](https://github.com/pytorch/pytorch/issues/114299). In this README, we try to provide more user-facing info and less system design details.
 
@@ -100,8 +100,8 @@ After with FSDP2:
 with torch.device("meta"):
     model = Transformer()
 for module in model.modules():
-if isinstance(module, TransformerBlock):
-    fully_shard(module)
+    if isinstance(module, TransformerBlock):
+        fully_shard(module)
 fully_shard(model)
 for tensor in itertools.chain(model.parameters(), model.buffers()):
     assert tensor.device == torch.device("meta")
