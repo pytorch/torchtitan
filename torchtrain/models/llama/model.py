@@ -131,6 +131,8 @@ class Attention(nn.Module):
         wk (Linear): Linear transformation for keys.
         wv (Linear): Linear transformation for values.
         wo (Linear): Linear transformation for output.
+        cache_k (torch.Tensor): Cached keys for attention.
+        cache_v (torch.Tensor): Cached values for attention.
 
     """
 
@@ -185,12 +187,16 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(
+            xk, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(
+            xv, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
         # we use casual mask for training
         output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
