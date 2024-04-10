@@ -14,20 +14,15 @@ log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
 
-[checkpoint]
-interval = 3600
-interval_type = "steps"
-folder = ""
-
 [model]
 name = "llama"
 flavor = "70B"
+norm_type = "rmsnorm" # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
 lr = 1.5e-4
-
 
 [training]
 batch_size = 4
@@ -43,6 +38,10 @@ fp8_linear = ""
 compile = false
 dataset = "openwebtext"
 
+[checkpoint]
+interval = 500
+interval_type = "steps"
+folder = ""
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']

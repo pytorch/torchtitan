@@ -163,9 +163,7 @@ def main(job_config: JobConfig):
 
     # loss_parallel enables dispatching to efficient loss operators
     loss_parallel_ctx = (
-        loss_parallel()
-        if parallel_dims.loss_parallel_enabled
-        else contextlib.nullcontext()
+        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
@@ -175,6 +173,7 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
 
     with torch.device("meta"):
@@ -337,6 +336,7 @@ def main(job_config: JobConfig):
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     loss.backward()
+                # TODO(whc) rebase conflict, rewrite how loss is handled?
                 current_loss = loss.item()
 
             # clip gradients
@@ -355,9 +355,10 @@ def main(job_config: JobConfig):
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
+                losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = (
-                    np.mean(losses_since_last_log),
-                    np.max(losses_since_last_log),
+                    np.mean(losses),
+                    np.max(losses),
                 )
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
