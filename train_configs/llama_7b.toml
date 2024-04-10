@@ -42,4 +42,4 @@ dataset = "alpaca"
 interval = 500
 interval_type = "steps"
 folder = ""
-model_only = false
+model_weights_only = false

@@ -57,20 +57,17 @@ class CheckpointManager:
         folder: str,
         interval_type: IntervalType,
         interval: int,
-        model_only: bool = False,
+        model_weights_only: bool = False,
     ) -> None:
         self.folder = folder
         self.states = states
-        self.model_only = model_only
-        states_update = (
-            {"model": ModelWrapper(model)}
-            if self.model_only
-            else {
+        self.model_weights_only = model_weights_only
+        self.states.update(
+            {
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
             }
         )
-        self.states.update(states_update)
         self.interval_type = interval_type
         self.interval = interval
         self.begin = 0
@@ -90,6 +87,10 @@ class CheckpointManager:
         return os.path.join(self.folder, f"step-{step}")
 
     def save(self, curr_step: int, force: bool = False) -> None:
+        """
+        force = True will force the checkpoint to be saved, even if the interval has not been reached.
+        This only happens when train_state.step == job_config.training.steps.
+        """
         if not self.folder:
             return
 
@@ -119,10 +120,15 @@ class CheckpointManager:
             self.work = None
             self.doit = None
 
-        model_only_msg = (
-            "Saving model states only" if self.model_only else "Saving a checkpoint"
+        # We only consider saving weights only at the end of the training.
+        # So this won't affect preemption and training resume.
+        weights_only = force and self.model_weights_only
+        weights_only_msg = (
+            "Saving model weights only" if weights_only else "Saving a full checkpoint"
         )
-        logger.info(f"{model_only_msg} at step {curr_step}")
+        self.states = {"model": self.states["model"]} if weights_only else self.states
+        logger.info(f"{weights_only_msg} at step {curr_step}")
+
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
         self.reset()
