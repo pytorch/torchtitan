@@ -34,7 +34,7 @@ no_recompute_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
 }
 
 
@@ -154,7 +154,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             model,
             tp_mesh,
             {
-                "embeddings.tok_embeddings": RowwiseParallel(
+                "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
                 ),
                 "output": col_parallel_strategy(

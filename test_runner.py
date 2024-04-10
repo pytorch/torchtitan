@@ -22,7 +22,7 @@ class OverrideDefinitions:
     """
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = ""
+    test_descr: str = "default"
 
 
 CONFIG_DIR = "./train_configs"
@@ -43,7 +43,7 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            ["--training.tensor_parallel_degree 2"],
+            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
         ],
         "Eager mode 2DParallel",
     ),
@@ -74,6 +74,10 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
             shell=True,
         )
         print(result.stdout)
+        if result.returncode != 0:
+            raise Exception(
+                f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
+            )
 
 
 for config_file in os.listdir(CONFIG_DIR):
