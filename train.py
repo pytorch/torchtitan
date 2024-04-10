@@ -15,7 +15,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from pippy.PipelineSchedule import PipelineScheduleGPipe
+from pippy.PipelineSchedule import ScheduleGPipe
 from pippy.PipelineStage import PipelineStage
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
@@ -225,7 +225,7 @@ def main(job_config: JobConfig):
             device=device,
             group=pp_mesh.get_group(),
         )
-        pp_schedule = PipelineScheduleGPipe(
+        pp_schedule = ScheduleGPipe(
             stage,
             n_microbatches=parallel_dims.pp,
             loss_fn=loss_fn,
@@ -317,7 +317,7 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with loss_parallel_ctx:
+                with loss_parallel_ctx():
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -327,8 +327,10 @@ def main(job_config: JobConfig):
                         schedule.step()
 
                 # accumulate losses across pipeline microbatches
-                current_loss = (
-                    torch.mean(torch.stack(losses)).item() if is_last_stage else -1.0
+                loss = (
+                    torch.mean(torch.stack(losses))
+                    if is_last_stage
+                    else torch.Tensor([-1.0])
                 )
             else:
                 # forward / backward
@@ -337,7 +339,6 @@ def main(job_config: JobConfig):
                     loss = loss_fn(pred, labels)
                     loss.backward()
                 # TODO(whc) rebase conflict, rewrite how loss is handled?
-                current_loss = loss.item()
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(
@@ -348,7 +349,7 @@ def main(job_config: JobConfig):
             optimizer.step()
             scheduler.step()
 
-            losses_since_last_log.append(current_loss)
+            losses_since_last_log.append(loss)
 
             # log metrics
             if (
