@@ -11,7 +11,7 @@ Compared to FSDP1:
 
 In the future, FSDP2 will offer an extension point to customize the all-gather (e.g. for fp8 all-gather for fp8 linears) and improved `torch.compile` support.
 
-We have validated FSDP2 numerics and performance using torchtrain (e.g. see this [PR](https://github.com/pytorch/torchtrain/pull/165)). For example, on some Llama-7B runs on 8x H100s, FSDP2 achieves higher MFU at 7% lower peak memory than FSDP1, matching the same loss curve.
+We have validated FSDP2 numerics and performance using torchtrain (e.g. see this [PR](https://github.com/pytorch/torchtrain/pull/165)). For example, on some Llama-7B runs on 8x H100s, FSDP2 achieves higher MFU with 7% lower peak memory than FSDP1, matching the same loss curve.
 
 For more details on motivation, API, and system design, refer to [here](https://github.com/pytorch/pytorch/issues/114299). In this README, we try to provide more user-facing info and less system design details.
 
