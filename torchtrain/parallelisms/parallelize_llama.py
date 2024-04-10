@@ -159,6 +159,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         model = pipe.get_stage_module(stage_idx)
 
     if parallel_dims.tp_enabled:
+        if job_config.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm not yet compatible with TP. Please use layernorm or rmsnorm."
+            )
+
         tp_mesh = world_mesh["tp"]
         row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
             job_config
@@ -175,7 +180,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     input_layouts=Replicate(),
                 ),
                 "output": col_parallel_strategy(
-                    input_layouts=Shard(0),
+                    input_layouts=Shard(1),
                     output_layouts=(
                         Shard(-1)
                         if parallel_dims.loss_parallel_enabled
@@ -183,10 +188,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     ),
                     use_local_output=not parallel_dims.loss_parallel_enabled,
                 ),
-                "norm": SequenceParallel(sequence_dim=0),
+                "norm": SequenceParallel(),
                 "layers.0": PrepareModuleInput(
                     input_layouts=(Replicate(), None),
-                    desired_input_layouts=(Shard(0), None),
+                    desired_input_layouts=(Shard(1), None),
                     use_local_output=True,
                 ),
             },
@@ -196,22 +201,22 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         for layer_id, transformer_block in enumerate(model.layers):
             layer_plan = {
                 "attention": PrepareModuleInput(
-                    input_layouts=(Shard(0), None),
+                    input_layouts=(Shard(1), None),
                     desired_input_layouts=(Replicate(), None),
                 ),
                 "attention.wq": col_parallel_strategy(),
                 "attention.wk": col_parallel_strategy(),
                 "attention.wv": col_parallel_strategy(),
-                "attention.wo": row_parallel_strategy(output_layouts=Shard(0)),
-                "attention_norm": SequenceParallel(sequence_dim=0),
+                "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
+                "attention_norm": SequenceParallel(),
                 "feed_forward": PrepareModuleInput(
-                    input_layouts=(Shard(0),),
+                    input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
                 ),
                 "feed_forward.w1": col_parallel_strategy(),
-                "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(0)),
+                "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
                 "feed_forward.w3": col_parallel_strategy(),
-                "ffn_norm": SequenceParallel(sequence_dim=0),
+                "ffn_norm": SequenceParallel(),
             }
 
             # Adjust attention module to use the local number of heads
@@ -232,7 +237,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
         # TODO: Expose `reduce_dtype` as a config option.
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            # TODO(whc) need to fix PP + FSDP-mixed-precision
+            # tracer for PP assumes f32 and is caught off guard when runtime FSDP interacts using bf16 inputs
+            # param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            param_dtype=torch.float32,
+            reduce_dtype=torch.float32,
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
