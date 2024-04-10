@@ -15,20 +15,15 @@ log_freq = 1
 enable_tensorboard = true
 save_tb_folder = "tb"
 
-[checkpoint]
-interval = 10
-interval_type = "steps"
-folder = "ckpt"
-
 [model]
 name = "llama"
 flavor = "debugmodel"
+norm_type = "fused_rmsnorm" # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
 lr = 8e-4
-
 
 [training]
 batch_size = 8
@@ -42,6 +37,11 @@ pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
 dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
+
+[checkpoint]
+interval = 10
+interval_type = "steps"
+folder = "ckpt"
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']

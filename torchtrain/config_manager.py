@@ -118,6 +118,12 @@ class JobConfig:
             help="which model config to train",
         )
         self.parser.add_argument(
+            "--model.norm_type",
+            type=str,
+            default="rmsnorm",
+            help="Layer Normalization type to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
+        )
+        self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
             default="./torchtrain/datasets/tokenizer/tokenizer.model",
@@ -198,25 +204,25 @@ class JobConfig:
             help="Whether to compile the model.",
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval",
+            "--checkpoint.interval",
             type=int,
-            default=3600,
+            default=500,
             help=(
                 "Checkpointing interval. The unit of measurement is in seconds or "
-                "steps depending on --training.checkpoint-internval-type."
+                "steps depending on --checkpoint.interval_type."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_interval_type",
+            "--checkpoint.interval_type",
             type=str,
             default="steps",
             help=(
                 "The checkpointing interval unit of measurement."
-                "The default value is step."
+                "The default value is steps."
             ),
         )
         self.parser.add_argument(
-            "--training.checkpoint_folder",
+            "--checkpoint.folder",
             type=str,
             default="",
             help=(
@@ -265,7 +271,7 @@ class JobConfig:
         self.parser.add_argument(
             "--comm.train_timeout_seconds",
             type=int,
-            default=5,
+            default=100,
             help=(
                 "Timeout for communication operations after the first train step-"
                 "usually a tighter bound than during initialization."
