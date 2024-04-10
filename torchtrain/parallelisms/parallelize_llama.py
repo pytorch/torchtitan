@@ -34,7 +34,7 @@ no_recompute_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
 }
 
 
