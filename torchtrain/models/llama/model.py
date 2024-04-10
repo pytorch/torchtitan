@@ -346,7 +346,6 @@ class Transformer(nn.Module):
     def __init__(self, model_args: ModelArgs):
         super().__init__()
         self.model_args = model_args
-        self.model_dim = model_args.dim
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
 
@@ -359,16 +358,13 @@ class Transformer(nn.Module):
         # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
         # initialized by the checkpoint, or we need to add a separate initializer for
         # just the non-persistent buffers that is called after loading checkpoints.
-
-        # Note that self.params.max_seq_len is multiplied by 2 because the token limit for the Llama 2 generation of models is 4096.
-        # Adding this multiplier instead of using 4096 directly allows for dynamism of token lengths while training or fine-tuning.
         self.register_buffer(
             "freqs_cis",
             precompute_freqs_cis(
-                self.model_args.dim // self.model_args.n_heads,
+                model_args.dim // model_args.n_heads,
                 # Need to compute until at least the max token limit for generation
                 # (use 2x max sequence length to be safe)
-                self.model_args.max_seq_len * 2,
+                model_args.max_seq_len * 2,
             ),
             persistent=True,
         )
@@ -396,7 +392,6 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-
         with torch.device(self.freqs_cis.device):
             self.freqs_cis = precompute_freqs_cis(
                 self.model_args.dim // self.model_args.n_heads,
@@ -404,13 +399,11 @@ class Transformer(nn.Module):
                 # (use 2x max sequence length to be safe)
                 self.model_args.max_seq_len * 2,
             )
-
         nn.init.normal_(self.tok_embeddings.weight)
-
         for layer in self.layers:
             layer.init_weights()
         self.norm.reset_parameters()
-        final_out_std = self.model_dim**-0.5
+        final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         nn.init.trunc_normal_(
             self.output.weight,
