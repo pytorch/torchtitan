@@ -245,54 +245,6 @@ class FeedForward(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
-class RotaryEmbedding(nn.Module):
-    """
-    RotaryEmbedding Module
-    """
-
-    def __init__(self, model_args: ModelArgs):
-        super().__init__()
-        self.model_args = model_args
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-
-        # TODO persistent should be set to false, since this buffer can be recomputed.
-        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
-        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
-        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
-        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
-        # initialized by the checkpoint, or we need to add a separate initializer for
-        # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
-
-    def _precompute_freqs_cis(self):
-        return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # (use 2x max sequence length to be safe)
-            self.model_args.max_seq_len * 2,
-        )
-
-    def forward(self, tokens: torch.Tensor):
-        """
-        Perform a forward pass through the embedding module.
-
-        Args:
-            tokens (torch.Tensor): Input tensor.
-
-        Returns:
-            Tuple(torch.Tensor, torch.Tensor): Embedded input tensor and freqs_cis
-        """
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        freqs_cis = self.freqs_cis[0:seqlen]
-        return h, freqs_cis
-
-    def init_weights(self):
-        with torch.device(self.freqs_cis.device):
-            self.freqs_cis = self._precompute_freqs_cis()
-        nn.init.normal_(self.tok_embeddings.weight)
-
-
 class TransformerBlock(nn.Module):
     """
     TransformerBlock Module
@@ -390,9 +342,27 @@ class Transformer(nn.Module):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.model_dim = model_args.dim
 
-        self.embeddings = RotaryEmbedding(model_args)
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+
+        # TODO persistent should be set to false, since this buffer can be recomputed.
+        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
+        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
+        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
+        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
+        # initialized by the checkpoint, or we need to add a separate initializer for
+        # just the non-persistent buffers that is called after loading checkpoints.
+        self.register_buffer(
+            "freqs_cis",
+            precompute_freqs_cis(
+                model_args.dim // model_args.n_heads,
+                # Need to compute until at least the max token limit for generation
+                # (use 2x max sequence length to be safe)
+                model_args.max_seq_len * 2,
+            ),
+            persistent=True,
+        )
+
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
@@ -416,11 +386,18 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        self.embeddings.init_weights()
+        with torch.device(self.freqs_cis.device):
+            self.freqs_cis = precompute_freqs_cis(
+                self.model_args.dim // self.model_args.n_heads,
+                # Need to compute until at least the max token limit for generation
+                # (use 2x max sequence length to be safe)
+                self.model_args.max_seq_len * 2,
+            )
+        nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers:
             layer.init_weights()
         self.norm.reset_parameters()
-        final_out_std = self.model_dim**-0.5
+        final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         nn.init.trunc_normal_(
             self.output.weight,
@@ -441,7 +418,11 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        h, freqs_cis = self.embeddings(tokens)
+        _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(tokens)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[0:seqlen]
+
         for layer in self.layers:
             h = layer(h, freqs_cis)
         h = self.norm(h)

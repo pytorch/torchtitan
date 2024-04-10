@@ -154,7 +154,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             model,
             tp_mesh,
             {
-                "embeddings.tok_embeddings": RowwiseParallel(
+                "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
                 ),
                 "output": col_parallel_strategy(
