@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
-from torchtrain.logging_utils import logger
-from torchtrain.parallelisms.parallelize_llama import parallelize_llama
+from torchtitan.logging_utils import logger
+from torchtitan.parallelisms.parallelize_llama import parallelize_llama
 
 models_parallelize_fns = {
     "llama": parallelize_llama,

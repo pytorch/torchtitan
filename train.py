@@ -18,17 +18,17 @@ import torch.nn.functional as F
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
-from torchtrain.checkpoint import CheckpointManager, IntervalType
-from torchtrain.config_manager import JobConfig
-from torchtrain.datasets import create_tokenizer, dataloader_fn
-from torchtrain.float8_linear import build_fp8_linear
-from torchtrain.logging_utils import init_logger, logger
-from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
-from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import (
+from torchtitan.checkpoint import CheckpointManager, IntervalType
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import create_tokenizer, dataloader_fn
+from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.logging_utils import init_logger, logger
+from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
+from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.profiling import maybe_run_profiler
+from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,

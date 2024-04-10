@@ -1,4 +1,4 @@
-from torchtrain.models.llama import llama_configs, Transformer
+from torchtitan.models.llama import llama_configs, Transformer
 
 models_config = {
     "llama": llama_configs,

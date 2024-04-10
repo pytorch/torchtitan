@@ -5,7 +5,7 @@
 # --- constraint issues or to tune for improved performance.
 # ---
 
-#SBATCH --job-name=torchtrain_multi_node
+#SBATCH --job-name=torchtitan_multi_node
 
 #SBATCH --ntasks=4
 

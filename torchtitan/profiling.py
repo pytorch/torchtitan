@@ -5,8 +5,8 @@ import contextlib
 import os
 
 import torch
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
 
 
 @contextlib.contextmanager

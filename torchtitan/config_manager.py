@@ -13,7 +13,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtrain.logging_utils import logger
+from torchtitan.logging_utils import logger
 
 
 class JobConfig:
@@ -40,7 +40,7 @@ class JobConfig:
 
     def __init__(self):
         # main parser
-        self.parser = argparse.ArgumentParser(description="TorchTrain arg parser.")
+        self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
         self.parser.add_argument(
             "--job.config_file",
             type=str,
@@ -52,7 +52,7 @@ class JobConfig:
         self.parser.add_argument(
             "--job.dump_folder",
             type=str,
-            default="./torchtrain/outputs",
+            default="./torchtitan/outputs",
             help="folder to dump job outputs",
         )
         self.parser.add_argument(
@@ -134,7 +134,7 @@ class JobConfig:
         self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
-            default="./torchtrain/datasets/tokenizer/tokenizer.model",
+            default="./torchtitan/datasets/tokenizer/tokenizer.model",
             help="tokenizer path",
         )
 

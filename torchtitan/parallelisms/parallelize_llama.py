@@ -25,8 +25,8 @@ from torch.distributed.tensor.parallel import (
 
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
 
 
 # for selective AC

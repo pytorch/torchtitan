@@ -17,7 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torchtrain.logging_utils import logger
+from torchtitan.logging_utils import logger
 
 
 class IntervalType(enum.Enum):
