@@ -1,11 +1,11 @@
-# torchtrain
+# torchtitan
 
 Note: This repository is currently under heavy development.
 
-torchtrain is a native PyTorch library with PyTorch native parallelisms and various training techniques to train large models.
+torchtitan is a native PyTorch library with PyTorch native parallelisms and various training techniques to train large models.
 ## Design Principles
 
-While torchtrain utilizes the PyTorch ecosystem for things like data loading (i.e. HuggingFace datasets), the core functionality is written in PyTorch.
+While torchtitan utilizes the PyTorch ecosystem for things like data loading (i.e. HuggingFace datasets), the core functionality is written in PyTorch.
 
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code, when applying 1D/2D or 3D Parallelisms.
@@ -41,7 +41,7 @@ To visualize TensorBoard metrics of models trained on a remote server via a loca
 ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
 ```
 
-3. Inside the SSH tunnel that logged into the remote server, go to the torchtrain repo, and start the TensorBoard backend
+3. Inside the SSH tunnel that logged into the remote server, go to the torchtitan repo, and start the TensorBoard backend
 ```
 tensorboard --logdir=./outputs/tb
 ```

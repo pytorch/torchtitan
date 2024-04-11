@@ -1,4 +1,4 @@
-# TorchTrain Config.toml
+# torchtitan Config.toml
 [job]
 dump_folder = "./outputs"
 description = "LLaMA 13B training"
@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 name = "llama"
 flavor = "13B"
 norm_type = "rmsnorm" # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
-tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
+tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
 name = "AdamW"

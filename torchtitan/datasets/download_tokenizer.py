@@ -18,7 +18,7 @@ def hf_download(repo_id: Optional[str] = None, hf_token: Optional[str] = None) -
         hf_hub_download(
             repo_id,
             "tokenizer.model",
-            local_dir="torchtrain/datasets/tokenizer/",
+            local_dir="torchtitan/datasets/tokenizer/",
             local_dir_use_symlinks=False,
             token=hf_token,
         )

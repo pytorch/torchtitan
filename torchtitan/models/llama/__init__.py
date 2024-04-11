@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-from torchtrain.models.llama.model import ModelArgs, Transformer
+from torchtitan.models.llama.model import ModelArgs, Transformer
 
 __all__ = ["Transformer"]
 

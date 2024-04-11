@@ -5,7 +5,7 @@ set -ex
 # libUV is a scalable backend for TCPStore which is used in processGroup
 # rendezvous. This is the recommended backend for distributed training.
 export USE_LIBUV=1
-TRAINER_DIR=${1:-/home/$USER/local/torchtrain}
+TRAINER_DIR=${1:-/home/$USER/local/torchtitan}
 
 # use envs as local overrides for convenience
 # e.g.
