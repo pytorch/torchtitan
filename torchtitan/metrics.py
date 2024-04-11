@@ -11,8 +11,8 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
 
 
 # named tuple for passing GPU memory stats for logging

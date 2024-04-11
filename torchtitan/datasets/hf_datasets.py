@@ -6,8 +6,8 @@ from typing import List, Optional
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-from torchtrain.datasets.tokenizer import TokenizerIf
-from torchtrain.logging_utils import logger
+from torchtitan.datasets.tokenizer import TokenizerIf
+from torchtitan.logging_utils import logger
 
 from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node

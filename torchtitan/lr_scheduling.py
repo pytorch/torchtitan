@@ -5,7 +5,7 @@
 # All rights reserved.
 
 from torch.optim.lr_scheduler import LambdaLR
-from torchtrain.config_manager import JobConfig
+from torchtitan.config_manager import JobConfig
 
 # global states for scheduling
 # these are needed as LambdaLR does not support argument passing
