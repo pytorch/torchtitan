@@ -12,7 +12,7 @@ from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
-from torchtrain.logging_utils import logger
+from torchtitan.logging_utils import logger
 
 
 class TokenizerIf(ABC):
