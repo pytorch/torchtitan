@@ -71,7 +71,7 @@ integration_tests_flavors["debug_model.toml"] = [
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
