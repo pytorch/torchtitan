@@ -49,10 +49,21 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}"],
-            [f"--checkpoint.folder {test_checkpoint_dir}", "--training.steps 20"],
+            [f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer"],
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer",
+                "--training.steps 20",
+            ],
         ],
-        "Checkpoint Integration Test",
+        "Checkpoint Integration Test - Model + Optimizer + TrainState",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only --checkpoint.model_weights_only true"
+            ],
+        ],
+        "Checkpoint Integration Test - Model Weights Only",
     ),
 ]
 
@@ -60,7 +71,7 @@ integration_tests_flavors["debug_model.toml"] = [
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
