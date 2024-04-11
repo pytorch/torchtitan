@@ -126,7 +126,6 @@ def _rms_norm_fwd_kernel(
     N,  # num cols
     block_N: tl.constexpr,
 ):
-
     row = tl.program_id(0)
     cols = tl.arange(0, block_N)
 

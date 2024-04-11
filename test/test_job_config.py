@@ -4,7 +4,7 @@
 import tempfile
 
 import pytest
-from torchtrain.config_manager import JobConfig
+from torchtitan.config_manager import JobConfig
 
 
 class TestJobConfig:

@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtrain.models.norms import create_norm
+from torchtitan.models.norms import create_norm
 
 
 @dataclass
