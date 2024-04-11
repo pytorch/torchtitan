@@ -239,6 +239,18 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
+            "--checkpoint.model_weights_only",
+            type=str,
+            default=False,
+            help=(
+                "When model_weights_only=True, we keep only model weights for your checkpoint at the end of training."
+                "With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion."
+                "When model_weights_only=False, we do a full checkpoint."
+                "A full checkpoint includes model, optimizer and train_state, which can be used to resume training."
+                "The default value is false."
+            ),
+        )
+        self.parser.add_argument(
             "--training.fp8_linear",
             type=str,
             default="",
