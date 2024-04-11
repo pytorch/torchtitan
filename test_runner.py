@@ -49,9 +49,9 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer"],
+            [f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint"],
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
                 "--training.steps 20",
             ],
         ],
@@ -60,10 +60,19 @@ integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only --checkpoint.model_weights_only true"
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32 --checkpoint.model_weights_only true"
             ],
         ],
-        "Checkpoint Integration Test - Model Weights Only",
+        "Checkpoint Integration Test - Model Weights Only fp32",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+                "--checkpoint.model_weights_only true --checkpoint.export_dtype bf16",
+            ],
+        ],
+        "Checkpoint Integration Test - Model Weights Only bf16",
     ),
 ]
 

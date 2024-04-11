@@ -251,6 +251,16 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
+            "--checkpoint.export_dtype",
+            type=str,
+            default="float32",
+            help=(
+                "Converts to the specified precision when training completes and model_weights_only=true."
+                "Currently supports float32, float16, and bfloat16."
+                "The default value is float32."
+            ),
+        )
+        self.parser.add_argument(
             "--training.fp8_linear",
             type=str,
             default="",

@@ -44,6 +44,7 @@ interval = 5
 interval_type = "steps"
 folder = ""
 model_weights_only = false
+export_dtype = "float32"
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'full', 'selective']
