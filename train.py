@@ -4,6 +4,7 @@
 import contextlib
 import gc
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -15,6 +16,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torch.distributed import destroy_process_group
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -386,7 +388,13 @@ def main(job_config: JobConfig):
                     world_mesh=world_mesh,
                 )
 
+    if torch.distributed.get_rank() == 0:
+        logger.info("Sleeping for 1 second for others ranks to complete ")
+        time.sleep(1)
+
     metric_logger.close()
+    logger.info("Training completed.")
+    destroy_process_group()
 
 
 if __name__ == "__main__":
