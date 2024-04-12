@@ -4,6 +4,7 @@
 import contextlib
 import gc
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -386,6 +387,10 @@ def main(job_config: JobConfig):
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
                     world_mesh=world_mesh,
                 )
+
+    if torch.distributed.get_rank() == 0:
+        logger.info("Sleeping for 1 second for others ranks to complete ")
+        time.sleep(1)
 
     metric_logger.close()
     logger.info("Training completed.")
