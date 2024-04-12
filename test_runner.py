@@ -69,7 +69,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
-                "--checkpoint.model_weights_only true --checkpoint.export_dtype bf16",
+                "--checkpoint.model_weights_only true --checkpoint.export_dtype bfloat16",
             ],
         ],
         "Checkpoint Integration Test - Model Weights Only bf16",
