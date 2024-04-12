@@ -241,6 +241,7 @@ def main(job_config: JobConfig):
         ),
         interval=job_config.checkpoint.interval,
         model_weights_only=job_config.checkpoint.model_weights_only,
+        export_dtype=job_config.checkpoint.export_dtype,
     )
     checkpoint.load()
 
