@@ -3,7 +3,9 @@
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+import glob
 import os
+import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -104,3 +106,9 @@ for config_file in os.listdir(CONFIG_DIR):
 
                 for test_flavor in test_flavors:
                     run_test(test_flavor, full_path)
+
+                    # Deleting checkpoint folder from test
+                    dir_list = glob.iglob(f"{test_checkpoint_dir}_*")
+                    for path in dir_list:
+                        if os.path.exists(path):
+                            shutil.rmtree(path)
