@@ -15,6 +15,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torch.distributed import destroy_process_group
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -387,6 +388,8 @@ def main(job_config: JobConfig):
                 )
 
     metric_logger.close()
+    logger.info("Training completed.")
+    destroy_process_group()
 
 
 if __name__ == "__main__":
