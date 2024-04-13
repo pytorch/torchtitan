@@ -230,12 +230,23 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
-            "--checkpoint.folder",
+            "--checkpoint.save_folder",
             type=str,
             default="",
             help=(
-                "The folder to store the checkpoints. If this is not specified or "
-                "is an empty string, checkpointing is disabled."
+                "The folder to store the checkpoints in. If this is not specified or "
+                "is an empty string, checkpointing is disabled. If a relative path is given, "
+                "it will be relative to the job.dump_folder.  Absolute paths are also supported."
+            ),
+        )
+        self.parser.add_argument(
+            "--checkpoint.load_folder",
+            type=str,
+            default=None,
+            help=(
+                "The folder to load the checkpoints. Defaults to loading from 'checkpoint.save_folder'. "
+                "The checkpoint with the highest step number in the folder will be loaded. Relative/absolute paths "
+                " follow the same rules as 'checkpoint.save_folder'."
             ),
         )
         self.parser.add_argument(
