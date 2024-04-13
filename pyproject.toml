@@ -1,0 +1,6 @@
+[tool.pydoclint]
+style = 'google'
+check-return-types = 'False'
+
+[tool.pytest.ini_options]
+addopts = ["--showlocals"] # show local variables in tracebacks
