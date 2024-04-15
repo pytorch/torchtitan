@@ -1,7 +1,12 @@
 # TorchTitan
-<img src="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg" width="300">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg">
+    <img alt="TorchTitan_Logo" width=35%>
+  </picture>
+</p>
 
-TorchTitan is a native PyTorch reference architecture showcasing some of the newest PyTorch techniques for large scale model training.  
+TorchTitan is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.  
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code, when applying 1D, 2D or 3D Parallelisms.
 * Modular components instead of monolithic codebase
