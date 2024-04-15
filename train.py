@@ -229,11 +229,18 @@ def main(job_config: JobConfig):
     # train loop
     model.train()
 
+    ckpt_folder = job_config.checkpoint.folder
+    ckpt_folder = (
+        os.path.join(job_config.job.dump_folder, ckpt_folder)
+        if ckpt_folder != ""
+        else None
+    )
+
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=job_config.checkpoint.folder,
+        folder=ckpt_folder,
         interval_type=(
             IntervalType.SECONDS
             if job_config.checkpoint.interval_type == "seconds"

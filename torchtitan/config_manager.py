@@ -234,8 +234,9 @@ class JobConfig:
             type=str,
             default="",
             help=(
-                "The folder to store the checkpoints. If this is not specified or "
-                "is an empty string, checkpointing is disabled."
+                "The folder to store the checkpoints. If this is an empty string, checkpointing is disabled."
+                "When specified, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}."
+                "The default value is an empty string."
             ),
         )
         self.parser.add_argument(
@@ -243,9 +244,9 @@ class JobConfig:
             type=str,
             default=False,
             help=(
-                "When model_weights_only=True, we keep only model weights for your checkpoint at the end of training."
+                "When model_weights_only=True, only model weights will be saved at the end of training."
                 "With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion."
-                "When model_weights_only=False, we do a full checkpoint."
+                "When model_weights_only=False, the full checkpoint will be saved."
                 "A full checkpoint includes model, optimizer and train_state, which can be used to resume training."
                 "The default value is false."
             ),
