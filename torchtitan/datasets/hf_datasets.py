@@ -33,7 +33,7 @@ class HuggingFaceDataset(IterableDataset):
 
     We currently support four datasets:
     alpaca (52K training entries)
-    openwebtext (1M training entries, same type of data for entire dataset)
+    openwebtext (8M training entries, same type of data for entire dataset)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> Alpaca <<:
@@ -85,7 +85,8 @@ class HuggingFaceDataset(IterableDataset):
     ) -> None:
         if dataset_name not in _supported_datasets:
             raise ValueError(
-                f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}."
+                f"Dataset {dataset_name} is not supported. "
+                f"Supported datasets are: {_supported_datasets.keys()}."
             )
 
         # TODO: This is a temporary solution for small datasets like Alpaca.
@@ -95,14 +96,24 @@ class HuggingFaceDataset(IterableDataset):
             ds = load_from_disk(dataset_path)
         else:
             logger.info(f"Preparing {dataset_name} dataset from HuggingFace")
-            # Setting `streaming=True` works for large dataset, but is slightly slower and unstable.
-            # c4 is huge, and requires both streaming and language selection (we default to en)
+            # Setting `streaming=True` works for large dataset, but is slightly
+            # slower and unstable.
             if dataset_name == "c4":
+                # c4 is huge, and requires both streaming and language selection
+                # (we default to en).
                 ds = load_dataset(
                     _supported_datasets[dataset_name],
                     "en",
                     split="train",
                     streaming=True,
+                )
+            elif dataset_name == "openwebtext":
+                # openwebtext dataset contains a dataset script which needs
+                # trust_remote_code=True to run on local machine.
+                ds = load_dataset(
+                    _supported_datasets[dataset_name],
+                    split="train",
+                    trust_remote_code=True,
                 )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")

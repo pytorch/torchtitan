@@ -1,4 +1,6 @@
 # torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
 [job]
 dump_folder = "./outputs"
 description = "LLaMA 70B training"

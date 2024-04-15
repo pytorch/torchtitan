@@ -1,4 +1,5 @@
 # torchtitan Config.toml
+
 [job]
 dump_folder = "./outputs"
 description = "LLaMA 7B training"

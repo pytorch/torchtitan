@@ -1,4 +1,5 @@
 # torchtitan Config.toml
+
 [job]
 dump_folder = "./outputs"
 description = "LLaMA debug training"
@@ -36,7 +37,7 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "alpaca"   # supported datasets = alpaca (52K), openwebtext (1M), c4 (177M)
+dataset = "alpaca"   # supported datasets: alpaca (52K), openwebtext (8M), c4 (177M)
 
 [checkpoint]
 interval = 5
