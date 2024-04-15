@@ -81,10 +81,10 @@ class JobConfig:
             help="trace file location",
         )
         self.parser.add_argument(
-            "--profiling.profile_every_x_iter",
+            "--profiling.profile_freq",
             type=int,
             default=10,
-            help="collect profiler traces every x iterations",
+            help="how often to collect profiler traces, in iterations",
         )
 
         # metrics configs
@@ -92,7 +92,7 @@ class JobConfig:
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="how often to log metrics to TensorBoard",
+            help="how often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
             "--metrics.enable_color_printing",
