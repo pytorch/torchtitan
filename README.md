@@ -24,13 +24,6 @@ TorchTitan is a native PyTorch reference architecture showcasing some of the new
 2 - FP8 support </br>
 3 - Context parallelism </br>
 
-## Design Principles
-
-While torchtitan utilizes the PyTorch ecosystem for things like data loading (i.e. HuggingFace datasets), the core functionality is written in PyTorch.
-
-* Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code, when applying 1D/2D or 3D Parallelisms.
-* Modular components instead of monolithic codebase
 
 # Installation
 
