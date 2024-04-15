@@ -7,12 +7,12 @@ TorchTitan is a native PyTorch reference architecture showcasing some of the new
 * Modular components instead of monolithic codebase
 * Get started in minutes, not hours! 
 
-## Release updates:
-4/16/2024: First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  Key features available: </br>
-1 - FSDP2 (per param sharding) </br>
+## Release updates (4/16/2024):
+First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  Key features available: </br>
+1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md)  </br> 
 2 - Selective layer and op activation checkpointing </br>
 3 - Distributed checkpointing (asynch pending) </br>
-4 - 2D (Tensor Parallel) and 3D (pipeline parallel) </br>
+4 - 2D (Tensor Parallel)</br>
 5 - 5 datasets pre-configured (47K - 144M)</br>
 6 - GPU, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
@@ -23,6 +23,7 @@ TorchTitan is a native PyTorch reference architecture showcasing some of the new
 1 - Asynch checkpointing </br>
 2 - FP8 support </br>
 3 - Context parallelism </br>
+4 - 3D (pipeline parallel) </br> 
 
 
 # Installation
