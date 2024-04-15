@@ -1,14 +1,15 @@
 # TorchTitan
-<img src="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg" width="350">
+<img src="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg" width="300">
 
 TorchTitan is a native PyTorch reference architecture showcasing some of the newest PyTorch techniques for large scale model training.  
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code, when applying 1D, 2D or 3D Parallelisms.
 * Modular components instead of monolithic codebase
-* Get started in minutes, not hours! 
+* Get started in minutes, not hours!
 
-## Release updates (4/16/2024):
-First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  Key features available: </br>
+## Release updates </br>
+#### (4/16/2024): First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  
+Key features available: </br>
 1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md)  </br> 
 2 - Selective layer and op activation checkpointing </br>
 3 - Distributed checkpointing (asynch pending) </br>
