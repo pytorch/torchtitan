@@ -6,33 +6,34 @@
   </picture>
 </p>
 
-TorchTitan is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.  
+TorchTitan is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.
 * Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code, when applying 1D, 2D or 3D Parallelisms.
-* Modular components instead of monolithic codebase
+* Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallelisms.
+* Modular components instead of monolithic codebase.
 * Get started in minutes, not hours!
 
-## Release updates </br>
-#### (4/16/2024): First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  
-Key features available: </br>
-1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md)  </br> 
-2 - Selective layer and op activation checkpointing </br>
-3 - Distributed checkpointing (asynch pending) </br>
-4 - 2D (Tensor Parallel)</br>
-5 - 5 datasets pre-configured (47K - 144M)</br>
-6 - GPU, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
+## Pre-Release Updates:
+#### (4/16/2024): TorchTitan is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch.</br>
+Key features available:</br>
+1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md)  </br>
+2 - Tensor Parallel (FSDP + Tensor Parallel)</br>
+3 - Selective layer and op activation checkpointing </br>
+4 - Distributed checkpointing (asynch pending) </br>
+5 - 3 datasets pre-configured (47K - 144M)</br>
+6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via toml files.</br>
 * TorchCompile support is still experimental.</br>
 
-## Features in progress: </br>
+## Coming soon features:
 1 - Asynch checkpointing </br>
 2 - FP8 support </br>
-3 - Context parallelism </br>
-4 - 3D (pipeline parallel) </br> 
+3 - Context Parallel </br>
+4 - 3D (Pipeline Parallel) </br>
+5 - Torch Compile support </br>
 
 
-# Installation
+## Installation
 
 Install PyTorch from source or install the latest pytorch nightly, then install requirements by
 
@@ -51,7 +52,7 @@ run the llama debug model locally to verify the setup is correct:
 ./run_llama_train.sh
 ```
 
-# TensorBoard
+## TensorBoard
 
 To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
 
