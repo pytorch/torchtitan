@@ -1,7 +1,11 @@
 # TorchTitan
 <img src="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg" width="350">
 
-TorchTitan is a native PyTorch reference architecture showcasing some of the newest PyTorch techniques for large scale model training.
+TorchTitan is a native PyTorch reference architecture showcasing some of the newest PyTorch techniques for large scale model training.  
+* Designed to be easy to understand, use and extend for different training purposes.
+* Minimal changes to the model code, when applying 1D, 2D or 3D Parallelisms.
+* Modular components instead of monolithic codebase
+* Get started in minutes, not hours! 
 
 ## Release updates:
 4/16/2024: First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  Key features available: </br>
@@ -11,7 +15,8 @@ TorchTitan is a native PyTorch reference architecture showcasing some of the new
 4 - 2D (Tensor Parallel) and 3D (pipeline parallel) </br>
 5 - 5 datasets pre-configured (47K - 144M)</br>
 6 - GPU, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
-7 - All options easily configured via toml files.</br>
+7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
+8 - All options easily configured via toml files.</br>
 * TorchCompile support is still experimental.</br>
 
 ## Features in progress: </br>
