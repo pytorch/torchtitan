@@ -1,11 +1,13 @@
 # TorchTitan
+<img src="[https://your-image-url.type](https://github.com/lessw2020/TorchTitan/assets/46302957/eda7b1de-f578-493f-82be-759159bc440c)" width="100">
+
 
 TorchTitan is a native PyTorch reference architecture showcasing some of the newest PyTorch techniques for large scale model training.
 
 ## Release updates:
 4/16/2024: First official release, showcasing pre-training Llama2 models from 7B - 70B.</br>  Key features available: </br>
-    1 - FSDP2 (per param sharding) </br>
-    2 - Selective layer and op activation checkpointing </br>
+1 - FSDP2 (per param sharding) </br>
+2 - Selective layer and op activation checkpointing </br>
 3 - Distributed checkpointing (asynch pending) </br>
 4 - 2D (Tensor Parallel) and 3D (pipeline parallel) </br>
 5 - 5 datasets pre-configured (47K - 144M)</br>
