@@ -90,7 +90,8 @@ class HuggingFaceDataset(IterableDataset):
             )
 
         # TODO: This is a temporary solution for small datasets like Alpaca.
-        #       For larger datasets we need to use a more scalable approach.
+        #       For large datasets we need to use a more scalable approach,
+        #       and support shuffling and checkpointing.
         if dataset_path:
             logger.info(f"Loading {dataset_name} dataset locally from {dataset_path}")
             ds = load_from_disk(dataset_path)
