@@ -14,7 +14,6 @@ from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
-    "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
     "openwebtext": "Skylion007/openwebtext",
 }
@@ -34,7 +33,6 @@ class HuggingFaceDataset(IterableDataset):
 
     We currently support four datasets:
     alpaca (52K training entries)
-    minipile (1M training entries, amalgamated from other datasets)
     openwebtext (1M training entries, same type of data for entire dataset)
     c4 (177M training entries - this dataset is streamed due to the size)
 
@@ -48,16 +46,7 @@ class HuggingFaceDataset(IterableDataset):
         Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
     }
 
-    >> MiniPile <<:
-    MiniPile dataset is detailed in the paper: https://arxiv.org/abs/2304.08442
-    Data input format (minipile):
-    {
-        "text": "Open-end spinning devices with such rotor bearing arrangements are known in
-                various different embodiments, and have been extensively described,
-                for example in German Patent Publications"
-    }
-
-     >> c4 (EN) <<:
+    >> c4 (EN) <<:
     c4 cleaned, English version
     Data input format (c4):
     {
