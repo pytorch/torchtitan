@@ -3,6 +3,10 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+#
+# Llama 2 is licensed under the LLAMA 2 Community License,
+# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
+
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
