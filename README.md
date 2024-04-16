@@ -16,7 +16,7 @@
 * Get started in minutes, not hours!
 
 ### Intro video - learn more about torchtitan in 4 mins:
-<video src="https://www.loom.com/share/a36a582f93484ca1b4daccd425bf7d41?sid=6db24038-40a6-4afa-9ae7-2dab66d27a28" width = "300" />
+<video src="https://www.loom.com/share/a36a582f93484ca1b4daccd425bf7d41?sid=6db24038-40a6-4afa-9ae7-2dab66d27a28" width = "300"></video>
 
 
 Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
