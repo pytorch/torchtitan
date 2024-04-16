@@ -5,8 +5,8 @@ dump_folder = "./outputs"
 description = "LLaMA 7B training"
 
 [profiling]
-run_profiler = true
-save_traces_folder = "profiling/traces"
+enable_profiling = true
+save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
@@ -38,9 +38,10 @@ compile = false
 dataset = "openwebtext"
 
 [checkpoint]
-interval = 500
+enable_checkpoint = false
+folder = "checkpoint"
 interval_type = "steps"
-folder = ""
+interval = 500
 model_weights_only = false
 export_dtype = "float32"
 

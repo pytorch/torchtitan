@@ -71,7 +71,7 @@ class JobConfig:
 
         # profiling configs
         self.parser.add_argument(
-            "--profiling.run_profiler",
+            "--profiling.enable_profiling",
             action="store_true",
             help="enable pytorch profiler",
         )
@@ -212,6 +212,31 @@ class JobConfig:
             action="store_true",
             help="Whether to compile the model.",
         )
+
+        # checkpoint configs
+        self.parser.add_argument(
+            "--checkpoint.enable_checkpoint",
+            action="store_true",
+            help="Whether to enable checkpoint",
+        )
+        self.parser.add_argument(
+            "--checkpoint.folder",
+            type=str,
+            default="checkpoint",
+            help=(
+                "The folder to store the checkpoints. "
+                "When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}."
+            ),
+        )
+        self.parser.add_argument(
+            "--checkpoint.interval_type",
+            type=str,
+            default="steps",
+            help=(
+                "The checkpointing interval unit of measurement. "
+                "The default value is steps."
+            ),
+        )
         self.parser.add_argument(
             "--checkpoint.interval",
             type=int,
@@ -222,32 +247,13 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
-            "--checkpoint.interval_type",
-            type=str,
-            default="steps",
-            help=(
-                "The checkpointing interval unit of measurement."
-                "The default value is steps."
-            ),
-        )
-        self.parser.add_argument(
-            "--checkpoint.folder",
-            type=str,
-            default="",
-            help=(
-                "The folder to store the checkpoints. If this is not specified or "
-                "is an empty string, checkpointing is disabled."
-            ),
-        )
-        self.parser.add_argument(
             "--checkpoint.model_weights_only",
-            type=str,
-            default=False,
+            action="store_true",
             help=(
-                "When model_weights_only=True, we keep only model weights for your checkpoint at the end of training."
-                "With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion."
-                "When model_weights_only=False, we do a full checkpoint."
-                "A full checkpoint includes model, optimizer and train_state, which can be used to resume training."
+                "When model_weights_only=True, only model weights will be saved at the end of training. "
+                "With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion. "
+                "When model_weights_only=False, the full checkpoint will be saved. "
+                "A full checkpoint includes model, optimizer and train_state, which can be used to resume training. "
                 "The default value is false."
             ),
         )
@@ -256,8 +262,8 @@ class JobConfig:
             type=str,
             default="float32",
             help=(
-                "Converts to the specified precision when training completes and model_weights_only=true."
-                "Currently supports float32, float16, and bfloat16."
+                "Converts to the specified precision when training completes and model_weights_only=true. "
+                "Currently supports float32, float16, and bfloat16. "
                 "The default value is float32."
             ),
         )

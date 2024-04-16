@@ -13,11 +13,11 @@ from torchtitan.logging_utils import logger
 
 
 @contextlib.contextmanager
-def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
+def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
     # get user defined profiler settings
-    run_profiler = config.profiling.run_profiler
+    enable_profiling = config.profiling.enable_profiling
 
-    if run_profiler:
+    if enable_profiling:
         dump_dir = config.job.dump_folder
         save_trace_dir = config.profiling.save_traces_folder
         trace_dir = os.path.join(dump_dir, save_trace_dir)
