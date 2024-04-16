@@ -1,6 +1,48 @@
-[tool.pydoclint]
-style = 'google'
-check-return-types = 'False'
+# ---- All project specifications ---- #
+[project]
+name = "torchtitan"
+version = "0.0.2"
+description = "A native-PyTorch library for large scale LLM training"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+authors = [
+    { name = "PyTorch Team", email = "packages@pytorch.org" },
+]
+keywords = ["pytorch", "training", "llm"]
+dependencies = [
+    # Hugging Face integrations
+    "datasets",
+
+    # Miscellaneous
+    "sentencepiece",
+    "tomli >= 1.1.0"
+]
+
+[project.urls]
+GitHub = "https://github.com/pytorch/torchtitan"
+Documentation = "https://github.com/pytorch/torchtitan/tree/main/docs"
+Issues = "https://github.com/pytorch/torchtitan/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "tensorboard",
+]
+
+# ---- Explicit project build information ---- #
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["torchtrain*"]
+
+[tool.setuptools.package-data]
+recipes = ["train_configs/*.toml"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"] # show local variables in tracebacks
