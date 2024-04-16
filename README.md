@@ -7,11 +7,11 @@
 </p>
 
 ## torchtitan is still in pre-release!
-torchtitan is currently in a pre-release state and under extensive development.
+`torchtitan` is currently in a pre-release state and under extensive development.
 
-torchtitan is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.
+`torchtitan` is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.
 * Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallelisms.
+* Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallel.
 * Modular components instead of monolithic codebase.
 * Get started in minutes, not hours!
 
