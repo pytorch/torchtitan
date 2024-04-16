@@ -1,7 +1,7 @@
 # torchtitan
 <p align="center">
   <picture>
-    <img src="/assets/images/TorchTitan_logo_main.jpg" alt="TorchTitan_Logo" width="300">
+    <img src="assets/images/TorchTitan_logo_main.jpg" alt="TorchTitan_Logo" width="300">
   </picture>
 </p>
 
