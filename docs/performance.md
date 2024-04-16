@@ -18,6 +18,6 @@ Next we show the loss curves for LLaMa 13B and LLaMa 70B training with both 1D p
 
 ![image](/assets/images/loss_curves.png)
 
-[^1] Since the 70B training with local batch size 2 will cause OOM error when selective activation checkpointing is used, we report the local batch size 1 case instead.
+[^1]: Since the 70B training with local batch size 2 will cause OOM error when selective activation checkpointing is used, we report the local batch size 1 case instead.
 
-[^2] One may have noticed that for both 13B and 70B training, 1D parallelism has slightly better convergence than 2D parallelism in the first half of training. We believe this is caused by the stronger shuffling effect introduced by having more FSDP ranks in the 1D parallelism, and the difference in convergence speed should go away after switching to a randomized data loading solution.
+[^2]: One may have noticed that for both 13B and 70B training, 1D parallelism has slightly better convergence than 2D parallelism in the first half of training. We believe this is caused by the stronger shuffling effect introduced by having more FSDP ranks in the 1D parallelism, and the difference in convergence speed should go away after switching to a randomized data loading solution.
