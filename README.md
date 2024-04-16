@@ -17,18 +17,20 @@
 
 Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
+
 ## Pre-Release Updates:
-#### (4/16/2024): TorchTitan is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch.
+#### (4/16/2024): `torchtitan` is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`.
 
 Key features available:</br>
-1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md) </br>
+1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
 2 - Tensor Parallel (FSDP + Tensor Parallel)</br>
 3 - Selective layer and op activation checkpointing </br>
 4 - Distributed checkpointing (asynch pending) </br>
 5 - 3 datasets pre-configured (47K - 144M)</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
-7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
+7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via toml files.</br>
+9 - [Performance](docs/performance.md) verified on 64 A100 GPUs.</br>
 
 
 ## Coming soon features:
@@ -37,6 +39,7 @@ Key features available:</br>
 3 - Context Parallel </br>
 4 - 3D (Pipeline Parallel) </br>
 5 - Torch Compile support </br>
+6 - Scalable data loading solution </br>
 
 
 ## Installation
@@ -58,6 +61,7 @@ run the llama debug model locally to verify the setup is correct:
 ./run_llama_train.sh
 ```
 
+
 ## TensorBoard
 
 To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
@@ -75,6 +79,7 @@ tensorboard --logdir=./outputs/tb
 ```
 
 4. In the local web browser, go to the URL it provides OR to http://localhost:6006/.
+
 
 ## Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the multinode_trainer.slurm file to submit your sbatch job.</br>
