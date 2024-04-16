@@ -64,18 +64,18 @@ class CheckpointManager:
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
-        self.states = states
-        self.states.update(
-            {
-                "model": ModelWrapper(model),
-                "optimizer": OptimizerWrapper(model, optimizer),
-            }
-        )
-
-        self.enable_checkpoint = job_config.checkpoint.enable_checkpoint
+        ckpt_config = job_config.checkpoint
+        self.enable_checkpoint = ckpt_config.enable_checkpoint
 
         if self.enable_checkpoint:
-            ckpt_config = job_config.checkpoint
+            self.states = states
+            self.states.update(
+                {
+                    "model": ModelWrapper(model),
+                    "optimizer": OptimizerWrapper(model, optimizer),
+                }
+            )
+
             self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
             self.interval_type = (
                 IntervalType.SECONDS
