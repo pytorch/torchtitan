@@ -72,33 +72,28 @@ class CheckpointManager:
             }
         )
 
-        ckpt_folder = job_config.checkpoint.folder
-        ckpt_folder = (
-            os.path.join(job_config.job.dump_folder, ckpt_folder)
-            if ckpt_folder != ""
-            else None
-        )
-        self.folder = ckpt_folder
+        self.enable_checkpoint = job_config.checkpoint.enable_checkpoint
 
-        self.interval_type = (
-            IntervalType.SECONDS
-            if job_config.checkpoint.interval_type == "seconds"
-            else IntervalType.STEPS
-        )
-
-        self.interval = job_config.checkpoint.interval
-        self.model_weights_only = job_config.checkpoint.model_weights_only
-        self.export_dtype = DTYPE_MAP[job_config.checkpoint.export_dtype]
+        if self.enable_checkpoint:
+            self.folder = os.path.join(
+                job_config.job.dump_folder, job_config.checkpoint.checkpoint_folder
+            )
+            self.interval_type = (
+                IntervalType.SECONDS
+                if job_config.checkpoint.interval_type == "seconds"
+                else IntervalType.STEPS
+            )
+            self.interval = job_config.checkpoint.interval
+            self.model_weights_only = job_config.checkpoint.model_weights_only
+            self.export_dtype = DTYPE_MAP[job_config.checkpoint.export_dtype]
+            logger.info(
+                f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
+            )
 
         self.begin = 0
         self.work = None
         self.pg = dist.new_group(backend="gloo")
         self.doit = None
-
-        if self.folder:
-            logger.info(
-                f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
-            )
 
     def reset(self) -> None:
         self.begin = time.monotonic()
@@ -111,7 +106,7 @@ class CheckpointManager:
         force = True will force the checkpoint to be saved, even if the interval has not been reached.
         This only happens when train_state.step == job_config.training.steps.
         """
-        if not self.folder:
+        if not self.enable_checkpoint:
             return
 
         if not force:
@@ -173,7 +168,7 @@ class CheckpointManager:
         )
 
     def load(self, step: int = -1) -> bool:
-        if not self.folder:
+        if not self.enable_checkpoint:
             return False
         if not os.path.isdir(self.folder):
             return False

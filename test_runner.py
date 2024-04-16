@@ -51,30 +51,38 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint"],
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_full_checkpoint",
+            ],
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_full_checkpoint",
                 "--training.steps 20",
             ],
         ],
-        "Checkpoint Integration Test - Model + Optimizer + TrainState",
+        "Checkpoint Integration Test - Save Load Full Checkpoint",
     ),
     OverrideDefinitions(
         [
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32 --checkpoint.model_weights_only true"
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_model_weights_only_fp32",
+                "--checkpoint.model_weights_only",
             ],
         ],
-        "Checkpoint Integration Test - Model Weights Only fp32",
+        "Checkpoint Integration Test - Save Model Weights Only fp32",
     ),
     OverrideDefinitions(
         [
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
-                "--checkpoint.model_weights_only true --checkpoint.export_dtype bfloat16",
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_model_weights_only_bf16",
+                "--checkpoint.model_weights_only",
+                "--checkpoint.export_dtype bfloat16",
             ],
         ],
-        "Checkpoint Integration Test - Model Weights Only bf16",
+        "Checkpoint Integration Test - Save Model Weights Only bf16",
     ),
 ]
 

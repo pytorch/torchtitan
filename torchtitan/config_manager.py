@@ -70,7 +70,7 @@ class JobConfig:
 
         # profiling configs
         self.parser.add_argument(
-            "--profiling.run_profiler",
+            "--profiling.enable_profiling",
             action="store_true",
             help="enable pytorch profiler",
         )
@@ -211,13 +211,20 @@ class JobConfig:
             action="store_true",
             help="Whether to compile the model.",
         )
+
+        # checkpoint configs
         self.parser.add_argument(
-            "--checkpoint.interval",
-            type=int,
-            default=500,
+            "--checkpoint.enable_checkpoint",
+            action="store_true",
+            help="Whether to enable checkpoint",
+        )
+        self.parser.add_argument(
+            "--checkpoint.checkpoint_folder",
+            type=str,
+            default="checkpoint",
             help=(
-                "Checkpointing interval. The unit of measurement is in seconds or "
-                "steps depending on --checkpoint.interval_type."
+                "The folder to store the checkpoints."
+                "When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}."
             ),
         )
         self.parser.add_argument(
@@ -230,19 +237,17 @@ class JobConfig:
             ),
         )
         self.parser.add_argument(
-            "--checkpoint.folder",
-            type=str,
-            default="",
+            "--checkpoint.interval",
+            type=int,
+            default=500,
             help=(
-                "The folder to store the checkpoints. If this is an empty string, checkpointing is disabled."
-                "When specified, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}."
-                "The default value is an empty string."
+                "Checkpointing interval. The unit of measurement is in seconds or "
+                "steps depending on --checkpoint.interval_type."
             ),
         )
         self.parser.add_argument(
             "--checkpoint.model_weights_only",
-            type=str,
-            default=False,
+            action="store_true",
             help=(
                 "When model_weights_only=True, only model weights will be saved at the end of training."
                 "With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion."

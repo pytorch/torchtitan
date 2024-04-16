@@ -12,7 +12,7 @@ from torchtitan.logging_utils import logger
 @contextlib.contextmanager
 def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
     # get user defined profiler settings
-    run_profiler = config.profiling.run_profiler
+    run_profiler = config.profiling.enable_profiling
 
     if run_profiler:
         dump_dir = config.job.dump_folder
