@@ -1,7 +1,7 @@
 # torchtitan
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/lessw2020/TorchTitan/blob/1ab9828ae6aa0e6508d9a7002d743d96d85e8599/assets/images/TorchTitan_logo_main.jpg">
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/pytorch/torchtitan/blob/bcac1570a7cc47554f934d057e0f9aea9ae6fd08/assets/images/TorchTitan_logo_main.jpg">
     <img alt="TorchTitan_Logo" width=35%>
   </picture>
 </p>
