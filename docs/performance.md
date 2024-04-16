@@ -16,7 +16,7 @@ We mostly use local batch size 2 (global batch size = local batch size 2 * numbe
 
 Next we show the loss curves for LLaMa 13B and LLaMa 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All the four models are trained 3000 steps on [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext), with global batch size 128. In terms of activation checkpointing (AC) configs, the LLaMa 13B training jobs use selective op AC, whereas the LLaMa 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^2].
 
-![image](/assets/images/loss_curves.png)
+![image](../assets/images/loss_curves.png)
 
 [^1]: Since the 70B training with local batch size 2 will cause OOM error when selective activation checkpointing is used, we report the local batch size 1 case instead.
 
