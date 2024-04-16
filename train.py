@@ -23,7 +23,7 @@ from torch.distributed import destroy_process_group
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
-from torchtitan.checkpoint import CheckpointManager, IntervalType
+from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import create_tokenizer, dataloader_fn
 from torchtitan.float8_linear import build_fp8_linear
@@ -32,7 +32,7 @@ from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from torchtitan.profiling import maybe_run_profiler
+from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
     dist_max,
@@ -236,15 +236,7 @@ def main(job_config: JobConfig):
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=job_config.checkpoint.folder,
-        interval_type=(
-            IntervalType.SECONDS
-            if job_config.checkpoint.interval_type == "seconds"
-            else IntervalType.STEPS
-        ),
-        interval=job_config.checkpoint.interval,
-        model_weights_only=job_config.checkpoint.model_weights_only,
-        export_dtype=job_config.checkpoint.export_dtype,
+        job_config=job_config,
     )
     checkpoint.load()
 
@@ -262,7 +254,7 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_run_profiler(job_config) as torch_profiler:
+    with maybe_enable_profiling(job_config) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
