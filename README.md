@@ -1,10 +1,10 @@
 # torchtitan
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/pytorch/torchtitan/blob/bcac1570a7cc47554f934d057e0f9aea9ae6fd08/assets/images/TorchTitan_logo_main.jpg">
-    <img alt="TorchTitan_Logo" width=35%>
+    <img src="assets/images/TorchTitan_logo_main.jpg" alt="TorchTitan_Logo" width="300">
   </picture>
 </p>
+
 
 ## torchtitan is still in pre-release!
 `torchtitan` is currently in a pre-release state and under extensive development.
