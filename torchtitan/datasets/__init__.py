@@ -1,5 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 from torchtitan.datasets.hf_datasets import build_hf_data_loader
 from torchtitan.datasets.tokenizer import create_tokenizer
