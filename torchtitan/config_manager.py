@@ -47,7 +47,7 @@ class JobConfig:
             "--job.config_file",
             type=str,
             default=None,
-            help="job config file",
+            help="Job config file",
         )
 
         # job level configs
@@ -55,38 +55,38 @@ class JobConfig:
             "--job.dump_folder",
             type=str,
             default="./torchtitan/outputs",
-            help="folder to dump job outputs",
+            help="Folder to dump job outputs",
         )
         self.parser.add_argument(
             "--job.description",
             type=str,
             default="default job",
-            help="description of the job",
+            help="Description of the job",
         )
         self.parser.add_argument(
             "--job.use_for_integration_test",
             default=False,
             action="store_true",
-            help="add this config to integration test suite",
+            help="Add this config to the integration test suite",
         )
 
         # profiling configs
         self.parser.add_argument(
             "--profiling.enable_profiling",
             action="store_true",
-            help="enable pytorch profiler",
+            help="Whether to enable pytorch profiler",
         )
         self.parser.add_argument(
             "--profiling.save_traces_folder",
             type=str,
-            default="profiling/traces",
-            help="trace file location",
+            default="profile_traces",
+            help="Trace files location",
         )
         self.parser.add_argument(
             "--profiling.profile_freq",
             type=int,
             default=10,
-            help="how often to collect profiler traces, in iterations",
+            help="How often to collect profiler traces, in iterations",
         )
 
         # metrics configs
@@ -94,24 +94,24 @@ class JobConfig:
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="how often to log metrics to TensorBoard, in iterations",
+            help="How often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
             "--metrics.enable_color_printing",
             default=False,
             action="store_true",
-            help="whether to enable color printing",
+            help="Whether to enable color printing",
         )
         self.parser.add_argument(
             "--metrics.enable_tensorboard",
             action="store_true",
-            help="whether to log metrics to TensorBoard",
+            help="Whether to log metrics to TensorBoard",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
             type=str,
             default="tb",
-            help="folder to dump tensorboard state",
+            help="Folder to dump TensorBoard states",
         )
 
         # model configs
@@ -119,38 +119,38 @@ class JobConfig:
             "--model.name",
             type=str,
             default="llama",
-            help="which model to train",
+            help="Which model to train",
         )
         self.parser.add_argument(
             "--model.flavor",
             type=str,
             default="debugmodel",
-            help="which model config to train",
+            help="Which model config to train",
         )
         self.parser.add_argument(
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Layer Normalization type to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
             default="./torchtitan/datasets/tokenizer/tokenizer.model",
-            help="tokenizer path",
+            help="Tokenizer path",
         )
 
         # optimizer configs
         self.parser.add_argument(
-            "--optimizer.name", type=str, default="AdamW", help="optimizer to use"
+            "--optimizer.name", type=str, default="AdamW", help="Optimizer to use"
         )
         self.parser.add_argument(
-            "--optimizer.lr", type=float, default=8e-4, help="learning rate to use"
+            "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
 
         # training configs
         self.parser.add_argument(
-            "--training.dataset", type=str, default="alpaca", help="dataset to use"
+            "--training.dataset", type=str, default="alpaca", help="Dataset to use"
         )
         self.parser.add_argument(
             "--training.dataset_path",
@@ -160,28 +160,28 @@ class JobConfig:
                 loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
-            "--training.batch_size", type=int, default=8, help="batch size"
+            "--training.batch_size", type=int, default=8, help="Batch size"
         )
         self.parser.add_argument(
-            "--training.seq_len", type=int, default=2048, help="sequence length"
+            "--training.seq_len", type=int, default=2048, help="Sequence length"
         )
         self.parser.add_argument(
             "--training.warmup_steps",
             type=int,
             default=200,
-            help="steps for lr scheduler warmup",
+            help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
         )
         self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,
-            help="max norm for gradient clipping",
+            help="Max norm for gradient clipping",
         )
         self.parser.add_argument(
             "--training.steps",
             type=int,
             default=10000,
-            help="how many train steps to run",
+            help="How many train steps to run",
         )
         self.parser.add_argument(
             "--training.data_parallel_degree",
@@ -199,18 +199,18 @@ class JobConfig:
             "--training.enable_loss_parallel",
             default=True,
             action="store_true",
-            help="whether to enable loss parallel when sequence parallel is enabled",
+            help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
             "--training.pipeline_parallel_degree",
             type=int,
             default=1,
-            help="Pipeline Parallelism degree (default of 1 means disabled)",
+            help="Pipeline Parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
             "--training.compile",
             action="store_true",
-            help="Whether to compile the model.",
+            help="Whether to compile the model",
         )
         self.parser.add_argument(
             "--training.fp8_linear",
@@ -220,7 +220,7 @@ class JobConfig:
                 "dynamic",
                 "",
             ],  # TODO: add "delayed" option back in when supported
-            help="Type of fp8 linear quantization to apply to the model",
+            help="Type of fp8 linear quantization to apply to the model ['', 'dynamic']",
         )
         self.parser.add_argument(
             "--training.gc_freq",
@@ -229,7 +229,7 @@ class JobConfig:
             help="Python garbage control scheduling interval, in steps",
         )
 
-        # checkpoint configs
+        # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
             action="store_true",
@@ -248,19 +248,13 @@ class JobConfig:
             "--checkpoint.interval_type",
             type=str,
             default="steps",
-            help="""
-                The checkpointing interval unit of measurement.
-                The default value is steps.
-            """,
+            help="Checkpointing interval unit of measurement ['step', 'seconds']",
         )
         self.parser.add_argument(
             "--checkpoint.interval",
             type=int,
             default=500,
-            help="""
-                Checkpointing interval. The unit of measurement is in seconds or
-                steps depending on --checkpoint.interval_type.
-            """,
+            help="Checkpointing interval, in steps or seconds depending on --checkpoint.interval_type",
         )
         self.parser.add_argument(
             "--checkpoint.model_weights_only",
@@ -284,18 +278,21 @@ class JobConfig:
             """,
         )
 
-        # activation checkpointing
+        # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
             type=str,
             default="selective",
-            help=" ['none', 'full', 'selective'] = type of activation checkpointing to use",
+            help="Type of activation checkpointing to use ['none', 'full', 'selective']",
         )
         self.parser.add_argument(
             "--activation_checkpoint.selective_ac_option",
             type=str,
             default="2",  # 2 = checkpoint every other layer
-            help="['int', 'op'] = selective activation checkpointing options, 'int' for every nth layer, or 'op' for op level ac.",
+            help="""
+                Selective activation checkpointing options ['int', 'op'].
+                'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
+            """,
         )
 
         # communications library settings
@@ -310,7 +307,7 @@ class JobConfig:
             type=int,
             default=100,
             help=(
-                "Timeout for communication operations after the first train step-"
+                "Timeout for communication operations after the first train step -- "
                 "usually a tighter bound than during initialization."
             ),
         )
