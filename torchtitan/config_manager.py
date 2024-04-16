@@ -289,7 +289,10 @@ class JobConfig:
             "--activation_checkpoint.selective_ac_option",
             type=str,
             default="2",  # 2 = checkpoint every other layer
-            help="Selective activation checkpointing options ['int', 'op']. 'int' (e.g., 2) for every nth layer, or 'op' for op level ac.",
+            help="""
+                Selective activation checkpointing options ['int', 'op'].
+                'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
+            """,
         )
 
         # communications library settings
