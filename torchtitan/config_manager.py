@@ -42,6 +42,7 @@ class JobConfig:
     def __init__(self):
         # main parser
         self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
+
         self.parser.add_argument(
             "--job.config_file",
             type=str,
@@ -154,10 +155,9 @@ class JobConfig:
         self.parser.add_argument(
             "--training.dataset_path",
             type=str,
-            help=(
-                "Path to the dataset in the file system. If provided, data will be"
-                "loaded from this path instead of downloaded.",
-            ),
+            help="""
+                Path to the dataset in the file system. If provided, data will be
+                loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
             "--training.batch_size", type=int, default=8, help="batch size"
@@ -165,18 +165,21 @@ class JobConfig:
         self.parser.add_argument(
             "--training.seq_len", type=int, default=2048, help="sequence length"
         )
+
         self.parser.add_argument(
             "--training.warmup_steps",
             type=int,
             default=200,
             help="steps for lr scheduler warmup",
         )
+
         self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,
             help="max norm for gradient clipping",
         )
+
         self.parser.add_argument(
             "--training.steps",
             type=int,
@@ -267,6 +270,7 @@ class JobConfig:
                 "The default value is float32."
             ),
         )
+
         self.parser.add_argument(
             "--training.fp8_linear",
             type=str,
@@ -277,6 +281,7 @@ class JobConfig:
             ],  # TODO: add "delayed" option back in when supported
             help="Type of fp8 linear quantization to apply to the model",
         )
+
         self.parser.add_argument(
             "--training.gc_freq",
             type=int,
