@@ -10,7 +10,7 @@ In your TorchTitan training config, ensure that `enable_checkpoint` is set to Tr
 enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
-interval = 5
+interval = 500
 ```
 
 
