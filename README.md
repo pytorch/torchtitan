@@ -23,7 +23,7 @@ Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
 2 - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (FSDP + Tensor Parallel)</br>
 3 - Selective layer and operator activation checkpointing </br>
-4 - Distributed checkpointing (async checkpointing) </br>
+4 - Distributed checkpointing </br>
 5 - 3 datasets pre-configured (47K - 144M)</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
@@ -107,8 +107,8 @@ If your gpu count per node is not 8, adjust:
 
 in the SBATCH command section.
 
-## Product Position:
-Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
+## Product Position
+`torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
 ## License
 
