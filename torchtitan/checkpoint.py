@@ -17,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 
 
@@ -61,28 +62,38 @@ class CheckpointManager:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         states: Dict[str, Any],
-        folder: str,
-        interval_type: IntervalType,
-        interval: int,
-        model_weights_only: bool = False,
-        export_dtype: str = "float32",
+        job_config: JobConfig,
     ) -> None:
-        self.folder = folder
         self.states = states
-        self.model_weights_only = model_weights_only
         self.states.update(
             {
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
             }
         )
-        self.interval_type = interval_type
-        self.interval = interval
+
+        ckpt_folder = job_config.checkpoint.folder
+        ckpt_folder = (
+            os.path.join(job_config.job.dump_folder, ckpt_folder)
+            if ckpt_folder != ""
+            else None
+        )
+        self.folder = ckpt_folder
+
+        self.interval_type = (
+            IntervalType.SECONDS
+            if job_config.checkpoint.interval_type == "seconds"
+            else IntervalType.STEPS
+        )
+
+        self.interval = job_config.checkpoint.interval
+        self.model_weights_only = job_config.checkpoint.model_weights_only
+        self.export_dtype = DTYPE_MAP[job_config.checkpoint.export_dtype]
+
         self.begin = 0
         self.work = None
         self.pg = dist.new_group(backend="gloo")
         self.doit = None
-        self.export_dtype = DTYPE_MAP[export_dtype]
 
         if self.folder:
             logger.info(
