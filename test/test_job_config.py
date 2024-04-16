@@ -43,3 +43,8 @@ class TestJobConfig:
             ]
         )
         assert config.job.dump_folder == "/tmp/test_tt/"
+
+    def test_print_help(self):
+        config = JobConfig()
+        parser = config.parser
+        parser.print_help()
