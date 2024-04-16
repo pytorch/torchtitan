@@ -19,7 +19,8 @@ Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training usi
 
 
 ## Pre-Release Updates:
-#### (4/16/2024): `torchtitan` is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`.
+#### (4/16/2024): `torchtitan` is now public but in a pre-release state and under development.
+Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
@@ -31,6 +32,7 @@ Key features available:</br>
 7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via toml files.</br>
 9 - [Performance](docs/performance.md) verified on 64 A100 GPUs.</br>
+10 - [Save torchtitan model weights](docs/checkpoint.md) and load directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning. </br>
 
 
 ## Coming soon features:
