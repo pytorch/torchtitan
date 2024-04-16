@@ -219,7 +219,7 @@ class JobConfig:
             help="Whether to enable checkpoint",
         )
         self.parser.add_argument(
-            "--checkpoint.checkpoint_folder",
+            "--checkpoint.folder",
             type=str,
             default="checkpoint",
             help=(

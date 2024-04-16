@@ -75,30 +75,30 @@ class CheckpointManager:
         self.enable_checkpoint = job_config.checkpoint.enable_checkpoint
 
         if self.enable_checkpoint:
-            self.folder = os.path.join(
-                job_config.job.dump_folder, job_config.checkpoint.checkpoint_folder
-            )
+            ckpt_config = job_config.checkpoint
+            self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
             self.interval_type = (
                 IntervalType.SECONDS
-                if job_config.checkpoint.interval_type == "seconds"
+                if ckpt_config.interval_type == "seconds"
                 else IntervalType.STEPS
             )
-            self.interval = job_config.checkpoint.interval
-            self.model_weights_only = job_config.checkpoint.model_weights_only
-            self.export_dtype = DTYPE_MAP[job_config.checkpoint.export_dtype]
+            self.interval = ckpt_config.interval
+            self.model_weights_only = ckpt_config.model_weights_only
+            self.export_dtype = DTYPE_MAP[ckpt_config.export_dtype]
+
             logger.info(
                 f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
             )
 
-        self.begin = 0
-        self.work = None
-        self.pg = dist.new_group(backend="gloo")
-        self.doit = None
+            self.begin = 0
+            self.work = None
+            self.pg = dist.new_group(backend="gloo")
+            self.doit = None
 
     def reset(self) -> None:
         self.begin = time.monotonic()
 
-    def create_checkpoint_id(self, step: int) -> str:
+    def _create_checkpoint_id(self, step: int) -> str:
         return os.path.join(self.folder, f"step-{step}")
 
     def save(self, curr_step: int, force: bool = False) -> None:
@@ -161,7 +161,7 @@ class CheckpointManager:
             logger.info(f"Saving a full checkpoint at step {curr_step}")
 
         begin = time.monotonic()
-        dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
+        dcp.save(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
         self.reset()
         logger.info(
             f"Finished saving the checkpoint in {time.monotonic() - begin:.2f} seconds"
@@ -172,7 +172,7 @@ class CheckpointManager:
             return False
         if not os.path.isdir(self.folder):
             return False
-        if step != -1 and not os.path.isdir(self.create_checkpoint_id(step)):
+        if step != -1 and not os.path.isdir(self._create_checkpoint_id(step)):
             return False
 
         if step == -1:
@@ -189,7 +189,7 @@ class CheckpointManager:
         begin = time.monotonic()
         dcp.load(
             self.states,
-            checkpoint_id=self.create_checkpoint_id(step),
+            checkpoint_id=self._create_checkpoint_id(step),
         )
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds"

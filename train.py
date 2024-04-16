@@ -29,7 +29,7 @@ from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from torchtitan.profiling import maybe_run_profiler
+from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
     dist_max,
@@ -251,7 +251,7 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_run_profiler(job_config) as torch_profiler:
+    with maybe_enable_profiling(job_config) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging

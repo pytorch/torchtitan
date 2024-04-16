@@ -53,11 +53,11 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_full_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
             ],
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_full_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
                 "--training.steps 20",
             ],
         ],
@@ -67,7 +67,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_model_weights_only_fp32",
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
                 "--checkpoint.model_weights_only",
             ],
         ],
@@ -77,7 +77,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.checkpoint_folder {test_checkpoint_dir}_model_weights_only_bf16",
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
                 "--checkpoint.model_weights_only",
                 "--checkpoint.export_dtype bfloat16",
             ],

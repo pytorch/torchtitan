@@ -8,7 +8,6 @@ description = "LLaMA 13B training"
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
-# profiling frequency - example: 10 means every 10th iter will be profiled
 profile_freq = 100
 
 [metrics]
@@ -41,7 +40,7 @@ dataset = "openwebtext"
 
 [checkpoint]
 enable_checkpoint = false
-checkpoint_folder = "checkpoint"
+folder = "checkpoint"
 interval_type = "steps"
 interval = 500
 model_weights_only = false
