@@ -12,6 +12,8 @@ torchtitan is a native PyTorch reference architecture showcasing some of the lat
 * Modular components instead of monolithic codebase.
 * Get started in minutes, not hours!
 
+Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
+
 ## Pre-Release Updates:
 #### (4/16/2024): TorchTitan is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch.</br>
 Key features available:</br>
@@ -23,7 +25,7 @@ Key features available:</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via toml files.</br>
-* TorchCompile support is still experimental.</br>
+
 
 ## Coming soon features:
 1 - Asynch checkpointing </br>
