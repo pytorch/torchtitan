@@ -29,8 +29,9 @@ Key features available:</br>
 4 - Distributed checkpointing (asynch pending) </br>
 5 - 3 datasets pre-configured (47K - 144M)</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
-7 - optional Fused RMSNorm, learning rate scheduler, meta init, and more.</br>
+7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via toml files.</br>
+9 - [Performance](docs/performance.md) verified on 64 A100 GPUs.</br>
 
 
 ## Coming soon features:
