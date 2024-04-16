@@ -23,22 +23,22 @@ Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training usi
 
 Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
-2 - Tensor Parallel (FSDP + Tensor Parallel)</br>
-3 - Selective layer and op activation checkpointing </br>
-4 - Distributed checkpointing (asynch pending) </br>
+2 - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (FSDP + Tensor Parallel)</br>
+3 - Selective layer and operator activation checkpointing </br>
+4 - Distributed checkpointing (async checkpointing) </br>
 5 - 3 datasets pre-configured (47K - 144M)</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
-8 - All options easily configured via toml files.</br>
+8 - All options easily configured via [toml files](train_configs/).</br>
 9 - [Performance](docs/performance.md) verified on 64 A100 GPUs.</br>
 
 
 ## Coming soon features:
-1 - Asynch checkpointing </br>
+1 - Async checkpointing </br>
 2 - FP8 support </br>
 3 - Context Parallel </br>
 4 - 3D (Pipeline Parallel) </br>
-5 - Torch Compile support </br>
+5 - `torch.compile` support </br>
 6 - Scalable data loading solution </br>
 
 
