@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
 from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config_manager import JobConfig
 

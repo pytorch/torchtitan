@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved
-
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 from torchtitan.models.llama import Transformer
