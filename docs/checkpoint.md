@@ -1,10 +1,10 @@
-# How to Convert a TorchTitan Checkpoint for Use in TorchTune
+# How to Convert a torchtitan Checkpoint for Use in torchtune
 
-This guide will walk you through the steps required to convert a checkpoint from TorchTitan so that it can be loaded into TorchTune.
+This guide will walk you through the steps required to convert a checkpoint from torchtitan so that it can be loaded into torchtune.
 
 ## Steps
 1. ENABLE CHECKPOINTING
-In your TorchTitan training config, ensure that `enable_checkpoint` is set to True.
+In your torchtitan training config, ensure that `enable_checkpoint` is set to True.
 ```
 [checkpoint]
 enable_checkpoint = true
@@ -46,10 +46,10 @@ export_dtype = "bfloat16"
 Once the above have been set, the final checkpoint at the end of the training step will consist of model weights only with the desired export dtype. However, if the final step has not been reached yet, full checkpoints will still be saved so that training can be resumed.
 
 6. CONVERT SHARDED CHECKPOINTS TO A SINGLE FILE\
-Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file that can be loaded into TorchTune:
+Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file that can be loaded into torchtune:
 
 ```
 python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpoint.pt
 ```
 
-That's it. You have now successfully converted a sharded TorchTitan checkpoint for use in TorchTune.
+That's it. You have now successfully converted a sharded torchtitan checkpoint for use in torchtune.
