@@ -1,6 +1,7 @@
 import contextlib
 import gc
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -237,6 +238,7 @@ def main(job_config: JobConfig):
         ),
         interval=job_config.checkpoint.interval,
         model_weights_only=job_config.checkpoint.model_weights_only,
+        export_dtype=job_config.checkpoint.export_dtype,
     )
     checkpoint.load()
 
@@ -384,8 +386,12 @@ def main(job_config: JobConfig):
                     world_mesh=world_mesh,
                 )
 
+    if torch.distributed.get_rank() == 0:
+        logger.info("Sleeping for 2 seconds for others ranks to complete ")
+        time.sleep(2)
+
     metric_logger.close()
-    logger.info("Training completed.")
+    logger.info("Training completed")
     destroy_process_group()
 
 

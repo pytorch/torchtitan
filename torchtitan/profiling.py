@@ -15,7 +15,7 @@ def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
         dump_dir = config.job.dump_folder
         save_trace_dir = config.profiling.save_traces_folder
         trace_dir = os.path.join(dump_dir, save_trace_dir)
-        iter_frequency = config.profiling.profile_every_x_iter
+        iter_frequency = config.profiling.profile_freq
 
         _global_iter_count = 0
 

@@ -76,10 +76,10 @@ class JobConfig:
             help="trace file location",
         )
         self.parser.add_argument(
-            "--profiling.profile_every_x_iter",
+            "--profiling.profile_freq",
             type=int,
             default=10,
-            help="collect profiler traces every x iterations",
+            help="how often to collect profiler traces, in iterations",
         )
 
         # metrics configs
@@ -87,7 +87,7 @@ class JobConfig:
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="how often to log metrics to TensorBoard",
+            help="how often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
             "--metrics.enable_color_printing",
@@ -243,6 +243,16 @@ class JobConfig:
                 "When model_weights_only=False, we do a full checkpoint."
                 "A full checkpoint includes model, optimizer and train_state, which can be used to resume training."
                 "The default value is false."
+            ),
+        )
+        self.parser.add_argument(
+            "--checkpoint.export_dtype",
+            type=str,
+            default="float32",
+            help=(
+                "Converts to the specified precision when training completes and model_weights_only=true."
+                "Currently supports float32, float16, and bfloat16."
+                "The default value is float32."
             ),
         )
         self.parser.add_argument(

@@ -1,4 +1,6 @@
+import glob
 import os
+import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -44,9 +46,9 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer"],
+            [f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint"],
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_optimizer",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
                 "--training.steps 20",
             ],
         ],
@@ -55,10 +57,19 @@ integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
             [
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only --checkpoint.model_weights_only true"
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32 --checkpoint.model_weights_only true"
             ],
         ],
-        "Checkpoint Integration Test - Model Weights Only",
+        "Checkpoint Integration Test - Model Weights Only fp32",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+                "--checkpoint.model_weights_only true --checkpoint.export_dtype bfloat16",
+            ],
+        ],
+        "Checkpoint Integration Test - Model Weights Only bf16",
     ),
 ]
 
@@ -99,3 +110,9 @@ for config_file in os.listdir(CONFIG_DIR):
 
                 for test_flavor in test_flavors:
                     run_test(test_flavor, full_path)
+
+                    # Deleting checkpoint folder from test
+                    dir_list = glob.iglob(f"{test_checkpoint_dir}_*")
+                    for path in dir_list:
+                        if os.path.exists(path):
+                            shutil.rmtree(path)

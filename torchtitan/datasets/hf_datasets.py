@@ -11,7 +11,6 @@ from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
     "alpaca": "tatsu-lab/alpaca",
-    "minipile": "JeanKaddour/minipile",
     "c4": "allenai/c4",
     "openwebtext": "Skylion007/openwebtext",
 }
@@ -31,8 +30,7 @@ class HuggingFaceDataset(IterableDataset):
 
     We currently support four datasets:
     alpaca (52K training entries)
-    minipile (1M training entries, amalgamated from other datasets)
-    openwebtext (1M training entries, same type of data for entire dataset)
+    openwebtext (8M training entries, same type of data for entire dataset)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> Alpaca <<:
@@ -45,16 +43,7 @@ class HuggingFaceDataset(IterableDataset):
         Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
     }
 
-    >> MiniPile <<:
-    MiniPile dataset is detailed in the paper: https://arxiv.org/abs/2304.08442
-    Data input format (minipile):
-    {
-        "text": "Open-end spinning devices with such rotor bearing arrangements are known in
-                various different embodiments, and have been extensively described,
-                for example in German Patent Publications"
-    }
-
-     >> c4 (EN) <<:
+    >> c4 (EN) <<:
     c4 cleaned, English version
     Data input format (c4):
     {
@@ -93,24 +82,36 @@ class HuggingFaceDataset(IterableDataset):
     ) -> None:
         if dataset_name not in _supported_datasets:
             raise ValueError(
-                f"Dataset {dataset_name} is not supported. Supported datasets are: {_supported_datasets.keys()}."
+                f"Dataset {dataset_name} is not supported. "
+                f"Supported datasets are: {_supported_datasets.keys()}."
             )
 
         # TODO: This is a temporary solution for small datasets like Alpaca.
-        #       For larger datasets we need to use a more scalable approach.
+        #       For large datasets we need to use a more scalable approach,
+        #       and support shuffling and checkpointing.
         if dataset_path:
             logger.info(f"Loading {dataset_name} dataset locally from {dataset_path}")
             ds = load_from_disk(dataset_path)
         else:
             logger.info(f"Preparing {dataset_name} dataset from HuggingFace")
-            # Setting `streaming=True` works for large dataset, but is slightly slower and unstable.
-            # c4 is huge, and requires both streaming and language selection (we default to en)
+            # Setting `streaming=True` works for large dataset, but is slightly
+            # slower and unstable.
             if dataset_name == "c4":
+                # c4 is huge, and requires both streaming and language selection
+                # (we default to en).
                 ds = load_dataset(
                     _supported_datasets[dataset_name],
                     "en",
                     split="train",
                     streaming=True,
+                )
+            elif dataset_name == "openwebtext":
+                # openwebtext dataset contains a dataset script which needs
+                # trust_remote_code=True to run on local machine.
+                ds = load_dataset(
+                    _supported_datasets[dataset_name],
+                    split="train",
+                    trust_remote_code=True,
                 )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")

@@ -17,6 +17,13 @@ from torch.distributed.checkpoint.state_dict import (
 from torchtitan.logging_utils import logger
 
 
+DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
 class IntervalType(enum.Enum):
     SECONDS = enum.auto()
     STEPS = enum.auto()
@@ -55,6 +62,7 @@ class CheckpointManager:
         interval_type: IntervalType,
         interval: int,
         model_weights_only: bool = False,
+        export_dtype: str = "float32",
     ) -> None:
         self.folder = folder
         self.states = states
@@ -71,6 +79,7 @@ class CheckpointManager:
         self.work = None
         self.pg = dist.new_group(backend="gloo")
         self.doit = None
+        self.export_dtype = DTYPE_MAP[export_dtype]
 
         if self.folder:
             logger.info(
@@ -119,12 +128,28 @@ class CheckpointManager:
 
         # We only consider saving weights only at the end of the training.
         # So this won't affect preemption and training resume.
-        weights_only = force and self.model_weights_only
-        weights_only_msg = (
-            "Saving model weights only" if weights_only else "Saving a full checkpoint"
-        )
-        self.states = {"model": self.states["model"]} if weights_only else self.states
-        logger.info(f"{weights_only_msg} at step {curr_step}")
+        # We also only allow dtype conversion when we are checkpoint model weights only
+        # and the current dtype is not the same as the export dtype at the end of the training.
+        if force and self.model_weights_only:
+            # We update self.states to keep the model only.
+            # After this update, self.states = {'tok_embeddings.weight':...,''layers.0.attention.wq.weight': ...}.
+            self.states = self.states["model"].state_dict()
+
+            # For now, we will manually pop the freqs_cis buffer, as we made this permanent
+            # temporarily and we don't want to include it in the exported state_dict.
+            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py#L348
+            self.states.pop("freqs_cis")
+
+            if self.export_dtype != torch.float32:
+                self.states = {
+                    k: v.to(self.export_dtype) for k, v in self.states.items()
+                }
+            logger.info(
+                f"Saving a model weights only checkpoint in {self.export_dtype} at step {curr_step}"
+            )
+
+        else:
+            logger.info(f"Saving a full checkpoint at step {curr_step}")
 
         begin = time.monotonic()
         dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
