@@ -23,7 +23,7 @@ Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training usi
 #### (4/16/2024): `torchtitan` is now public but in a pre-release state and under development.  Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`.
 
 Key features available:</br>
-1 - [FSDP2 (per param sharding)](https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md) </br>
+1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
 2 - Tensor Parallel (FSDP + Tensor Parallel)</br>
 3 - Selective layer and op activation checkpointing </br>
 4 - Distributed checkpointing (asynch pending) </br>
