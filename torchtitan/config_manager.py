@@ -165,21 +165,18 @@ class JobConfig:
         self.parser.add_argument(
             "--training.seq_len", type=int, default=2048, help="sequence length"
         )
-
         self.parser.add_argument(
             "--training.warmup_steps",
             type=int,
             default=200,
             help="steps for lr scheduler warmup",
         )
-
         self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,
             help="max norm for gradient clipping",
         )
-
         self.parser.add_argument(
             "--training.steps",
             type=int,
@@ -214,6 +211,22 @@ class JobConfig:
             "--training.compile",
             action="store_true",
             help="Whether to compile the model.",
+        )
+        self.parser.add_argument(
+            "--training.fp8_linear",
+            type=str,
+            default="",
+            choices=[
+                "dynamic",
+                "",
+            ],  # TODO: add "delayed" option back in when supported
+            help="Type of fp8 linear quantization to apply to the model",
+        )
+        self.parser.add_argument(
+            "--training.gc_freq",
+            type=int,
+            default=50,
+            help="Python garbage control scheduling interval, in steps",
         )
 
         # checkpoint configs
@@ -269,24 +282,6 @@ class JobConfig:
                 "Currently supports float32, float16, and bfloat16. "
                 "The default value is float32."
             ),
-        )
-
-        self.parser.add_argument(
-            "--training.fp8_linear",
-            type=str,
-            default="",
-            choices=[
-                "dynamic",
-                "",
-            ],  # TODO: add "delayed" option back in when supported
-            help="Type of fp8 linear quantization to apply to the model",
-        )
-
-        self.parser.add_argument(
-            "--training.gc_freq",
-            type=int,
-            default=50,
-            help="Python garbage control scheduling interval, in steps",
         )
 
         # activation checkpointing
