@@ -390,8 +390,8 @@ def main(job_config: JobConfig):
                 )
 
     if torch.distributed.get_rank() == 0:
-        logger.info("Sleeping 1 second for other ranks to complete")
-        time.sleep(1)
+        logger.info("Sleeping for 2 seconds for others ranks to complete ")
+        time.sleep(2)
 
     metric_logger.close()
     logger.info("Training completed")
