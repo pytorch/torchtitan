@@ -1,7 +1,6 @@
 # ---- All project specifications ---- #
 [project]
 name = "torchtitan"
-version = "0.0.2"
 description = "A native-PyTorch library for large scale LLM training"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -18,6 +17,7 @@ dependencies = [
     "sentencepiece",
     "tomli >= 1.1.0"
 ]
+dynamic = ["version"]
 
 [project.urls]
 GitHub = "https://github.com/pytorch/torchtitan"
@@ -32,6 +32,10 @@ dev = [
     "tensorboard",
 ]
 
+[tool.setuptools.dynamic]
+version = {attr = "torchtitan.__version__"}
+
+
 # ---- Explicit project build information ---- #
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -39,10 +43,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
-include = ["torchtrain*"]
+include = ["torchtitan*"]
 
 [tool.setuptools.package-data]
 recipes = ["train_configs/*.toml"]
 
 [tool.pytest.ini_options]
-addopts = ["--showlocals"] # show local variables in tracebacks
+addopts = ["--showlocals"]  # show local variables in tracebacks
