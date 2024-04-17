@@ -166,8 +166,11 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    # set the model configs from training inputs:
+    # 1. norm type to decide which norm layer to use
+    # 2. vocab size from tokenizer
+    # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    # set vocab size from tokenizer and max_seq_len base on inputs
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
