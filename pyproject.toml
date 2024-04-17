@@ -33,7 +33,7 @@ dev = [
 ]
 
 [tool.setuptools.dynamic]
-version = {attr = "torchtitan.__version__"}
+version = {file = "version.txt"}
 
 
 # ---- Explicit project build information ---- #
