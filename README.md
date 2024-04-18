@@ -1,10 +1,5 @@
 # torchtitan
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/pytorch/torchtitan/blob/bcac1570a7cc47554f934d057e0f9aea9ae6fd08/assets/images/TorchTitan_logo_main.jpg">
-    <img alt="TorchTitan_Logo" width=35%>
-  </picture>
-</p>
+
 
 ## torchtitan is still in pre-release!
 `torchtitan` is currently in a pre-release state and under extensive development.
@@ -17,7 +12,7 @@
 
 ### Intro video - learn more about torchtitan in under 4 mins:
 
-[![Welcome to TorchTrain!](https://res.cloudinary.com/marcomontalbano/image/upload/v1713243056/video_to_markdown/images/youtube--ee5DOEqD35I-c05b58ac6eb4c4700831b2b3070cd403.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
+[![Welcome to TorchTrain!](assets/images/titan_play_video.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
 
 
 Please note: `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
