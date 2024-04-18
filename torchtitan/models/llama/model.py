@@ -29,7 +29,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
 
     max_batch_size: int = 32
-    max_seq_len: int = 32768
+    max_seq_len: int = 2048
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True

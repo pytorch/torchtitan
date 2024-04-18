@@ -13,7 +13,6 @@ __all__ = [
 ]
 
 dataloader_fn = {
-    "alpaca": build_hf_data_loader,
+    "c4_mini": build_hf_data_loader,
     "c4": build_hf_data_loader,
-    "openwebtext": build_hf_data_loader,
 }

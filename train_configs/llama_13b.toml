@@ -6,8 +6,8 @@ dump_folder = "./outputs"
 description = "LLaMA 13B training"
 
 [profiling]
-run_profiler = true
-save_traces_folder = "profiling/traces"
+enable_profiling = true
+save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama"
 flavor = "13B"
-norm_type = "fused_rmsnorm" # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
+norm_type = "fused_rmsnorm"  # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
 tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
@@ -36,12 +36,13 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "openwebtext"
+dataset = "c4"
 
 [checkpoint]
-interval = 500
+enable_checkpoint = false
+folder = "checkpoint"
 interval_type = "steps"
-folder = ""
+interval = 500
 model_weights_only = false
 export_dtype = "float32"
 

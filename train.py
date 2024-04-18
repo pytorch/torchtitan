@@ -23,7 +23,7 @@ from torch.distributed import destroy_process_group
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
-from torchtitan.checkpoint import CheckpointManager, IntervalType
+from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import create_tokenizer, dataloader_fn
 from torchtitan.float8_linear import build_fp8_linear
@@ -32,7 +32,7 @@ from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from torchtitan.profiling import maybe_run_profiler
+from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
     dist_max,
@@ -166,8 +166,13 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    # set the model configs from training inputs:
+    # 1. norm type to decide which norm layer to use
+    # 2. vocab size from tokenizer
+    # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
+    model_config.max_seq_len = job_config.training.seq_len
 
     with torch.device("meta"):
         logger.info(
@@ -236,15 +241,7 @@ def main(job_config: JobConfig):
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=job_config.checkpoint.folder,
-        interval_type=(
-            IntervalType.SECONDS
-            if job_config.checkpoint.interval_type == "seconds"
-            else IntervalType.STEPS
-        ),
-        interval=job_config.checkpoint.interval,
-        model_weights_only=job_config.checkpoint.model_weights_only,
-        export_dtype=job_config.checkpoint.export_dtype,
+        job_config=job_config,
     )
     checkpoint.load()
 
@@ -262,7 +259,7 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_run_profiler(job_config) as torch_profiler:
+    with maybe_enable_profiling(job_config) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
@@ -393,7 +390,7 @@ def main(job_config: JobConfig):
                 )
 
     if torch.distributed.get_rank() == 0:
-        logger.info("Sleeping for 2 seconds for others ranks to complete ")
+        logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
 
     metric_logger.close()
