@@ -9,6 +9,10 @@
 * Modular components instead of monolithic codebase.
 * Get started in minutes, not hours!
 
+### Intro video - learn more about torchtitan in under 4 mins:
+
+[![Welcome to TorchTrain!](assets/images/titan_play_video.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
+
 ## Pre-Release Updates:
 #### (4/18/2024): `torchtitan` is now public but in a pre-release state and under development.
 Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
