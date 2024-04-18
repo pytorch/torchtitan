@@ -6,7 +6,7 @@ description = "LLaMA debug training"
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 
