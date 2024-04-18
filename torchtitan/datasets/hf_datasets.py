@@ -25,8 +25,11 @@ class HuggingFaceDataset(IterableDataset):
 
     Args:
         dataset_name (str): name of the dataset to load
-        dataset_path (Optional[str]): Path to the dataset in the file system. If provided, data will be loaded from this path instead of downloaded.
-        tokenizer (TokenizerIf): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+        dataset_path (Optional[str]):
+            Path to the dataset in the file system. If provided, data will be loaded
+            from this path instead of downloaded.
+        tokenizer (TokenizerIf):
+            Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
         world_size (int): number of data parallel processes participating in training
         rank (int): rank of the current data parallel process
@@ -40,7 +43,7 @@ class HuggingFaceDataset(IterableDataset):
     Data input format (c4):
     {
     'url': 'https://klyq.com/beginners-bbq-class-taking-place-in-missoula/',
-    'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at making delicious BBQ? You will have the opportunity, put this on your calendar now. Thursday, September 22nd join World Class BBQ Champion, Tony Balay from Lonestar Smoke Rangers. He will be teaching a beginner level class for everyone who wants to get better with their culinary skills.\nHe will teach you everything you need to know to compete in a KCBS BBQ competition, including techniques, recipes, timelines, meat selection and trimming, plus smoker and fire information.\nThe cost to be in the class is $35 per person, and for spectators it is free. Included in the cost will be either a t-shirt or apron and you will be tasting samples of each meat that is prepared.',
+    'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at ...',
     'timestamp': '2019-04-25T12:57:54Z'
     }
 
@@ -49,8 +52,6 @@ class HuggingFaceDataset(IterableDataset):
     >>> for batch in Dataloader(ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
-
-
     """
 
     def __init__(
