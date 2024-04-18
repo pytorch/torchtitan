@@ -16,9 +16,7 @@ from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
-    "alpaca": "tatsu-lab/alpaca",
     "c4": "allenai/c4",
-    "openwebtext": "Skylion007/openwebtext",
 }
 
 
@@ -34,20 +32,8 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support four datasets:
-    alpaca (52K training entries)
-    openwebtext (8M training entries, same type of data for entire dataset)
+    We currently support the c4 dataset:
     c4 (177M training entries - this dataset is streamed due to the size)
-
-    >> Alpaca <<:
-    Data input format (alpaca):
-    {
-        "instruction": "Create a classification task by clustering the given list of items.",
-        "input": "Apples, oranges, bananas, strawberries, pineapples",
-        "output": "Class 1: Apples, Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",
-        "text": "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\nCreate a classification task by clustering the given list of items.\n\n### Input:\nApples, oranges, bananas, strawberries, pineapples\n\n### Response:\nClass 1: Apples,
-        Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
-    }
 
     >> c4 (EN) <<:
     c4 cleaned, English version
@@ -58,18 +44,9 @@ class HuggingFaceDataset(IterableDataset):
     'timestamp': '2019-04-25T12:57:54Z'
     }
 
-    >> OpenWebText <<:
-    OpenWeb crawl, English
-    Example:
-    {
-        'text': "Amazon has launched a new cheaper version of its Echo Dot voice-controlled device today.
-    The launch comes six months after Amazon first introduced two new Echo devices —
-    one of which was the $90 Echo Dot,..."
-    }
-
-    Example use (alpaca):
-    >>> alpaca_ds = HuggingFaceDataset(dataset_name="alpaca", dataset_path=None, tokenizer=tokenizer)
-    >>> for batch in Dataloader(alpaca_ds, batch_size=8):
+    Example use (c4):
+    >>> ds = HuggingFaceDataset(dataset_name="c4", dataset_path=None, tokenizer=tokenizer)
+    >>> for batch in Dataloader(ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
 
@@ -92,7 +69,7 @@ class HuggingFaceDataset(IterableDataset):
                 f"Supported datasets are: {_supported_datasets.keys()}."
             )
 
-        # TODO: This is a temporary solution for small datasets like Alpaca.
+        # TODO: This is a temporary solution for small datasets.
         #       For large datasets we need to use a more scalable approach,
         #       and support shuffling and checkpointing.
         if dataset_path:
@@ -110,14 +87,6 @@ class HuggingFaceDataset(IterableDataset):
                     "en",
                     split="train",
                     streaming=True,
-                )
-            elif dataset_name == "openwebtext":
-                # openwebtext dataset contains a dataset script which needs
-                # trust_remote_code=True to run on local machine.
-                ds = load_dataset(
-                    _supported_datasets[dataset_name],
-                    split="train",
-                    trust_remote_code=True,
                 )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")

@@ -150,7 +150,7 @@ class JobConfig:
 
         # training configs
         self.parser.add_argument(
-            "--training.dataset", type=str, default="alpaca", help="Dataset to use"
+            "--training.dataset", type=str, default="c4", help="Dataset to use"
         )
         self.parser.add_argument(
             "--training.dataset_path",
