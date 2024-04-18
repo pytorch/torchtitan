@@ -16,6 +16,7 @@ from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
+    "c4_mini": "torchtitan/datasets/c4_mini",
     "c4": "allenai/c4",
 }
 
@@ -69,6 +70,9 @@ class HuggingFaceDataset(IterableDataset):
                 f"Dataset {dataset_name} is not supported. "
                 f"Supported datasets are: {_supported_datasets.keys()}."
             )
+        # special case to auto-load c4_mini (and any future datasets) from local dir
+        if dataset_name == "c4_mini":
+            dataset_path = f"torchtitan/datasets/{dataset_name}"
 
         # TODO: This is a temporary solution for small datasets.
         #       For large datasets we need to use a more scalable approach,
