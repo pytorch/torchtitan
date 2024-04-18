@@ -35,7 +35,7 @@ tensor_parallel_degree = 1  # dp-only would be sufficient for 7B
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "openwebtext"
+dataset = "c4"
 
 [checkpoint]
 enable_checkpoint = false

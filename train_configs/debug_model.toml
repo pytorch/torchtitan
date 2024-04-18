@@ -37,7 +37,7 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "alpaca"  # supported datasets: alpaca (52K), openwebtext (8M), c4 (177M)
+dataset = "c4"  # supported datasets: c4 (177M)
 
 [checkpoint]
 enable_checkpoint = false
