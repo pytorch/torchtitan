@@ -22,7 +22,7 @@ Key features available:</br>
 2 - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (FSDP + Tensor Parallel)</br>
 3 - Selective layer and operator activation checkpointing </br>
 4 - Distributed checkpointing </br>
-5 - 3 datasets pre-configured (47K - 144M)</br>
+5 - 2 datasets pre-configured (45K - 144M)</br>
 6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
 7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
 8 - All options easily configured via [toml files](train_configs/).</br>
