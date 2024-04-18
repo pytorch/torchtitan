@@ -14,7 +14,7 @@ Below is the WPS (word per second, or more accurately, token per second) and MFU
 
 We mostly use local batch size 2 (global batch size = local batch size 2 * number of FSDP ranks 64  = 128) in the experiments, because it mimics the small local batch size in large scaled training, and moreoever allows us to compare 1D (FSDP) and 2D (FSDP + TP) training under the same global batch size on both 13B and 70B LLaMa models, without the out-of-memory (OOM) issue. In fact, for the 70B model with full activation checkpointing, the MFU can go up to 54% when local batch size is higher (but before OOM happens).
 
-Next we show the loss curves for LLaMa 13B and LLaMa 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All the four models are trained 3000 steps on [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext), with global batch size 128. In terms of activation checkpointing (AC) configs, the LLaMa 13B training jobs use selective op AC, whereas the LLaMa 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^2].
+Next we show the loss curves for LLaMa 13B and LLaMa 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All the four models are trained 3000 steps with global batch size 128. In terms of activation checkpointing (AC) configs, the LLaMa 13B training jobs use selective op AC, whereas the LLaMa 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^2].
 
 ![image](../assets/images/loss_curves.png)
 
