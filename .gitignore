@@ -10,3 +10,4 @@ dist/*
 data
 out
 wandb
+*.json
