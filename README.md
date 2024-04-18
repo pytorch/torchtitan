@@ -1,10 +1,4 @@
 # torchtitan
-<p align="center">
-  <picture>
-    <img src="assets/images/TorchTitan_logo_main.jpg" alt="TorchTitan_Logo" width="300">
-  </picture>
-</p>
-
 
 ## torchtitan is still in pre-release!
 `torchtitan` is currently in a pre-release state and under extensive development.
@@ -16,7 +10,7 @@
 * Get started in minutes, not hours!
 
 ## Pre-Release Updates:
-#### (4/16/2024): `torchtitan` is now public but in a pre-release state and under development.
+#### (4/18/2024): `torchtitan` is now public but in a pre-release state and under development.
 Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
