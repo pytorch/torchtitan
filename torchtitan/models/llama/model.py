@@ -27,6 +27,7 @@ class ModelArgs:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
+    rope_theta: float = 10000
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -366,6 +367,7 @@ class Transformer(nn.Module):
                 # Need to compute until at least the max token limit for generation
                 # (use 2x max sequence length to be safe)
                 model_args.max_seq_len * 2,
+                model_args.rope_theta,
             ),
             persistent=True,
         )
@@ -399,6 +401,7 @@ class Transformer(nn.Module):
                 # Need to compute until at least the max token limit for generation
                 # (use 2x max sequence length to be safe)
                 self.model_args.max_seq_len * 2,
+                self.model_args.rope_theta,
             )
         nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers:

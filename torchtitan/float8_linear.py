@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch.nn as nn
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
-from torchtitan.models.llama import Transformer
 
 
-def build_fp8_linear(model: Transformer, job_config: JobConfig):
+def build_fp8_linear(model: nn.Module, job_config: JobConfig):
     """
     This function converts the linear layers to one of the fp8 types:
     - Float8DynamicLinear: Dynamic quantization of the weights and the activations
