@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.datasets.tokenizer.sentencepiece import SentencePieceTokenizer
-from torchtitan.datasets.tokenizer.tiktokenizer import TikTokenizer
+from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
 
 from torchtitan.logging_utils import logger
