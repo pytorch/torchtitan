@@ -6,46 +6,15 @@
 
 # copied and adjusted from https://github.com/facebookresearch/llama/blob/main/llama/tokenizer.py
 
-import os
-from abc import ABC, abstractmethod
 from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
+from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
 from torchtitan.logging_utils import logger
 
 
-class TokenizerIf(ABC):
-    # tokenizer interface
-    def __init__(self, tokenizer_path: str):
-        assert os.path.exists(
-            tokenizer_path
-        ), f"The tokenizer path does not exist: {tokenizer_path}"
-        assert os.path.isfile(tokenizer_path), tokenizer_path
-        self._n_words = 8
-
-    @abstractmethod
-    def encode(self, *args, **kwargs) -> List[int]:
-        ...
-
-    @abstractmethod
-    def decode(self, *args, **kwargs) -> str:
-        ...
-
-    @property
-    def n_words(self) -> int:
-        return self._n_words
-
-
-def create_tokenizer(tokenizer_type: str, tokenizer_path: str) -> TokenizerIf:
-    logger.info(f"Building {tokenizer_type} tokenizer locally from {tokenizer_path}")
-    if tokenizer_type == "sentencepiece":
-        return SentencePieceTokenizer(tokenizer_path)
-    else:
-        raise ValueError(f"Unknown tokenizer type: {args.type}")
-
-
-class SentencePieceTokenizer(TokenizerIf):
+class SentencePieceTokenizer(Tokenizer):
     """
     Tokenizing and encoding/decoding text based on a SentencePiece model.
 
