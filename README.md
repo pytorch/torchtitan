@@ -47,15 +47,26 @@ Install PyTorch from source or install the latest pytorch nightly, then install 
 pip install -r requirements.txt
 ```
 
-Install additional dev requirements if you want to contribute to the repo:
+### Downloading a tokenizer.model
+
+`torchtitan` currently supports training Llama3 (8B, 70B), and Llama2 (13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
+
+Once you have confirmed access, you can run the following command to download the Llama2/3 tokenizer to your local machine.
+
 ```
-pip install -r dev-requirements.txt
+# pass your hf_token in order to download tokenizer.model
+
+# llama3 tokenizer.model
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
+
+# llama2 tokenizer.model
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
 ```
 
-run the llama debug model locally to verify the setup is correct:
+Run the llama3 8B model locally on 8 GPUs:
 
 ```
-./run_llama_train.sh
+CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
 
 

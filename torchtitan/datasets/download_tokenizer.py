@@ -4,21 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 from typing import Optional
 
 from requests.exceptions import HTTPError
 
 
-def hf_download(repo_id: Optional[str] = None, hf_token: Optional[str] = None) -> None:
+def hf_download(
+    repo_id: str, tokenizer_path: str, local_dir: str, hf_token: Optional[str] = None
+) -> None:
     from huggingface_hub import hf_hub_download
 
-    os.makedirs(f"checkpoints/{repo_id}", exist_ok=True)
+    tokenizer_path = (
+        f"{tokenizer_path}/tokenizer.model" if tokenizer_path else "tokenizer.model"
+    )
+
     try:
         hf_hub_download(
             repo_id,
-            "tokenizer.model",
-            local_dir="torchtitan/datasets/tokenizer/",
+            tokenizer_path,
+            local_dir=local_dir,
             local_dir_use_symlinks=False,
             token=hf_token,
         )
@@ -38,12 +42,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repo_id",
         type=str,
-        default="meta-llama/llama-2-70b",
-        help="Repository ID to download from.",
+        default="meta-llama/Meta-Llama-3-8B",
+        help="Repository ID to download from. default to Llama-3-8B",
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default="",
+        help="the tokenizer.model path relative to repo_id",
     )
     parser.add_argument(
         "--hf_token", type=str, default=None, help="HuggingFace API token."
     )
+    parser.add_argument(
+        "--local_dir",
+        type=str,
+        default="torchtitan/datasets/tokenizer/llama3/",
+        help="local directory to save the tokenizer.model",
+    )
 
     args = parser.parse_args()
-    hf_download(args.repo_id, args.hf_token)
+    hf_download(args.repo_id, args.tokenizer_path, args.local_dir, args.hf_token)
