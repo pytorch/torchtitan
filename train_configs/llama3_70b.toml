@@ -1,8 +1,9 @@
 # torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
 dump_folder = "./outputs"
-description = "LLaMA 7B training"
+description = "Llama 3 70B training"
 
 [profiling]
 enable_profiling = true
@@ -15,23 +16,23 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
-name = "llama"
-flavor = "7B"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
-tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
+name = "llama3"
+flavor = "70B"
+norm_type = "rmsnorm"  # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
+tokenizer_path = "./torchtitan/datasets/tokenizer/llama3/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 1.5e-4
 
 [training]
-batch_size = 8
-seq_len = 2048
+batch_size = 16
+seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_degree = -1
-tensor_parallel_degree = 1  # dp-only would be sufficient for 7B
+tensor_parallel_degree = 8  # 8-way TP
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
@@ -46,5 +47,4 @@ model_weights_only = false
 export_dtype = "float32"
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
-selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+mode = 'full'
