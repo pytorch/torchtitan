@@ -1,5 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 # this file applies the PTD parallelisms and various training techniques to the
 # llama model, i.e. activation checkpointing, etc.
@@ -25,8 +28,8 @@ from torch.distributed.tensor.parallel import (
 
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
 
 
 # for selective AC
@@ -34,7 +37,7 @@ no_recompute_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
 }
 
 
@@ -154,7 +157,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             model,
             tp_mesh,
             {
-                "embeddings.tok_embeddings": RowwiseParallel(
+                "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
                 ),
                 "output": col_parallel_strategy(

@@ -1,5 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import enum
 import os
@@ -17,7 +20,15 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
+
+
+DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
 
 
 class IntervalType(enum.Enum):
@@ -54,38 +65,51 @@ class CheckpointManager:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         states: Dict[str, Any],
-        folder: str,
-        interval_type: IntervalType,
-        interval: int,
+        job_config: JobConfig,
     ) -> None:
-        self.folder = folder
-        self.states = states
-        self.states.update(
-            {
-                "model": ModelWrapper(model),
-                "optimizer": OptimizerWrapper(model, optimizer),
-            }
-        )
-        self.interval_type = interval_type
-        self.interval = interval
-        self.begin = 0
-        self.work = None
-        self.pg = dist.new_group(backend="gloo")
-        self.doit = None
+        ckpt_config = job_config.checkpoint
+        self.enable_checkpoint = ckpt_config.enable_checkpoint
 
-        if self.folder:
+        if self.enable_checkpoint:
+            self.states = states
+            self.states.update(
+                {
+                    "model": ModelWrapper(model),
+                    "optimizer": OptimizerWrapper(model, optimizer),
+                }
+            )
+
+            self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+            self.interval_type = (
+                IntervalType.SECONDS
+                if ckpt_config.interval_type == "seconds"
+                else IntervalType.STEPS
+            )
+            self.interval = ckpt_config.interval
+            self.model_weights_only = ckpt_config.model_weights_only
+            self.export_dtype = DTYPE_MAP[ckpt_config.export_dtype]
+
             logger.info(
                 f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
             )
 
+            self.begin = 0
+            self.work = None
+            self.pg = dist.new_group(backend="gloo")
+            self.doit = None
+
     def reset(self) -> None:
         self.begin = time.monotonic()
 
-    def create_checkpoint_id(self, step: int) -> str:
+    def _create_checkpoint_id(self, step: int) -> str:
         return os.path.join(self.folder, f"step-{step}")
 
     def save(self, curr_step: int, force: bool = False) -> None:
-        if not self.folder:
+        """
+        force = True will force the checkpoint to be saved, even if the interval has not been reached.
+        This only happens when train_state.step == job_config.training.steps.
+        """
+        if not self.enable_checkpoint:
             return
 
         if not force:
@@ -114,21 +138,44 @@ class CheckpointManager:
             self.work = None
             self.doit = None
 
-        logger.info(f"Saving a checkpoint at step {curr_step}")
+        # We only consider saving weights only at the end of the training.
+        # So this won't affect preemption and training resume.
+        # We also only allow dtype conversion when we are checkpoint model weights only
+        # and the current dtype is not the same as the export dtype at the end of the training.
+        if force and self.model_weights_only:
+            # We update self.states to keep the model only.
+            # After this update, self.states = {'tok_embeddings.weight':...,''layers.0.attention.wq.weight': ...}.
+            self.states = self.states["model"].state_dict()
+
+            # For now, we will manually pop the freqs_cis buffer, as we made this permanent
+            # temporarily and we don't want to include it in the exported state_dict.
+            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py#L348
+            self.states.pop("freqs_cis")
+
+            if self.export_dtype != torch.float32:
+                self.states = {
+                    k: v.to(self.export_dtype) for k, v in self.states.items()
+                }
+            logger.info(
+                f"Saving a model weights only checkpoint in {self.export_dtype} at step {curr_step}"
+            )
+
+        else:
+            logger.info(f"Saving a full checkpoint at step {curr_step}")
+
         begin = time.monotonic()
-        dcp.save(self.states, checkpoint_id=self.create_checkpoint_id(curr_step))
+        dcp.save(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
         self.reset()
         logger.info(
             f"Finished saving the checkpoint in {time.monotonic() - begin:.2f} seconds"
         )
 
     def load(self, step: int = -1) -> bool:
-        logger.info(f"Trying Loading a checkpoint from  '{self.folder}'")
-        if not self.folder:
+        if not self.enable_checkpoint:
             return False
         if not os.path.isdir(self.folder):
             return False
-        if step != -1 and not os.path.isdir(self.create_checkpoint_id(step)):
+        if step != -1 and not os.path.isdir(self._create_checkpoint_id(step)):
             return False
 
         if step == -1:
@@ -147,7 +194,7 @@ class CheckpointManager:
         begin = time.monotonic()
         dcp.load(
             states,
-            checkpoint_id=self.create_checkpoint_id(step),
+            checkpoint_id=self._create_checkpoint_id(step),
         )
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds"

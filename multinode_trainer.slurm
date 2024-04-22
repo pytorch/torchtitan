@@ -1,11 +1,16 @@
 #!/bin/bash
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 # --- This script is optimized for AWS with EFA
 # --- adjust NCCL_BUFFSIZE if you encounter memory
 # --- constraint issues or to tune for improved performance.
 # ---
 
-#SBATCH --job-name=torchtrain_multi_node
+#SBATCH --job-name=torchtitan_multi_node
 
 #SBATCH --ntasks=4
 

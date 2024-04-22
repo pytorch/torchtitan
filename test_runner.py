@@ -1,9 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import glob
 import os
+import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -22,7 +25,7 @@ class OverrideDefinitions:
     """
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = ""
+    test_descr: str = "default"
 
 
 CONFIG_DIR = "./train_configs"
@@ -43,16 +46,44 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            ["--training.tensor_parallel_degree 2"],
+            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
         ],
         "Eager mode 2DParallel",
     ),
     OverrideDefinitions(
         [
-            [f"--checkpoint.folder {test_checkpoint_dir}"],
-            [f"--checkpoint.folder {test_checkpoint_dir}", "--training.steps 20"],
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+            ],
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                "--training.steps 20",
+            ],
         ],
-        "Checkpoint Integration Test",
+        "Checkpoint Integration Test - Save Load Full Checkpoint",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
+                "--checkpoint.model_weights_only",
+            ],
+        ],
+        "Checkpoint Integration Test - Save Model Weights Only fp32",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+                "--checkpoint.model_weights_only",
+                "--checkpoint.export_dtype bfloat16",
+            ],
+        ],
+        "Checkpoint Integration Test - Save Model Weights Only bf16",
     ),
 ]
 
@@ -60,7 +91,7 @@ integration_tests_flavors["debug_model.toml"] = [
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        cmd = f"CONFIG_FILE={full_path} NGPU=4 ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
@@ -74,6 +105,10 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
             shell=True,
         )
         print(result.stdout)
+        if result.returncode != 0:
+            raise Exception(
+                f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
+            )
 
 
 for config_file in os.listdir(CONFIG_DIR):
@@ -89,3 +124,9 @@ for config_file in os.listdir(CONFIG_DIR):
 
                 for test_flavor in test_flavors:
                     run_test(test_flavor, full_path)
+
+                    # Deleting checkpoint folder from test
+                    dir_list = glob.iglob(f"{test_checkpoint_dir}_*")
+                    for path in dir_list:
+                        if os.path.exists(path):
+                            shutil.rmtree(path)

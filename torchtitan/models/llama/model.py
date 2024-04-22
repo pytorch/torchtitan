@@ -1,5 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+#
+# Llama 2 is licensed under the LLAMA 2 Community License,
+# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
+
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -7,7 +14,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtrain.models.norms import create_norm
+from torchtitan.models.norms import create_norm
 
 
 @dataclass
@@ -22,14 +29,14 @@ class ModelArgs:
     norm_eps: float = 1e-5
 
     max_batch_size: int = 32
-    max_seq_len: int = 32768
-    depth_init: bool = (
-        True  # initialization uses each unique layer_id or total model layer count
-    )
+    max_seq_len: int = 2048
+    # If `True`, then each transformer block init uses its layer ID, and if
+    # `False`, each uses the total number of transformer blocks
+    depth_init: bool = True
     norm_type: str = "rmsnorm"
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
@@ -46,13 +53,13 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
     Reshape frequency tensor for broadcasting it with another tensor.
 
@@ -131,8 +138,6 @@ class Attention(nn.Module):
         wk (Linear): Linear transformation for keys.
         wv (Linear): Linear transformation for values.
         wo (Linear): Linear transformation for output.
-        cache_k (torch.Tensor): Cached keys for attention.
-        cache_v (torch.Tensor): Cached values for attention.
 
     """
 
@@ -187,16 +192,12 @@ class Attention(nn.Module):
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(
-            xk, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(
-            xv, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
         # we use casual mask for training
         output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
@@ -249,54 +250,6 @@ class FeedForward(nn.Module):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
-
-
-class RotaryEmbedding(nn.Module):
-    """
-    RotaryEmbedding Module
-    """
-
-    def __init__(self, model_args: ModelArgs):
-        super().__init__()
-        self.model_args = model_args
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-
-        # TODO persistent should be set to false, since this buffer can be recomputed.
-        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
-        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
-        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
-        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
-        # initialized by the checkpoint, or we need to add a separate initializer for
-        # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
-
-    def _precompute_freqs_cis(self):
-        return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # (use 2x max sequence length to be safe)
-            self.model_args.max_seq_len * 2,
-        )
-
-    def forward(self, tokens: torch.Tensor):
-        """
-        Perform a forward pass through the embedding module.
-
-        Args:
-            tokens (torch.Tensor): Input tensor.
-
-        Returns:
-            Tuple(torch.Tensor, torch.Tensor): Embedded input tensor and freqs_cis
-        """
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        freqs_cis = self.freqs_cis[0:seqlen]
-        return h, freqs_cis
-
-    def init_weights(self):
-        with torch.device(self.freqs_cis.device):
-            self.freqs_cis = self._precompute_freqs_cis()
-        nn.init.normal_(self.tok_embeddings.weight)
 
 
 class TransformerBlock(nn.Module):
@@ -396,9 +349,27 @@ class Transformer(nn.Module):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.model_dim = model_args.dim
 
-        self.embeddings = RotaryEmbedding(model_args)
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+
+        # TODO persistent should be set to false, since this buffer can be recomputed.
+        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
+        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
+        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
+        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
+        # initialized by the checkpoint, or we need to add a separate initializer for
+        # just the non-persistent buffers that is called after loading checkpoints.
+        self.register_buffer(
+            "freqs_cis",
+            precompute_freqs_cis(
+                model_args.dim // model_args.n_heads,
+                # Need to compute until at least the max token limit for generation
+                # (use 2x max sequence length to be safe)
+                model_args.max_seq_len * 2,
+            ),
+            persistent=True,
+        )
+
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
             self.layers.append(TransformerBlock(layer_id, model_args))
@@ -422,11 +393,18 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        self.embeddings.init_weights()
+        with torch.device(self.freqs_cis.device):
+            self.freqs_cis = precompute_freqs_cis(
+                self.model_args.dim // self.model_args.n_heads,
+                # Need to compute until at least the max token limit for generation
+                # (use 2x max sequence length to be safe)
+                self.model_args.max_seq_len * 2,
+            )
+        nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers:
             layer.init_weights()
         self.norm.reset_parameters()
-        final_out_std = self.model_dim**-0.5
+        final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         nn.init.trunc_normal_(
             self.output.weight,
@@ -447,7 +425,11 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        h, freqs_cis = self.embeddings(tokens)
+        _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(tokens)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[0:seqlen]
+
         for layer in self.layers:
             h = layer(h, freqs_cis)
         h = self.norm(h)

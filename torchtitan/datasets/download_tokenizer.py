@@ -1,8 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
-# Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import os
 from typing import Optional
@@ -18,7 +18,7 @@ def hf_download(repo_id: Optional[str] = None, hf_token: Optional[str] = None) -
         hf_hub_download(
             repo_id,
             "tokenizer.model",
-            local_dir="torchtrain/datasets/tokenizer/",
+            local_dir="torchtitan/datasets/tokenizer/",
             local_dir_use_symlinks=False,
             token=hf_token,
         )
