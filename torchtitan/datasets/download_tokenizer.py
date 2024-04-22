@@ -52,12 +52,12 @@ if __name__ == "__main__":
         help="the tokenizer.model path relative to repo_id",
     )
     parser.add_argument(
-        "--hf_token", type=str, default=None, help="HuggingFace API token."
+        "--hf_token", type=str, default=None, help="HuggingFace API token"
     )
     parser.add_argument(
         "--local_dir",
         type=str,
-        default="torchtitan/datasets/tokenizer/llama3/",
+        default="torchtitan/datasets/tokenizer/",
         help="local directory to save the tokenizer.model",
     )
 

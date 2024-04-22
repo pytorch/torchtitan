@@ -73,7 +73,6 @@ class TikTokenizer(Tokenizer):
             mergeable_ranks=mergeable_ranks,
             special_tokens=self.special_tokens,
         )
-        logger.info(f"Reloaded tiktoken model from {model_path}")
 
         self._n_words: int = self.model.n_vocab
         # BOS / EOS token IDs
@@ -85,7 +84,7 @@ class TikTokenizer(Tokenizer):
             self.special_tokens["<|eot_id|>"],
         }
         logger.info(
-            f"#words: {self._n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
+            f"TikTokenizer built: #words {self.n_words}, BOS ID {self.bos_id}, EOS ID {self.eos_id}"
         )
 
     def encode(
