@@ -1,24 +1,27 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import contextlib
 import os
 
 import torch
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
 
 
 @contextlib.contextmanager
-def maybe_run_profiler(config: JobConfig, *pos_args, **kwargs):
+def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
     # get user defined profiler settings
-    run_profiler = config.profiling.run_profiler
+    enable_profiling = config.profiling.enable_profiling
 
-    if run_profiler:
+    if enable_profiling:
         dump_dir = config.job.dump_folder
         save_trace_dir = config.profiling.save_traces_folder
         trace_dir = os.path.join(dump_dir, save_trace_dir)
-        iter_frequency = config.profiling.profile_every_x_iter
+        iter_frequency = config.profiling.profile_freq
 
         _global_iter_count = 0
 

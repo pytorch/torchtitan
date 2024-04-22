@@ -1,12 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved
-
-from torchtrain.config_manager import JobConfig
-from torchtrain.logging_utils import logger
-from torchtrain.models.llama import Transformer
+from torchtitan.config_manager import JobConfig
+from torchtitan.logging_utils import logger
+from torchtitan.models.llama import Transformer
 
 
 def build_fp8_linear(model: Transformer, job_config: JobConfig):

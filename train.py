@@ -1,9 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import contextlib
 import gc
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -15,22 +19,23 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torch.distributed import destroy_process_group
 from pippy.PipelineSchedule import ScheduleGPipe
 from pippy.PipelineStage import PipelineStage
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
-from torchtrain.checkpoint import CheckpointManager, IntervalType
-from torchtrain.config_manager import JobConfig
-from torchtrain.datasets import create_tokenizer, dataloader_fn
-from torchtrain.float8_linear import build_fp8_linear
-from torchtrain.logging_utils import init_logger, logger
-from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
-from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import (
+from torchtitan.checkpoint import CheckpointManager
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import create_tokenizer, dataloader_fn
+from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.logging_utils import init_logger, logger
+from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
+from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.profiling import maybe_enable_profiling
+from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
@@ -38,12 +43,9 @@ from torchtrain.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
+    NoColor,
     set_pg_timeouts,
 )
-
-_is_local_logging = True
-if "SLURM_JOB_ID" in os.environ:
-    _is_local_logging = False
 
 
 @dataclass
@@ -107,6 +109,9 @@ def build_optimizer(model, job_config: JobConfig):
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # used for colorful printing
+    color = Color if job_config.metrics.enable_color_printing else NoColor
 
     # take control of garbage collection to avoid stragglers
     _gc_freq = job_config.training.gc_freq
@@ -173,8 +178,13 @@ def main(job_config: JobConfig):
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    # set the model configs from training inputs:
+    # 1. norm type to decide which norm layer to use
+    # 2. vocab size from tokenizer
+    # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
+    model_config.max_seq_len = job_config.training.seq_len
 
     with torch.device("meta"):
         logger.info(
@@ -191,15 +201,10 @@ def main(job_config: JobConfig):
     num_flop_per_token = get_num_flop_per_token(
         model_param_count, model_config, job_config.training.seq_len
     )
-    if _is_local_logging:
-        logger.info(
-            f"{Color.blue}Model {model_name} {job_config.model.flavor} "
-            f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
-        )
-    else:
-        logger.info(
-            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
-        )
+    logger.info(
+        f"{color.blue}Model {model_name} {job_config.model.flavor} "
+        f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+    )
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
@@ -239,6 +244,13 @@ def main(job_config: JobConfig):
         # allocate sharded model on GPU and initialize weights via DTensor
         model.init_weights()
 
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
+
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
@@ -265,13 +277,7 @@ def main(job_config: JobConfig):
         model=model,
         optimizer=optimizer,
         states={"train_state": train_state},
-        folder=job_config.checkpoint.folder,
-        interval_type=(
-            IntervalType.SECONDS
-            if job_config.checkpoint.interval_type == "seconds"
-            else IntervalType.STEPS
-        ),
-        interval=job_config.checkpoint.interval,
+        job_config=job_config,
     )
     checkpoint.load()
 
@@ -288,7 +294,8 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
-    with maybe_run_profiler(job_config) as torch_profiler:
+    logger.info(f"Training starts at step {train_state.step + 1}")
+    with maybe_enable_profiling(job_config) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
@@ -296,6 +303,7 @@ def main(job_config: JobConfig):
         ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
+        gpu_memory_monitor.reset_peak_stats()
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
@@ -407,24 +415,14 @@ def main(job_config: JobConfig):
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
-                if _is_local_logging:
-                    logger.info(
-                        f"{Color.cyan}step: {train_state.step:2}  "
-                        f"{Color.green}loss: {global_avg_loss:7.4f}  "
-                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}  "
-                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
-                    )
-                else:
-                    logger.info(
-                        f"step: {train_state.step:2}  "
-                        f"loss: {global_avg_loss:7.4f}  "
-                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}  "
-                        f"mfu: {mfu:.2f}%"
-                    )
+                logger.info(
+                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}wps: {round(wps):,}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                )
 
                 losses_since_last_log.clear()
                 ntokens_since_last_log = 0
@@ -447,7 +445,13 @@ def main(job_config: JobConfig):
                     world_mesh=world_mesh,
                 )
 
+    if torch.distributed.get_rank() == 0:
+        logger.info("Sleeping 2 seconds for other ranks to complete")
+        time.sleep(2)
+
     metric_logger.close()
+    logger.info("Training completed")
+    destroy_process_group()
 
 
 if __name__ == "__main__":
