@@ -1,4 +1,4 @@
-To demonstrate the effectiveness of techniques used in torchtitan, we report both the infra metrics and loss curves of the LLaMa 2 (13B and 70B) and LLaMa 3 (8B and 70B) training on 64 A100 (80GB memory) GPUs. We report infra metrics achieved by FSDP2 (1D parallelism) under various configurations, and loss curves for both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel) training.
+To demonstrate the effectiveness of techniques used in torchtitan, we report both the infra metrics and loss curves of LLaMa 2 (13B and 70B) and LLaMa 3 (8B and 70B) training on 64 A100 (80GB memory) GPUs. We report infra metrics achieved by FSDP2 (1D parallelism) under various configurations, and loss curves for both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel) training.
 
 
 ## LLaMa 3 performance numbers
@@ -30,7 +30,7 @@ Below is the WPS and MFU results which torchtitan achieves on LLaMa 2 models wit
 | 70B | 1[^2] | selective op | 355 | 50.8% |
 | 70B | 2 | full | 353 | 50.5% |
 
-We mostly use local batch size 2 (global batch size 128) in the experiments, to keep the same number of tokens per training iteration between LLaMa 2 and LLaMa 3 (since the default sequence length in LLaMa 2 is 4096 which is halved compared with LLaMa 3). In fact, for the LLaMa 2 70B model with full activation checkpointing, the MFU can go up to 54% when local batch size is higher (but before OOM happens).
+We mostly use local batch size 2 (global batch size 128) in the experiments, to keep the same number of tokens per training iteration between LLaMa 2 and LLaMa 3 (since the default sequence length in LLaMa 2 is 4096 which is halved compared with LLaMa 3). In fact, for LLaMa 2 70B model with full activation checkpointing, the MFU can go up to 54% when local batch size is higher (but before OOM happens).
 
 Next we show the loss curves for LLaMa 2 13B and LLaMa 2 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All the four models are trained 3000 steps with global batch size 128. In terms of activation checkpointing (AC) configs, the LLaMa 2 13B training jobs use selective op AC, whereas the LLaMa 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^3].
 
