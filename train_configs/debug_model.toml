@@ -1,25 +1,26 @@
-# TorchTrain Config.toml
+# torchtitan Config.toml
+
 [job]
 dump_folder = "./outputs"
 description = "LLaMA debug training"
 use_for_integration_test = true
 
 [profiling]
-run_profiler = true
-save_traces_folder = "profiling/traces"
-# profiling frequency - example: 10 means every 10th iter will be profiled
-profile_every_x_iter = 10
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
 
 [metrics]
 log_freq = 1
+enable_color_printing = true
 enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
 name = "llama"
 flavor = "debugmodel"
-norm_type = "fused_rmsnorm" # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
-tokenizer_path = "./torchtrain/datasets/tokenizer/tokenizer.model"
+norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
@@ -36,13 +37,16 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "alpaca"   # supported datasets = alpaca (52K), minipile (1M), c4 (177M)
+dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 
 [checkpoint]
-interval = 10
+enable_checkpoint = false
+folder = "checkpoint"
 interval_type = "steps"
-folder = "ckpt"
+interval = 5
+model_weights_only = false
+export_dtype = "float32"
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'full', 'selective']
+mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy

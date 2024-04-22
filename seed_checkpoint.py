@@ -1,15 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
 import os
 
 import torch.distributed.checkpoint as DCP
 
-from torchtrain.config_manager import JobConfig
-from torchtrain.datasets import create_tokenizer
-from torchtrain.float8_linear import build_fp8_linear
-from torchtrain.logging_utils import init_logger, logger
-from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import create_tokenizer
+from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.logging_utils import init_logger, logger
+from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 
 _is_local_logging = True
 if "SLURM_JOB_ID" in os.environ:
@@ -38,7 +44,7 @@ def main(job_config: JobConfig):
 
     model.init_weights()
 
-    checkpoint_id = os.path.join(job_config.training.checkpoint_folder, "step-0")
+    checkpoint_id = os.path.join(job_config.checkpoint.folder, "step-0")
     logger.info(f"Creating seed (step-0) checkpoint in {checkpoint_id}")
     DCP.save(
         state_dict={
