@@ -1,10 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import tempfile
 
 import pytest
-from torchtrain.config_manager import JobConfig
+from torchtitan.config_manager import JobConfig
 
 
 class TestJobConfig:
@@ -40,3 +43,8 @@ class TestJobConfig:
             ]
         )
         assert config.job.dump_folder == "/tmp/test_tt/"
+
+    def test_print_help(self):
+        config = JobConfig()
+        parser = config.parser
+        parser.print_help()
