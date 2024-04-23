@@ -5,10 +5,11 @@ __pycache__
 build
 outputs
 dist/*
-*.model
 
 # data
 data
 out
 wandb
 *.json
+
+torchtitan/datasets/**/*.model
