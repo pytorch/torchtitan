@@ -11,8 +11,3 @@ __all__ = [
     "build_hf_data_loader",
     "create_tokenizer",
 ]
-
-dataloader_fn = {
-    "c4_mini": build_hf_data_loader,
-    "c4": build_hf_data_loader,
-}

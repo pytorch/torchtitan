@@ -36,7 +36,8 @@ class HuggingFaceDataset(IterableDataset):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support the c4 dataset:
+    We currently support the c4 dataset and a subset of it:
+    c4_mini (45K training entries)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> c4 (EN) <<:
@@ -65,6 +66,19 @@ class HuggingFaceDataset(IterableDataset):
         rank: int = 0,
         infinite: bool = False,
     ) -> None:
+        # allow user to pass in a local path to use unsupported datasets
+        if dataset_name not in _supported_datasets:
+            if dataset_path:
+                logger.warning(
+                    f"Dataset {dataset_name} is not tested or verfied. "
+                    f"Recommended datasets are: {list(_supported_datasets.keys())}."
+                )
+            else:
+                raise ValueError(
+                    f"Dataset {dataset_name} is not supported. "
+                    f"Supported datasets are: {list(_supported_datasets.keys())}."
+                )
+
         # special case to auto-load c4_mini (and any future datasets) from local dir
         if dataset_name == "c4_mini":
             dataset_path = f"torchtitan/datasets/{dataset_name}"
@@ -79,13 +93,6 @@ class HuggingFaceDataset(IterableDataset):
             logger.info(f"Preparing {dataset_name} dataset from HuggingFace")
             # Setting `streaming=True` works for large dataset, but is slightly
             # slower and unstable.
-            if dataset_name not in _supported_datasets:
-                import warnings
-
-                warnings.warn(
-                    f"Dataset {dataset_name} is not tested/verfied. "
-                    f"Recommended datasets are: {_supported_datasets.keys()}."
-                )
             if dataset_name == "c4":
                 # c4 is huge, and requires both streaming and language selection
                 # (we default to en).
