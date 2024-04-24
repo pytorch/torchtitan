@@ -14,8 +14,8 @@
 [![Welcome to TorchTrain!](assets/images/titan_play_video.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
 
 ## Pre-Release Updates:
-#### (4/18/2024): `torchtitan` is now public but in a pre-release state and under development.
-Currently we showcase pre-training Llama2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
+#### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
+Currently we showcase pre-training **Llama 3 and Llama 2** models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
@@ -49,9 +49,9 @@ pip install -r requirements.txt
 
 ### Downloading a tokenizer.model
 
-`torchtitan` currently supports training Llama3 (8B, 70B), and Llama2 (13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
+`torchtitan` currently supports training Llama 3 (8B, 70B), and Llama 2 (7B, 13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
 
-Once you have confirmed access, you can run the following command to download the Llama2/3 tokenizer to your local machine.
+Once you have confirmed access, you can run the following command to download the Llama 3 / Llama 2 tokenizer to your local machine.
 
 ```
 # pass your hf_token in order to download tokenizer.model
@@ -63,7 +63,7 @@ python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama
 python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
 ```
 
-Run the llama3 8B model locally on 8 GPUs:
+Run Llama 3 8B model locally on 8 GPUs:
 
 ```
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
