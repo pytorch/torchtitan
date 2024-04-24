@@ -14,8 +14,8 @@
 [![Welcome to TorchTrain!](assets/images/titan_play_video.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
 
 ## Pre-Release Updates:
-#### (4/23/2024): `torchtitan` is now public but in a pre-release state and under development.
-Currently we showcase pre-training Llama 3 and Llama 2 models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
+#### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
+Currently we showcase pre-training **Llama 3 and Llama 2** models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
