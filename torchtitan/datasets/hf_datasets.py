@@ -65,11 +65,6 @@ class HuggingFaceDataset(IterableDataset):
         rank: int = 0,
         infinite: bool = False,
     ) -> None:
-        if dataset_name not in _supported_datasets:
-            raise ValueError(
-                f"Dataset {dataset_name} is not supported. "
-                f"Supported datasets are: {_supported_datasets.keys()}."
-            )
         # special case to auto-load c4_mini (and any future datasets) from local dir
         if dataset_name == "c4_mini":
             dataset_path = f"torchtitan/datasets/{dataset_name}"
@@ -84,6 +79,13 @@ class HuggingFaceDataset(IterableDataset):
             logger.info(f"Preparing {dataset_name} dataset from HuggingFace")
             # Setting `streaming=True` works for large dataset, but is slightly
             # slower and unstable.
+            if dataset_name not in _supported_datasets:
+                import warnings
+
+                warnings.warn(
+                    f"Dataset {dataset_name} is not tested/verfied. "
+                    f"Recommended datasets are: {_supported_datasets.keys()}."
+                )
             if dataset_name == "c4":
                 # c4 is huge, and requires both streaming and language selection
                 # (we default to en).
