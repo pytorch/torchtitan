@@ -49,9 +49,9 @@ pip install -r requirements.txt
 
 ### Downloading a tokenizer.model
 
-`torchtitan` currently supports training Llama 3 (8B, 70B), and Llama 2 (13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
+`torchtitan` currently supports training Llama 3 (8B, 70B), and Llama 2 (7B, 13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
 
-Once you have confirmed access, you can run the following command to download Llama 3 / Llama 2 tokenizer to your local machine.
+Once you have confirmed access, you can run the following command to download the Llama 3 / Llama 2 tokenizer to your local machine.
 
 ```
 # pass your hf_token in order to download tokenizer.model
