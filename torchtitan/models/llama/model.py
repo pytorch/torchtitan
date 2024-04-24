@@ -360,9 +360,7 @@ class Transformer(nn.Module):
         # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
         # initialized by the checkpoint, or we need to add a separate initializer for
         # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer(
-            "freqs_cis", self._precompute_freqs_cis(), persistent=True
-        )
+        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
@@ -411,7 +409,6 @@ class Transformer(nn.Module):
             self.model_args.max_seq_len * 2,
             self.model_args.rope_theta,
         )
-
 
     def forward(self, tokens: torch.Tensor):
         """
