@@ -219,8 +219,6 @@ def main(job_config: JobConfig):
 
     metric_logger = build_metric_logger(job_config)
 
-    train_state = TrainState()
-
     if job_config.training.compile:
         if (
             job_config.activation_checkpoint.mode == "selective"
@@ -231,6 +229,8 @@ def main(job_config: JobConfig):
                 True
             )
         logger.info(f"Compiling each TransformerBlock with torch.compile")
+
+    train_state = TrainState()
 
     # train loop
     model.train()
