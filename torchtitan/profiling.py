@@ -45,6 +45,11 @@ def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
             logger.info(
                 f"Finished dumping traces in {time.monotonic() - begin:.2f} seconds"
             )
+            # Profiling is a heavy operation which could cost very different amount of time
+            # across all ranks. Insert a barrier to make sure all ranks have finished profiling
+            # before moving on.
+            # TODO: Can we find a cleaner way?
+            torch.distributed.barrier()
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
