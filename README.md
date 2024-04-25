@@ -1,15 +1,14 @@
 # torchtitan
 
-## torchtitan is still in pre-release!
 `torchtitan` is currently in a pre-release state and under extensive development.
 
 `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
-Here are some principles around building `torchtitan`
+Here were our guiding principles when building `torchtitan`
 
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallel.
-* Modular components instead of monolithic codebase.
+* Modular components instead of a monolithic codebase.
 * Get started in minutes, not hours!
 
 ### Intro video - learn more about torchtitan in under 4 mins:
@@ -18,7 +17,7 @@ Here are some principles around building `torchtitan`
 
 ## Pre-Release Updates:
 #### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
-Currently we showcase pre-training **Llama 3 and Llama 2** models (LLMs) of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
+Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
 1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
