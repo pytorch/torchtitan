@@ -53,7 +53,9 @@ def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
 
         warmup, active = WARMUP, 1
         wait = profile_freq - (active + warmup)
-        assert wait >= 0, "profile_freq must be greater than or equal to warmup + active"
+        assert (
+            wait >= 0
+        ), "profile_freq must be greater than or equal to warmup + active"
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
