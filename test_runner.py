@@ -52,7 +52,9 @@ integration_tests_flavors["debug_model.toml"] = [
     ),
     OverrideDefinitions(
         [
-            ["--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
+            [
+                "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"
+            ],
         ],
         "2DParallel compile",
     ),
