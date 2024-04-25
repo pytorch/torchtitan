@@ -40,7 +40,7 @@ integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
-            ["--training.compile"],
+            ["--training.compile --model.norm_type=rmsnorm"],
         ],
         "1D compile",
     ),
@@ -49,6 +49,12 @@ integration_tests_flavors["debug_model.toml"] = [
             ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
         ],
         "Eager mode 2DParallel",
+    ),
+    OverrideDefinitions(
+        [
+            ["--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
+        ],
+        "2DParallel compile",
     ),
     OverrideDefinitions(
         [

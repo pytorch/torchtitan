@@ -219,18 +219,6 @@ def main(job_config: JobConfig):
 
     metric_logger = build_metric_logger(job_config)
 
-    # torch.compile model for improved performance
-    if job_config.training.compile:
-        if (
-            job_config.activation_checkpoint.mode == "selective"
-            and job_config.activation_checkpoint.selective_ac_option == "op"
-        ):
-            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
-                True
-            )
-        logger.info("Compiling model with torch.compile")
-        model = torch.compile(model)
-
     train_state = TrainState()
 
     # train loop

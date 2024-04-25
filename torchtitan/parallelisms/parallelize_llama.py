@@ -227,6 +227,19 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
                 )
+
+            if job_config.training.compile:
+                if (
+                    job_config.activation_checkpoint.mode == "selective"
+                    and job_config.activation_checkpoint.selective_ac_option == "op"
+                ):
+                    torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+                        True
+                    )
+                logger.info(f"Compiling TransformerBlock {layer_id} with torch.compile")
+                # TODO: dynamic shape have some issues so we turn it off for now.
+                transformer_block = torch.compile(transformer_block, dynamic=False)
+
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
             reshard_after_forward = layer_id < len(model.layers) - 1
