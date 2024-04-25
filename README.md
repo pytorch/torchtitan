@@ -13,50 +13,53 @@ Here were our guiding principles when building `torchtitan`
 
 ### Intro video - learn more about torchtitan in under 4 mins:
 
-[![Welcome to TorchTrain!](assets/images/titan_play_video.jpg)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to TorchTrain!")
+[![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
 
 ## Pre-Release Updates:
 #### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
 Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
 Key features available:</br>
-1 - [FSDP2 (per param sharding)](docs/fsdp.md) </br>
-2 - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (FSDP + Tensor Parallel)</br>
-3 - Selective layer and operator activation checkpointing </br>
-4 - Distributed checkpointing </br>
-5 - 2 datasets pre-configured (45K - 144M)</br>
-6 - GPU usage, MFU, tokens per second and other metrics all reported and displayed via TensorBoard.</br>
-7 - Fused RMSNorm (optional), learning rate scheduler, meta init, and more.</br>
-8 - All options easily configured via [toml files](train_configs/).</br>
-9 - [Performance](docs/performance.md) verified on 64 A100 GPUs.</br>
-10 - [Save pre-trained torchtitan model weights](docs/checkpoint.md) and load directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning. </br>
+1. [FSDP2 with per param sharding](docs/fsdp.md)
+2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html)
+3. Selective layer and operator activation checkpointing
+4. Distributed checkpointing
+5. 2 datasets pre-configured (45K - 144M)
+6. GPU usage, MFU, tokens per second and more displayed via TensorBoard
+6. Learning rate scheduler, meta init, Optional Fused RMSNorm
+7. All options easily configured via [toml files](train_configs/)
+8. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning
+
+We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
 
-## Coming soon features:
-1 - Async checkpointing </br>
-2 - FP8 support </br>
-3 - Context Parallel </br>
-4 - 3D (Pipeline Parallel) </br>
-5 - `torch.compile` support </br>
-6 - Scalable data loading solution </br>
+## Coming soon
+1. Async checkpointing
+2. FP8 support
+3. Context Parallel
+4. 3D Pipeline Parallel
+5. `torch.compile` support
+6. Scalable data loading solution
 
 
 ## Installation
 
-Install PyTorch from source or install the latest pytorch nightly, then install requirements by
-
-```python
+```bash
+git clone https://github.com/pytorch/torchtitan
+cd torchtitan
 pip install -r requirements.txt
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121 # or cu118
+pip install .
 ```
 
-### Downloading a tokenizer.model
+### Downloading a tokenizer
 
 `torchtitan` currently supports training Llama 3 (8B, 70B), and Llama 2 (7B, 13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
 
 Once you have confirmed access, you can run the following command to download the Llama 3 / Llama 2 tokenizer to your local machine.
 
-```
-# pass your hf_token in order to download tokenizer.model
+```bash
+# Get your HF token from https://huggingface.co/settings/tokens
 
 # llama3 tokenizer.model
 python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
@@ -65,9 +68,10 @@ python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama
 python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
 ```
 
-Run Llama 3 8B model locally on 8 GPUs:
+### Start a training run
+Llama 3 8B model locally on 8 GPUs
 
-```
+```bash
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
 
@@ -92,21 +96,19 @@ tensorboard --logdir=./outputs/tb
 
 
 ## Multi-Node Training
-For training on ParallelCluster/Slurm type configurations, you can use the multinode_trainer.slurm file to submit your sbatch job.</br>
-Note that you will need to adjust the number of nodes and gpu count to your cluster configs.</br>
-<b>To adjust total nodes:</b>
+For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
+
+To get started adjust the number of nodes and GPUs
 ```
 #SBATCH --ntasks=2
 #SBATCH --nodes=2
 ```
-should both be set to your total node count.
-Then update the srun launch parameters to match:
+
+Then start a run where `nnodes` is your total node count, matching the sbatch node count above.
+
 ```
 srun torchrun --nnodes 2
 ```
-where nnodes is your total node count, matching the sbatch node count above.
-
-<b>To adjust gpu count per node:</b>
 
 If your gpu count per node is not 8, adjust:
 
