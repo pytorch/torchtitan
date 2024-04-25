@@ -3,7 +3,10 @@
 ## torchtitan is still in pre-release!
 `torchtitan` is currently in a pre-release state and under extensive development.
 
-`torchtitan` is a native PyTorch reference architecture showcasing some of the latest PyTorch techniques for large scale model training.
+`torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
+
+Here are some principles around building `torchtitan`
+
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallel.
 * Modular components instead of monolithic codebase.
@@ -115,9 +118,6 @@ If your gpu count per node is not 8, adjust:
 ```#SBATCH --gpus-per-task```
 
 in the SBATCH command section.
-
-## Product Position
-`torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
 ## License
 
