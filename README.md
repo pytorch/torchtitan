@@ -19,7 +19,7 @@ Our guiding principles when building `torchtitan`:
 #### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
 Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
 
-Key features available
+### Key features available
 
 1. [FSDP2 with per param sharding](docs/fsdp.md)
 2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html)
@@ -34,7 +34,8 @@ Key features available
 We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
 
-## Coming soon
+### Coming soon
+
 1. Async checkpointing
 2. FP8 support
 3. Context Parallel

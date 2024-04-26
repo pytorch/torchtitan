@@ -213,6 +213,21 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         logger.info("Applied Tensor Parallelism to the model")
 
+    # apply AC + torch.compile
+    ac_mode = job_config.activation_checkpoint.mode
+    for layer_id, transformer_block in enumerate(model.layers):
+        if ac_mode in ("full", "selective"):
+            transformer_block = checkpoint_wrapper(
+                transformer_block, job_config.activation_checkpoint
+            )
+            logger.info(f"Applied {ac_mode} activation checkpointing to the model")
+
+        if job_config.training.compile:
+            # turn on per-transformer block compile after AC wrappnig and before FSDP
+            # TODO: dynamic shape have some issues so we turn it off for now.
+            transformer_block = torch.compile(transformer_block, dynamic=False)
+
+    # apply DP (FSDP2)
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
@@ -220,19 +235,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
-        ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
         for layer_id, transformer_block in enumerate(model.layers):
-            if job_config.activation_checkpoint.mode in ("full", "selective"):
-                transformer_block = checkpoint_wrapper(
-                    transformer_block, job_config.activation_checkpoint
-                )
-
-            if job_config.training.compile:
-                # turn on per-transformer block compile after AC wrappnig and before FSDP
-                # TODO: dynamic shape have some issues so we turn it off for now.
-                transformer_block = torch.compile(transformer_block, dynamic=False)
-
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
             reshard_after_forward = layer_id < len(model.layers) - 1
@@ -243,8 +247,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             )
             model.layers[layer_id] = transformer_block
         model = fully_shard(model, **fsdp_config)
-        if ac_mode in ("full", "selective"):
-            logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
 
     return model
