@@ -186,7 +186,9 @@ def main(job_config: JobConfig):
     # log model size
     model_param_count = get_num_params(model)
     num_flop_per_token = get_num_flop_per_token(
-        model_param_count, model_config, job_config.training.seq_len
+        get_num_params(model, exclude_embedding=True),
+        model_config,
+        job_config.training.seq_len,
     )
     logger.info(
         f"{color.blue}Model {model_name} {job_config.model.flavor} "
