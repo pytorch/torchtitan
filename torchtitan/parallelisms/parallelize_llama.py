@@ -212,10 +212,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
+    enable_compile = job_config.training.compile
     for layer_id, transformer_block in enumerate(model.layers):
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
-        if job_config.training.compile:
+        if enable_compile:
             # turn on per-transformer block compile after AC wrapping and before FSDP
             # TODO: dynamic shape have some issues so we turn it off for now.
             model.layers[layer_id] = torch.compile(transformer_block, dynamic=False)
@@ -223,7 +224,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if ac_config.mode in ("full", "selective"):
         logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
         if (
-            job_config.training.compile
+            enable_compile
             and ac_config.mode == "selective"
             and ac_config.selective_ac_option == "op"
         ):
@@ -231,6 +232,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
+    if enable_compile:
         logger.info("Compiled each TransformerBlock with torch.compile")
 
     # apply DP (FSDP2)
