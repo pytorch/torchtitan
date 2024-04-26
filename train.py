@@ -239,6 +239,7 @@ def main(job_config: JobConfig):
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
+        lr_scheduler=scheduler,
         states={"train_state": train_state},
         job_config=job_config,
     )
