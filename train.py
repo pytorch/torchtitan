@@ -219,17 +219,6 @@ def main(job_config: JobConfig):
 
     metric_logger = build_metric_logger(job_config)
 
-    if job_config.training.compile:
-        if (
-            job_config.activation_checkpoint.mode == "selective"
-            and job_config.activation_checkpoint.selective_ac_option == "op"
-        ):
-            # some flags for torch.compile enablement
-            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
-                True
-            )
-        logger.info("Compiling each TransformerBlock with torch.compile")
-
     train_state = TrainState()
 
     # train loop

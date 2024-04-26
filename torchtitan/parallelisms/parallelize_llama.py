@@ -149,6 +149,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
             job_config
         )
+        loss_parallel = parallel_dims.loss_parallel_enabled
 
         # 1. Parallelize the first embedding and the last linear proj layer
         # 2. Parallelize the root norm layer over the sequence dim
@@ -162,12 +163,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(1),
-                    output_layouts=(
-                        Shard(-1)
-                        if parallel_dims.loss_parallel_enabled
-                        else Replicate()
-                    ),
-                    use_local_output=not parallel_dims.loss_parallel_enabled,
+                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                    use_local_output=not loss_parallel,
                 ),
                 "norm": SequenceParallel(),
                 "layers.0": PrepareModuleInput(
@@ -214,13 +211,19 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         logger.info("Applied Tensor Parallelism to the model")
 
     # apply AC + torch.compile
-    ac_mode = job_config.activation_checkpoint.mode
-    for layer_id, transformer_block in enumerate(model.layers):
-        if ac_mode in ("full", "selective"):
-            transformer_block = checkpoint_wrapper(
-                transformer_block, job_config.activation_checkpoint
+    ac_config = job_config.activation_checkpoint
+    if job_config.training.compile:
+        if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
+            # some temp flags for torch.compile enablement + SAC
+            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+                True
             )
-            logger.info(f"Applied {ac_mode} activation checkpointing to the model")
+        logger.info("Compiling each TransformerBlock with torch.compile")
+
+    for layer_id, transformer_block in enumerate(model.layers):
+        if ac_config.mode in ("full", "selective"):
+            transformer_block = checkpoint_wrapper(transformer_block, ac_config)
+            logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
         if job_config.training.compile:
             # turn on per-transformer block compile after AC wrappnig and before FSDP
