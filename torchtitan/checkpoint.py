@@ -64,6 +64,7 @@ class CheckpointManager:
         self,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
+        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -76,6 +77,7 @@ class CheckpointManager:
                 {
                     "model": ModelWrapper(model),
                     "optimizer": OptimizerWrapper(model, optimizer),
+                    "lr_scheduler": lr_scheduler,
                 }
             )
 
