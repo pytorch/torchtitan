@@ -226,7 +226,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
         if job_config.training.compile:
-            # turn on per-transformer block compile after AC wrappnig and before FSDP
+            # turn on per-transformer block compile after AC wrapping and before FSDP
             # TODO: dynamic shape have some issues so we turn it off for now.
             transformer_block = torch.compile(transformer_block, dynamic=False)
 
