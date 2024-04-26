@@ -223,7 +223,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     for layer_id, transformer_block in enumerate(model.layers):
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
-            logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+            logger.info(
+                f"Applied {ac_config.mode} activation checkpointing to the model"
+            )
 
         if job_config.training.compile:
             # turn on per-transformer block compile after AC wrapping and before FSDP
