@@ -233,6 +233,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 True
             )
     if enable_compile:
+        if job_config.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
+            )
         logger.info("Compiled each TransformerBlock with torch.compile")
 
     # apply DP (FSDP2)
