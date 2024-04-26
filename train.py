@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -47,7 +48,7 @@ from torchtitan.utils import (
 
 
 @dataclass
-class TrainState:
+class TrainState(Stateful):
     step: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
