@@ -212,25 +212,26 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
-    if job_config.training.compile:
-        if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
+    for layer_id, transformer_block in enumerate(model.layers):
+        if ac_config.mode in ("full", "selective"):
+            transformer_block = checkpoint_wrapper(transformer_block, ac_config)
+        if job_config.training.compile:
+            # turn on per-transformer block compile after AC wrapping and before FSDP
+            # TODO: dynamic shape have some issues so we turn it off for now.
+            model.layers[layer_id] = torch.compile(transformer_block, dynamic=False)
+
+    if ac_config.mode in ("full", "selective"):
+        logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+        if (
+            job_config.training.compile
+            and ac_config.mode == "selective"
+            and ac_config.selective_ac_option == "op"
+        ):
             # some temp flags for torch.compile enablement + SAC
             torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
                 True
             )
-        logger.info("Compiling each TransformerBlock with torch.compile")
-
-    for layer_id, transformer_block in enumerate(model.layers):
-        if ac_config.mode in ("full", "selective"):
-            transformer_block = checkpoint_wrapper(transformer_block, ac_config)
-            logger.info(
-                f"Applied {ac_config.mode} activation checkpointing to the model"
-            )
-
-        if job_config.training.compile:
-            # turn on per-transformer block compile after AC wrapping and before FSDP
-            # TODO: dynamic shape have some issues so we turn it off for now.
-            transformer_block = torch.compile(transformer_block, dynamic=False)
+        logger.info("Compiled each TransformerBlock with torch.compile")
 
     # apply DP (FSDP2)
     if parallel_dims.dp_enabled:
