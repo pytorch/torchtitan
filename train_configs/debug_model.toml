@@ -2,7 +2,8 @@
 
 [job]
 dump_folder = "./outputs"
-description = "LLaMA debug training"
+description = "Llama 3 debug training"
+# TODO: turn this back on once ci have tokenizer
 use_for_integration_test = true
 
 [profiling]
@@ -17,10 +18,11 @@ enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
-name = "llama"
+name = "llama3"
 flavor = "debugmodel"
 norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
-tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
+# test tokenizer.model, for debug purpose only
+tokenizer_path = "./test/assets/test_tiktoken.model"
 
 [optimizer]
 name = "AdamW"
@@ -37,7 +39,7 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "alpaca"  # supported datasets: alpaca (52K), openwebtext (8M), c4 (177M)
+dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 
 [checkpoint]
 enable_checkpoint = false

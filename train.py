@@ -20,12 +20,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import create_tokenizer, dataloader_fn
+from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_scheduler
@@ -47,7 +48,7 @@ from torchtitan.utils import (
 
 
 @dataclass
-class TrainState:
+class TrainState(Stateful):
     step: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
@@ -137,14 +138,13 @@ def main(job_config: JobConfig):
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
-    build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree = dp_mesh.size()
         dp_rank = dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
-    data_loader = build_dataloader_fn(
+    data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
         tokenizer,
@@ -240,6 +240,7 @@ def main(job_config: JobConfig):
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
+        lr_scheduler=scheduler,
         states={"train_state": train_state},
         job_config=job_config,
     )
