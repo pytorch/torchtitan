@@ -12,7 +12,8 @@ from torchtitan.logging_utils import logger
 from torchtitan.parallelisms.parallelize_llama import parallelize_llama
 
 models_parallelize_fns = {
-    "llama": parallelize_llama,
+    "llama2": parallelize_llama,
+    "llama3": parallelize_llama,
 }
 
 
