@@ -13,9 +13,13 @@ dependencies = [
     # Hugging Face integrations
     "datasets",
 
-    # Miscellaneous
+    # Tokenization
+    "blobfile",
     "sentencepiece",
-    "tomli >= 1.1.0"
+    "tiktoken",
+
+    # Miscellaneous
+    "tomli>=1.1.0"
 ]
 dynamic = ["version"]
 

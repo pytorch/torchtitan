@@ -220,7 +220,11 @@ class JobConfig:
                 "dynamic",
                 "",
             ],  # TODO: add "delayed" option back in when supported
-            help="Type of fp8 linear quantization to apply to the model ['', 'dynamic']",
+            help="""
+                Type of fp8 linear quantization to apply to the model ['', 'dynamic'].
+                This features requires you to install 'float8_experimental' which can be found
+                here: https://github.com/pytorch-labs/float8_experimental
+            """,
         )
         self.parser.add_argument(
             "--training.gc_freq",
