@@ -149,6 +149,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
             job_config
         )
+        loss_parallel = parallel_dims.loss_parallel_enabled
 
         # 1. Parallelize the first embedding and the last linear proj layer
         # 2. Parallelize the root norm layer over the sequence dim
@@ -162,12 +163,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(1),
-                    output_layouts=(
-                        Shard(-1)
-                        if parallel_dims.loss_parallel_enabled
-                        else Replicate()
-                    ),
-                    use_local_output=not parallel_dims.loss_parallel_enabled,
+                    output_layouts=(Shard(-1) if loss_parallel else Replicate()),
+                    use_local_output=not loss_parallel,
                 ),
                 "norm": SequenceParallel(),
                 "layers.0": PrepareModuleInput(
