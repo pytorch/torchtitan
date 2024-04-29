@@ -9,16 +9,15 @@ from typing import List, Optional
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-from torchtitan.datasets.tokenizer import TokenizerIf
+from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging_utils import logger
 
 from datasets import load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 
 _supported_datasets = {
-    "alpaca": "tatsu-lab/alpaca",
+    "c4_mini": "torchtitan/datasets/c4_mini",
     "c4": "allenai/c4",
-    "openwebtext": "Skylion007/openwebtext",
 }
 
 
@@ -27,72 +26,64 @@ class HuggingFaceDataset(IterableDataset):
 
     Args:
         dataset_name (str): name of the dataset to load
-        dataset_path (Optional[str]): Path to the dataset in the file system. If provided, data will be loaded from this path instead of downloaded.
-        tokenizer (TokenizerIf): Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+        dataset_path (Optional[str]):
+            Path to the dataset in the file system. If provided, data will be loaded
+            from this path instead of downloaded.
+        tokenizer (Tokenizer):
+            Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
         world_size (int): number of data parallel processes participating in training
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support four datasets:
-    alpaca (52K training entries)
-    openwebtext (8M training entries, same type of data for entire dataset)
+    We currently support the c4 dataset and a subset of it:
+    c4_mini (45K training entries)
     c4 (177M training entries - this dataset is streamed due to the size)
-
-    >> Alpaca <<:
-    Data input format (alpaca):
-    {
-        "instruction": "Create a classification task by clustering the given list of items.",
-        "input": "Apples, oranges, bananas, strawberries, pineapples",
-        "output": "Class 1: Apples, Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",
-        "text": "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\nCreate a classification task by clustering the given list of items.\n\n### Input:\nApples, oranges, bananas, strawberries, pineapples\n\n### Response:\nClass 1: Apples,
-        Oranges\nClass 2: Bananas, Strawberries\nClass 3: Pineapples",  # noqa: B950
-    }
 
     >> c4 (EN) <<:
     c4 cleaned, English version
     Data input format (c4):
     {
     'url': 'https://klyq.com/beginners-bbq-class-taking-place-in-missoula/',
-    'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at making delicious BBQ? You will have the opportunity, put this on your calendar now. Thursday, September 22nd join World Class BBQ Champion, Tony Balay from Lonestar Smoke Rangers. He will be teaching a beginner level class for everyone who wants to get better with their culinary skills.\nHe will teach you everything you need to know to compete in a KCBS BBQ competition, including techniques, recipes, timelines, meat selection and trimming, plus smoker and fire information.\nThe cost to be in the class is $35 per person, and for spectators it is free. Included in the cost will be either a t-shirt or apron and you will be tasting samples of each meat that is prepared.',
+    'text': 'Beginners BBQ Class Taking Place in Missoula!\nDo you want to get better at ...',
     'timestamp': '2019-04-25T12:57:54Z'
     }
 
-    >> OpenWebText <<:
-    OpenWeb crawl, English
-    Example:
-    {
-        'text': "Amazon has launched a new cheaper version of its Echo Dot voice-controlled device today.
-    The launch comes six months after Amazon first introduced two new Echo devices —
-    one of which was the $90 Echo Dot,..."
-    }
-
-    Example use (alpaca):
-    >>> alpaca_ds = HuggingFaceDataset(dataset_name="alpaca", dataset_path=None, tokenizer=tokenizer)
-    >>> for batch in Dataloader(alpaca_ds, batch_size=8):
+    Example use (c4):
+    >>> ds = HuggingFaceDataset(dataset_name="c4", dataset_path=None, tokenizer=tokenizer)
+    >>> for batch in Dataloader(ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
-
-
     """
 
     def __init__(
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        tokenizer: TokenizerIf,
+        tokenizer: Tokenizer,
         seq_len: int = 2048,
         world_size: int = 1,
         rank: int = 0,
         infinite: bool = False,
     ) -> None:
+        # allow user to pass in a local path to use unsupported datasets
         if dataset_name not in _supported_datasets:
-            raise ValueError(
-                f"Dataset {dataset_name} is not supported. "
-                f"Supported datasets are: {_supported_datasets.keys()}."
-            )
+            if dataset_path:
+                logger.warning(
+                    f"Dataset {dataset_name} is not tested or verfied. "
+                    f"Recommended datasets are: {list(_supported_datasets.keys())}."
+                )
+            else:
+                raise ValueError(
+                    f"Dataset {dataset_name} is not supported. "
+                    f"Supported datasets are: {list(_supported_datasets.keys())}."
+                )
 
-        # TODO: This is a temporary solution for small datasets like Alpaca.
+        # special case to auto-load c4_mini (and any future datasets) from local dir
+        if dataset_name == "c4_mini":
+            dataset_path = f"torchtitan/datasets/{dataset_name}"
+
+        # TODO: This is a temporary solution for small datasets.
         #       For large datasets we need to use a more scalable approach,
         #       and support shuffling and checkpointing.
         if dataset_path:
@@ -110,14 +101,6 @@ class HuggingFaceDataset(IterableDataset):
                     "en",
                     split="train",
                     streaming=True,
-                )
-            elif dataset_name == "openwebtext":
-                # openwebtext dataset contains a dataset script which needs
-                # trust_remote_code=True to run on local machine.
-                ds = load_dataset(
-                    _supported_datasets[dataset_name],
-                    split="train",
-                    trust_remote_code=True,
                 )
             else:
                 ds = load_dataset(_supported_datasets[dataset_name], split="train")
@@ -158,7 +141,7 @@ class HuggingFaceDataset(IterableDataset):
 def build_hf_data_loader(
     dataset_name: str,
     dataset_path: Optional[str],
-    tokenizer: TokenizerIf,
+    tokenizer: Tokenizer,
     batch_size: int,
     seq_len: int,
     world_size,
