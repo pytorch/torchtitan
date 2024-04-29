@@ -20,6 +20,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torch.distributed.checkpoint.stateful import Stateful
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 
@@ -36,7 +37,7 @@ class IntervalType(enum.Enum):
     STEPS = enum.auto()
 
 
-class ModelWrapper:
+class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module) -> None:
         self.model = model
 
@@ -47,7 +48,7 @@ class ModelWrapper:
         set_model_state_dict(self.model, state_dict)
 
 
-class OptimizerWrapper:
+class OptimizerWrapper(Stateful):
     def __init__(self, model: nn.Module, optim: torch.optim.Optimizer) -> None:
         self.model = model
         self.optim = optim
@@ -64,6 +65,7 @@ class CheckpointManager:
         self,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
+        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -76,6 +78,7 @@ class CheckpointManager:
                 {
                     "model": ModelWrapper(model),
                     "optimizer": OptimizerWrapper(model, optimizer),
+                    "lr_scheduler": lr_scheduler,
                 }
             )
 
