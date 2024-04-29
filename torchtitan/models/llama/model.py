@@ -27,6 +27,7 @@ class ModelArgs:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
+    rope_theta: float = 10000
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
@@ -359,16 +360,7 @@ class Transformer(nn.Module):
         # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
         # initialized by the checkpoint, or we need to add a separate initializer for
         # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer(
-            "freqs_cis",
-            precompute_freqs_cis(
-                model_args.dim // model_args.n_heads,
-                # Need to compute until at least the max token limit for generation
-                # (use 2x max sequence length to be safe)
-                model_args.max_seq_len * 2,
-            ),
-            persistent=True,
-        )
+        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
@@ -394,12 +386,7 @@ class Transformer(nn.Module):
         ``Transformer`` root module to avoid reinitializing tensors.
         """
         with torch.device(self.freqs_cis.device):
-            self.freqs_cis = precompute_freqs_cis(
-                self.model_args.dim // self.model_args.n_heads,
-                # Need to compute until at least the max token limit for generation
-                # (use 2x max sequence length to be safe)
-                self.model_args.max_seq_len * 2,
-            )
+            self.freqs_cis = self._precompute_freqs_cis()
         nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers:
             layer.init_weights()
@@ -412,6 +399,15 @@ class Transformer(nn.Module):
             std=final_out_std,
             a=-cutoff_factor * final_out_std,
             b=cutoff_factor * final_out_std,
+        )
+
+    def _precompute_freqs_cis(self) -> torch.Tensor:
+        return precompute_freqs_cis(
+            self.model_args.dim // self.model_args.n_heads,
+            # Need to compute until at least the max token limit for generation
+            # (use 2x max sequence length to be safe)
+            self.model_args.max_seq_len * 2,
+            self.model_args.rope_theta,
         )
 
     def forward(self, tokens: torch.Tensor):
