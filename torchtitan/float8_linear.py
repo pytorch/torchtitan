@@ -4,6 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# [Note] Getting the 'float8_experimental' package:
+# This script requires the 'float8_experimental' package to function correctly.
+# Please ensure you have this package installed from the appropriate repository.
+# You can obtain it from https://github.com/pytorch-labs/float8_experimental.
+# Either clone and run `pip install .` or run `pip install git+https://github.com/pytorch-labs/float8_experimental.git`
+
+# Note: Performance
+# Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
+
 import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
@@ -14,7 +23,7 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
     """
     This function converts the linear layers to one of the fp8 types:
     - Float8DynamicLinear: Dynamic quantization of the weights and the activations
-    - Float8Linear: Uses a history of amaxs to quantize the weights and activations
+    - [Not Yet Supported] Float8Linear: Uses a history of amaxs to quantize the weights and activations
 
     This will mutate the model inplace.
     """
