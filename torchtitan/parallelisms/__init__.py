@@ -43,7 +43,7 @@ class ParallelDims:
         dims = []
         names = []
         for d, name in zip(
-            [self.dp, self.tp, self.pp], ["dp", "tp", "pp"], strict=True
+            [self.pp, self.dp, self.tp], ["pp", "dp", "tp"], strict=True
         ):
             if d > 1:
                 dims.append(d)
