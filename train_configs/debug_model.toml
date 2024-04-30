@@ -7,14 +7,14 @@ description = "Llama 3 debug training"
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
 
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = false
+enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
