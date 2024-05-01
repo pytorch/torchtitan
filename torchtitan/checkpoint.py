@@ -110,7 +110,7 @@ class CheckpointManager:
     def save(self, curr_step: int, force: bool = False) -> None:
         """
         force = True will force the checkpoint to be saved, even if the interval has not been reached.
-        This only happens when train_state.step == job_config.training.steps.
+        This only happens when train_state.step == job_config.training.steps, or for initial seed checkpoint.
         """
         if not self.enable_checkpoint:
             return
