@@ -17,7 +17,7 @@ WARMUP = 3
 
 
 @contextlib.contextmanager
-def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
+def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
     # get user defined profiler settings
     enable_profiling = config.profiling.enable_profiling
 
@@ -27,8 +27,7 @@ def maybe_enable_profiling(config: JobConfig, *pos_args, **kwargs):
         trace_dir = os.path.join(dump_dir, save_trace_dir)
         profile_freq = config.profiling.profile_freq
 
-        _global_iter_count = 0
-
+        _global_iter_count = global_step
         rank = torch.distributed.get_rank()
 
         def trace_handler(prof):
