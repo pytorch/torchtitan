@@ -1,4 +1,4 @@
-![GPU Integration Test](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_periodic.yaml/badge.svg)
+![GPU Integration Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_4gpu.yaml/badge.svg)
 
 # torchtitan
 
