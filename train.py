@@ -1,9 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import contextlib
 import gc
 import os
+import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -15,21 +19,24 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from torch.distributed import destroy_process_group
+from torch.distributed.checkpoint.stateful import Stateful
+from pippy.PipelineSchedule import ScheduleGPipe
+from pippy.PipelineStage import PipelineStage
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor.parallel import loss_parallel
 
-from torchtrain.checkpoint import CheckpointManager, IntervalType
-from torchtrain.config_manager import JobConfig
-from torchtrain.datasets import create_tokenizer, dataloader_fn
-from torchtrain.float8_linear import build_fp8_linear
-from torchtrain.logging_utils import init_logger, logger
-from torchtrain.lr_scheduling import get_lr_scheduler
-from torchtrain.metrics import build_gpu_memory_monitor, build_metric_logger
-from torchtrain.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtrain.parallelisms import models_parallelize_fns, ParallelDims
-from torchtrain.profiling import maybe_run_profiler
-from torchtrain.utils import (
+from torchtitan.checkpoint import CheckpointManager
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import build_hf_data_loader, create_tokenizer
+from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.logging_utils import init_logger, logger
+from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
+from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.profiling import maybe_enable_profiling
+from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
@@ -37,16 +44,13 @@ from torchtrain.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
+    NoColor,
     set_pg_timeouts,
 )
 
-_is_local_logging = True
-if "SLURM_JOB_ID" in os.environ:
-    _is_local_logging = False
-
 
 @dataclass
-class TrainState:
+class TrainState(Stateful):
     step: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
@@ -101,19 +105,14 @@ def build_optimizer(model, job_config: JobConfig):
     return optimizer
 
 
-def build_grad_scaler(model):
-    # TODO: FSDP2 does not support sharded grad scaler yet.
-    # TODO: if enabled, grad scaler's states need saving & loading in checkpointing
-    enable_grad_scaling = False
-    logger.info("Gradient scaling not enabled")
-    return ShardedGradScaler(enabled=enable_grad_scaling)
-
-
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    # used for colorful printing
+    color = Color if job_config.metrics.enable_color_printing else NoColor
 
     # take control of garbage collection to avoid stragglers
     _gc_freq = job_config.training.gc_freq
@@ -129,7 +128,9 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    # torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    torch.cuda.set_device(device)
     init_distributed(job_config)
 
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -141,14 +142,21 @@ def main(job_config: JobConfig):
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
-    build_dataloader_fn = dataloader_fn[job_config.training.dataset]
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree = dp_mesh.size()
         dp_rank = dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
-    data_loader = build_dataloader_fn(
+
+    if parallel_dims.pp_enabled:
+        pp_mesh = world_mesh["pp"]
+        pp_degree = pp_mesh.size()
+        pp_rank = pp_mesh.get_local_rank()
+    else:
+        pp_degree, pp_rank = 1, 0
+
+    data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
         tokenizer,
@@ -158,10 +166,25 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
+    # loss_parallel enables dispatching to efficient loss operators
+    loss_parallel_ctx = (
+        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
+    )
+
+    # loss fn can be shared by pipeline-parallel or non-pp execution
+    def loss_fn(pred, labels):
+        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
     model_config = models_config[model_name][job_config.model.flavor]
+    # set the model configs from training inputs:
+    # 1. norm type to decide which norm layer to use
+    # 2. vocab size from tokenizer
+    # 3. max_seq_len base on inputs
+    model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
+    model_config.max_seq_len = job_config.training.seq_len
 
     with torch.device("meta"):
         logger.info(
@@ -178,15 +201,10 @@ def main(job_config: JobConfig):
     num_flop_per_token = get_num_flop_per_token(
         model_param_count, model_config, job_config.training.seq_len
     )
-    if _is_local_logging:
-        logger.info(
-            f"{Color.blue}Model {model_name} {job_config.model.flavor} "
-            f"{Color.red}size: {model_param_count:,} total parameters{Color.reset}"
-        )
-    else:
-        logger.info(
-            f"{model_name} {job_config.model.flavor} size: {model_param_count:,} total parameters"
-        )
+    logger.info(
+        f"{color.blue}Model {model_name} {job_config.model.flavor} "
+        f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+    )
 
     # initialize GPU memory monitor before applying parallelisms to the model
     gpu_memory_monitor = build_gpu_memory_monitor()
@@ -197,18 +215,45 @@ def main(job_config: JobConfig):
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
-    # allocate sharded model on GPU and initialize weights via DTensor
+    if parallel_dims.pp_enabled:
+        pipe_meta = model
+        model = pipe_meta.get_stage_module(pp_rank)
+
     model.to_empty(device="cuda")
-    model.init_weights()
+
+    # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
+    # there are virtual stages
+    if parallel_dims.pp_enabled:
+        stage = PipelineStage(
+            pipe=pipe_meta,
+            stage_index=pp_rank,
+            device=device,
+            group=pp_mesh.get_group(),
+        )
+        pp_schedule = ScheduleGPipe(
+            stage,
+            n_microbatches=parallel_dims.pp,
+            loss_fn=loss_fn,
+        )
+    else:
+        # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
+        # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
+        # the whole model (all its weights, or FQNs) exist on one rank.  In PP, the init_weights on stage1 might crash
+        # becuase it can't find "embedding" layer, for example.
+
+        # allocate sharded model on GPU and initialize weights via DTensor
+        model.init_weights()
+
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
-
-    # build grad scaler which is effective only when mixed precision training
-    # is enabled with fp16 param dtype under FSDP
-    scaler = build_grad_scaler(model)
-
     metric_logger = build_metric_logger(job_config)
 
     # torch.compile model for improved performance
@@ -231,15 +276,19 @@ def main(job_config: JobConfig):
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
+        lr_scheduler=scheduler,
         states={"train_state": train_state},
-        folder=job_config.checkpoint.folder,
-        interval_type=(
-            IntervalType.SECONDS
-            if job_config.checkpoint.interval_type == "seconds"
-            else IntervalType.STEPS
-        ),
-        interval=job_config.checkpoint.interval,
+        job_config=job_config,
     )
+
+    if job_config.checkpoint.create_seed_checkpoint:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        checkpoint.save(curr_step=0, force=True)
+        logger.info("Created seed checkpoint")
+        return
+
     checkpoint.load()
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
@@ -255,7 +304,8 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
-    with maybe_run_profiler(job_config) as torch_profiler:
+    logger.info(f"Training starts at step {train_state.step + 1}")
+    with maybe_enable_profiling(job_config) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
@@ -263,6 +313,7 @@ def main(job_config: JobConfig):
         ntokens_since_last_log = 0
         data_loading_times: List[float] = []
         time_last_log = timer()
+        gpu_memory_monitor.reset_peak_stats()
 
         while train_state.step < job_config.training.steps:
             train_state.step += 1
@@ -278,48 +329,55 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-
             optimizer.zero_grad()
 
-            # forward
-            pred = model(input_ids)
+            if parallel_dims.pp_enabled:
+                # pipeline parallel forward / backward inside step() call
+                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-            with (
-                loss_parallel()
-                if parallel_dims.loss_parallel_enabled
-                else contextlib.nullcontext()
-            ):
-                loss = F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+                with loss_parallel_ctx():
+                    if pp_mesh.get_local_rank() == 0:
+                        pp_schedule.step(input_ids)
+                    elif is_last_stage:
+                        losses = []
+                        pp_schedule.step(target=labels, losses=losses)
+                    else:
+                        schedule.step()
 
-                # backward on scaled loss to create scaled gradients
-                scaler.scale(loss).backward()
+                # accumulate losses across pipeline microbatches
+                loss = (
+                    torch.mean(torch.stack(losses))
+                    if is_last_stage
+                    else torch.Tensor([-1.0])
+                )
+            else:
+                # forward / backward
+                with loss_parallel_ctx:
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    loss.backward()
+                # TODO(whc) rebase conflict, rewrite how loss is handled?
 
-            # clip gradients (after unscaling gradients of the optimizer's params)
-            scaler.unscale_(optimizer)
+            # clip gradients
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), job_config.training.max_norm, foreach=True
             )
 
             # optimizer step
-            # If gradients don't contain infs/NaNs, optimizer.step() is then called;
-            # otherwise, optimizer.step() is skipped.
-            scaler.step(optimizer)
+            optimizer.step()
             scheduler.step()
 
-            # updates the scale for next iteration
-            scaler.update()
-
-            current_loss = loss.item()
-            losses_since_last_log.append(current_loss)
+            losses_since_last_log.append(loss)
 
             # log metrics
             if (
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
+                losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = (
-                    np.mean(losses_since_last_log),
-                    np.max(losses_since_last_log),
+                    np.mean(losses),
+                    np.max(losses),
                 )
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
@@ -367,24 +425,14 @@ def main(job_config: JobConfig):
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
-                if _is_local_logging:
-                    logger.info(
-                        f"{Color.cyan}step: {train_state.step:2}  "
-                        f"{Color.green}loss: {global_avg_loss:7.4f}  "
-                        f"{Color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"{Color.blue}wps: {round(wps):,}  "
-                        f"{Color.magenta}mfu: {mfu:.2f}%{Color.reset}"
-                    )
-                else:
-                    logger.info(
-                        f"step: {train_state.step:2}  "
-                        f"loss: {global_avg_loss:7.4f}  "
-                        f"memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                        f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
-                        f"wps: {round(wps):,}  "
-                        f"mfu: {mfu:.2f}%"
-                    )
+                logger.info(
+                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}wps: {round(wps):,}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                )
 
                 losses_since_last_log.clear()
                 ntokens_since_last_log = 0
@@ -407,7 +455,13 @@ def main(job_config: JobConfig):
                     world_mesh=world_mesh,
                 )
 
+    if torch.distributed.get_rank() == 0:
+        logger.info("Sleeping 2 seconds for other ranks to complete")
+        time.sleep(2)
+
     metric_logger.close()
+    logger.info("Training completed")
+    destroy_process_group()
 
 
 if __name__ == "__main__":
