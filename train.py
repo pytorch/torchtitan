@@ -280,6 +280,15 @@ def main(job_config: JobConfig):
         states={"train_state": train_state},
         job_config=job_config,
     )
+
+    if job_config.checkpoint.create_seed_checkpoint:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        checkpoint.save(curr_step=0, force=True)
+        logger.info("Created seed checkpoint")
+        return
+
     checkpoint.load()
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
