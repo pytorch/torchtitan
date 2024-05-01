@@ -4,9 +4,12 @@ __pycache__
 *.egg-info
 build
 outputs
+dist/*
 
 # data
 data
 out
 wandb
 *.json
+
+torchtitan/datasets/**/*.model
