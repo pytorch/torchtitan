@@ -19,10 +19,10 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from torch.distributed import destroy_process_group
-from torch.distributed.checkpoint.stateful import Stateful
 from pippy.PipelineSchedule import ScheduleGPipe
 from pippy.PipelineStage import PipelineStage
+from torch.distributed import destroy_process_group
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -129,7 +129,6 @@ def main(job_config: JobConfig):
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-    # torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
     init_distributed(job_config)
 
@@ -153,6 +152,7 @@ def main(job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
         pp_degree = pp_mesh.size()
         pp_rank = pp_mesh.get_local_rank()
+
     else:
         pp_degree, pp_rank = 1, 0
 
@@ -289,7 +289,13 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint.load()
+    checkpoint_loaded = checkpoint.load()
+
+    if parallel_dims.pp_enabled and not checkpoint_loaded:
+        raise RuntimeError(
+            "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
+            "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
+        )
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
@@ -351,12 +357,11 @@ def main(job_config: JobConfig):
                     else torch.Tensor([-1.0])
                 )
             else:
-                # forward / backward
-                with loss_parallel_ctx:
+                # Non-PP forward / backward
+                with loss_parallel_ctx():
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     loss.backward()
-                # TODO(whc) rebase conflict, rewrite how loss is handled?
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(
