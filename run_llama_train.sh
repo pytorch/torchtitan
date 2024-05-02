@@ -16,7 +16,7 @@ TRAINER_DIR=${1:-/home/$USER/local/torchtitan}
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
 
-NGPU=${NGPU:-"2"}
+NGPU=${NGPU:-"8"}
 
 # by default log just rank 0 output,
 LOG_RANK=${LOG_RANK:-0}

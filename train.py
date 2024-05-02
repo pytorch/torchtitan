@@ -129,7 +129,6 @@ def main(job_config: JobConfig):
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-    # torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
     init_distributed(job_config)
 
