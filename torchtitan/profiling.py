@@ -27,18 +27,15 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
         trace_dir = os.path.join(dump_dir, save_trace_dir)
         profile_freq = config.profiling.profile_freq
 
-        _global_iter_count = global_step
         rank = torch.distributed.get_rank()
 
         def trace_handler(prof):
-            nonlocal _global_iter_count
-            _global_iter_count += profile_freq
-            curr_trace_dir_name = "iteration_" + str(_global_iter_count)
+            curr_trace_dir_name = "iteration_" + str(prof.step_num)
             curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
             if not os.path.exists(curr_trace_dir):
                 os.makedirs(curr_trace_dir, exist_ok=True)
 
-            logger.info(f"Dumping traces at step {_global_iter_count}")
+            logger.info(f"Dumping traces at step {prof.step_num}")
             begin = time.monotonic()
             prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
             logger.info(
@@ -68,6 +65,7 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
         ) as torch_profiler:
+            torch_profiler.step_num = global_step
             yield torch_profiler
     else:
         torch_profiler = contextlib.nullcontext()
