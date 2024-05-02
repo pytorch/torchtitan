@@ -1,3 +1,5 @@
+[![GPU Integration Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_4gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_4gpu.yaml)
+
 # torchtitan
 
 `torchtitan` is currently in a pre-release state and under extensive development.

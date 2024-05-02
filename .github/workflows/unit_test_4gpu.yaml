@@ -33,7 +33,7 @@ jobs:
         run: python -m pip install --upgrade pip
       - name: Install dependencies
         run: |
-          pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+          pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
           python -m pip install -r requirements.txt
           python -m pip install -r dev-requirements.txt
           python -m pip install -e .
