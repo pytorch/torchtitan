@@ -22,6 +22,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -181,14 +182,20 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         loss_parallel = parallel_dims.loss_parallel_enabled
 
         # 1. Parallelize the first embedding and the last linear proj layer
-        # 2. Parallelize the root norm layer over the sequence dim
-        # 3. Shard the first transformer block's inputs
+        # 2. Prepare the freq_cis in rotary embedding as dtensor
+        # 3. Parallelize the root norm layer over the sequence dim
+        # 4. Shard the first transformer block's inputs
         model = parallelize_module(
             model,
             tp_mesh,
             {
                 "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
+                ),
+                "embeddings": PrepareModuleOutput(
+                    output_layouts=(None, Replicate()),
+                    desired_output_layouts=(None, Replicate()),
+                    use_local_output=False,
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(1),
@@ -212,9 +219,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     input_layouts=(Shard(1), None),
                     desired_input_layouts=(Replicate(), None),
                 ),
-                "attention.wq": col_parallel_strategy(),
-                "attention.wk": col_parallel_strategy(),
-                "attention.wv": col_parallel_strategy(),
+                "attention.wq": col_parallel_strategy(use_local_output=False),
+                "attention.wk": col_parallel_strategy(use_local_output=False),
+                "attention.wv": col_parallel_strategy(use_local_output=False),
                 "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
                 "attention_norm": SequenceParallel(),
                 "feed_forward": PrepareModuleInput(
@@ -226,11 +233,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "feed_forward.w3": col_parallel_strategy(),
                 "ffn_norm": SequenceParallel(),
             }
-
-            # Adjust attention module to use the local number of heads
-            attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
 
             parallelize_module(
                 module=transformer_block,
