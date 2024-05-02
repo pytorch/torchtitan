@@ -36,7 +36,6 @@ jobs:
           pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
           python -m pip install -r requirements.txt
           python -m pip install -r dev-requirements.txt
-          python -m pip install -e .
       - name: Run unit tests with coverage
         run: pytest test --cov=. --cov-report=xml --durations=20 -vv
       - name: Upload Coverage to Codecov
