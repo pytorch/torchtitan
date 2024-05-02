@@ -126,16 +126,21 @@ def _run_cmd(cmd):
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        if test_flavor.requires_seed_checkpoint:
-            run_cmd(
-                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh --checkpoint.folder {test_checkpoint_dir}"
-            )
+
         cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
+
+        if test_flavor.requires_seed_checkpoint:
+            print("Creating seed checkpoint")
+            result = run_cmd(
+                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh --checkpoint.folder {test_checkpoint_dir}"
+            )
+            print(result.stdout)
+
         result = _run_cmd(cmd)
         print(result.stdout)
         if result.returncode != 0:
