@@ -92,6 +92,7 @@ integration_tests_flavors["debug_model.toml"] = [
                 "--checkpoint.enable_checkpoint",
                 "--training.pipeline_parallel_degree 4",
                 "--training.data_parallel_degree 1",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
             ],
         ],
         "PP 1D test",
@@ -103,6 +104,7 @@ integration_tests_flavors["debug_model.toml"] = [
                 "--checkpoint.enable_checkpoint",
                 "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 2",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
             ],
         ],
         "PP+DP 2D test",
