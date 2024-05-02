@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-
+from pippy import annotate_split_points, pipeline, SplitPoint
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -137,7 +137,36 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     the model must fit on GPU or CPU memory.
     """
     if parallel_dims.pp_enabled:
-        raise NotImplementedError("PP not implemented yet.")
+
+        if job_config.model.norm_type == "fused_rmsnorm":
+            # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
+            # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
+            raise NotImplementedError(
+                "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
+            )
+        pp_mesh = world_mesh["pp"]
+        stage_idx = pp_mesh.get_local_rank()
+        layers_per_rank = len(model.layers) // parallel_dims.pp
+        for i in range(1, parallel_dims.pp):
+            annotate_split_points(
+                model,
+                {f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING},
+            )
+
+        # Get example input
+        label_shape = input_shape = (8, 2048)  # TODO
+        input_ids = torch.randint(
+            model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+        )
+        labels = torch.randint(
+            model.vocab_size, label_shape, dtype=torch.int64, device="meta"
+        )
+        print("input_ids: ", input_ids.shape, input_ids.dtype)
+        print("labels: ", labels.shape, labels.dtype)
+
+        # Create a pipeline representation from the model
+        pipe = pipeline(model, parallel_dims.pp, example_args=(input_ids,))
+        model = pipe.get_stage_module(stage_idx)
 
     if parallel_dims.tp_enabled:
         if job_config.model.norm_type == "fused_rmsnorm":
@@ -215,27 +244,39 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
         # TODO: Expose `reduce_dtype` as a config option.
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            # TODO(whc) need to fix PP + FSDP-mixed-precision
+            # tracer for PP assumes f32 and is caught off guard when runtime FSDP interacts using bf16 inputs
+            # param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            param_dtype=torch.float32,
+            reduce_dtype=torch.float32,
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_id, transformer_block in enumerate(model.layers):
+        for layer_name, transformer_block in model.layers.named_children():
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
                 )
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = layer_id < len(model.layers) - 1
+            # reshard_after_forward = layer_id < len(model.layers) - 1
+            # TODO(whc) need to fix correctly handle layer-ids on pp-split module
+            reshard_after_forward = True
             fully_shard(
                 transformer_block,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            model.layers[layer_id] = transformer_block
+            # model.layers[layer_id] = transformer_block
+            # TODO(whc)
+            setattr(model.layers, layer_name, transformer_block)
         model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
+
+    if parallel_dims.pp_enabled:
+        setattr(pipe.split_gm, f"submod_{stage_idx}", model)
+        return pipe
 
     return model
