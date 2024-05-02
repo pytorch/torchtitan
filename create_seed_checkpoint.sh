@@ -5,6 +5,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+echo "create_seed_checkpoint.sh top"
+
 set -ex
 
 # libUV is a scalable backend for TCPStore which is used in processGroup
@@ -27,6 +29,7 @@ overrides=""
 if [ $# -ne 0 ]; then
     overrides="$*"
 fi
+echo "create_seed_checkpoint.sh call torchrun"
 
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
