@@ -358,12 +358,11 @@ def main(job_config: JobConfig):
                     else torch.Tensor([-1.0])
                 )
             else:
-                # forward / backward
-                with loss_parallel_ctx:
+                # Non-PP forward / backward
+                with loss_parallel_ctx():
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     loss.backward()
-                # TODO(whc) rebase conflict, rewrite how loss is handled?
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(
