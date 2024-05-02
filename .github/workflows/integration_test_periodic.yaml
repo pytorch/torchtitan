@@ -1,9 +1,9 @@
-name: 4 GPU Unit Test
+name: GPU Integration Test
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
+  schedule:
+    # Runs hourly
+    - cron: '0 * * * *'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}

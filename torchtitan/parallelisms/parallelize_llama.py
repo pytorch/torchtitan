@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-from pippy import annotate_split_points, pipeline, SplitPoint
+from pippy import pipeline, SplitPoint
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -147,12 +147,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
         stage_idx = pp_mesh.get_local_rank()
         layers_per_rank = len(model.layers) // parallel_dims.pp
-        for i in range(1, parallel_dims.pp):
-            annotate_split_points(
-                model,
-                {f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING},
-            )
-
+        split_spec = {
+            f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
+            for i in range(1, parallel_dims.pp)
+        }
         # Get example input
         label_shape = input_shape = (8, 2048)  # TODO
         input_ids = torch.randint(
@@ -165,7 +163,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         print("labels: ", labels.shape, labels.dtype)
 
         # Create a pipeline representation from the model
-        pipe = pipeline(model, parallel_dims.pp, example_args=(input_ids,))
+        pipe = pipeline(
+            model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
+        )
         model = pipe.get_stage_module(stage_idx)
 
     if parallel_dims.tp_enabled:
