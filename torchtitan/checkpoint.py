@@ -110,7 +110,7 @@ class CheckpointManager:
     def save(self, curr_step: int, force: bool = False) -> None:
         """
         force = True will force the checkpoint to be saved, even if the interval has not been reached.
-        This only happens when train_state.step == job_config.training.steps.
+        This only happens when train_state.step == job_config.training.steps, or for initial seed checkpoint.
         """
         if not self.enable_checkpoint:
             return
@@ -191,10 +191,12 @@ class CheckpointManager:
                 return False
             step = max(step_counts)
 
+        # We won't have optimizer states to load, if we are loading a seed checkpoint
+        states = {"model": self.states["model"]} if step == 0 else self.states
         logger.info(f"Loading the checkpoint at step {step}")
         begin = time.monotonic()
         dcp.load(
-            self.states,
+            states,
             checkpoint_id=self._create_checkpoint_id(step),
         )
         logger.info(
