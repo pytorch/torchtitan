@@ -281,6 +281,15 @@ class JobConfig:
                 The default value is float32.
             """,
         )
+        self.parser.add_argument(
+            "--checkpoint.create_seed_checkpoint",
+            action="store_true",
+            help="""
+                Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
+                Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
+                Could be implemented as a separate script, but this way shares more code.
+            """,
+        )
 
         # activation checkpointing configs
         self.parser.add_argument(
