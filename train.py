@@ -466,10 +466,10 @@ def main(job_config: JobConfig):
 
     metric_logger.close()
     logger.info("Training completed")
-    destroy_process_group()
 
 
 if __name__ == "__main__":
     config = JobConfig()
     config.parse_args()
     main(config)
+    destroy_process_group()
