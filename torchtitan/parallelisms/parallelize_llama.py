@@ -11,7 +11,16 @@ from collections import defaultdict
 from typing import Tuple
 
 import torch
-from pippy import pipeline, SplitPoint
+
+# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
+try:
+    from pippy import pipeline, SplitPoint
+except ImportError as exc:
+    raise ImportError(
+        "pippy is not installed. Please install it to use pipeline parallelism. "
+        "`pip install git+https://github.com/pytorch/pippy`"
+    ) from exc
+
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -159,8 +168,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         labels = torch.randint(
             model.vocab_size, label_shape, dtype=torch.int64, device="meta"
         )
-        print("input_ids: ", input_ids.shape, input_ids.dtype)
-        print("labels: ", labels.shape, labels.dtype)
 
         # Create a pipeline representation from the model
         pipe = pipeline(

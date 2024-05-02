@@ -19,8 +19,16 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from pippy.PipelineSchedule import ScheduleGPipe
-from pippy.PipelineStage import PipelineStage
+
+# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
+try:
+    from pippy import PipelineStage, ScheduleGPipe
+except ImportError as exc:
+    raise ImportError(
+        "pippy is not installed. Please install it to use pipeline parallelism. "
+        "`pip install git+https://github.com/pytorch/pippy`"
+    ) from exc
+
 from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record

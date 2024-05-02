@@ -5,5 +5,3 @@ tensorboard
 sentencepiece
 tiktoken
 blobfile
-# TODO remove pippy requirement after completing migration to pytorch
-git+https://github.com/pytorch/pippy
