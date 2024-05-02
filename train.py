@@ -470,7 +470,6 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
-    print("train.py __main__")
     config = JobConfig()
     config.parse_args()
     main(config)
