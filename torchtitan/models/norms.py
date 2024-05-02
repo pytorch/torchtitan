@@ -258,7 +258,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        x, weight, rstd = ctx.saved_tensors
+        x, weight, Rstd = ctx.saved_tensors
         eps = ctx.eps
         x_shape_start = ctx.x_shape_start
 
@@ -290,7 +290,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
             dy.stride(0),
             dx,
             dx.stride(0),
-            rstd,
+            Rstd,
             _dw,
             eps,
             M,
