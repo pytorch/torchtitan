@@ -136,7 +136,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
 
         if test_flavor.requires_seed_checkpoint:
             print("Creating seed checkpoint")
-            result = run_cmd(
+            result = _run_cmd(
                 f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh --checkpoint.folder {test_checkpoint_dir}"
             )
             print(result.stdout)
