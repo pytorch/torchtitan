@@ -26,7 +26,7 @@ class OverrideDefinitions:
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
-    requires_seed_ckpt: bool = False
+    requires_seed_checkpoint: bool = False
 
 
 CONFIG_DIR = "./train_configs"
@@ -95,7 +95,7 @@ integration_tests_flavors["debug_model.toml"] = [
             ],
         ],
         "PP 1D test",
-        requires_seed_ckpt=True,
+        requires_seed_checkpoint=True,
     ),
     OverrideDefinitions(
         [
@@ -106,27 +106,35 @@ integration_tests_flavors["debug_model.toml"] = [
             ],
         ],
         "PP+DP 2D test",
-        requires_seed_ckpt=True,
+        requires_seed_checkpoint=True,
     ),
 ]
+
+
+def _run_cmd(cmd):
+    return subprocess.run(
+        [cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        shell=True,
+    )
 
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
+        if test_flavor.requires_seed_checkpoint:
+            run_cmd(
+                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh --checkpoint.folder {test_checkpoint_dir}"
+            )
         cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-        result = subprocess.run(
-            [cmd],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            shell=True,
-        )
+        result = _run_cmd(cmd)
         print(result.stdout)
         if result.returncode != 0:
             raise Exception(
