@@ -26,6 +26,7 @@ class OverrideDefinitions:
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
+    requires_seed_ckpt: bool = False
 
 
 CONFIG_DIR = "./train_configs"
@@ -84,6 +85,28 @@ integration_tests_flavors["debug_model.toml"] = [
             ],
         ],
         "Checkpoint Integration Test - Save Model Weights Only bf16",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                "--training.pipeline_parallel_degree 4",
+                "--training.data_parallel_degree 1",
+            ],
+        ],
+        "PP 1D test",
+        requires_seed_ckpt=True,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                "--training.pipeline_parallel_degree 2",
+                "--training.data_parallel_degree 2",
+            ],
+        ],
+        "PP+DP 2D test",
+        requires_seed_ckpt=True,
     ),
 ]
 
