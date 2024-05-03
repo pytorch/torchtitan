@@ -290,6 +290,23 @@ class JobConfig:
                 Could be implemented as a separate script, but this way shares more code.
             """,
         )
+        self.parser.add_argument(
+            "--checkpoint.async_mode",
+            type=str,
+            default="disabled",
+            help="""
+                Which async checkpoint mode to use. Currently there are 3 different modes.
+                1. "disabled": synchronized checkpointing will be used.
+                2. "async": torch.distributed.checkpoint.async_save will be used.
+                3. "async_with_pinned_mem": a dedicated pinned memory space will be used and
+                   a dedicated process will be created to avoid GIL issues. The first
+                   checkpointing will be slow due to allocaing the pinned memory.
+                   The performance of this option depends on the model and may be slower
+                   than async in some cases.
+
+                "disabled" is the default mode.
+            """,
+        )
 
         # activation checkpointing configs
         self.parser.add_argument(
