@@ -215,7 +215,7 @@ def _rms_norm_bwd_kernel_sm(
 
 # Make fused_rmsnorm a custom op, to work around tracing issues for pp tracer/export
 FUSED_RMSNORM_FORWARD = "torchtitan::fused_rmsnorm_forward"
-FUSED_RMSNORM_BACKWARD = "torchtitan::fused_rmsnorm_forward"
+FUSED_RMSNORM_BACKWARD = "torchtitan::fused_rmsnorm_backward"
 torch.library.define(
     FUSED_RMSNORM_FORWARD, "(Tensor x, Tensor weight, float eps) -> (Tensor, Tensor)"
 )
@@ -264,14 +264,20 @@ def fused_rmsnorm_forward(x, weight, eps):
 # forward meta (shape inference)
 @torch.library.impl_abstract(FUSED_RMSNORM_FORWARD)
 def fused_rmsnorm_forward_abstract(x, weight, eps):
-    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     y = torch.empty_like(x)
+
+    _x = x.view(-1, x.shape[-1])
+    if _x.stride(-1) != 1:
+        _x = _x.contiguous()
+    M, _ = _x.shape
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
+
     return y, rstd
 
 
 torch.library.define(
     FUSED_RMSNORM_BACKWARD,
-    "(Tensor x, Tensor weight, Tensor rstd, float eps, Shape x_shape_start, Tensor dy) -> (Tensor, Tensor, NoneType)",
+    "(Tensor x, Tensor weight, Tensor rstd, float eps, SymInt[] x_shape_start, Tensor dy) -> (Tensor, Tensor, NoneType)",
 )
 
 
@@ -321,6 +327,11 @@ def fused_rmsnorm_backward(x, weight, rstd, eps, x_shape_start, dy):
 @torch.library.impl_abstract(FUSED_RMSNORM_BACKWARD)
 def fused_rmsnorm_backward_abstract(x, weight, rstd, eps, x_shape_start, dy):
     dx = torch.empty_like(x).view(x_shape_start)
+
+    dy = dy.view(-1, dy.shape[-1])
+    if dy.stride(-1) != 1:
+        dy = dy.contiguous()
+
     _, N = dy.shape
     dw = torch.empty((N,), dtype=weight.dtype, device=weight.device)
     return dx, dw, None
