@@ -213,47 +213,126 @@ def _rms_norm_bwd_kernel_sm(
     tl.store(DW + row_block_id * N + cols, dw, mask=mask)
 
 
+# Make fused_rmsnorm a custom op, to work around tracing issues for pp tracer/export
+FUSED_RMSNORM_FORWARD = "torchtitan::fused_rmsnorm_forward"
+FUSED_RMSNORM_BACKWARD = "torchtitan::fused_rmsnorm_forward"
+torch.library.define(
+    FUSED_RMSNORM_FORWARD, "(Tensor x, Tensor weight, float eps) -> (Tensor, Tensor)"
+)
+
+# forward implementation
+@torch.library.impl(FUSED_RMSNORM_FORWARD, "default")
+def fused_rmsnorm_forward(x, weight, eps):
+    x_shape_start = x.shape
+
+    # Flatten input
+    x = x.view(-1, x.shape[-1])
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    if weight.stride(-1) != 1:
+        weight = weight.contiguous()
+
+    M, N = x.shape
+    y = torch.empty_like(x)
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
+
+    max_size = 65536 // x.element_size()
+    block_N = min(max_size, triton.next_power_of_2(N))
+
+    if N > block_N:
+        raise ValueError(f"N {N} must be <= {block_N=}")
+
+    grid = lambda meta: (M,)
+    _rms_norm_fwd_kernel[grid](
+        x,
+        x.stride(0),
+        y,
+        y.stride(0),
+        weight,
+        rstd,
+        eps,
+        M,
+        N,
+        block_N,
+    )
+
+    y = y.reshape(x_shape_start)
+
+    return y, rstd
+
+
+# forward meta (shape inference)
+@torch.library.impl_abstract(FUSED_RMSNORM_FORWARD)
+def fused_rmsnorm_forward_abstract(x, weight, eps):
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
+    y = torch.empty_like(x)
+    return y, rstd
+
+
+torch.library.define(
+    FUSED_RMSNORM_BACKWARD,
+    "(Tensor x, Tensor weight, Tensor rstd, float eps, Shape x_shape_start, Tensor dy) -> (Tensor, Tensor, NoneType)",
+)
+
+
+@torch.library.impl(FUSED_RMSNORM_BACKWARD, "default")
+def fused_rmsnorm_backward(x, weight, rstd, eps, x_shape_start, dy):
+    # Flatten input and output gradients
+    dy = dy.view(-1, dy.shape[-1])
+    if dy.stride(-1) != 1:
+        dy = dy.contiguous()
+
+    M, N = dy.shape
+    dx = torch.empty_like(x)
+    dw = torch.empty_like(weight)
+
+    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
+
+    max_size = 65536 // x.element_size()
+    block_N = min(max_size, triton.next_power_of_2(N))
+    rows_per_sm = math.ceil(M / sm_count)
+
+    if N > block_N:
+        raise ValueError(f"N {N} must be <= {block_N=}")
+
+    grid = lambda meta: (sm_count,)
+    _rms_norm_bwd_kernel_sm[grid](
+        x,
+        x.stride(0),
+        weight,
+        dy,
+        dy.stride(0),
+        dx,
+        dx.stride(0),
+        rstd,
+        _dw,
+        eps,
+        M,
+        N,
+        rows_per_sm,
+        block_N,
+    )
+    dw = _dw.sum(0).to(weight.dtype)
+    dx = dx.view(x_shape_start)
+    return dx, dw, None
+
+
+@torch.library.impl_abstract(FUSED_RMSNORM_BACKWARD)
+def fused_rmsnorm_backward_abstract(x, weight, rstd, eps, x_shape_start, dy):
+    dx = torch.empty_like(x).view(x_shape_start)
+    _, N = dy.shape
+    dw = torch.empty((N,), dtype=weight.dtype, device=weight.device)
+    return dx, dw, None
+
+
 class TritonFusedRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps):
-        x_shape_start = x.shape
-
-        # Flatten input
-        x = x.view(-1, x.shape[-1])
-        if x.stride(-1) != 1:
-            x = x.contiguous()
-        if weight.stride(-1) != 1:
-            weight = weight.contiguous()
-
-        M, N = x.shape
-        y = torch.empty_like(x)
-        rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
-
-        max_size = 65536 // x.element_size()
-        block_N = min(max_size, triton.next_power_of_2(N))
-
-        if N > block_N:
-            raise ValueError(f"N {N} must be <= {block_N=}")
-
-        grid = lambda meta: (M,)
-        _rms_norm_fwd_kernel[grid](
-            x,
-            x.stride(0),
-            y,
-            y.stride(0),
-            weight,
-            rstd,
-            eps,
-            M,
-            N,
-            block_N,
-        )
-
+        y, rstd = torch.ops.torchtitan.fused_rmsnorm_forward.default(x, weight, eps)
         ctx.eps = eps
         ctx.save_for_backward(x, weight, rstd)
-        ctx.x_shape_start = x_shape_start
-
-        y = y.reshape(x_shape_start)
+        ctx.x_shape_start = x.shape
         return y
 
     @staticmethod
@@ -261,46 +340,9 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         x, weight, rstd = ctx.saved_tensors
         eps = ctx.eps
         x_shape_start = ctx.x_shape_start
-
-        # Flatten input and output gradients
-        dy = dy.view(-1, dy.shape[-1])
-        if dy.stride(-1) != 1:
-            dy = dy.contiguous()
-
-        M, N = dy.shape
-        dx = torch.empty_like(x)
-        dw = torch.empty_like(weight)
-
-        sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-        _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
-
-        max_size = 65536 // x.element_size()
-        block_N = min(max_size, triton.next_power_of_2(N))
-        rows_per_sm = math.ceil(M / sm_count)
-
-        if N > block_N:
-            raise ValueError(f"N {N} must be <= {block_N=}")
-
-        grid = lambda meta: (sm_count,)
-        _rms_norm_bwd_kernel_sm[grid](
-            x,
-            x.stride(0),
-            weight,
-            dy,
-            dy.stride(0),
-            dx,
-            dx.stride(0),
-            rstd,
-            _dw,
-            eps,
-            M,
-            N,
-            rows_per_sm,
-            block_N,
+        return torch.ops.torchtitan.fused_rmsnorm_backward.default(
+            x, weight, rstd, eps, x_shape_start, dy
         )
-        dw = _dw.sum(0).to(weight.dtype)
-        dx = dx.view(x_shape_start)
-        return dx, dw, None
 
 
 # expose fusedRMSNorm as a function
