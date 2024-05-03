@@ -232,7 +232,9 @@ def main(job_config: JobConfig):
                 True
             )
         logger.info("Compiling model with torch.compile")
-        model = torch.compile(model)
+        # Dynamic shape have issues with distributed, turn dynamic off as Transformer
+        # training is static_shape TODO: resolve dynamic shape issue and restore defaults
+        model = torch.compile(model, dynamic=False)
 
     train_state = TrainState()
 
@@ -271,7 +273,9 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_enable_profiling(job_config) as torch_profiler:
+    with maybe_enable_profiling(
+        job_config, global_step=train_state.step
+    ) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
