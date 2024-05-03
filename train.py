@@ -19,6 +19,17 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+
+# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
+try:
+    from pippy import ScheduleGPipe
+    from pippy.PipelineStage import _PipelineStage
+except ImportError as exc:
+    raise ImportError(
+        "pippy is not installed. Please install it to use pipeline parallelism. "
+        "`pip install git+https://github.com/pytorch/pippy`"
+    ) from exc
+
 from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -126,7 +137,8 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    torch.cuda.set_device(device)
     init_distributed(job_config)
 
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -144,6 +156,15 @@ def main(job_config: JobConfig):
         dp_rank = dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
+
+    if parallel_dims.pp_enabled:
+        pp_mesh = world_mesh["pp"]
+        pp_degree = pp_mesh.size()
+        pp_rank = pp_mesh.get_local_rank()
+
+    else:
+        pp_degree, pp_rank = 1, 0
+
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -201,13 +222,44 @@ def main(job_config: JobConfig):
     # obtain the peak flops of bf16 type for MFU calculation
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
-    # apply PT-D parallelisms and activation checkpointing
+    if parallel_dims.pp_enabled:
+        # TODO(whc) now i need to figure out how to align this with the `model_parallelize_fns[model_name] pattern`
+        from torchtitan.parallelisms.parallelize_llama import apply_pipeline_parallelism
+
+        model, pipe_info = apply_pipeline_parallelism(
+            model, world_mesh, parallel_dims, job_config
+        )
+
+    # apply PT-D DP/TP parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
-    # allocate sharded model on GPU and initialize weights via DTensor
+
     model.to_empty(device="cuda")
-    model.init_weights()
+
+    # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
+    # there are virtual stages
+    if parallel_dims.pp_enabled:
+        stage = _PipelineStage(
+            stage_module=model,
+            stage_index=pp_rank,
+            pipe_info=pipe_info,
+            device=device,
+            group=pp_mesh.get_group(),
+        )
+        pp_schedule = ScheduleGPipe(
+            stage,
+            n_microbatches=parallel_dims.pp,
+            loss_fn=loss_fn,
+        )
+    else:
+        # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
+        # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
+        # the whole model (all its weights, or FQNs) exist on one rank.  In PP, the init_weights on stage1 might crash
+        # becuase it can't find "embedding" layer, for example.
+
+        # allocate sharded model on GPU and initialize weights via DTensor
+        model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -219,7 +271,6 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
-
     metric_logger = build_metric_logger(job_config)
 
     # torch.compile model for improved performance
@@ -257,7 +308,13 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint.load()
+    checkpoint_loaded = checkpoint.load()
+
+    if parallel_dims.pp_enabled and not checkpoint_loaded:
+        raise RuntimeError(
+            "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
+            "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
+        )
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
@@ -299,14 +356,33 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-
             optimizer.zero_grad()
 
-            # forward / backward
-            with loss_parallel_ctx():
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels)
-                loss.backward()
+            if parallel_dims.pp_enabled:
+                # pipeline parallel forward / backward inside step() call
+                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+
+                with loss_parallel_ctx():
+                    if pp_mesh.get_local_rank() == 0:
+                        pp_schedule.step(input_ids)
+                    elif is_last_stage:
+                        losses = []
+                        pp_schedule.step(target=labels, losses=losses)
+                    else:
+                        schedule.step()
+
+                # accumulate losses across pipeline microbatches
+                loss = (
+                    torch.mean(torch.stack(losses))
+                    if is_last_stage
+                    else torch.Tensor([-1.0])
+                )
+            else:
+                # Non-PP forward / backward
+                with loss_parallel_ctx():
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    loss.backward()
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(
