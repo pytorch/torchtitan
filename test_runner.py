@@ -91,6 +91,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}",
                 "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 1",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
@@ -104,6 +105,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}",
                 "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 2",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
