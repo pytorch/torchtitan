@@ -157,12 +157,9 @@ def apply_pipeline_parallelism(model, world_mesh, parallel_dims, job_config: Job
         for i in range(1, parallel_dims.pp)
     }
     # Get example input
-    label_shape = input_shape = (8, 2048)  # TODO
+    input_shape = (job_config.training.batch_size, job_config.training.seq_len)
     input_ids = torch.randint(
         model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-    )
-    labels = torch.randint(
-        model.vocab_size, label_shape, dtype=torch.int64, device="meta"
     )
 
     # Create a pipeline representation from the model
