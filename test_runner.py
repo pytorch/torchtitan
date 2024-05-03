@@ -91,7 +91,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}",
+                f"--checkpoint.folder {test_checkpoint_dir}_pp",
                 "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 1",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
@@ -105,7 +105,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}",
+                f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
                 "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 2",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
@@ -139,9 +139,16 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
         )
 
         if test_flavor.requires_seed_checkpoint:
+            checkpoint_folder_arg = None
+            for arg in override_arg:
+                if "--checkpoint.folder" in arg:
+                    checkpoint_folder_arg = arg
+            assert (
+                checkpoint_folder_arg is not None
+            ), "Can't use seed checkpoint if folder is not specified"
             print("Creating seed checkpoint")
             result = _run_cmd(
-                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh --checkpoint.folder {test_checkpoint_dir}"
+                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {checkpoint_folder_arg}"
             )
             print(result.stdout)
 
