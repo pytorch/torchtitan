@@ -220,10 +220,8 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
         # Flatten input
         x = x.view(-1, x.shape[-1])
-        if x.stride(-1) != 1:
-            x = x.contiguous()
-        if weight.stride(-1) != 1:
-            weight = weight.contiguous()
+        x = x.contiguous()
+        weight = weight.contiguous()
 
         M, N = x.shape
         y = torch.empty_like(x)
@@ -264,8 +262,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
         # Flatten input and output gradients
         dy = dy.view(-1, dy.shape[-1])
-        if dy.stride(-1) != 1:
-            dy = dy.contiguous()
+        dy = dy.contiguous()
 
         M, N = dy.shape
         dx = torch.empty_like(x)
