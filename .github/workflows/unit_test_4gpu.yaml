@@ -37,7 +37,6 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r dev-requirements.txt
           python -m pip install git+https://github.com/pytorch/pippy
-          python -m pip install -e .
       - name: Run test_runner.py
         run: python ./test_runner.py
       - name: Upload Coverage to Codecov

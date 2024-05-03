@@ -138,42 +138,48 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
+def apply_pipeline_parallelism(model, world_mesh, parallel_dims, job_config: JobConfig):
+    assert (
+        parallel_dims.pp_enabled
+    ), "can't apply pipeline parallelism if it is not enabled"
+
+    if job_config.model.norm_type == "fused_rmsnorm":
+        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
+        # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
+        raise NotImplementedError(
+            "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
+        )
+    pp_mesh = world_mesh["pp"]
+    stage_idx = pp_mesh.get_local_rank()
+    layers_per_rank = len(model.layers) // parallel_dims.pp
+    split_spec = {
+        f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
+        for i in range(1, parallel_dims.pp)
+    }
+    # Get example input
+    label_shape = input_shape = (8, 2048)  # TODO
+    input_ids = torch.randint(
+        model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+    )
+    labels = torch.randint(
+        model.vocab_size, label_shape, dtype=torch.int64, device="meta"
+    )
+
+    # Create a pipeline representation from the model
+    pipe = pipeline(
+        model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
+    )
+    model = pipe.get_stage_module(stage_idx)
+    return model, pipe.pipe_info
+
+
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
-    Apply parallelisms and activation checkpointing to the model.
+    Apply SPMD parallelisms and activation checkpointing to the model.
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallel_dims.pp_enabled:
-
-        if job_config.model.norm_type == "fused_rmsnorm":
-            # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
-            # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
-            raise NotImplementedError(
-                "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
-            )
-        pp_mesh = world_mesh["pp"]
-        stage_idx = pp_mesh.get_local_rank()
-        layers_per_rank = len(model.layers) // parallel_dims.pp
-        split_spec = {
-            f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
-            for i in range(1, parallel_dims.pp)
-        }
-        # Get example input
-        label_shape = input_shape = (8, 2048)  # TODO
-        input_ids = torch.randint(
-            model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-        )
-        labels = torch.randint(
-            model.vocab_size, label_shape, dtype=torch.int64, device="meta"
-        )
-
-        # Create a pipeline representation from the model
-        pipe = pipeline(
-            model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
-        )
-        model = pipe.get_stage_module(stage_idx)
 
     if parallel_dims.tp_enabled:
         if job_config.model.norm_type == "fused_rmsnorm":
@@ -274,16 +280,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            # model.layers[layer_id] = transformer_block
-            # TODO(whc)
-            setattr(model.layers, layer_name, transformer_block)
+            model.layers.add_module(layer_name, transformer_block)
+
         model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
-
-    if parallel_dims.pp_enabled:
-        setattr(pipe.split_gm, f"submod_{stage_idx}", model)
-        return pipe
 
     return model
