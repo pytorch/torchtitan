@@ -232,7 +232,9 @@ def main(job_config: JobConfig):
                 True
             )
         logger.info("Compiling model with torch.compile")
-        model = torch.compile(model)
+        # Dynamic shape have issues with distributed, turn dynamic off as Transformer
+        # training is static_shape TODO: resolve dynamic shape issue and restore defaults
+        model = torch.compile(model, dynamic=False)
 
     train_state = TrainState()
 
