@@ -143,12 +143,6 @@ def apply_pipeline_parallelism(model, world_mesh, parallel_dims, job_config: Job
         parallel_dims.pp_enabled
     ), "can't apply pipeline parallelism if it is not enabled"
 
-    if job_config.model.norm_type == "fused_rmsnorm":
-        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
-        # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
-        raise NotImplementedError(
-            "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
-        )
     pp_mesh = world_mesh["pp"]
     stage_idx = pp_mesh.get_local_rank()
     layers_per_rank = len(model.layers) // parallel_dims.pp
