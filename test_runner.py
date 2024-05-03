@@ -27,6 +27,7 @@ class OverrideDefinitions:
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
     requires_seed_checkpoint: bool = False
+    ngpu: int = 4
 
 
 CONFIG_DIR = "./train_configs"
@@ -90,13 +91,14 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                "--training.pipeline_parallel_degree 4",
+                "--training.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 1",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
             ],
         ],
         "PP 1D test",
         requires_seed_checkpoint=True,
+        ngpu=2,
     ),
     OverrideDefinitions(
         [
@@ -127,7 +129,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
 
-        cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(

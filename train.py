@@ -22,7 +22,8 @@ import torch.nn.functional as F
 
 # TODO(whc) this can be removed after pippy migration into pytorch core is complete.
 try:
-    from pippy import PipelineStage, ScheduleGPipe
+    from pippy import ScheduleGPipe
+    from pippy.PipelineStage import _PipelineStage
 except ImportError as exc:
     raise ImportError(
         "pippy is not installed. Please install it to use pipeline parallelism. "
@@ -221,22 +222,28 @@ def main(job_config: JobConfig):
     # obtain the peak flops of bf16 type for MFU calculation
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
-    # apply PT-D parallelisms and activation checkpointing
+    if parallel_dims.pp_enabled:
+        # TODO(whc) now i need to figure out how to align this with the `model_parallelize_fns[model_name] pattern`
+        from torchtitan.parallelisms.parallelize_llama import apply_pipeline_parallelism
+
+        model, pipe_info = apply_pipeline_parallelism(
+            model, world_mesh, parallel_dims, job_config
+        )
+
+    # apply PT-D DP/TP parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
-    if parallel_dims.pp_enabled:
-        pipe_meta = model
-        model = pipe_meta.get_stage_module(pp_rank)
 
     model.to_empty(device="cuda")
 
     # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
     # there are virtual stages
     if parallel_dims.pp_enabled:
-        stage = PipelineStage(
-            pipe=pipe_meta,
+        stage = _PipelineStage(
+            stage_module=model,
             stage_index=pp_rank,
+            pipe_info=pipe_info,
             device=device,
             group=pp_mesh.get_group(),
         )
@@ -276,7 +283,9 @@ def main(job_config: JobConfig):
                 True
             )
         logger.info("Compiling model with torch.compile")
-        model = torch.compile(model)
+        # Dynamic shape have issues with distributed, turn dynamic off as Transformer
+        # training is static_shape TODO: resolve dynamic shape issue and restore defaults
+        model = torch.compile(model, dynamic=False)
 
     train_state = TrainState()
 
@@ -321,7 +330,9 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_enable_profiling(job_config) as torch_profiler:
+    with maybe_enable_profiling(
+        job_config, global_step=train_state.step
+    ) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
