@@ -138,7 +138,116 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
-def apply_pipeline_parallelism(model, world_mesh, parallel_dims, job_config: JobConfig):
+class DummyModule(torch.nn.Module):
+    def forward(self, *args):
+        return *args
+
+
+class TransformerChunk(torch.nn.Module):
+    def __init__(
+        self,
+        orig_model: Transformer,
+        this_stage_layer_names: List[str],
+    ):
+        super().__init__()
+        if "tok_embeddings" in this_stage_layer_names:
+            self.tok_embeddings = orig_model.tok_embeddings
+        self.freqs_cis = orig_model.freqs_cis
+        # preserve FQNs of original model by preserving structure
+        # (including preserving position in layers[] list)- use dummy module
+        self.layers = orig_model.layers
+        for i in range(len(self.layers)):
+            if f"layers.{i}" not in this_stage_layer_names:
+                self.layers[i] = DummyModule()
+        if "norm" in this_stage_layer_names:
+            self.norm = orig_model.norm
+        if "output" in this_stage_layer_names:
+            self.output = orig_model.output
+
+    def forward(self, input):
+        """
+        Copypaste of original Transformer.forward, with conditionals and unpacking added
+        such that we handle the cases where this rank doesn't have the embedding, or doesn't have
+        the output layers.
+
+        We unpack input from a tuple always, and we re-pack output as a tuple always, for compatibility with
+        _PipelineStage API
+        """
+        if self.embeddings is not None:
+            (tokens,) = input
+            h = self.tok_embeddings(tokens)
+        else:
+            assert len(input) == 1, input
+            (h,) = input
+
+        _, seqlen, _ = h.shape
+        freqs_cis = self.freqs_cis[:seqlen]
+
+        for layer in self.layers:
+            h = layer(h, freqs_cis)
+        output = (h,)
+
+        if self.norm is not None:
+            h = self.norm(h)
+            output = (h,)
+
+        if self.output is not None:
+            output = self.output(h).float()
+        return output
+
+
+def extract_pipeline_stage_models_manual(
+    model, world_mesh, parallel_dims, job_config: JobConfig
+):
+    """
+    This API gets individual torch.nn.Module objects for each pipeline stage (including virtual stages).
+
+    The SPMD parallelisms should be applied to
+    """
+    assert (
+        parallel_dims.pp_enabled
+    ), "can't apply pipeline parallelism if it is not enabled"
+
+    pp_mesh = world_mesh["pp"]
+    pp_rank = pp_mesh.get_local_rank()
+    stage_idx = pp_rank  # TODO support virtual stages
+    layers_per_rank = len(model.layers) // parallel_dims.pp
+    layer_offset = parallel_dims.pp * pp_rank
+    this_stage_layer_names = [
+        f"layers.{i + layer_offset}" for i in range(layers_per_rank)
+    ]
+    if pp_rank == 0:
+        this_stage_layer_names.insert(0, "tok_embeddings")
+    elif pp_rank == pp_size - 1:
+        this_stage_layer_names.append("norm")
+        this_stage_layer_names.append("output")
+    # Get example input
+    input_shape = (job_config.training.batch_size, job_config.training.seq_len)
+    input_ids = torch.randint(
+        model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+    )
+    stage_model = TransformerChunk(model, this_stage_layer_names)
+    # Create a pipeline representation from the model
+
+    # note for PipPy API
+    # it would be nice if we could get fx.graph out of PipeInfo and then make it possible to manually construct PipeInfo
+    # and then use the same _PipelineStage ctor in either tracer or graph cases.
+
+    stage = ManualPipelineStage(
+        stage_model,
+        pp_rank,
+        pp_size,
+        device,
+        chunks,
+        input_args=example_input.chunk(chunks)[0],
+    )
+
+    return (stage_model,)
+
+
+def apply_pipeline_parallelism_tracer(
+    model, world_mesh, parallel_dims, job_config: JobConfig
+):
     assert (
         parallel_dims.pp_enabled
     ), "can't apply pipeline parallelism if it is not enabled"
