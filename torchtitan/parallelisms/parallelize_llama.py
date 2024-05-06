@@ -8,7 +8,7 @@
 # llama model, i.e. activation checkpointing, etc.
 
 from collections import defaultdict
-from typing import Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -140,16 +140,17 @@ def get_tp_parallel_strategy(
 
 class DummyModule(torch.nn.Module):
     def forward(self, *args):
-        return *args
+        return args
 
 
 class TransformerChunk(torch.nn.Module):
     def __init__(
         self,
-        orig_model: Transformer,
+        orig_model,  # : Transformer,
         this_stage_layer_names: List[str],
     ):
         super().__init__()
+        self.tok_embeddings = None
         if "tok_embeddings" in this_stage_layer_names:
             self.tok_embeddings = orig_model.tok_embeddings
         self.freqs_cis = orig_model.freqs_cis
@@ -159,8 +160,10 @@ class TransformerChunk(torch.nn.Module):
         for i in range(len(self.layers)):
             if f"layers.{i}" not in this_stage_layer_names:
                 self.layers[i] = DummyModule()
+        self.norm = None
         if "norm" in this_stage_layer_names:
             self.norm = orig_model.norm
+        self.output = None
         if "output" in this_stage_layer_names:
             self.output = orig_model.output
 
@@ -169,35 +172,31 @@ class TransformerChunk(torch.nn.Module):
         Copypaste of original Transformer.forward, with conditionals and unpacking added
         such that we handle the cases where this rank doesn't have the embedding, or doesn't have
         the output layers.
-
-        We unpack input from a tuple always, and we re-pack output as a tuple always, for compatibility with
-        _PipelineStage API
         """
-        if self.embeddings is not None:
-            (tokens,) = input
-            h = self.tok_embeddings(tokens)
+        if self.tok_embeddings:
+            h = self.tok_embeddings(input)
+            _, seqlen, _ = h.shape
         else:
-            assert len(input) == 1, input
-            (h,) = input
+            h = input
+            _, seqlen = h.shape
 
-        _, seqlen, _ = h.shape
         freqs_cis = self.freqs_cis[:seqlen]
 
         for layer in self.layers:
             h = layer(h, freqs_cis)
-        output = (h,)
+        output = h
 
-        if self.norm is not None:
+        if self.norm:
             h = self.norm(h)
-            output = (h,)
+            output = h
 
-        if self.output is not None:
+        if self.output:
             output = self.output(h).float()
         return output
 
 
 def extract_pipeline_stage_models_manual(
-    model, world_mesh, parallel_dims, job_config: JobConfig
+    model, world_mesh, parallel_dims, job_config: JobConfig, device
 ):
     """
     This API gets individual torch.nn.Module objects for each pipeline stage (including virtual stages).
@@ -210,6 +209,7 @@ def extract_pipeline_stage_models_manual(
 
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
+    pp_size = pp_mesh.size()
     stage_idx = pp_rank  # TODO support virtual stages
     layers_per_rank = len(model.layers) // parallel_dims.pp
     layer_offset = parallel_dims.pp * pp_rank
@@ -221,26 +221,13 @@ def extract_pipeline_stage_models_manual(
     elif pp_rank == pp_size - 1:
         this_stage_layer_names.append("norm")
         this_stage_layer_names.append("output")
-    # Get example input
-    input_shape = (job_config.training.batch_size, job_config.training.seq_len)
-    input_ids = torch.randint(
-        model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-    )
+
     stage_model = TransformerChunk(model, this_stage_layer_names)
     # Create a pipeline representation from the model
 
     # note for PipPy API
     # it would be nice if we could get fx.graph out of PipeInfo and then make it possible to manually construct PipeInfo
     # and then use the same _PipelineStage ctor in either tracer or graph cases.
-
-    stage = ManualPipelineStage(
-        stage_model,
-        pp_rank,
-        pp_size,
-        device,
-        chunks,
-        input_args=example_input.chunk(chunks)[0],
-    )
 
     return (stage_model,)
 
