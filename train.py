@@ -22,8 +22,9 @@ import torch.nn.functional as F
 
 # TODO(whc) this can be removed after pippy migration into pytorch core is complete.
 try:
-    from pippy import ScheduleGPipe
-    from pippy.PipelineStage import _PipelineStage
+    from pippy import ManualPipelineStage, ScheduleGPipe
+
+    # from pippy.PipelineStage import _PipelineStage
 except ImportError as exc:
     raise ImportError(
         "pippy is not installed. Please install it to use pipeline parallelism. "
@@ -224,10 +225,12 @@ def main(job_config: JobConfig):
 
     if parallel_dims.pp_enabled:
         # TODO(whc) now i need to figure out how to align this with the `model_parallelize_fns[model_name] pattern`
-        from torchtitan.parallelisms.parallelize_llama import apply_pipeline_parallelism
+        from torchtitan.parallelisms.parallelize_llama import (
+            extract_pipeline_stage_models_manual,
+        )
 
-        model, pipe_info = apply_pipeline_parallelism(
-            model, world_mesh, parallel_dims, job_config
+        stage_models = extract_pipeline_stage_models_manual(
+            model, world_mesh, parallel_dims, job_config, device
         )
 
     # apply PT-D DP/TP parallelisms and activation checkpointing
@@ -240,13 +243,34 @@ def main(job_config: JobConfig):
     # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
     # there are virtual stages
     if parallel_dims.pp_enabled:
-        stage = _PipelineStage(
-            stage_module=model,
-            stage_index=pp_rank,
-            pipe_info=pipe_info,
-            device=device,
-            group=pp_mesh.get_group(),
+        # stage = _PipelineStage(
+        #     stage_module=model,
+        #     stage_index=pp_rank,
+        #     pipe_info=pipe_info,
+        #     device=device,
+        #     group=pp_mesh.get_group(),
+        # )
+        assert len(stage_models) == 1, "virtual stages NYI"
+        stage_model = stage_models[0]
+        chunks = parallel_dims.pp
+        pp_mesh = world_mesh["pp"]
+        pp_rank = pp_mesh.get_local_rank()
+        pp_size = pp_mesh.size()
+        stage_idx = pp_rank  # TODO support virtual stages
+        # Get example input
+        input_shape = (job_config.training.batch_size, job_config.training.seq_len)
+        input_ids = torch.randint(
+            model.vocab_size, input_shape, dtype=torch.int64, device="meta"
         )
+        stage = ManualPipelineStage(
+            stage_model,
+            pp_rank,
+            pp_size,
+            device,
+            chunks,
+            input_args=input_ids.chunk(chunks)[0],
+        )
+        stage = stages[0]
         pp_schedule = ScheduleGPipe(
             stage,
             n_microbatches=parallel_dims.pp,
