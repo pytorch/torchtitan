@@ -298,11 +298,15 @@ class JobConfig:
                 Which async checkpoint mode to use. Currently there are 3 different modes.
                 1. "disabled": synchronized checkpointing will be used.
                 2. "async": torch.distributed.checkpoint.async_save will be used.
-                3. "async_with_pinned_mem": a dedicated pinned memory space will be used and
-                   a dedicated process will be created to avoid GIL issues. The first
-                   checkpointing will be slow due to allocaing the pinned memory.
-                   The performance of this option depends on the model and may be slower
-                   than async in some cases.
+                3. "async_with_pinned_mem": this option utilizes a dedicated pinned memory
+                   space and creates a separate process for faster GPU->CPU transfer
+                   performance and eliminating GIL contention. The cost is increased CPU
+                   memory usage. If insufficient CPU memory is available, performance may
+                   degrade due to memory paging. For most users, "async" should suffice as
+                   the performance overhead is typically small (on the order of tens of
+                   seconds) compared to checkpointing frequency. This mode can be employed
+                   to pursue near-zero checkpointing times (e.g., < 1 second) given
+                   appropriate hardware support such as ample CPU memory and fast PCIe.
 
                 "disabled" is the default mode.
             """,

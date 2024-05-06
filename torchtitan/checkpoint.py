@@ -150,6 +150,7 @@ class CheckpointManager:
             self.async_mode = AsyncMode.DISABLED
         elif async_mode == AsyncMode.ASYNC:
             self.async_mode = AsyncMode.ASYNC
+            self.async_future = None
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
             ctx = get_context("spawn")
@@ -253,25 +254,27 @@ class CheckpointManager:
 
         return True
 
+    def _async_wait(self) -> None:
+        if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            logger.info(
+                f"Waiting for the background process to finish, {time.monotonic()}."
+            )
+            if not self.mp.is_alive():
+                raise RuntimeError("The checkpoint background process is dead.")
+            _ = self.mp_queue_recv.get()
+        elif self.async_mode == AsyncMode.ASYNC:
+            if self.async_future:
+                self.async_future.result()
+
     def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
-        # Make sure the checkpoint process is done
-        logger.info(
-            f"Waiting for the background process to finish, {time.monotonic()}."
-        )
-
-        if not self.mp.is_alive():
-            raise RuntimeError("The checkpoint background process is dead.")
-        _ = self.mp_queue_recv.get()
-
-        logger.info(f"Expanding the stateful, {time.monotonic()}")
         state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
-        logger.info(f"Prepare the memory, {time.monotonic()}")
         if self.cpu_offload_state_dict is None:
+            logger.info(f"Preparing the CPU memory, {time.monotonic()}.")
             self.cpu_offload_state_dict = _create_cpu_state_dict(
                 state_dict, pin_memory=True
             )
 
-        logger.info(f"Staging the state_dict, {time.monotonic()}")
+        logger.info(f"Staging the state_dict, {time.monotonic()}.")
         with torch.cuda.stream(self.staging_stream):
             self.cpu_offload_state_dict = _copy_state_dict(
                 state_dict,
@@ -294,12 +297,15 @@ class CheckpointManager:
 
         begin = time.monotonic()
         checkpoint_id = self._create_checkpoint_id(curr_step)
+        self._async_wait()
         if force:
             self._save_last_step(curr_step)
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
-            dcp.async_save(
+            if self.async_future is not None:
+                self.async_future.result()
+            self.async_future = dcp.async_save(
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
         else:
