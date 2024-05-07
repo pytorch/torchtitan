@@ -97,8 +97,8 @@ def checkpoint_mp(recv, send):
             state, checkpoint_id = obj
             dcp.save(state, checkpoint_id=checkpoint_id)
             logger.info(
-                "Finish saving the checkpoint in the background process. "
-                f"Spent {time.monotonic() - begin:.2f} seconds."
+                "Finish saving the checkpoint in the background process in "
+                f"{time.monotonic() - begin:.2f} seconds."
             )
     finally:
         logger.info("Destroying the process group.")
@@ -263,7 +263,7 @@ class CheckpointManager:
                 raise RuntimeError("The checkpoint background process is dead.")
             _ = self.mp_queue_recv.get()
         elif self.async_mode == AsyncMode.ASYNC:
-            if self.async_future:
+            if self.async_future is not None:
                 self.async_future.result()
 
     def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
@@ -303,8 +303,6 @@ class CheckpointManager:
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
-            if self.async_future is not None:
-                self.async_future.result()
             self.async_future = dcp.async_save(
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
@@ -313,7 +311,8 @@ class CheckpointManager:
         self.reset()
 
         logger.info(
-            f"Finished saving the checkpoint in {time.monotonic() - begin:.2f} seconds"
+            "Finished saving the checkpoint (or staging if async is enabled)"
+            f"in {time.monotonic() - begin:.2f} seconds."
         )
 
     def wait_for_staging(self) -> None:
