@@ -44,6 +44,7 @@ interval_type = "steps"
 interval = 500
 model_weights_only = false
 export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']
