@@ -84,11 +84,11 @@ def checkpoint_mp(recv, send):
     dist.init_process_group()
     try:
         while True:
-            logger.info("Checkpoint background process is done")
+            logger.debug("Checkpoint background process is done.")
             send.put(SaveDone())
-            logger.info("Wait for the new state_dict.")
+            logger.debug("Wait for the new state_dict.")
             obj = recv.get()
-            logger.info("Received the new state_dict.")
+            logger.debug("Received the new state_dict.")
             if isinstance(obj, Terminate):
                 logger.info("Terminating the checkpoint background process.")
                 return
@@ -98,7 +98,7 @@ def checkpoint_mp(recv, send):
             dcp.save(state, checkpoint_id=checkpoint_id)
             logger.info(
                 "Finish saving the checkpoint in the background process. "
-                f"{time.monotonic() - begin} seconds"
+                f"Spent {time.monotonic() - begin:.2f} seconds."
             )
     finally:
         logger.info("Destroying the process group.")
@@ -256,8 +256,8 @@ class CheckpointManager:
 
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            logger.info(
-                f"Waiting for the background process to finish, {time.monotonic()}."
+            logger.debug(
+                f"Waiting for the background process to finish, {time.monotonic()=}.:.2f"
             )
             if not self.mp.is_alive():
                 raise RuntimeError("The checkpoint background process is dead.")
@@ -269,12 +269,12 @@ class CheckpointManager:
     def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
         state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
         if self.cpu_offload_state_dict is None:
-            logger.info(f"Preparing the CPU memory, {time.monotonic()}.")
+            logger.debug(f"Preparing the CPU memory, {time.monotonic()=}.:.2f")
             self.cpu_offload_state_dict = _create_cpu_state_dict(
                 state_dict, pin_memory=True
             )
 
-        logger.info(f"Staging the state_dict, {time.monotonic()}.")
+        logger.debug(f"Staging the state_dict, {time.monotonic()=}.:.2f")
         with torch.cuda.stream(self.staging_stream):
             self.cpu_offload_state_dict = _copy_state_dict(
                 state_dict,
@@ -322,10 +322,10 @@ class CheckpointManager:
             and self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
             and self.staging
         ):
-            logger.info(f"Waiting for staging, {time.monotonic()}.")
+            logger.debug(f"Waiting for staging, {time.monotonic()=:.2f}.")
             self.staging_stream.synchronize()
-            logger.info(
-                f"Sending the state dict to the background process, {time.monotonic()}."
+            logger.debug(
+                f"Sending the state dict to the background process, {time.monotonic()=:.2f}."
             )
             self.mp_queue_send.put((self.staging_state_dict, self.staging_id))
             self.staging = False
@@ -350,13 +350,13 @@ class CheckpointManager:
 
         # We won't have optimizer states to load, if we are loading a seed checkpoint
         states = {"model": self.states["model"]} if step == 0 else self.states
-        logger.info(f"Loading the checkpoint at step {step}")
+        logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
         dcp.load(
             states,
             checkpoint_id=self._create_checkpoint_id(step),
         )
         logger.info(
-            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds"
+            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
