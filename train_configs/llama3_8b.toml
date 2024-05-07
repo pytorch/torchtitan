@@ -36,7 +36,7 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
-dataset = "c4_mini"
+dataset = "c4"
 
 [checkpoint]
 enable_checkpoint = false
