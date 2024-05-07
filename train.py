@@ -232,11 +232,18 @@ def main(job_config: JobConfig):
         stage_models = extract_pipeline_stage_models_manual(
             model, world_mesh, parallel_dims, job_config, device
         )
+        stage_models = [
+            models_parallelize_fns[model_name](
+                model, world_mesh, parallel_dims, job_config
+            )
+            for model in stage_models
+        ]
 
-    # apply PT-D DP/TP parallelisms and activation checkpointing
-    model = models_parallelize_fns[model_name](
-        model, world_mesh, parallel_dims, job_config
-    )
+    else:
+        # apply PT-D DP/TP parallelisms and activation checkpointing
+        model = models_parallelize_fns[model_name](
+            model, world_mesh, parallel_dims, job_config
+        )
 
     model.to_empty(device="cuda")
 
@@ -258,10 +265,20 @@ def main(job_config: JobConfig):
         pp_size = pp_mesh.size()
         stage_idx = pp_rank  # TODO support virtual stages
         # Get example input
-        input_shape = (job_config.training.batch_size, job_config.training.seq_len)
-        input_ids = torch.randint(
-            model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-        )
+        if pp_rank == 0:
+            input_shape = (job_config.training.batch_size, job_config.training.seq_len)
+            input_ids = torch.randint(
+                model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+            )
+        else:
+            input_shape = (
+                job_config.training.batch_size,
+                job_config.training.seq_len,
+                model_config.dim,
+            )
+            input_ids = torch.randint(
+                model.vocab_size, input_shape, dtype=torch.float32, device="meta"
+            )
         stage = ManualPipelineStage(
             stage_model,
             pp_rank,
@@ -269,8 +286,8 @@ def main(job_config: JobConfig):
             device,
             chunks,
             input_args=input_ids.chunk(chunks)[0],
+            group=pp_mesh.get_group("pp"),
         )
-        stage = stages[0]
         pp_schedule = ScheduleGPipe(
             stage,
             n_microbatches=parallel_dims.pp,

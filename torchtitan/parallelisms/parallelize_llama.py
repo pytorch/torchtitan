@@ -138,9 +138,9 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
-class DummyModule(torch.nn.Module):
-    def forward(self, *args):
-        return args
+class DummyTransformerLayer(torch.nn.Module):
+    def forward(self, input, freqs_cis):
+        return input
 
 
 class TransformerChunk(torch.nn.Module):
@@ -148,18 +148,22 @@ class TransformerChunk(torch.nn.Module):
         self,
         orig_model,  # : Transformer,
         this_stage_layer_names: List[str],
+        device,
     ):
         super().__init__()
         self.tok_embeddings = None
         if "tok_embeddings" in this_stage_layer_names:
             self.tok_embeddings = orig_model.tok_embeddings
-        self.freqs_cis = orig_model.freqs_cis
+
+        with torch.device(device):
+            self.freqs_cis = orig_model._precompute_freqs_cis()
+
         # preserve FQNs of original model by preserving structure
         # (including preserving position in layers[] list)- use dummy module
         self.layers = orig_model.layers
         for i in range(len(self.layers)):
             if f"layers.{i}" not in this_stage_layer_names:
-                self.layers[i] = DummyModule()
+                self.layers[i] = DummyTransformerLayer()
         self.norm = None
         if "norm" in this_stage_layer_names:
             self.norm = orig_model.norm
@@ -175,10 +179,9 @@ class TransformerChunk(torch.nn.Module):
         """
         if self.tok_embeddings:
             h = self.tok_embeddings(input)
-            _, seqlen, _ = h.shape
         else:
             h = input
-            _, seqlen = h.shape
+        _, seqlen, _ = h.shape
 
         freqs_cis = self.freqs_cis[:seqlen]
 
@@ -212,17 +215,19 @@ def extract_pipeline_stage_models_manual(
     pp_size = pp_mesh.size()
     stage_idx = pp_rank  # TODO support virtual stages
     layers_per_rank = len(model.layers) // parallel_dims.pp
-    layer_offset = parallel_dims.pp * pp_rank
+    layer_offset = layers_per_rank * pp_rank
     this_stage_layer_names = [
         f"layers.{i + layer_offset}" for i in range(layers_per_rank)
     ]
     if pp_rank == 0:
         this_stage_layer_names.insert(0, "tok_embeddings")
+        assert "layers.0" in this_stage_layer_names
     elif pp_rank == pp_size - 1:
         this_stage_layer_names.append("norm")
         this_stage_layer_names.append("output")
+        assert "layers.1" in this_stage_layer_names
 
-    stage_model = TransformerChunk(model, this_stage_layer_names)
+    stage_model = TransformerChunk(model, this_stage_layer_names, device)
     # Create a pipeline representation from the model
 
     # note for PipPy API
