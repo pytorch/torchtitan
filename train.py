@@ -238,6 +238,8 @@ def main(job_config: JobConfig):
             )
             for model in stage_models
         ]
+        # TODO virtual stages NYI
+        model = stage_models[0]
 
     else:
         # apply PT-D DP/TP parallelisms and activation checkpointing
@@ -258,7 +260,6 @@ def main(job_config: JobConfig):
         #     group=pp_mesh.get_group(),
         # )
         assert len(stage_models) == 1, "virtual stages NYI"
-        stage_model = stage_models[0]
         chunks = parallel_dims.pp
         pp_mesh = world_mesh["pp"]
         pp_rank = pp_mesh.get_local_rank()
@@ -268,7 +269,7 @@ def main(job_config: JobConfig):
         if pp_rank == 0:
             input_shape = (job_config.training.batch_size, job_config.training.seq_len)
             input_ids = torch.randint(
-                model.vocab_size, input_shape, dtype=torch.int64, device="meta"
+                model_config.vocab_size, input_shape, dtype=torch.int64, device="meta"
             )
         else:
             input_shape = (
@@ -277,10 +278,10 @@ def main(job_config: JobConfig):
                 model_config.dim,
             )
             input_ids = torch.randint(
-                model.vocab_size, input_shape, dtype=torch.float32, device="meta"
+                model_config.vocab_size, input_shape, dtype=torch.float32, device="meta"
             )
         stage = ManualPipelineStage(
-            stage_model,
+            model,
             pp_rank,
             pp_size,
             device,
@@ -308,6 +309,9 @@ def main(job_config: JobConfig):
         f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
+
+    # reshard now to counteract an issue where FSDP's states got advanced during PP stage shape inference
+    model.reshard()
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
