@@ -317,6 +317,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         # Apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
+            if isinstance(transformer_block, DummyTransformerLayer):
+                continue
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
@@ -380,6 +382,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             )
             model.layers.add_module(layer_name, transformer_block)
 
+        # TODO(whc) do we need reshard_after_forward setting here too?
         model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
