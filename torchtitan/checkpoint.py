@@ -341,7 +341,7 @@ class CheckpointManager:
             step_counts = []
             for filename in os.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
-                metadata_probe = os.path.join(self.folder, filename, ".metadata")                
+                metadata_probe = os.path.join(self.folder, filename, ".metadata")
                 if match and os.path.isfile(metadata_probe):
                     step_counts.append(int(match.group(1)))
             if not step_counts:
