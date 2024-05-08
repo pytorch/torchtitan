@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
 
@@ -47,7 +48,7 @@ from torchtitan.utils import (
 
 
 @dataclass
-class TrainState:
+class TrainState(Stateful):
     step: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
@@ -186,7 +187,9 @@ def main(job_config: JobConfig):
     # log model size
     model_param_count = get_num_params(model)
     num_flop_per_token = get_num_flop_per_token(
-        model_param_count, model_config, job_config.training.seq_len
+        get_num_params(model, exclude_embedding=True),
+        model_config,
+        job_config.training.seq_len,
     )
     logger.info(
         f"{color.blue}Model {model_name} {job_config.model.flavor} "
@@ -231,6 +234,15 @@ def main(job_config: JobConfig):
         states={"train_state": train_state},
         job_config=job_config,
     )
+
+    if job_config.checkpoint.create_seed_checkpoint:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        checkpoint.save(curr_step=0, force=True)
+        logger.info("Created seed checkpoint")
+        return
+
     checkpoint.load()
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
@@ -247,7 +259,9 @@ def main(job_config: JobConfig):
     data_iterator = iter(data_loader)
 
     logger.info(f"Training starts at step {train_state.step + 1}")
-    with maybe_enable_profiling(job_config) as torch_profiler:
+    with maybe_enable_profiling(
+        job_config, global_step=train_state.step
+    ) as torch_profiler:
         checkpoint.reset()
 
         # variables used to keep info for metrics logging
@@ -286,6 +300,7 @@ def main(job_config: JobConfig):
             )
 
             # optimizer step
+            checkpoint.wait_for_staging()
             optimizer.step()
             scheduler.step()
 
@@ -383,10 +398,10 @@ def main(job_config: JobConfig):
 
     metric_logger.close()
     logger.info("Training completed")
-    destroy_process_group()
 
 
 if __name__ == "__main__":
     config = JobConfig()
     config.parse_args()
     main(config)
+    destroy_process_group()

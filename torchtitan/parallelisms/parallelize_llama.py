@@ -160,6 +160,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             {
                 "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
+                    output_layouts=Shard(1),
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(1),
@@ -167,11 +168,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     use_local_output=not loss_parallel,
                 ),
                 "norm": SequenceParallel(),
-                "layers.0": PrepareModuleInput(
-                    input_layouts=(Replicate(), None),
-                    desired_input_layouts=(Shard(1), None),
-                    use_local_output=True,
-                ),
             },
         )
 

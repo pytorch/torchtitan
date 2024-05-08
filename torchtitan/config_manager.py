@@ -220,7 +220,11 @@ class JobConfig:
                 "dynamic",
                 "",
             ],  # TODO: add "delayed" option back in when supported
-            help="Type of fp8 linear quantization to apply to the model ['', 'dynamic']",
+            help="""
+                Type of fp8 linear quantization to apply to the model ['', 'dynamic'].
+                This features requires you to install 'float8_experimental' which can be found
+                here: https://github.com/pytorch-labs/float8_experimental
+            """,
         )
         self.parser.add_argument(
             "--training.gc_freq",
@@ -275,6 +279,36 @@ class JobConfig:
                 Converts to the specified precision when training completes and model_weights_only=true.
                 Currently supports float32, float16, and bfloat16.
                 The default value is float32.
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.create_seed_checkpoint",
+            action="store_true",
+            help="""
+                Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
+                Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
+                Could be implemented as a separate script, but this way shares more code.
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.async_mode",
+            type=str,
+            default="disabled",
+            help="""
+                Which async checkpoint mode to use. Currently there are 3 different modes.
+                1. "disabled": synchronized checkpointing will be used.
+                2. "async": torch.distributed.checkpoint.async_save will be used.
+                3. "async_with_pinned_mem": this option utilizes a dedicated pinned memory
+                   space and creates a separate process for faster GPU->CPU transfer
+                   performance and eliminating GIL contention. The cost is increased CPU
+                   memory usage. If insufficient CPU memory is available, performance may
+                   degrade due to memory paging. For most users, "async" should suffice as
+                   the performance overhead is typically small (on the order of tens of
+                   seconds) compared to checkpointing frequency. This mode can be employed
+                   to pursue near-zero checkpointing times (e.g., < 1 second) given
+                   appropriate hardware support such as ample CPU memory and fast PCIe.
+
+                "disabled" is the default mode.
             """,
         )
 

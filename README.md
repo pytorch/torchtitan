@@ -1,3 +1,5 @@
+[![GPU Integration Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_4gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_4gpu.yaml)
+
 # torchtitan
 
 `torchtitan` is currently in a pre-release state and under extensive development.
@@ -51,7 +53,6 @@ git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121 # or cu118
-pip install .
 ```
 
 ### Downloading a tokenizer
