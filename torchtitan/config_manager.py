@@ -200,7 +200,7 @@ class JobConfig:
                 When data_parallel_degree is -1 and data_parallel_replicate_degree > 1,
                 the parallelism is DDP.  DDP should only be used for small model as
                 DDP + TP is not yet supported.
-            """
+            """,
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",
@@ -228,12 +228,11 @@ class JobConfig:
         self.parser.add_argument(
             "--training.compiled_autograd",
             action="store_true",
-            help=
-                """
+            help="""
                 Whether to use CompiledAutograd to trace the backward.
                 This is an experimental feature and should not be used
                 unless you are familiar with CompiledAutograd.
-                """
+                """,
         )
         self.parser.add_argument(
             "--training.fp8_linear",
