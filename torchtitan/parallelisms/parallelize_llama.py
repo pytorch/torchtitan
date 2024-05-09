@@ -204,7 +204,7 @@ class TransformerChunk(torch.nn.Module):
         return output
 
 
-def extract_pipeline_stage_models_manual(
+def apply_pipeline_parallelism_manual(
     model, world_mesh, parallel_dims, job_config: JobConfig, device
 ):
     """
@@ -212,10 +212,6 @@ def extract_pipeline_stage_models_manual(
 
     The SPMD parallelisms should be applied to
     """
-    assert (
-        parallel_dims.pp_enabled
-    ), "can't apply pipeline parallelism if it is not enabled"
-
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
@@ -240,7 +236,7 @@ def extract_pipeline_stage_models_manual(
 
     # note for PipPy API
     # it would be nice if we could get fx.graph out of PipeInfo and then make it possible to manually construct PipeInfo
-    # and then use the same _PipelineStage ctor in either tracer or graph cases.
+    # and then use the same _PipelineStage ctor in either tracer or manual cases.
 
     return (stage_model,)
 

@@ -227,10 +227,10 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         # TODO(whc) now i need to figure out how to align this with the `model_parallelize_fns[model_name] pattern`
         from torchtitan.parallelisms.parallelize_llama import (
-            extract_pipeline_stage_models_manual,
+            apply_pipeline_parallelism_manual,
         )
 
-        stage_models = extract_pipeline_stage_models_manual(
+        stage_models = apply_pipeline_parallelism_manual(
             model, world_mesh, parallel_dims, job_config, device
         )
         stage_models = [
@@ -296,7 +296,6 @@ def main(job_config: JobConfig):
             n_microbatches=parallel_dims.pp,
             loss_fn=loss_fn,
         )
-
     else:
         # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
         # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
@@ -306,8 +305,7 @@ def main(job_config: JobConfig):
         # allocate sharded model on GPU and initialize weights via DTensor
 
         # if we were to rewrite init_weights to work on the pp-model, we could call it unconditionally here, and that
-        # would not only free us from needing seed-checkpoint init, but also solve the problem of computing freqs_cis
-        # buffer with appropriate shape after applying TP and affecting n_heads.
+        # would not free us from needing seed-checkpoint init
         model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
