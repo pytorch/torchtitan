@@ -228,7 +228,12 @@ class JobConfig:
         self.parser.add_argument(
             "--training.compiled_autograd",
             action="store_true",
-            help="Whether to compile the model.",
+            help=
+                """
+                Whether to use CompiledAutograd to trace the backward.
+                This is an experimental feature and should not be used
+                unless you are familiar with CompiledAutograd.
+                """
         )
         self.parser.add_argument(
             "--training.fp8_linear",
