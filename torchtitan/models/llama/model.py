@@ -182,7 +182,6 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        print(f"transformer layer got input shape {x.shape}")
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
