@@ -33,7 +33,7 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
-compile = true
+compile = false
 dataset = "c4"
 
 [activation_checkpoint]
