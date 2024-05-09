@@ -202,7 +202,7 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
-            "--training.pipeline_parallel_degree",
+            "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
             help="Pipeline Parallelism degree. 1 means disabled.",

@@ -92,7 +92,7 @@ integration_tests_flavors["debug_model.toml"] = [
             [
                 "--checkpoint.enable_checkpoint",
                 f"--checkpoint.folder {test_checkpoint_dir}_pp",
-                "--training.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 1",
                 "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
             ],
@@ -106,14 +106,42 @@ integration_tests_flavors["debug_model.toml"] = [
             [
                 "--checkpoint.enable_checkpoint",
                 f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
-                "--training.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_degree 2",
                 "--training.data_parallel_degree 2",
-                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+                "--model.norm_type fused_rmsnorm",
             ],
         ],
         "PP+DP 2D test",
         requires_seed_checkpoint=True,
     ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_pp_tp",
+                "--experimental.pipeline_parallel_degree 2",
+                "--training.tensor_parallel_degree 2",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+            ],
+        ],
+        "PP+TP 2D test",
+        requires_seed_checkpoint=True,
+    ),
+    # oh.. not enough GPUs?
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_pp_dp_tp",
+    #             "--experimental.pipeline_parallel_degree 2",
+    #             "--training.data_parallel_degree 2",
+    #             "--training.tensor_parallel_degree 2",
+    #             "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+    #         ],
+    #     ],
+    #     "PP+DP+TP 3D test",
+    #     requires_seed_checkpoint=True,
+    # ),
 ]
 
 
