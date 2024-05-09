@@ -149,9 +149,16 @@ class TransformerChunk(torch.nn.Module):
         orig_model,  # : Transformer,
         this_stage_layer_names: List[str],
         device,
+        input_seqlen: int,
     ):
         super().__init__()
         self.tok_embeddings = None
+
+        # inferring seqlen from forward(input) only works on stage0, bc on later stages
+        # the hidden state input may have reduced seqlen due to TP.  We need to use the
+        # original (full) seqlen for freqs_cis to be correct.
+        self.input_seqlen = input_seqlen
+
         if "tok_embeddings" in this_stage_layer_names:
             self.tok_embeddings = orig_model.tok_embeddings
 
@@ -181,9 +188,8 @@ class TransformerChunk(torch.nn.Module):
             h = self.tok_embeddings(input)
         else:
             h = input
-        _, seqlen, _ = h.shape
 
-        freqs_cis = self.freqs_cis[:seqlen]
+        freqs_cis = self.freqs_cis[0 : self.input_seqlen]
 
         for layer in self.layers:
             h = layer(h, freqs_cis)
@@ -227,7 +233,9 @@ def extract_pipeline_stage_models_manual(
         this_stage_layer_names.append("output")
         assert "layers.1" in this_stage_layer_names
 
-    stage_model = TransformerChunk(model, this_stage_layer_names, device)
+    input_seqlen = 2048  # TODO hack
+
+    stage_model = TransformerChunk(model, this_stage_layer_names, device, input_seqlen)
     # Create a pipeline representation from the model
 
     # note for PipPy API
@@ -300,6 +308,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             {
                 "tok_embeddings": RowwiseParallel(
                     input_layouts=Replicate(),
+                    output_layouts=Shard(1),
                 ),
                 "output": col_parallel_strategy(
                     input_layouts=Shard(1),
@@ -307,11 +316,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     use_local_output=not loss_parallel,
                 ),
                 "norm": SequenceParallel(),
-                "layers.0": PrepareModuleInput(
-                    input_layouts=(Replicate(), None),
-                    desired_input_layouts=(Shard(1), None),
-                    use_local_output=True,
-                ),
             },
         )
 
@@ -366,6 +370,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
         for layer_name, transformer_block in model.layers.named_children():
+            if isinstance(transformer_block, DummyTransformerLayer):
+                continue
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint

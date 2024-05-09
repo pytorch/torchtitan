@@ -32,6 +32,7 @@ except ImportError as exc:
     ) from exc
 
 from torch.distributed import destroy_process_group
+from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
@@ -272,9 +273,10 @@ def main(job_config: JobConfig):
                 model_config.vocab_size, input_shape, dtype=torch.int64, device="meta"
             )
         else:
+            # TODO(whc) can we rely on shape inference so that user doesn't have to compute TP impact on seq_len
             input_shape = (
                 job_config.training.batch_size,
-                job_config.training.seq_len,
+                int(job_config.training.seq_len // parallel_dims.tp),
                 model_config.dim,
             )
             input_ids = torch.randint(
@@ -294,6 +296,7 @@ def main(job_config: JobConfig):
             n_microbatches=parallel_dims.pp,
             loss_fn=loss_fn,
         )
+
     else:
         # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
         # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
@@ -301,6 +304,10 @@ def main(job_config: JobConfig):
         # becuase it can't find "embedding" layer, for example.
 
         # allocate sharded model on GPU and initialize weights via DTensor
+
+        # if we were to rewrite init_weights to work on the pp-model, we could call it unconditionally here, and that
+        # would not only free us from needing seed-checkpoint init, but also solve the problem of computing freqs_cis
+        # buffer with appropriate shape after applying TP and affecting n_heads.
         model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
@@ -310,8 +317,9 @@ def main(job_config: JobConfig):
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
 
-    # reshard now to counteract an issue where FSDP's states got advanced during PP stage shape inference
-    model.reshard()
+    if isinstance(model, FSDPModule) and parallel_dims.pp_enabled:
+        # reshard now to counteract an issue where FSDP's states got advanced during PP stage shape inference
+        model.reshard()
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -435,6 +443,7 @@ def main(job_config: JobConfig):
             )
 
             # optimizer step
+            checkpoint.wait_for_staging()
             optimizer.step()
             scheduler.step()
 
