@@ -121,6 +121,7 @@ def main(job_config: JobConfig):
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
+        dp_replicate=job_config.training.data_parallel_replicate_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.training.pipeline_parallel_degree,
         world_size=world_size,
@@ -303,10 +304,13 @@ def main(job_config: JobConfig):
             optimizer.zero_grad()
 
             # forward / backward
-            with loss_parallel_ctx():
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels)
-                loss.backward()
+            with torch._dynamo.utils.maybe_enable_compiled_autograd(
+                job_config.training.compiled_autograd
+            ):
+                with loss_parallel_ctx():
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    loss.backward()
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(

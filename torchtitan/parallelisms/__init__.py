@@ -20,6 +20,7 @@ models_parallelize_fns = {
 @dataclass
 class ParallelDims:
     dp: int
+    dp_replicate: int
     tp: int
     pp: int
     world_size: int
@@ -29,21 +30,27 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp, tp, pp = self.dp, self.tp, self.pp
+        dp, dp_replicate, tp, pp = self.dp, self.dp_replicate, self.tp, self.pp
         if dp == -1:
-            self.dp = dp = self.world_size // (tp * pp)
+            self.dp = dp = self.world_size // (dp_replicate * tp * pp)
         assert dp >= 1, dp
+        assert dp_replicate >= 1, dp_replicate
         assert tp >= 1, tp
         assert pp >= 1, pp
         assert (
-            dp * tp * pp == self.world_size
-        ), f"Invalid parallel dims: dp({dp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+            dp * dp_replicate * tp * pp == self.world_size
+        ), (
+            f"Invalid parallel dims: dp({dp}) * dp_replicate({dp_replicate}) * "
+            f"tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})."
+        )
 
     def build_mesh(self, device_type):
         dims = []
         names = []
         for d, name in zip(
-            [self.pp, self.dp, self.tp], ["pp", "dp", "tp"], strict=True
+            [self.pp, self.dp_replicate, self.dp, self.tp],
+            ["pp", "dp_replicate", "dp", "tp"],
+            strict=True
         ):
             if d > 1:
                 dims.append(d)
@@ -55,6 +62,10 @@ class ParallelDims:
     @property
     def dp_enabled(self):
         return self.dp > 1
+
+    @property
+    def dp_replicate_enabled(self):
+        return self.dp_replicate > 1
 
     @property
     def tp_enabled(self):

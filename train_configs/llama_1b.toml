@@ -1,0 +1,41 @@
+# TorchTrain Config.toml
+[job]
+dump_folder = "./outputs"
+description = "LLaMA 1B training"
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 10
+enable_tensorboard = true
+save_tb_folder = "tb"
+
+[model]
+name = "llama2"
+flavor = "1B"
+norm_type = "fused_rmsnorm"  # [layernorm / np_layernorm / rmsnorm / fused_rmsnorm]
+tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
+
+[optimizer]
+name = "AdamW"
+lr = 1.5e-4
+
+[training]
+batch_size = 8
+seq_len = 1024
+warmup_steps = 200  # lr scheduler warm up
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+data_parallel_degree = -1
+data_parallel_replicate_degree = 8  # experim
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+fp8_linear = ""
+compile = true
+dataset = "c4"
+
+[activation_checkpoint]
+mode = "none"  # ['none', 'full', 'selective']
