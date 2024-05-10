@@ -213,6 +213,11 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
+            "--training.compile_rmsnorm",
+            action="store_true",
+            help="Whether to compile the norm layers",
+        )
+        self.parser.add_argument(
             "--training.fp8_linear",
             type=str,
             default="",

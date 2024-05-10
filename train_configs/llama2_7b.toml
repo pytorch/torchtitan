@@ -17,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama2"
 flavor = "7B"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
@@ -35,6 +35,7 @@ tensor_parallel_degree = 1  # dp-only would be sufficient for 7B
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
+compile_rmsnorm = true  # compile setting above should be false to use this
 dataset = "c4"
 
 [checkpoint]
