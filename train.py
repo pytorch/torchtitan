@@ -20,17 +20,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
-try:
-    from pippy import ScheduleGPipe
-    from pippy.PipelineStage import _PipelineStage
-except ImportError as exc:
-    raise ImportError(
-        "pippy is not installed. Please install it to use pipeline parallelism. "
-        "`pip install git+https://github.com/pytorch/pippy`"
-    ) from exc
-
 from torch.distributed import destroy_process_group
+from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
@@ -133,7 +124,7 @@ def main(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
-        pp=job_config.training.pipeline_parallel_degree,
+        pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
@@ -223,11 +214,10 @@ def main(job_config: JobConfig):
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     if parallel_dims.pp_enabled:
-        # TODO(whc) now i need to figure out how to align this with the `model_parallelize_fns[model_name] pattern`
         from torchtitan.parallelisms.parallelize_llama import apply_pipeline_parallelism
 
-        model, pipe_info = apply_pipeline_parallelism(
-            model, world_mesh, parallel_dims, job_config
+        stage, model = apply_pipeline_parallelism(
+            model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
     # apply PT-D DP/TP parallelisms and activation checkpointing
@@ -237,21 +227,10 @@ def main(job_config: JobConfig):
 
     model.to_empty(device="cuda")
 
-    # TODO(whc) everything below needs to become a function that can be applied to each 'virtual stage' of PP, if
-    # there are virtual stages
     if parallel_dims.pp_enabled:
-        stage = _PipelineStage(
-            stage_module=model,
-            stage_index=pp_rank,
-            pipe_info=pipe_info,
-            device=device,
-            group=pp_mesh.get_group(),
-        )
-        pp_schedule = ScheduleGPipe(
-            stage,
-            n_microbatches=parallel_dims.pp,
-            loss_fn=loss_fn,
-        )
+        from torchtitan.parallelisms.parallelize_llama import build_pipeline_schedule
+
+        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
     else:
         # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
         # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
@@ -267,6 +246,10 @@ def main(job_config: JobConfig):
         f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
+
+    if isinstance(model, FSDPModule) and parallel_dims.pp_enabled:
+        # reshard now to counteract an issue where FSDP's states got advanced during PP stage shape inference
+        model.reshard()
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
