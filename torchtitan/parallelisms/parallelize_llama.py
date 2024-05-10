@@ -8,18 +8,9 @@
 # llama model, i.e. activation checkpointing, etc.
 
 from collections import defaultdict
-from typing import List, Tuple
+from typing import Tuple
 
 import torch
-
-# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
-try:
-    from pippy import pipeline, SplitPoint
-except ImportError as exc:
-    raise ImportError(
-        "pippy is not installed. Please install it to use pipeline parallelism. "
-        "`pip install git+https://github.com/pytorch/pippy`"
-    ) from exc
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
@@ -138,150 +129,15 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
-class DummyTransformerLayer(torch.nn.Module):
-    def forward(self, input, freqs_cis):
-        return input
-
-
-class TransformerChunk(torch.nn.Module):
-    def __init__(
-        self,
-        orig_model,  # : Transformer,
-        this_stage_layer_names: List[str],
-        device,
-        input_seqlen: int,
-    ):
-        super().__init__()
-        self.tok_embeddings = None
-
-        # inferring seqlen from forward(input) only works on stage0, bc on later stages
-        # the hidden state input may have reduced seqlen due to TP.  We need to use the
-        # original (full) seqlen for freqs_cis to be correct.
-        self.input_seqlen = input_seqlen
-
-        if "tok_embeddings" in this_stage_layer_names:
-            self.tok_embeddings = orig_model.tok_embeddings
-
-        with torch.device(device):
-            self.freqs_cis = orig_model._precompute_freqs_cis()
-
-        # preserve FQNs of original model by preserving structure
-        # (including preserving position in layers[] list)- use dummy module
-        self.layers = orig_model.layers
-        for i in range(len(self.layers)):
-            if f"layers.{i}" not in this_stage_layer_names:
-                self.layers[i] = DummyTransformerLayer()
-        self.norm = None
-        if "norm" in this_stage_layer_names:
-            self.norm = orig_model.norm
-        self.output = None
-        if "output" in this_stage_layer_names:
-            self.output = orig_model.output
-
-    def forward(self, input):
-        """
-        Copypaste of original Transformer.forward, with conditionals and unpacking added
-        such that we handle the cases where this rank doesn't have the embedding, or doesn't have
-        the output layers.
-        """
-        if self.tok_embeddings:
-            h = self.tok_embeddings(input)
-        else:
-            h = input
-
-        freqs_cis = self.freqs_cis[0 : self.input_seqlen]
-
-        for layer in self.layers:
-            h = layer(h, freqs_cis)
-        output = h
-
-        if self.norm:
-            h = self.norm(h)
-            output = h
-
-        if self.output:
-            output = self.output(h).float()
-        return output
-
-
-def apply_pipeline_parallelism_manual(
-    model, world_mesh, parallel_dims, job_config: JobConfig, device
-):
-    """
-    This API gets individual torch.nn.Module objects for each pipeline stage (including virtual stages).
-
-    The SPMD parallelisms should be applied to
-    """
-    pp_mesh = world_mesh["pp"]
-    pp_rank = pp_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
-    stage_idx = pp_rank  # TODO support virtual stages
-    layers_per_rank = len(model.layers) // parallel_dims.pp
-    layer_offset = layers_per_rank * pp_rank
-    this_stage_layer_names = [
-        f"layers.{i + layer_offset}" for i in range(layers_per_rank)
-    ]
-    if pp_rank == 0:
-        this_stage_layer_names.insert(0, "tok_embeddings")
-        assert "layers.0" in this_stage_layer_names
-    elif pp_rank == pp_size - 1:
-        this_stage_layer_names.append("norm")
-        this_stage_layer_names.append("output")
-        assert "layers.1" in this_stage_layer_names
-
-    input_seqlen = 2048  # TODO hack
-
-    stage_model = TransformerChunk(model, this_stage_layer_names, device, input_seqlen)
-    # Create a pipeline representation from the model
-
-    # note for PipPy API
-    # it would be nice if we could get fx.graph out of PipeInfo and then make it possible to manually construct PipeInfo
-    # and then use the same _PipelineStage ctor in either tracer or manual cases.
-
-    return (stage_model,)
-
-
-def apply_pipeline_parallelism_tracer(
-    model, world_mesh, parallel_dims, job_config: JobConfig
-):
-    assert (
-        parallel_dims.pp_enabled
-    ), "can't apply pipeline parallelism if it is not enabled"
-
-    if job_config.model.norm_type == "fused_rmsnorm":
-        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
-        # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
-        raise NotImplementedError(
-            "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
-        )
-    pp_mesh = world_mesh["pp"]
-    stage_idx = pp_mesh.get_local_rank()
-    layers_per_rank = len(model.layers) // parallel_dims.pp
-    split_spec = {
-        f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
-        for i in range(1, parallel_dims.pp)
-    }
-    # Get example input
-    input_shape = (job_config.training.batch_size, job_config.training.seq_len)
-    input_ids = torch.randint(
-        model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-    )
-
-    # Create a pipeline representation from the model
-    pipe = pipeline(
-        model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
-    )
-    model = pipe.get_stage_module(stage_idx)
-    return model, pipe.pipe_info
-
-
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
-    Apply SPMD parallelisms and activation checkpointing to the model.
+    Apply parallelisms and activation checkpointing to the model.
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    if parallel_dims.pp_enabled:
+        raise NotImplementedError("PP not implemented yet.")
 
     if parallel_dims.tp_enabled:
         if job_config.model.norm_type == "fused_rmsnorm":
@@ -317,8 +173,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
         # Apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in enumerate(model.layers):
-            if isinstance(transformer_block, DummyTransformerLayer):
-                continue
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
@@ -357,34 +211,24 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
         # TODO: Expose `reduce_dtype` as a config option.
         mp_policy = MixedPrecisionPolicy(
-            # TODO(whc) need to fix PP + FSDP-mixed-precision
-            # tracer for PP assumes f32 and is caught off guard when runtime FSDP interacts using bf16 inputs
-            # param_dtype=torch.bfloat16, reduce_dtype=torch.float32
-            param_dtype=torch.float32,
-            reduce_dtype=torch.float32,
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_name, transformer_block in model.layers.named_children():
-            if isinstance(transformer_block, DummyTransformerLayer):
-                continue
+        for layer_id, transformer_block in enumerate(model.layers):
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
                 )
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
-            # reshard_after_forward = layer_id < len(model.layers) - 1
-            # TODO(whc) need to fix correctly handle layer-ids on pp-split module
-            reshard_after_forward = True
+            reshard_after_forward = layer_id < len(model.layers) - 1
             fully_shard(
                 transformer_block,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            model.layers.add_module(layer_name, transformer_block)
-
-        # TODO(whc) do we need reshard_after_forward setting here too?
+            model.layers[layer_id] = transformer_block
         model = fully_shard(model, **fsdp_config)
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
