@@ -26,6 +26,8 @@ class OverrideDefinitions:
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
+    requires_seed_checkpoint: bool = False
+    ngpu: int = 4
 
 
 CONFIG_DIR = "./train_configs"
@@ -85,25 +87,72 @@ integration_tests_flavors["debug_model.toml"] = [
         ],
         "Checkpoint Integration Test - Save Model Weights Only bf16",
     ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_pp",
+                "--training.pipeline_parallel_degree 2",
+                "--training.data_parallel_degree 1",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+            ],
+        ],
+        "PP 1D test",
+        requires_seed_checkpoint=True,
+        ngpu=2,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
+                "--training.pipeline_parallel_degree 2",
+                "--training.data_parallel_degree 2",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+            ],
+        ],
+        "PP+DP 2D test",
+        requires_seed_checkpoint=True,
+    ),
 ]
+
+
+def _run_cmd(cmd):
+    return subprocess.run(
+        [cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        shell=True,
+    )
 
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
+
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-        result = subprocess.run(
-            [cmd],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            shell=True,
-        )
+
+        if test_flavor.requires_seed_checkpoint:
+            checkpoint_folder_arg = None
+            for arg in override_arg:
+                if "--checkpoint.folder" in arg:
+                    checkpoint_folder_arg = arg
+            assert (
+                checkpoint_folder_arg is not None
+            ), "Can't use seed checkpoint if folder is not specified"
+            print("Creating seed checkpoint")
+            result = _run_cmd(
+                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {checkpoint_folder_arg}"
+            )
+            print(result.stdout)
+
+        result = _run_cmd(cmd)
         print(result.stdout)
         if result.returncode != 0:
             raise Exception(
