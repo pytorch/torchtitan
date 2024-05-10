@@ -208,6 +208,62 @@ class JobConfig:
             help="Pipeline Parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
+            "--experimental.pipeline_parallel_stages_per_rank",
+            type=int,
+            default=1,
+            help="""
+                Pipeline Parallelism number of stages per rank (a.k.a. virtual stages)
+
+                For simple schedules, this should be 1.
+
+                For looped schedules, this can be greater than one.
+
+                If the number of stages produced by splitting does not match the expected number of stages,
+                an error will be raised for sanity.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_points",
+            type=int,
+            nargs="+",
+            default=[],
+            help="""
+                Specify names of modules to use as the beginning of a split point.
+
+                e.g. ["layers.1"] will cause the model to be split into 2 stages,
+                the first containing all the layers up to layers.0,
+                the second containing layers.1 and all the remaining layers.
+
+                Note: fully-automated splitting may be enabled in the future,
+                but currently the split points must be specified manually for both manual and tracer.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_schedule",
+            type=str,
+            choices=["1f1b", "gpipe"],
+            default="1f1b",
+            help="""
+                Specify the Pipeline Parallel schedule to use.
+
+                The schedule must be compatible with the split points and stages_per_rank.
+
+                Looped schedules are not yet supported in torchtitan.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_mode",
+            type=str,
+            choices=["manual", "tracer"],
+            default="manual",
+            help="""
+                Specify the split method (e.g. the Pipeline Parallelism Front End)
+
+                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
+                implementation manually, and then wrap it in a PipelineStage.
+
+                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
+                split via the provided split points, unflattened into an nn.Module,
+                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
+        )
+        self.parser.add_argument(
             "--training.compile",
             action="store_true",
             help="Whether to compile the model",
