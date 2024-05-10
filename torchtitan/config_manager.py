@@ -211,21 +211,10 @@ class JobConfig:
             "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
-            help="Pipeline Parallelism degree. 1 means disabled.",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_stages_per_rank",
-            type=int,
-            default=1,
             help="""
-                Pipeline Parallelism number of stages per rank (a.k.a. virtual stages)
-
-                For simple schedules, this should be 1.
-
-                For looped schedules, this can be greater than one.
-
-                If the number of stages produced by splitting does not match the expected number of stages,
-                an error will be raised for sanity.""",
+                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
+                If using looped schedules, this still specifies the number of physical ranks, not the number
+                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_split_points",
