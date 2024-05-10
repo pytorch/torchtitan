@@ -20,7 +20,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "debugmodel"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
@@ -39,6 +39,7 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
+compile_rmsnorm = true  # compile setting above should be false to use this
 dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 
 [checkpoint]

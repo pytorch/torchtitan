@@ -36,6 +36,7 @@ tensor_parallel_degree = 8  # 8-way TP
 pipeline_parallel_degree = 1
 fp8_linear = ""
 compile = false
+compile_rmsnorm = true  # compile setting above should be false to use this
 dataset = "c4"
 
 [checkpoint]
