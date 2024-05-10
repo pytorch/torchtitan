@@ -8,13 +8,20 @@
 # llama model, i.e. activation checkpointing, etc.
 
 from collections import defaultdict
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
 # TODO(whc) this can be removed after pippy migration into pytorch core is complete.
 try:
-    from pippy import pipeline, SplitPoint
+    from pippy import (
+        ManualPipelineStage,
+        pipeline,
+        Schedule1F1B,
+        ScheduleGPipe,
+        SplitPoint,
+    )
+    from pippy.PipelineStage import _PipelineStage
 except ImportError as exc:
     raise ImportError(
         "pippy is not installed. Please install it to use pipeline parallelism. "
@@ -34,7 +41,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
+from torch.nn import ModuleDict
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
 from torchtitan.config_manager import JobConfig
@@ -138,11 +145,6 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
-class DummyTransformerLayer(torch.nn.Module):
-    def forward(self, input, freqs_cis):
-        return input
-
-
 class TransformerChunk(torch.nn.Module):
     def __init__(
         self,
@@ -167,10 +169,11 @@ class TransformerChunk(torch.nn.Module):
 
         # preserve FQNs of original model by preserving structure
         # (including preserving position in layers[] list)- use dummy module
-        self.layers = orig_model.layers
-        for i in range(len(self.layers)):
-            if f"layers.{i}" not in this_stage_layer_names:
-                self.layers[i] = DummyTransformerLayer()
+        self.layers = ModuleDict()
+        for name in this_stage_layer_names:
+            if "layers." in name:
+                idx = name.split(".")[-1]
+                self.layers[idx] = orig_model.layers[int(idx)]
         self.norm = None
         if "norm" in this_stage_layer_names:
             self.norm = orig_model.norm
@@ -191,7 +194,7 @@ class TransformerChunk(torch.nn.Module):
 
         freqs_cis = self.freqs_cis[0 : self.input_seqlen]
 
-        for layer in self.layers:
+        for layer in self.layers.values():
             h = layer(h, freqs_cis)
         output = h
 
@@ -204,8 +207,41 @@ class TransformerChunk(torch.nn.Module):
         return output
 
 
+def apply_pipeline_parallelism(
+    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
+):
+    if job_config.experimental.pipeline_parallel_split_mode == "manual":
+        return apply_pipeline_parallelism_manual(
+            model, world_mesh, parallel_dims, job_config, device, model_config
+        )
+    elif job_config.experimental.pipeline_parallel_split_mode == "tracer":
+        return apply_pipeline_parallelism_tracer(
+            model, world_mesh, parallel_dims, job_config, device, model_config
+        )
+    else:
+        raise NotImplementedError(
+            f"{job_config.experimental.pipeline_parallel_split_mode} is not a valid split mode"
+        )
+
+
+def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
+    if job_config.experimental.pipeline_parallel_schedule == "1f1b":
+        schedule_class = Schedule1F1B
+    elif job_config.experimental.pipeline_parallel_schedule == "gpipe":
+        schedule_class = ScheduleGPipe
+    else:
+        raise NotImplementedError(
+            f"{job_config.experimental.pipeline_parallel_schedule} is not implemented"
+        )
+    return schedule_class(
+        stage,
+        n_microbatches=parallel_dims.pp,
+        loss_fn=loss_fn,
+    )
+
+
 def apply_pipeline_parallelism_manual(
-    model, world_mesh, parallel_dims, job_config: JobConfig, device
+    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     """
     This API gets individual torch.nn.Module objects for each pipeline stage (including virtual stages).
@@ -215,6 +251,8 @@ def apply_pipeline_parallelism_manual(
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
+    # heuristically == PP dim but should be a config
+    microbatches = parallel_dims.pp
     stage_idx = pp_rank  # TODO support virtual stages
     layers_per_rank = len(model.layers) // parallel_dims.pp
     layer_offset = layers_per_rank * pp_rank
@@ -231,18 +269,64 @@ def apply_pipeline_parallelism_manual(
 
     input_seqlen = 2048  # TODO hack
 
-    stage_model = TransformerChunk(model, this_stage_layer_names, device, input_seqlen)
+    model = TransformerChunk(model, this_stage_layer_names, device, input_seqlen)
     # Create a pipeline representation from the model
 
-    # note for PipPy API
-    # it would be nice if we could get fx.graph out of PipeInfo and then make it possible to manually construct PipeInfo
-    # and then use the same _PipelineStage ctor in either tracer or manual cases.
+    # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can leave model on meta device longer and
+    # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
+    # layers of the model that map to this stage, not the whole model.
 
-    return (stage_model,)
+    # Get example input
+    if pp_rank == 0:
+        input_shape = (job_config.training.batch_size, job_config.training.seq_len)
+        input = torch.randint(
+            model_config.vocab_size, input_shape, dtype=torch.int64, device=device
+        )
+
+        # HACK- can't use shape inference via execution of the PP stage inside ManualPipelineStage API, becuase the
+        # real output shapes will change after applying TP.  So we hardcode output shapes here, and thus bypass doing
+        # shape inference.
+        # the real fix is to use lazy shape inference during first PP forward, and not need to specify anything here.
+        output_shape = (
+            job_config.training.batch_size,
+            int(job_config.training.seq_len // parallel_dims.tp),
+            model_config.dim,
+        )
+        output = torch.empty(output_shape, dtype=torch.float32, device=device)
+    else:
+        # TODO(whc) can we rely on shape inference so that user doesn't have to compute TP impact on seq_len
+        input_shape = (
+            job_config.training.batch_size,
+            int(job_config.training.seq_len // parallel_dims.tp),
+            model_config.dim,
+        )
+        input = torch.randint(
+            model_config.vocab_size, input_shape, dtype=torch.float32, device=device
+        )
+        # TODO wrong shape, need to consider output layer
+        output_shape = (
+            job_config.training.batch_size,
+            int(job_config.training.seq_len // parallel_dims.tp),
+            model_config.dim,
+        )
+        output = torch.empty(output_shape, dtype=torch.float32, device=device)
+
+    model.to_empty(device=device)
+    stage = ManualPipelineStage(
+        model,
+        pp_rank,
+        pp_size,
+        device,
+        microbatches,
+        input_args=input.chunk(microbatches)[0],
+        output_args=output.chunk(microbatches)[0],
+        group=pp_mesh.get_group("pp"),
+    )
+    return (stage, model)
 
 
 def apply_pipeline_parallelism_tracer(
-    model, world_mesh, parallel_dims, job_config: JobConfig
+    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     assert (
         parallel_dims.pp_enabled
@@ -255,6 +339,7 @@ def apply_pipeline_parallelism_tracer(
             "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
         )
     pp_mesh = world_mesh["pp"]
+    pp_rank = pp_mesh.get_local_rank()
     stage_idx = pp_mesh.get_local_rank()
     layers_per_rank = len(model.layers) // parallel_dims.pp
     split_spec = {
@@ -272,7 +357,14 @@ def apply_pipeline_parallelism_tracer(
         model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
     )
     model = pipe.get_stage_module(stage_idx)
-    return model, pipe.pipe_info
+    stage = _PipelineStage(
+        stage_module=model,
+        stage_index=pp_rank,
+        pipe_info=pipe.pipe_info,
+        device=device,
+        group=pp_mesh.get_group(),
+    )
+    return (stage, model)
 
 
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
@@ -316,9 +408,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
 
         # Apply tensor + sequence parallelism to every transformer block
-        for layer_id, transformer_block in enumerate(model.layers):
-            if isinstance(transformer_block, DummyTransformerLayer):
-                continue
+        for layer_name, transformer_block in model.layers.named_children():
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
@@ -366,8 +456,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
         for layer_name, transformer_block in model.layers.named_children():
-            if isinstance(transformer_block, DummyTransformerLayer):
-                continue
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
