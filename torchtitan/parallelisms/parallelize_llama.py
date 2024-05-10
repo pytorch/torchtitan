@@ -217,7 +217,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         # specifically compile just the RMSNorm layers
         enable_compile_rmsnorm = job_config.training.compile_rmsnorm
         if job_config.training.compile and enable_compile_rmsnorm:
-            logger.info("Entire model is compiled with torch.compile, disabling RMSNorm compilation")
+            logger.info(
+                "Entire model is compiled with torch.compile, disabling RMSNorm compilation"
+            )
             enable_compile_rmsnorm = False
         if enable_compile_rmsnorm:
             logger.info("Compiling RMSNorm layers with torch.compile")
@@ -231,8 +233,12 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 )
 
             if enable_compile_rmsnorm:
-                transformer_block.attention_norm = torch.compile(transformer_block.attention_norm, dynamic=False)
-                transformer_block.ffn_norm = torch.compile(transformer_block.ffn_norm, dynamic=False)
+                transformer_block.attention_norm = torch.compile(
+                    transformer_block.attention_norm, dynamic=False
+                )
+                transformer_block.ffn_norm = torch.compile(
+                    transformer_block.ffn_norm, dynamic=False
+                )
 
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
