@@ -172,7 +172,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
 
         # Apply tensor + sequence parallelism to every transformer block
-        for layer_id, transformer_block in enumerate(model.layers):
+        for layer_id, transformer_block in model.layers.items():
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
@@ -215,14 +215,14 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_id, transformer_block in enumerate(model.layers):
+        for layer_id, transformer_block in model.layers.items():
             if job_config.activation_checkpoint.mode in ("full", "selective"):
                 transformer_block = checkpoint_wrapper(
                     transformer_block, job_config.activation_checkpoint
                 )
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = layer_id < len(model.layers) - 1
+            reshard_after_forward = int(layer_id) < len(model.layers) - 1
             fully_shard(
                 transformer_block,
                 **fsdp_config,
