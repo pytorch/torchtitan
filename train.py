@@ -34,7 +34,11 @@ from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.parallelisms import (
+    models_parallelize_fns,
+    models_pipelining_fns,
+    ParallelDims,
+)
 from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
@@ -151,11 +155,6 @@ def main(job_config: JobConfig):
 
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
-        pp_degree = pp_mesh.size()
-        pp_rank = pp_mesh.get_local_rank()
-
-    else:
-        pp_degree, pp_rank = 1, 0
 
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
@@ -215,9 +214,7 @@ def main(job_config: JobConfig):
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     if parallel_dims.pp_enabled:
-        from torchtitan.parallelisms.parallelize_llama import apply_pipeline_parallelism
-
-        stage, model = apply_pipeline_parallelism(
+        stage, model = models_pipelining_fns[model_name](
             model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
@@ -229,13 +226,10 @@ def main(job_config: JobConfig):
     model.to_empty(device="cuda")
 
     if parallel_dims.pp_enabled:
-
         pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
     else:
-        # if PP is enabled, we can't use init_weights. instead, we have to rely on offline creating an initial checkpoint
-        # and loading it to get initialization values.  This is becuase the init_weights functions are written assuming
-        # the whole model (all its weights, or FQNs) exist on one rank.  In PP, the init_weights on stage1 might crash
-        # becuase it can't find "embedding" layer, for example.
+        # If PP is enabled, we can't rely on init_weights, because some layers are missing.
+        # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
 
         # allocate sharded model on GPU and initialize weights via DTensor
         model.init_weights()

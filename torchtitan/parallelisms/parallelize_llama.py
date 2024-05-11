@@ -151,7 +151,7 @@ def _llama_fqns(num_layers):
     )
 
 
-def apply_pipeline_parallelism(
+def pipeline_llama(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     if job_config.experimental.pipeline_parallel_split_mode == "manual":
