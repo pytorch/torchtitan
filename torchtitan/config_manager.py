@@ -18,9 +18,7 @@ from torchtitan.logging_utils import logger
 
 
 def string_list(raw_arg):
-    s = raw_arg.split(",")
-    print(s)
-    return s
+    return raw_arg.split(",")
 
 
 class JobConfig:
