@@ -366,9 +366,9 @@ class Transformer(nn.Module):
         # just the non-persistent buffers that is called after loading checkpoints.
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
-        self.layers = torch.nn.ModuleList()
+        self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers.append(TransformerBlock(layer_id, model_args))
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = create_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
@@ -392,7 +392,7 @@ class Transformer(nn.Module):
         with torch.device(self.freqs_cis.device):
             self.freqs_cis = self._precompute_freqs_cis()
         nn.init.normal_(self.tok_embeddings.weight)
-        for layer in self.layers:
+        for layer in self.layers.values():
             layer.init_weights()
         self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
@@ -425,12 +425,14 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        h = self.tok_embeddings(tokens)
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
-        for layer in self.layers:
+        for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
-        h = self.norm(h)
-        output = self.output(h).float()
+
+        h = self.norm(h) if self.norm else h
+        output = self.output(h).float() if self.output else h
         return output
 
     @classmethod
