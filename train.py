@@ -35,6 +35,7 @@ from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
@@ -228,7 +229,6 @@ def main(job_config: JobConfig):
     model.to_empty(device="cuda")
 
     if parallel_dims.pp_enabled:
-        from torchtitan.parallelisms.parallelize_llama import build_pipeline_schedule
 
         pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
     else:

@@ -12,21 +12,15 @@ from typing import Dict, Tuple
 
 import torch
 
-# TODO(whc) this can be removed after pippy migration into pytorch core is complete.
 try:
-    from pippy import (
-        ManualPipelineStage,
-        pipeline,
-        Schedule1F1B,
-        ScheduleGPipe,
-        SplitPoint,
-    )
-    from pippy.PipelineStage import _PipelineStage
+    from pippy import ManualPipelineStage, pipeline, SplitPoint
+    from pippy._PipelineStage import _PipelineStage
 except ImportError as exc:
     raise ImportError(
         "pippy is not installed. Please install it to use pipeline parallelism. "
         "`pip install git+https://github.com/pytorch/pippy`"
     ) from exc
+
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
@@ -45,7 +39,7 @@ from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, che
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
-
+from torchtitan.parallelisms.pipelining_utils import split_stage_fqns
 
 # for selective AC
 no_recompute_list = {
@@ -144,6 +138,19 @@ def get_tp_parallel_strategy(
     return RowwiseParallel, ColwiseParallel
 
 
+def _llama_fqns(num_layers):
+    return (
+        [
+            "tok_embeddings",
+        ]
+        + [f"layers.{i}" for i in range(num_layers)]
+        + [
+            "norm",
+            "output",
+        ]
+    )
+
+
 def apply_pipeline_parallelism(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
@@ -159,56 +166,6 @@ def apply_pipeline_parallelism(
         raise NotImplementedError(
             f"{job_config.experimental.pipeline_parallel_split_mode} is not a valid split mode"
         )
-
-
-def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
-    if job_config.experimental.pipeline_parallel_schedule == "1f1b":
-        schedule_class = Schedule1F1B
-    elif job_config.experimental.pipeline_parallel_schedule == "gpipe":
-        schedule_class = ScheduleGPipe
-    else:
-        raise NotImplementedError(
-            f"{job_config.experimental.pipeline_parallel_schedule} is not implemented"
-        )
-    return schedule_class(
-        stage,
-        n_microbatches=parallel_dims.pp,
-        loss_fn=loss_fn,
-    )
-
-
-def _llama_fqns(num_layers):
-    return (
-        [
-            "tok_embeddings",
-        ]
-        + [f"layers.{i}" for i in range(num_layers)]
-        + [
-            "norm",
-            "output",
-        ]
-    )
-
-
-def split_stage_fqns(fqns, split_points, stage_id):
-    """Helper for splitting ordered list of layer names into layers per stage.
-
-    split_points is a list of layer names, each layer will be the first layer in a stage
-    """
-    stages = []
-    cur = []
-
-    for name in fqns:
-        if name in split_points:
-            assert len(
-                cur
-            ), f"{name} is not a valid split point, do not specify the first layer of stage 0"
-            stages.append(cur)
-            cur = []
-        cur.append(name)
-
-    stages.append(cur)
-    return stages[stage_id]
 
 
 def apply_pipeline_parallelism_manual(
