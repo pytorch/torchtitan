@@ -68,6 +68,34 @@ void check_args(
     compute_n1_n2(input,normalized_shape,n1,n2);
 }
 
+void cuda_rms_norm(
+    at::Tensor* output,
+    at::Tensor* invvar,
+    at::Tensor* input,
+    int n1,
+    int n2,
+    at::IntArrayRef normalized_shape,
+    at::Tensor* gamma,
+    double epsilon);
+
+#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
+std::vector<at::Tensor> rms_norm(
+    at::Tensor input,
+    at::IntArrayRef normalized_shape,
+    double epsilon) {
+  CHECK_INPUT(input);
+  int n1,n2;
+  check_args(input,normalized_shape,n1,n2);
+  at::Tensor output = at::empty_like(input);
+  at::Tensor invvar = at::empty({n1}, input.options().dtype(input.scalar_type()==at::ScalarType::Half || input.scalar_type()==at::ScalarType::BFloat16 ? at::ScalarType::Float : input.scalar_type()));
+  cuda_rms_norm(&output,&invvar,&input,n1,n2,
+      normalized_shape,NULL,epsilon);
+  return {output, invvar};
+}
+
 std::vector<at::Tensor> rms_norm_affine(
     at::Tensor input,
     at::IntArrayRef normalized_shape,
@@ -85,4 +113,68 @@ std::vector<at::Tensor> rms_norm_affine(
   cuda_rms_norm(&output,&invvar,&input,n1,n2,
       normalized_shape,&gamma,epsilon);
   return {output, invvar};
+}
+
+void cuda_rms_norm_gradient(
+    at::Tensor* dout,
+    at::Tensor* invvar,
+    at::Tensor* input_or_output,
+    int n1,
+    int n2,
+    at::IntArrayRef normalized_shape,
+    at::Tensor* gamma,
+    double epsilon,
+    at::Tensor* grad_input,
+    at::Tensor* grad_gamma,
+    bool memory_efficient);
+
+at::Tensor rms_norm_gradient(
+    at::Tensor dout,
+    at::Tensor invvar,
+    at::Tensor input_or_output,
+    at::IntArrayRef normalized_shape,
+    double epsilon,
+    bool memory_efficient) {
+  CHECK_INPUT(dout);
+  CHECK_INPUT(invvar);
+  CHECK_INPUT(input_or_output);
+  int n1,n2;
+  check_args(input_or_output,normalized_shape,n1,n2);
+  at::Tensor grad_input = at::empty_like(input_or_output);
+  cuda_rms_norm_gradient(&dout,&invvar,&input_or_output,n1,n2,
+      normalized_shape,NULL,epsilon,
+      &grad_input,NULL,memory_efficient);
+  return grad_input;
+}
+
+std::vector<at::Tensor> rms_norm_gradient_affine(
+    at::Tensor dout,
+    at::Tensor invvar,
+    at::Tensor input_or_output,
+    at::IntArrayRef normalized_shape,
+    at::Tensor gamma,
+    double epsilon,
+    bool memory_efficient) {
+  CHECK_INPUT(dout);
+  CHECK_INPUT(invvar);
+  CHECK_INPUT(input_or_output);
+  CHECK_INPUT(gamma);
+  int n1,n2;
+  check_args(input_or_output,normalized_shape,gamma,n1,n2);
+  at::Tensor grad_input = at::empty_like(input_or_output);
+  at::Tensor grad_gamma = at::empty_like(gamma);
+  cuda_rms_norm_gradient(&dout,&invvar,&input_or_output,n1,n2,
+      normalized_shape,&gamma,epsilon,
+      &grad_input,&grad_gamma,memory_efficient);
+  return {grad_input, grad_gamma};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+
+  m.def("rms_forward_affine", &rms_norm_affine, "RMSNorm forward (CUDA)");
+  m.def("rms_forward", &rms_norm, "RMSNorm forward (CUDA)");
+  m.def("rms_backward_affine", &rms_norm_gradient_affine, "RMSNorm backward (CUDA)");
+  m.def("rms_backward", &rms_norm_gradient, "RMSNorm backward (CUDA)");
+
+  //m.def("rms_forward_affine_mixed_dtypes", &rms_norm_affine_mixed_dtypes, "RMSNorm forward with mixed dtypes (CUDA) compatible with Megatron's implementation");
 }
