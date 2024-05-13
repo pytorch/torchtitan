@@ -379,54 +379,6 @@ void cuComputePartGradGammaBeta(
     }
 }
 
-template<typename U, typename V> __global__
-void cuComputeGradGammaBeta(
-    const U* part_grad_gamma,
-    const U* part_grad_beta,
-    const int part_size,
-    const int n1,
-    const int n2,
-    V* grad_gamma,
-    V* grad_beta,
-    bool rms_only)
-{
-    // sum partial gradients for gamma and beta
-    SharedMemory<U> shared;
-    U* buf = shared.getPointer();
-    int i2 = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i2 < n2) {
-      // each warp does sequential reductions until reduced part_size is num_warps
-      int num_warp_reductions = part_size / blockDim.y;
-      U sum_gamma = U(0);
-      U sum_beta = U(0);
-      const U* part_grad_gamma_ptr = part_grad_gamma + threadIdx.y * num_warp_reductions * n2 + i2;
-      const U* part_grad_beta_ptr = part_grad_beta + threadIdx.y * num_warp_reductions * n2 + i2;
-      for (int warp_offset = 0;  warp_offset < num_warp_reductions;  ++warp_offset) {
-        sum_gamma += part_grad_gamma_ptr[warp_offset*n2];
-      }
-      // inter-warp reductions
-      const int nbsize3 = blockDim.x * blockDim.y / 2;
-      for (int offset = blockDim.y/2;  offset >= 1;  offset /= 2) {
-        // top half write to shared memory
-        if (threadIdx.y >= offset && threadIdx.y < 2*offset) {
-          const int write_idx = (threadIdx.y - offset) * blockDim.x + threadIdx.x;
-          buf[write_idx] = sum_gamma;
-        }
-        __syncthreads();
-        // bottom half sums
-        if (threadIdx.y < offset) {
-          const int read_idx = threadIdx.y * blockDim.x + threadIdx.x;
-          sum_gamma += buf[read_idx];
-        }
-        __syncthreads();
-      }
-      // write out fully summed gradients
-      if (threadIdx.y == 0) {
-        grad_gamma[i2] = sum_gamma;
-      }
-    }
-}
-
 
 template<typename T, typename U, typename V, bool MemoryEfficient> __global__
 void cuComputeGradInput(
