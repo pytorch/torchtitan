@@ -6,8 +6,8 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn import functional as F
 
-global fused_layer_norm_cuda
-fused_layer_norm_cuda = None
+global titan_cuda
+titan_cuda = None
 
 
 # Reference implementation from Huggingface
@@ -32,15 +32,15 @@ def manual_rms_norm(input, normalized_shape, weight, eps):
 class FusedRMSNormAffineFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, weight, normalized_shape, eps, memory_efficient=False):
-        global fused_layer_norm_cuda
-        if fused_layer_norm_cuda is None:
-            fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
+        global titan_cuda
+        if titan_cuda is None:
+            titan_cuda = importlib.import_module("titan_cuda")
         ctx.normalized_shape = normalized_shape
         ctx.eps = eps
         ctx.memory_efficient = memory_efficient
         input_ = input.contiguous()
         weight_ = weight.contiguous()
-        output, invvar = fused_layer_norm_cuda.rms_forward_affine(
+        output, invvar = titan_cuda.rms_forward_affine(
             input_, ctx.normalized_shape, weight_, ctx.eps)
         if ctx.memory_efficient:
             ctx.save_for_backward(output, weight_, invvar)
@@ -52,7 +52,7 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input_or_output, weight_, invvar = ctx.saved_tensors
         grad_input = grad_weight = None
-        grad_input, grad_weight = fused_layer_norm_cuda.rms_backward_affine(
+        grad_input, grad_weight = titan_cuda.rms_backward_affine(
            grad_output.contiguous(), invvar, input_or_output,
            ctx.normalized_shape, weight_, ctx.eps, ctx.memory_efficient
         )
@@ -62,14 +62,14 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
 class FusedRMSNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, normalized_shape, eps, memory_efficient=False):
-        global fused_layer_norm_cuda
-        if fused_layer_norm_cuda is None:
-            fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
+        global titan_cuda
+        if titan_cuda is None:
+            titan_cuda = importlib.import_module("titan_cuda")
         ctx.normalized_shape = normalized_shape
         ctx.eps = eps
         ctx.memory_efficient = memory_efficient
         input_ = input.contiguous()
-        output, invvar = fused_layer_norm_cuda.rms_forward(input_, ctx.normalized_shape, ctx.eps)
+        output, invvar = titan_cuda.rms_forward(input_, ctx.normalized_shape, ctx.eps)
         if ctx.memory_efficient:
             ctx.save_for_backward(output, invvar)
         else:
@@ -80,7 +80,7 @@ class FusedRMSNormFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input_or_output, invvar = ctx.saved_tensors
         grad_input = None
-        grad_input = fused_layer_norm_cuda.rms_backward(
+        grad_input = titan_cuda.rms_backward(
             grad_output.contiguous(), invvar, input_or_output,
             ctx.normalized_shape, ctx.eps, ctx.memory_efficient
         )
@@ -151,8 +151,8 @@ class FusedRMSNorm(torch.nn.Module):
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, memory_efficient=False):
         super().__init__()
 
-        global fused_layer_norm_cuda
-        fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
+        global titan_cuda
+        titan_cuda = importlib.import_module("titan_cuda")
 
         if isinstance(normalized_shape, numbers.Integral):
             normalized_shape = (normalized_shape,)
