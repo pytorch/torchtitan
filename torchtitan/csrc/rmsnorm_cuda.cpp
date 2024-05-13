@@ -21,9 +21,18 @@ void compute_n1_n2(const at::Tensor& input,
     for (int i = 1; i < idiff; ++i) {
         n1 *= input.size(i);
     }
-}
 
-} // namespace
+}  //end compute n1 n2
+
+void check_args(
+    at::IntArrayRef normalized_shape,
+    at::Tensor gamma,
+    at::Tensor beta
+    )
+{
+    TORCH_CHECK(!gamma.defined() || gamma.sizes().equals(normalized_shape));
+    TORCH_CHECK(!beta.defined() || beta.sizes().equals(normalized_shape));
+}
 
 void check_args(
     at::IntArrayRef normalized_shape,
@@ -66,6 +75,50 @@ void check_args(
     }
 
     compute_n1_n2(input,normalized_shape,n1,n2);
+}
+
+void check_args(
+    at::Tensor input,
+    at::IntArrayRef normalized_shape,
+    at::Tensor gamma,
+    int& n1,
+    int& n2
+    )
+{
+    check_args(input,normalized_shape,n1,n2);
+    check_args(normalized_shape,gamma);
+}
+
+
+void check_args(
+    at::Tensor input,
+    at::IntArrayRef normalized_shape,
+    at::Tensor gamma,
+    at::Tensor beta,
+    int& n1,
+    int& n2
+    )
+{
+    check_args(input,normalized_shape,n1,n2);
+    check_args(normalized_shape,gamma,beta);
+}
+
+
+
+} // namespace
+
+
+template<typename T, typename U, typename V=T> __global__
+void cuApplyRMSNorm(
+  V* __restrict__ output_vals,
+  U* __restrict__ invvar,
+  const T* __restrict__ vals,
+  const int n1,
+  const int n2,
+  const U epsilon,
+  const V* __restrict__ gamma)
+{
+  cuApplyLayerNorm_<T, U, V>(output_vals, NULL, invvar, vals, n1, n2, epsilon, gamma, NULL, true);
 }
 
 void cuda_rms_norm(
