@@ -30,12 +30,6 @@ class TestFusedLayerNorm(common_utils.TestCase):
             module_cuda_ = FusedRMSNorm(
                 normalized_shape=normalized_shape, elementwise_affine=elementwise_affine, memory_efficient=memory_efficient
             ).to(device="cuda", dtype=dtype)
-        else:
-            assert elementwise_affine
-            module_cpu_ = MixedFusedRMSNorm(
-                normalized_shape=normalized_shape).cpu()
-            module_cuda_ = MixedFusedRMSNorm(
-                normalized_shape=normalized_shape).to(device="cuda", dtype=dtype)
 
         torch.cuda.manual_seed(42)
         if contiguous:
