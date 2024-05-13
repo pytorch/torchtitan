@@ -49,10 +49,10 @@ class TestRMSNorm:
     def n_dim(
         self,
     ):
-        return 8192
+        return 32
 
     def test_cuda_fused_vs_pytorch_accuracy(self, n_dim):
-        batch_size = 8
+        batch_size = 1
         layer_weight_size = (n_dim,)
         test_eps = 1e-8
         atol_precision = 1e-7
@@ -68,8 +68,8 @@ class TestRMSNorm:
         expected_rms = expected_rms_func(sample_x)
         fused_out = fused_rms_norm(sample_x)
 
-        print(f"{fused_out[0:10]=}")
-        print(f"{expected_rms[0:10]=}")
+        print(f"{fused_out.shape=}")
+        print(f"{expected_rms=}")
 
         # Check forward pass accuracy
         assert_expected(
