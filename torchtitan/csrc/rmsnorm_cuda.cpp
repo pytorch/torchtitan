@@ -90,36 +90,11 @@ void check_args(
 }
 
 
-void check_args(
-    at::Tensor input,
-    at::IntArrayRef normalized_shape,
-    at::Tensor gamma,
-    at::Tensor beta,
-    int& n1,
-    int& n2
-    )
-{
-    check_args(input,normalized_shape,n1,n2);
-    check_args(normalized_shape,gamma,beta);
-}
 
 
 
 } // namespace
 
-
-template<typename T, typename U, typename V=T> __global__
-void cuApplyRMSNorm(
-  V* __restrict__ output_vals,
-  U* __restrict__ invvar,
-  const T* __restrict__ vals,
-  const int n1,
-  const int n2,
-  const U epsilon,
-  const V* __restrict__ gamma)
-{
-  cuApplyLayerNorm_<T, U, V>(output_vals, NULL, invvar, vals, n1, n2, epsilon, gamma, NULL, true);
-}
 
 void cuda_rms_norm(
     at::Tensor* output,
