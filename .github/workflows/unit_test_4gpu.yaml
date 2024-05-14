@@ -23,7 +23,7 @@ jobs:
         python -m pip install -r requirements.txt
         python -m pip install -r dev-requirements.txt
         python ./test_runner.py
-        mv outputs/* artifacts-to-be-uploaded/
+        mv outputs artifacts-to-be-uploaded
 # TODO the below were not ported over to the 'generic workflow' - do they matter?
 
 # defaults:
