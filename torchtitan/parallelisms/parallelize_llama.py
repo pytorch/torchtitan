@@ -35,6 +35,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
 from torchtitan.config_manager import JobConfig
@@ -155,11 +156,11 @@ def pipeline_llama(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     if job_config.experimental.pipeline_parallel_split_mode == "manual":
-        return apply_pipeline_parallelism_manual(
+        return pipeline_llama_manual(
             model, world_mesh, parallel_dims, job_config, device, model_config
         )
     elif job_config.experimental.pipeline_parallel_split_mode == "tracer":
-        return apply_pipeline_parallelism_tracer(
+        return pipeline_llama_tracer(
             model, world_mesh, parallel_dims, job_config, device, model_config
         )
     else:
@@ -168,7 +169,16 @@ def pipeline_llama(
         )
 
 
-def apply_pipeline_parallelism_manual(
+def _llama_trace_input(job_config, model_config, device="meta"):
+    """Get meta tensors with the right input shapes used for tracing"""
+    tokens_shape = (job_config.training.batch_size, job_config.training.seq_len)
+    tokens = torch.randint(
+        model_config.vocab_size, tokens_shape, dtype=torch.int64, device=device
+    )
+    return (tokens,)
+
+
+def pipeline_llama_manual(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     """
@@ -253,7 +263,7 @@ def apply_pipeline_parallelism_manual(
     return (stage, model)
 
 
-def apply_pipeline_parallelism_tracer(
+def pipeline_llama_tracer(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
     if job_config.model.norm_type == "fused_rmsnorm":
@@ -276,15 +286,13 @@ def apply_pipeline_parallelism_tracer(
         f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
         for i in range(1, parallel_dims.pp)
     }
-    # Get example input
-    input_shape = (job_config.training.batch_size, job_config.training.seq_len)
-    input_ids = torch.randint(
-        model.vocab_size, input_shape, dtype=torch.int64, device="meta"
-    )
 
     # Create a pipeline representation from the model
     pipe = pipeline(
-        model, parallel_dims.pp, example_args=(input_ids,), split_spec=split_spec
+        model,
+        parallel_dims.pp,
+        example_args=_llama_trace_input(job_config, model_config),
+        split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
     stage = _PipelineStage(

@@ -19,7 +19,6 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-
 from torch.distributed import destroy_process_group
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.checkpoint.stateful import Stateful
@@ -248,6 +247,7 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
+
     metric_logger = build_metric_logger(job_config)
 
     # torch.compile model for improved performance
