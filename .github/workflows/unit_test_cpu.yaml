@@ -15,7 +15,6 @@ jobs:
     with:
       docker-image: "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
       repository: "pytorch/torchtitan"
-      upload-artifact: "outputs"
       script: |
         pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install -r requirements.txt
