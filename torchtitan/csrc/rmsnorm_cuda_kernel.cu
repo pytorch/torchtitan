@@ -588,63 +588,40 @@ void cuComputeGradInput(
   }
 }
 
-template<typename U, typename V> __global__
-void cuComputeGradGammaBeta(
-    const U* part_grad_gamma,
-    const U* part_grad_beta,
-    const int part_size,
-    const int n1,
-    const int n2,
-    V* grad_gamma,
-    V* grad_beta,
-    bool rms_only)
-{
-    // sum partial gradients for gamma and beta
+template<typename U, typename V>
+__global__ void cuComputeGradGamma(
+    const U* part_grad_gamma, const int part_size, const int n1, const int n2, V* grad_gamma) {
+    // sum partial gradients for gamma
     SharedMemory<U> shared;
     U* buf = shared.getPointer();
     int i2 = blockIdx.x * blockDim.x + threadIdx.x;
     if (i2 < n2) {
-      // each warp does sequential reductions until reduced part_size is num_warps
-      int num_warp_reductions = part_size / blockDim.y;
-      U sum_gamma = U(0);
-      U sum_beta = U(0);
-      const U* part_grad_gamma_ptr = part_grad_gamma + threadIdx.y * num_warp_reductions * n2 + i2;
-      const U* part_grad_beta_ptr = part_grad_beta + threadIdx.y * num_warp_reductions * n2 + i2;
-      for (int warp_offset = 0;  warp_offset < num_warp_reductions;  ++warp_offset) {
-        sum_gamma += part_grad_gamma_ptr[warp_offset*n2];
-        if (!rms_only) {
-          sum_beta += part_grad_beta_ptr[warp_offset*n2];
+        // each warp does sequential reductions until reduced part_size is num_warps
+        int num_warp_reductions = part_size / blockDim.y;
+        U sum_gamma = U(0);
+        const U* part_grad_gamma_ptr = part_grad_gamma + threadIdx.y * num_warp_reductions * n2 + i2;
+        for (int warp_offset = 0; warp_offset < num_warp_reductions; ++warp_offset) {
+            sum_gamma += part_grad_gamma_ptr[warp_offset*n2];
         }
-      }
-      // inter-warp reductions
-      const int nbsize3 = blockDim.x * blockDim.y / 2;
-      for (int offset = blockDim.y/2;  offset >= 1;  offset /= 2) {
-        // top half write to shared memory
-        if (threadIdx.y >= offset && threadIdx.y < 2*offset) {
-          const int write_idx = (threadIdx.y - offset) * blockDim.x + threadIdx.x;
-          buf[write_idx] = sum_gamma;
-          if (!rms_only) {
-            buf[write_idx+nbsize3] = sum_beta;
-          }
+        // inter-warp reductions
+        for (int offset = blockDim.y/2; offset >= 1; offset /= 2) {
+            // top half write to shared memory
+            if (threadIdx.y >= offset && threadIdx.y < 2*offset) {
+                const int write_idx = (threadIdx.y - offset) * blockDim.x + threadIdx.x;
+                buf[write_idx] = sum_gamma;
+            }
+            __syncthreads();
+            // bottom half sums
+            if (threadIdx.y < offset) {
+                const int read_idx = threadIdx.y * blockDim.x + threadIdx.x;
+                sum_gamma += buf[read_idx];
+            }
+            __syncthreads();
         }
-        __syncthreads();
-        // bottom half sums
-        if (threadIdx.y < offset) {
-          const int read_idx = threadIdx.y * blockDim.x + threadIdx.x;
-          sum_gamma += buf[read_idx];
-          if (!rms_only) {
-            sum_beta += buf[read_idx+nbsize3];
-          }
+        // write out fully summed gradients
+        if (threadIdx.y == 0) {
+            grad_gamma[i2] = sum_gamma;
         }
-        __syncthreads();
-      }
-      // write out fully summed gradients
-      if (threadIdx.y == 0) {
-        grad_gamma[i2] = sum_gamma;
-        if (!rms_only) {
-          grad_beta[i2] = sum_beta;
-        }
-      }
     }
 }
 
@@ -774,14 +751,14 @@ void HostRMSNormGradient(
       const dim3 threads3(32,8,1);
       const dim3 blocks3((n2+threads2.x-1)/threads2.x,1,1);
       const int nshared3 = threads3.x * threads3.y * sizeof(U);
-      cuComputeGradGammaBeta<<<blocks3, threads3, nshared3, stream>>>(
+      cuComputeGradGamma<<<blocks3, threads3, nshared3, stream>>>(
                       part_grad_gamma.DATA_PTR<U>(),
-                      part_grad_gamma.DATA_PTR<U>(), /* unused */
+                      //part_grad_gamma.DATA_PTR<U>(), /* unused */
                       part_size,
                       n1,n2,
-                      grad_gamma,
-                      grad_gamma, /* unused */
-                      true);
+                      grad_gamma
+                      //grad_gamma /* unused */
+                      );
     }
 
     // compute grad_input
