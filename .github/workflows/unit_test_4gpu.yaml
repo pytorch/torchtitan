@@ -16,7 +16,7 @@ jobs:
       runner: linux.g5.12xlarge.nvidia.gpu
       gpu-arch-type: cuda
       gpu-arch-version: "12.1"
-      docker-image: "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
+      docker-image: "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
       repository: "pytorch/torchtitan"
       upload-artifact: "outputs"
       script: |
@@ -25,8 +25,6 @@ jobs:
         python -m pip install -r dev-requirements.txt
         python ./test_runner.py
         mv outputs artifacts-to-be-uploaded
-
-# TODO the below were not ported over to the 'generic workflow' - do they matter?
-
-#       - name: Upload Coverage to Codecov
-#         uses: codecov/codecov-action@v3
+  upload-coverage:
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v3
