@@ -396,10 +396,12 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                     transformer_block, job_config.activation_checkpoint
                 )
             # As an optimization, do not reshard after forward for the last
-            # transformer block since FSDP would prefetch it immediately
-            # reshard_after_forward = int(layer_id) < len(model.layers) - 1
-            # TODO(whc) need to fix correctly handle layer-ids on pp-split module
-            reshard_after_forward = True
+            # transformer block since FSDP would prefetch it immediately.
+            # When using Pipeline Parallelism, generally zero-2 is best so as to avoid repeated reshardings
+            # per microbatch.
+            reshard_after_forward = (
+                int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
+            )
             fully_shard(
                 transformer_block,
                 **fsdp_config,
@@ -407,8 +409,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             )
             model.layers[layer_id] = transformer_block
 
-        # TODO(whc) do we need reshard_after_forward setting here too?
-        model = fully_shard(model, **fsdp_config)
+        model = fully_shard(
+            model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
+        )
         if ac_mode in ("full", "selective"):
             logger.info(f"Applied {ac_mode} activation checkpointing to the model")
         logger.info("Applied FSDP to the model")
