@@ -21,6 +21,6 @@ jobs:
         python -m pip install -r requirements.txt
         python -m pip install -r dev-requirements.txt
         pytest test --cov=. --cov-report=xml --durations=20 -vv
-  upload-coverage:
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v3
+  # upload-coverage:
+  #     - name: Upload Coverage to Codecov
+  #       uses: codecov/codecov-action@v3

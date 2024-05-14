@@ -25,6 +25,6 @@ jobs:
         python -m pip install -r dev-requirements.txt
         python ./test_runner.py
         mv outputs artifacts-to-be-uploaded
-  upload-coverage:
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v3
+  # upload-coverage:
+  #     - name: Upload Coverage to Codecov
+  #       uses: codecov/codecov-action@v3
