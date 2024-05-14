@@ -31,7 +31,7 @@ def manual_rms_norm(input, normalized_shape, weight, eps):
 
 class FusedRMSNormAffineFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, weight, normalized_shape, eps, memory_efficient=False):
+    def forward(ctx, input, weight, normalized_shape, eps, memory_efficient=True):
         global titan_cuda
         if titan_cuda is None:
             titan_cuda = importlib.import_module("titan_cuda")
@@ -40,20 +40,20 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
         ctx.memory_efficient = memory_efficient
         input_ = input.contiguous()
         weight_ = weight.contiguous()
-        output, invvar = titan_cuda.rms_forward_affine(
+        output, rstd = titan_cuda.rms_forward_affine(
             input_, ctx.normalized_shape, weight_, ctx.eps)
         if ctx.memory_efficient:
-            ctx.save_for_backward(output, weight_, invvar)
+            ctx.save_for_backward(output, weight_, rstd)
         else:
-            ctx.save_for_backward(input_, weight_, invvar)
+            ctx.save_for_backward(input_, weight_, rstd)
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        input_or_output, weight_, invvar = ctx.saved_tensors
+        input_or_output, weight_, rstd = ctx.saved_tensors
         grad_input = grad_weight = None
         grad_input, grad_weight = titan_cuda.rms_backward_affine(
-           grad_output.contiguous(), invvar, input_or_output,
+           grad_output.contiguous(), rstd, input_or_output,
            ctx.normalized_shape, weight_, ctx.eps, ctx.memory_efficient
         )
         return grad_input, grad_weight, None, None, None
@@ -61,7 +61,7 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
 
 class FusedRMSNormFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, normalized_shape, eps, memory_efficient=False):
+    def forward(ctx, input, normalized_shape, eps, memory_efficient=True):
         global titan_cuda
         if titan_cuda is None:
             titan_cuda = importlib.import_module("titan_cuda")

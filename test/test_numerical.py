@@ -17,7 +17,7 @@ from .testing_utils import assert_expected, gpu_test, set_rng_seed
 
 @pytest.fixture(autouse=True)
 def set_seed():
-    set_rng_seed(2023)
+    set_rng_seed(2020)
 
 
 class TorchRMSNorm(nn.Module):
@@ -52,7 +52,7 @@ class TestRMSNorm:
         return 512
 
     def test_cuda_fused_vs_pytorch_accuracy(self, n_dim):
-        batch_size = 1
+        batch_size = 30
         layer_weight_size = (n_dim,)
         test_eps = 1e-8
         atol_precision = 1e-7
@@ -69,8 +69,8 @@ class TestRMSNorm:
         fused_out = fused_rms_norm(sample_x)
 
         print(f"{fused_out.shape=}")
-        print(f"{fused_out[0:40]=}")
-        #print(f"{expected_rms[0:5]=}")
+        print(f"{fused_out[0:10]=}")
+        print(f"{expected_rms[0:10]=}")
 
         # Check forward pass accuracy
         assert_expected(
