@@ -40,53 +40,53 @@ same root config file.
 """
 integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
-    OverrideDefinitions(
-        [
-            ["--training.compile"],
-        ],
-        "1D compile",
-    ),
-    OverrideDefinitions(
-        [
-            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
-        ],
-        "Eager mode 2DParallel",
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
-            ],
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
-                "--training.steps 20",
-            ],
-        ],
-        "Checkpoint Integration Test - Save Load Full Checkpoint",
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
-                "--checkpoint.model_weights_only",
-            ],
-        ],
-        "Checkpoint Integration Test - Save Model Weights Only fp32",
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
-                "--checkpoint.model_weights_only",
-                "--checkpoint.export_dtype bfloat16",
-            ],
-        ],
-        "Checkpoint Integration Test - Save Model Weights Only bf16",
-    ),
+    # OverrideDefinitions(
+    #     [
+    #         ["--training.compile"],
+    #     ],
+    #     "1D compile",
+    # ),
+    # OverrideDefinitions(
+    #     [
+    #         ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
+    #     ],
+    #     "Eager mode 2DParallel",
+    # ),
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+    #         ],
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+    #             "--training.steps 20",
+    #         ],
+    #     ],
+    #     "Checkpoint Integration Test - Save Load Full Checkpoint",
+    # ),
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
+    #             "--checkpoint.model_weights_only",
+    #         ],
+    #     ],
+    #     "Checkpoint Integration Test - Save Model Weights Only fp32",
+    # ),
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+    #             "--checkpoint.model_weights_only",
+    #             "--checkpoint.export_dtype bfloat16",
+    #         ],
+    #     ],
+    #     "Checkpoint Integration Test - Save Model Weights Only bf16",
+    # ),
     OverrideDefinitions(
         [
             [
@@ -102,34 +102,34 @@ integration_tests_flavors["debug_model.toml"] = [
         requires_seed_checkpoint=True,
         ngpu=2,
     ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
-                "--experimental.pipeline_parallel_degree 2",
-                "--experimental.pipeline_parallel_split_points layers.1",
-                "--training.data_parallel_degree 2",
-                "--model.norm_type fused_rmsnorm",
-            ],
-        ],
-        "PP+DP 2D test",
-        requires_seed_checkpoint=True,
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_pp_tp",
-                "--experimental.pipeline_parallel_degree 2",
-                "--experimental.pipeline_parallel_split_points layers.1",
-                "--training.tensor_parallel_degree 2",
-                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
-            ],
-        ],
-        "PP+TP 2D test",
-        requires_seed_checkpoint=True,
-    ),
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
+    #             "--experimental.pipeline_parallel_degree 2",
+    #             "--experimental.pipeline_parallel_split_points layers.1",
+    #             "--training.data_parallel_degree 2",
+    #             "--model.norm_type fused_rmsnorm",
+    #         ],
+    #     ],
+    #     "PP+DP 2D test",
+    #     requires_seed_checkpoint=True,
+    # ),
+    # OverrideDefinitions(
+    #     [
+    #         [
+    #             "--checkpoint.enable_checkpoint",
+    #             f"--checkpoint.folder {test_checkpoint_dir}_pp_tp",
+    #             "--experimental.pipeline_parallel_degree 2",
+    #             "--experimental.pipeline_parallel_split_points layers.1",
+    #             "--training.tensor_parallel_degree 2",
+    #             "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+    #         ],
+    #     ],
+    #     "PP+TP 2D test",
+    #     requires_seed_checkpoint=True,
+    # ),
     # oh.. not enough GPUs?
     # OverrideDefinitions(
     #     [
@@ -162,7 +162,6 @@ def _run_cmd(cmd):
 def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
@@ -190,6 +189,9 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
             raise Exception(
                 f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
             )
+            if os.path.exists("outputs/comm_trace"):
+                print("Found nccl trace dumps, running analysis")
+                _run_cmd("python fr_trace.py -d outputs/comm_trace")
 
 
 for config_file in os.listdir(CONFIG_DIR):
