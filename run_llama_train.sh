@@ -29,6 +29,8 @@ if [ $# -ne 0 ]; then
     overrides="$*"
 fi
 
+TORCH_LOGS="+dynamo" \
+TORCHDYNAMO_VERBOSE=1 \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 train.py --job.config_file ${CONFIG_FILE} $overrides

@@ -82,16 +82,18 @@ class RMSNorm(nn.Module):
 
     """
 
+    @staticmethod
+    def _norm(x: torch.Tensor, eps: float):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x: torch.Tensor):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        self.compiled_norm = torch.compile(RMSNorm._norm)
 
     def forward(self, x: torch.Tensor):
-        output = self._norm(x.float()).type_as(x)
+        output = self.compiled_norm(x.float(), self.eps).type_as(x)
         return output * self.weight
 
     def reset_parameters(self):
