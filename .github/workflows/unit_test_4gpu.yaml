@@ -24,7 +24,7 @@ jobs:
         # conda create -n "test" python=3.10
         # conda activate test
       script: |
-        conda install -y -q git clang clangxx cxx-compiler
+        conda install -y -q git clang clangxx
         export CC=clang
         export CXX=clangxx
         pip config --user set global.progress_bar off
