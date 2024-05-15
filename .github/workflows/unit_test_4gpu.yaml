@@ -20,9 +20,11 @@ jobs:
       repository: "pytorch/torchtitan"
       upload-artifact: "outputs"
       script: |
-        pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
+        python -m pip uninstall torch
+        python -m pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install -r requirements.txt
         python -m pip install -r dev-requirements.txt
+        python -m pip install git
         python -m pip install git+https://github.com/pytorch/pippy
         python ./test_runner.py
         mv outputs artifacts-to-be-uploaded
