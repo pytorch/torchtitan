@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import glob
+import argparse
 import os
-import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,6 +15,11 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("output_dir")
+args = parser.parse_args()
 
 
 @dataclass
@@ -31,7 +35,6 @@ class OverrideDefinitions:
 
 
 CONFIG_DIR = "./train_configs"
-test_checkpoint_dir = "./test_runner_checkpoint"
 
 """
 key is the config file name and value is a list of OverrideDefinitions
@@ -56,11 +59,11 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                f"--job.dump_folder {args.output_dir}/full_checkpoint/",
             ],
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                f"--job.dump_folder {args.output_dir}/full_checkpoint/",
                 "--training.steps 20",
             ],
         ],
@@ -70,7 +73,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
+                f"--job.dump_folder {args.output_dir}/model_weights_only_fp32/",
                 "--checkpoint.model_weights_only",
             ],
         ],
@@ -80,7 +83,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+                f"--job.dump_folder {args.output_dir}/model_weights_only_bf16/",
                 "--checkpoint.model_weights_only",
                 "--checkpoint.export_dtype bfloat16",
             ],
@@ -91,7 +94,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_pp",
+                f"--job.dump_folder {args.output_dir}/pp/",
                 "--experimental.pipeline_parallel_degree 2",
                 "--experimental.pipeline_parallel_split_points layers.1",
                 "--training.data_parallel_degree 1",
@@ -106,7 +109,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_pp_dp",
+                f"--job.dump_folder {args.output_dir}/pp_dp/",
                 "--experimental.pipeline_parallel_degree 2",
                 "--experimental.pipeline_parallel_split_points layers.1",
                 "--training.data_parallel_degree 2",
@@ -120,7 +123,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_pp_tp",
+                f"--job.dump_folder {args.output_dir}/pp_tp/",
                 "--experimental.pipeline_parallel_degree 2",
                 "--experimental.pipeline_parallel_split_points layers.1",
                 "--training.tensor_parallel_degree 2",
@@ -135,7 +138,7 @@ integration_tests_flavors["debug_model.toml"] = [
     #     [
     #         [
     #             "--checkpoint.enable_checkpoint",
-    #             f"--checkpoint.folder {test_checkpoint_dir}_pp_dp_tp",
+    # f"--job.dump_folder {args.output_dir}/pp_dp_tp/",
     #             "--experimental.pipeline_parallel_degree 2",
     #             "--experimental.pipeline_parallel_split_points layers.1",
     #             "--training.data_parallel_degree 2",
@@ -165,22 +168,24 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
 
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
-            cmd += " " + " ".join(override_arg)
+            cmd += (
+                " " + " ".join(override_arg) + f" --job.dump_folder {args.output_dir}"
+            )
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
 
         if test_flavor.requires_seed_checkpoint:
-            checkpoint_folder_arg = None
+            dump_folder_arg = None
             for arg in override_arg:
-                if "--checkpoint.folder" in arg:
-                    checkpoint_folder_arg = arg
+                if "--job.dump_folder" in arg:
+                    dump_folder_arg = arg
             assert (
-                checkpoint_folder_arg is not None
+                dump_folder_arg is not None
             ), "Can't use seed checkpoint if folder is not specified"
             print("Creating seed checkpoint")
             result = _run_cmd(
-                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {checkpoint_folder_arg}"
+                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
             )
             print(result.stdout)
 
@@ -205,9 +210,3 @@ for config_file in os.listdir(CONFIG_DIR):
 
                 for test_flavor in test_flavors:
                     run_test(test_flavor, full_path)
-
-                    # Deleting checkpoint folder from test
-                    dir_list = glob.iglob(f"{test_checkpoint_dir}_*")
-                    for path in dir_list:
-                        if os.path.exists(path):
-                            shutil.rmtree(path)
