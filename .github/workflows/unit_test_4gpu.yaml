@@ -28,7 +28,7 @@ jobs:
         bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
         rm -rf ~/miniconda3/miniconda.sh
         ~/miniconda3/bin/conda init bash
-        conda install -y -q git clang clangxx cxx-compilers
+        conda install -y -q git clang clangxx cxx-compiler
         export CC=clang
         export CXX=clangxx
         pip config --user set global.progress_bar off
