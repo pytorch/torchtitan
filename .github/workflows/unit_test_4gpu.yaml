@@ -17,12 +17,13 @@ jobs:
       gpu-arch-type: cuda
       gpu-arch-version: "12.1"
       # This image is faster to clone than the default, but it lacks CC needed by triton
+      # (1m25s vs 2m37s)
       docker-image: "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
       repository: "pytorch/torchtitan"
       upload-artifact: "outputs"
+        # conda create -n "test" python=3.10
+        # conda activate test
       script: |
-        conda create -n "test" python=3.10
-        conda activate test
         conda install git
         pip config --user set global.progress_bar off
         pip install --upgrade pip
