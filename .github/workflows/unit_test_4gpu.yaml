@@ -25,8 +25,8 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install -r requirements.txt
         python -m pip install -r dev-requirements.txt
-        python ./test_runner.py
-        mv outputs artifacts-to-be-uploaded
+        mkdir artifacts-to-be-uploaded
+        python ./test_runner.py artifacts-to-be-uploaded
   # upload-coverage:
   #     - name: Upload Coverage to Codecov
   #       uses: codecov/codecov-action@v3
