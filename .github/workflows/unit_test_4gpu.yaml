@@ -16,9 +16,8 @@ jobs:
       runner: linux.g5.12xlarge.nvidia.gpu
       gpu-arch-type: cuda
       gpu-arch-version: "12.1"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s)
-      docker-image: "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime"
+      # Trying how much faster the nvidia-cuda image is
+      docker-image: "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
       repository: "pytorch/torchtitan"
       upload-artifact: "outputs"
         # conda create -n "test" python=3.10
