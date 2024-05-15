@@ -12,21 +12,16 @@ from typing import Dict, Tuple
 
 import torch
 
-# try:
-#     from pippy import ManualPipelineStage, pipeline, SplitPoint
-#     from pippy._PipelineStage import _PipelineStage
-# except ImportError as exc:
-#     raise ImportError(
-#         "pippy is not installed. Please install it to use pipeline parallelism. "
-#         "`pip install git+https://github.com/pytorch/pippy`"
-#     ) from exc
-
-
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
+)
+from torch.distributed.pipelining import pipeline, SplitPoint
+from torch.distributed.pipelining._PipelineStage import (
+    _PipelineStage,
+    ManualPipelineStage,
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -35,8 +30,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from torch.distributed.pipelining import pipeline, SplitPoint
-from torch.distributed.pipelining._PipelineStage import ManualPipelineStage, _PipelineStage
 
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
