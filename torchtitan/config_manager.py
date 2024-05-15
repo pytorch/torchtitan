@@ -234,7 +234,7 @@ class JobConfig:
             "--experimental.pipeline_parallel_schedule",
             type=str,
             choices=["1f1b", "gpipe"],
-            default="1f1b",
+            default="gpipe",
             help="""
                 Specify the Pipeline Parallel schedule to use.
 
