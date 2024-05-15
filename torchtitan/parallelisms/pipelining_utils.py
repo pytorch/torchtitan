@@ -5,14 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 # TODO(whc) this can be removed after pippy migration into pytorch core is complete.
-try:
-    from pippy import Schedule1F1B, ScheduleGPipe
-except ImportError as exc:
-    raise ImportError(
-        "pippy is not installed. Please install it to use pipeline parallelism. "
-        "`pip install git+https://github.com/pytorch/pippy`"
-    ) from exc
+# try:
+#     from pippy import Schedule1F1B, ScheduleGPipe
+# except ImportError as exc:
+#     raise ImportError(
+#         "pippy is not installed. Please install it to use pipeline parallelism. "
+#         "`pip install git+https://github.com/pytorch/pippy`"
+#     ) from exc
 
+from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
 
 def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
