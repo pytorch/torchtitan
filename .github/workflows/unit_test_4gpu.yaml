@@ -30,5 +30,5 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install -r requirements.txt
         python -m pip install -r dev-requirements.txt
-        mkdir artifacts-to-be-uploaded
+        python -m pip install git+https://github.com/pytorch/pippy
         python ./test_runner.py artifacts-to-be-uploaded
