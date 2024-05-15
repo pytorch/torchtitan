@@ -43,13 +43,27 @@ integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
-            ["--training.compile"],
+            [
+                f"--job.dump_folder {args.output_dir}/default/",
+            ],
+        ],
+        "Default",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--training.compile",
+                f"--job.dump_folder {args.output_dir}/1d_compile/",
+            ],
         ],
         "1D compile",
     ),
     OverrideDefinitions(
         [
-            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
+            [
+                "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+                f"--job.dump_folder {args.output_dir}/eager_2d/",
+            ],
         ],
         "Eager mode 2DParallel",
     ),
@@ -97,7 +111,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
         cmd = f"CONFIG_FILE={full_path} NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += (
-                " " + " ".join(override_arg) + f" --job.dump_folder {args.output_dir}"
+                " " + " ".join(override_arg)
             )
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
@@ -123,9 +137,5 @@ for config_file in os.listdir(CONFIG_DIR):
             config = tomllib.load(f)
             is_integration_test = config["job"].get("use_for_integration_test", False)
             if is_integration_test:
-                test_flavors = [OverrideDefinitions()] + integration_tests_flavors[
-                    config_file
-                ]
-
-                for test_flavor in test_flavors:
+                for test_flavor in integration_tests_flavors[config_file]:
                     run_test(test_flavor, full_path)
