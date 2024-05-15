@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import glob
+import argparse
 import os
-import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,6 +15,11 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("output_dir")
+args = parser.parse_args()
 
 
 @dataclass
@@ -29,7 +33,6 @@ class OverrideDefinitions:
 
 
 CONFIG_DIR = "./train_configs"
-test_checkpoint_dir = "./test_runner_checkpoint"
 
 """
 key is the config file name and value is a list of OverrideDefinitions
@@ -40,13 +43,27 @@ integration_tests_flavors = defaultdict(list)
 integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
-            ["--training.compile"],
+            [
+                f"--job.dump_folder {args.output_dir}/default/",
+            ],
+        ],
+        "Default",
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--training.compile",
+                f"--job.dump_folder {args.output_dir}/1d_compile/",
+            ],
         ],
         "1D compile",
     ),
     OverrideDefinitions(
         [
-            ["--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm"],
+            [
+                "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+                f"--job.dump_folder {args.output_dir}/eager_2d/",
+            ],
         ],
         "Eager mode 2DParallel",
     ),
@@ -54,11 +71,11 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                f"--job.dump_folder {args.output_dir}/full_checkpoint/",
             ],
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_full_checkpoint",
+                f"--job.dump_folder {args.output_dir}/full_checkpoint/",
                 "--training.steps 20",
             ],
         ],
@@ -68,7 +85,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_fp32",
+                f"--job.dump_folder {args.output_dir}/model_weights_only_fp32/",
                 "--checkpoint.model_weights_only",
             ],
         ],
@@ -78,7 +95,7 @@ integration_tests_flavors["debug_model.toml"] = [
         [
             [
                 "--checkpoint.enable_checkpoint",
-                f"--checkpoint.folder {test_checkpoint_dir}_model_weights_only_bf16",
+                f"--job.dump_folder {args.output_dir}/model_weights_only_bf16/",
                 "--checkpoint.model_weights_only",
                 "--checkpoint.export_dtype bfloat16",
             ],
@@ -118,15 +135,5 @@ for config_file in os.listdir(CONFIG_DIR):
             config = tomllib.load(f)
             is_integration_test = config["job"].get("use_for_integration_test", False)
             if is_integration_test:
-                test_flavors = [OverrideDefinitions()] + integration_tests_flavors[
-                    config_file
-                ]
-
-                for test_flavor in test_flavors:
+                for test_flavor in integration_tests_flavors[config_file]:
                     run_test(test_flavor, full_path)
-
-                    # Deleting checkpoint folder from test
-                    dir_list = glob.iglob(f"{test_checkpoint_dir}_*")
-                    for path in dir_list:
-                        if os.path.exists(path):
-                            shutil.rmtree(path)
