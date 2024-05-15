@@ -182,9 +182,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
 
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
-            cmd += (
-                " " + " ".join(override_arg)
-            )
+            cmd += " " + " ".join(override_arg)
         print(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
