@@ -15,8 +15,8 @@ echo "Building ${IMAGE_NAME} Docker image"
 OS=ubuntu
 OS_VERSION=20.04
 CLANG_VERSION=""
-PYTHON_VERSION=3.10
-MINICONDA_VERSION=23.10.0-1
+PYTHON_VERSION=3.11
+MINICONDA_VERSION=24.3.0-0
 
 case "${IMAGE_NAME}" in
   torchtitan-ubuntu-20.04-clang12)
