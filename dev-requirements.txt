@@ -1,3 +1,1 @@
-pytest
-pytest-cov
-pre-commit
+.ci/docker/dev-requirements.txt
