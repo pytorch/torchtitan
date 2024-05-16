@@ -18,5 +18,9 @@ jobs:
       script: |
         set -eux
 
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
         pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         pytest test --cov=. --cov-report=xml --durations=20 -vv
