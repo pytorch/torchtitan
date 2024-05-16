@@ -11,7 +11,10 @@ import torch.distributed as dist
 from torch.distributed.pipelining import ScheduleGPipe
 
 # imports related to local copy of Schedule1F1B with local fix
-from torch.distributed.pipelining.PipelineSchedule import PipelineScheduleSingle
+from torch.distributed.pipelining.PipelineSchedule import (
+    PipelineScheduleSingle,
+    sorted_batch_isend_irecv,
+)
 from torch.profiler import record_function
 
 from torchtitan.logging_utils import logger
