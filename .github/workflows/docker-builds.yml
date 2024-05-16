@@ -30,7 +30,7 @@ jobs:
         include:
           - docker-image-name: torchtitan-ubuntu-20.04-clang12
     env:
-      DOCKER_IMAGE: 308535385114.dkr.ecr.us-east-1.amazonaws.com/executorch/${{ matrix.docker-image-name }}
+      DOCKER_IMAGE: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image-name }}
     steps:
       - name: Clean workspace
         shell: bash
@@ -44,7 +44,7 @@ jobs:
         with:
           github-secret: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checkout Executorch
+      - name: Checkout the repo
         uses: actions/checkout@v3
 
       - name: Setup Linux
