@@ -6,6 +6,8 @@
 
 from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
 
+from torchtitan.logging_utils import logger
+
 
 def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
@@ -16,6 +18,9 @@ def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
         raise NotImplementedError(
             f"{job_config.experimental.pipeline_parallel_schedule} is not implemented"
         )
+    logger.info(
+        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
+    )
     return schedule_class(
         stage,
         n_microbatches=parallel_dims.pp,
