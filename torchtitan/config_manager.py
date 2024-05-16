@@ -113,6 +113,12 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
+        self.parser.add_argument(
+            "--metrics.rank_0_only",
+            default=True,
+            action="store_true",
+            help="Whether to save TensorBoard metrics only for rank 0 or for all ranks",
+        )
 
         # model configs
         self.parser.add_argument(
