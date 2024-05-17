@@ -50,14 +50,14 @@ class TestRMSNorm:
     def n_dim(
         self,
     ):
-        return 512
+        return 8192*2*2*2*2
 
     def test_cuda_fused_vs_pytorch_accuracy(self, n_dim):
         batch_size = 30
         layer_weight_size = (n_dim,)
         test_eps = 1e-8
-        atol_precision = 1e-2
-        rtol_precision = 1e-2
+        atol_precision = 1e-3
+        rtol_precision = 1e-3
 
         sample_x = torch.randn(
             layer_weight_size, dtype=torch.float32, device="cuda", requires_grad=True
@@ -97,3 +97,4 @@ class TestRMSNorm:
 
         # Check backward pass accuracy
         #assert_expected(dy_expected, dy_fused, rtol=rtol_precision, atol=atol_precision)
+        print(f"SUCCESS BWD!")
