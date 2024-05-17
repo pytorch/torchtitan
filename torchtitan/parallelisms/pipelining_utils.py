@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 # from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
-from typing import List, Optional
+from collections import defaultdict
+
+from typing import Dict, List, Optional
 
 import torch.distributed as dist
 from torch.distributed.pipelining import ScheduleGPipe
@@ -13,11 +15,44 @@ from torch.distributed.pipelining import ScheduleGPipe
 # imports related to local copy of Schedule1F1B with local fix
 from torch.distributed.pipelining.PipelineSchedule import (
     PipelineScheduleSingle,
-    sorted_batch_p2p,
+    # sorted_batch_p2p,
 )
 from torch.profiler import record_function
 
 from torchtitan.logging_utils import logger
+
+# haven't landed these yet in core
+def batch_p2p(p2p_ops: List[dist.P2POp], desc: Optional[str] = None):
+    desc_str = f"{desc}, " if desc else ""
+    logger.debug(f"batch_p2p {desc_str}{p2p_ops}")  # noqa: G004
+    return dist.batch_isend_irecv(p2p_ops).pop()
+
+
+def sorted_batch_p2p(
+    p2p_ops: List[dist.P2POp], desc: Optional[str] = None
+) -> Dict[int, dist.Work]:
+    """
+    Sorts the list of P2P ops by the peer rank, and then calls
+    batch_isend_irecv. Return a dictionary of works by peer rank. This function
+    helps us avoid hangs in case of skip connections.
+    """
+    # Arrange p2p_ops by peer rank:
+    #   int is the peer rank;
+    #   List is the list of ops towards the peer
+    ops_by_peer: Dict[int, List[dist.P2POp]] = defaultdict(list)
+    work_by_peer: Dict[int, dist.Work] = {}
+    if len(p2p_ops) == 0:
+        return work_by_peer
+
+    # Classify the ops by peer rank
+    for op in p2p_ops:
+        ops_by_peer[op.peer].append(op)
+
+    # Call batch_isend_irecv per peer, in sorted order of the peers (to avoid hangs)
+    for peer, ops in sorted(ops_by_peer.items()):
+        work_by_peer[peer] = batch_p2p(ops, desc=desc)
+
+    return work_by_peer
 
 
 class Schedule1F1B(PipelineScheduleSingle):
