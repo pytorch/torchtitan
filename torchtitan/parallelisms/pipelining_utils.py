@@ -126,7 +126,7 @@ class Schedule1F1B(PipelineScheduleSingle):
                 with record_function(f"Backward {bwd_mb_index}"):
                     ops = self._stage.get_bwd_recv_ops()
 
-                    if should_coalesce_fwd_send_bwd_recv(i - 1):
+                    if should_coalesce_fwd_send_bwd_recv(i):
                         ops.extend(self._stage.get_fwd_send_ops())
 
                     works = sorted_batch_isend_irecv(ops)
@@ -136,7 +136,7 @@ class Schedule1F1B(PipelineScheduleSingle):
                     loss = self._maybe_get_loss(self._stage, bwd_mb_index)
                     self._stage.backward_one_chunk(loss=loss)
 
-                    if should_coalesce_bwd_send_fwd_recv(i):
+                    if not should_coalesce_bwd_send_fwd_recv(i):
                         # see Note: coalesced bwd-send/fwd-recv
                         ops = self._stage.get_bwd_send_ops()
                         works = sorted_batch_isend_irecv(ops)
