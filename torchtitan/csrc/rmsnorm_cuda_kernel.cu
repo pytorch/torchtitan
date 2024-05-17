@@ -100,32 +100,19 @@ void cuWelfordMuSigma2(
     for (;  l+3 < n2;  l+=4*numx) {
       for (int k = 0;  k < 4;  ++k) {
         U curr = static_cast<U>(lvals[l+k]);
-        if (!rms_only) {
-          cuWelfordOnlineSum<U>(curr,mu,sigma2,count);
-        } else {
           cuRMSOnlineSum<U>(curr, sigma2);
-        }
       }
     }
     for (;  l < n2;  ++l) {
       U curr = static_cast<U>(lvals[l]);
-      if (!rms_only) {
-        cuWelfordOnlineSum<U>(curr,mu,sigma2,count);
-      } else {
        cuRMSOnlineSum<U>(curr, sigma2);
-      }
+
     }
     // intra-warp reductions
     for (int l = 0;  l <= 4;  ++l) {
       int srcLaneB = (threadIdx.x+(1<<l))&31;
       U sigma2B = WARP_SHFL(sigma2, srcLaneB);
-      if (!rms_only) {
-        U muB = WARP_SHFL(mu, srcLaneB);
-        U countB = WARP_SHFL(count, srcLaneB);
-        cuChanOnlineSum<U>(muB,sigma2B,countB,mu,sigma2,count);
-      } else {
         cuChanRMSOnlineSum<U>(sigma2B, sigma2);
-      }
     }
     // threadIdx.x == 0 has correct values for each warp
     // inter-warp reductions
@@ -136,43 +123,24 @@ void cuWelfordMuSigma2(
         // upper half of warps write to shared
         if (threadIdx.x == 0 && threadIdx.y >= offset && threadIdx.y < 2*offset) {
           const int wrt_y = threadIdx.y - offset;
-          if (!rms_only) {
-            ubuf[2*wrt_y] = mu;
-            ibuf[wrt_y] = count;
-          }
           ubuf[2*wrt_y+1] = sigma2;
         }
         __syncthreads();
         // lower half merges
         if (threadIdx.x == 0 && threadIdx.y < offset) {
           U sigma2B = ubuf[2*threadIdx.y+1];
-          if (!rms_only) {
-            U muB = ubuf[2*threadIdx.y];
-            U countB = ibuf[threadIdx.y];
-            cuChanOnlineSum<U>(muB,sigma2B,countB,mu,sigma2,count);
-          } else {
             cuChanRMSOnlineSum<U>(sigma2B,sigma2);
-          }
         }
         __syncthreads();
       }
       // threadIdx.x = 0 && threadIdx.y == 0 only thread that has correct values
       if (threadIdx.x == 0 && threadIdx.y == 0) {
-        if (!rms_only) {
-          ubuf[0] = mu;
-        }
         ubuf[1] = sigma2;
       }
       __syncthreads();
-      if (!rms_only) {
-        mu = ubuf[0];
-      }
       sigma2 = ubuf[1]/U(n2);
       // don't care about final value of count, we know count == n2
     } else {
-      if (!rms_only) {
-        mu = WARP_SHFL(mu, 0);
-      }
       sigma2 = WARP_SHFL(sigma2/U(n2), 0);
     }
   }
@@ -932,10 +900,10 @@ void cuda_rms_norm_gradient(
     bool memory_efficient)
 {
     using namespace at;
-    // we can do away with `accscalar_t` as there're only three dtypes: fp32, fp16, bf16
-    // DISPATCH_FLOAT_HALF_AND_BFLOAT_INOUT_TYPES(
     DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT_INOUT_TYPES(
-      input_or_output->scalar_type(), gamma == NULL ? input_or_output->scalar_type() :  gamma->scalar_type(), "cuComputeGradInputRMS",
+      input_or_output->scalar_type(),
+      gamma == NULL ? input_or_output->scalar_type() :  gamma->scalar_type(),
+      "cuComputeGradInputRMS",
       using accscalar_t = at::acc_type<scalar_t_in, true>;
       HostRMSNormGradient(
         dout->DATA_PTR<scalar_t_out>(),
@@ -951,7 +919,42 @@ void cuda_rms_norm_gradient(
         memory_efficient);
     )
 }
+/*
+void cuda_rms_norm_gradient(
+    at::Tensor* dout,
+    at::Tensor* invvar,
+    at::Tensor* input_or_output,
+    int n1,
+    int n2,
+    at::IntArrayRef normalized_shape,
+    at::Tensor* gamma,
+    double epsilon,
+    at::Tensor* grad_input,
+    at::Tensor* grad_gamma,
+    bool memory_efficient) {
+    using namespace at;
 
+    DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT_INOUT_TYPES(
+        input_or_output->scalar_type(),
+        gamma == nullptr ? input_or_output->scalar_type() : gamma->scalar_type(),
+        "cuComputeGradInputRMS",
+        [&] {
+            using accscalar_t = acc_type<scalar_t_in, true>;
+            HostRMSNormGradient(
+                dout->DATA_PTR<scalar_t_out>(),
+                invvar->DATA_PTR<accscalar_t>(),
+                input_or_output,
+                n1,
+                n2,
+                gamma != nullptr ? gamma->DATA_PTR<scalar_t_out>() : nullptr,
+                epsilon,
+                grad_input->DATA_PTR<scalar_t_in>(),
+                grad_gamma != nullptr ? grad_gamma->DATA_PTR<scalar_t_out>() : nullptr,
+                memory_efficient);
+        }
+    );
+}
+*/
 /*
 template<typename AccType>
 __device__ void cuRMSOnlineSum(const AccType curr, AccType& sigma2) {

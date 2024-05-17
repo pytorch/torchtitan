@@ -96,5 +96,5 @@ class TestRMSNorm:
         print(f"{dy_expected[0:5]=}")
 
         # Check backward pass accuracy
-        #assert_expected(dy_expected, dy_fused, rtol=rtol_precision, atol=atol_precision)
+        assert_expected(dy_expected, dy_fused, rtol=rtol_precision, atol=atol_precision)
         print(f"SUCCESS BWD!")
