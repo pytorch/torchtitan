@@ -13,7 +13,7 @@ jobs:
   build-test:
     uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
     with:
-      runner: linux.g5.12xlarge.nvidia.gpu
+      runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
       gpu-arch-version: "12.1"
       # This image is faster to clone than the default, but it lacks CC needed by triton
@@ -32,4 +32,4 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         mkdir artifacts-to-be-uploaded
-        python ./test_runner.py artifacts-to-be-uploaded --ngpu 4
+        python ./test_runner.py artifacts-to-be-uploaded --ngpu 8
