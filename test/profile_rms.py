@@ -15,7 +15,7 @@ from fused_rms_norm import FusedRMSNorm
 
 n_dim = 768
 
-layer_weight_size = (n_dim,)
+layer_weight_size = (5, n_dim,n_dim)
 test_eps = 1e-8
 atol_precision = 1e-2
 rtol_precision = 1e-2

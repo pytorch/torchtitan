@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <vector>
 #include <cassert>
+#include <iostream>
 #include "utils.h"
 
 
@@ -138,6 +139,12 @@ std::vector<at::Tensor> rms_norm_affine(
   at::Tensor output = at::empty_like(input);
   const auto stats_dtype = (input.scalar_type() == at::ScalarType::Half || input.scalar_type() == at::ScalarType::BFloat16) ? at::ScalarType::Float : input.scalar_type();
   at::Tensor invvar = at::empty({n1}, input.options().dtype(stats_dtype));
+  // Print the normalized shape
+    std::cout << "Normalized Shape: ";
+    for (auto dim : normalized_shape) {
+        std::cout << dim << " ";
+    }
+    std::cout << std::endl;
   cuda_rms_norm(&output,&invvar,&input,n1,n2,
       normalized_shape,&gamma,epsilon);
   return {output, invvar};
