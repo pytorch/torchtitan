@@ -185,17 +185,17 @@ void cuApplyRMSNorm(
     U c_invvar = rsqrt(sigma2 + epsilon);
     const int numx = blockDim.x * blockDim.y;
     const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
-    if (gamma != nullptr) {
-      for (int i = thrx;  i < n2;  i+=numx) {
+    //if (gamma != nullptr) {
+    for (int i = thrx;  i < n2;  i+=numx) {
         U curr = static_cast<U>(lvals[i]);
         ovals[i] = gamma[i] * static_cast<V>(c_invvar * curr);
       }
-    } else {
+    /*} else {
       for (int i = thrx;  i < n2;  i+=numx) {
         U curr = static_cast<U>(lvals[i]);
         ovals[i] = static_cast<V>(c_invvar * curr);
-      }
-    }
+      }*/
+    //}
     if (threadIdx.x == 0 && threadIdx.y == 0) {
       invvar[i1] = c_invvar;
     }
@@ -406,9 +406,9 @@ void cuComputeGradGammaBeta(
       // each warp does sequential reductions until reduced part_size is num_warps
       int num_warp_reductions = part_size / blockDim.y;
       U sum_gamma = U(0);
-      U sum_beta = U(0);
+      //U sum_beta = U(0);
       const U* part_grad_gamma_ptr = part_grad_gamma + threadIdx.y * num_warp_reductions * n2 + i2;
-      const U* part_grad_beta_ptr = part_grad_beta + threadIdx.y * num_warp_reductions * n2 + i2;
+      //const U* part_grad_beta_ptr = part_grad_beta + threadIdx.y * num_warp_reductions * n2 + i2;
       for (int warp_offset = 0;  warp_offset < num_warp_reductions;  ++warp_offset) {
         sum_gamma += part_grad_gamma_ptr[warp_offset*n2];
 
