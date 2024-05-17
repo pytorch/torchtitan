@@ -20,7 +20,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group
-from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
@@ -239,10 +238,6 @@ def main(job_config: JobConfig):
         f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
-
-    if isinstance(model, FSDPModule) and parallel_dims.pp_enabled:
-        # reshard now to counteract an issue where FSDP's states got advanced during PP stage shape inference
-        model.reshard()
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
