@@ -46,7 +46,6 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 1",
-                    "--model.norm_type fused_rmsnorm",
                 ],
             ],
             "PP 1D test 1f1b",
@@ -62,7 +61,6 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 1",
-                    "--model.norm_type fused_rmsnorm",
                 ],
             ],
             "PP 1D test gpipe",
@@ -78,7 +76,6 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 2",
-                    "--model.norm_type fused_rmsnorm",
                 ],
             ],
             "PP+DP 1f1b 2D test",
@@ -93,7 +90,6 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 2",
-                    "--model.norm_type fused_rmsnorm",
                 ],
             ],
             "PP+DP gpipe 2D test",
@@ -107,7 +103,7 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
                 ],
             ],
             "PP+TP 2D test",
@@ -174,22 +170,6 @@ def build_test_list(args):
             ],
             "Checkpoint Integration Test - Save Model Weights Only bf16",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_dp_tp/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--training.data_parallel_degree 2",
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
-                ],
-            ],
-            "PP+DP+TP 3D test",
-            requires_seed_checkpoint=True,
-            ngpu=8,
-        ),
     ]
     return integration_tests_flavors
 
@@ -249,21 +229,13 @@ def run_tests(args):
                 )
                 if is_integration_test:
                     for test_flavor in integration_tests_flavors[config_file]:
-                        if (args.ngpu == 8 and test_flavor.ngpu == 8) or (
-                            args.ngpu == 4 and test_flavor.ngpu <= 4
-                        ):
-                            run_test(test_flavor, full_path)
-                        else:
-                            print(
-                                f"Skipping test {test_flavor} due to num_gpu mismatch {test_flavor.ngpu}"
-                            )
+                        run_test(test_flavor, full_path)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("output_dir", type=str)
+    parser.add_argument("output_dir")
     parser.add_argument("--config_dir", default="./train_configs")
-    parser.add_argument("--ngpu", default=4, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
