@@ -28,6 +28,9 @@ class OverrideDefinitions:
     requires_seed_checkpoint: bool = False
     ngpu: int = 4
 
+    def __repr__(self):
+        return self.test_descr
+
 
 def build_test_list(args):
     """
@@ -170,6 +173,22 @@ def build_test_list(args):
             ],
             "Checkpoint Integration Test - Save Model Weights Only bf16",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_dp_tp/",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--training.data_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+                ],
+            ],
+            "PP+DP+TP 3D test",
+            requires_seed_checkpoint=True,
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
 
@@ -188,7 +207,8 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
 
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
+        all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
         print(
@@ -229,13 +249,17 @@ def run_tests(args):
                 )
                 if is_integration_test:
                     for test_flavor in integration_tests_flavors[config_file]:
-                        run_test(test_flavor, full_path)
+                        if (args.ngpu == 8 and test_flavor.ngpu == 8) or (
+                            args.ngpu == 4 and test_flavor.ngpu <= 4
+                        ):
+                            run_test(test_flavor, full_path)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument("--config_dir", default="./train_configs")
+    parser.add_argument("--ngpu", default=4, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
