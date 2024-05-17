@@ -289,22 +289,6 @@ void cuApplyLayerNorm_(
 }
 
 template<typename T, typename U, typename V=T> __global__
-void cuApplyLayerNorm(
-  V* __restrict__ output_vals,
-  U* __restrict__ mean,
-  U* __restrict__ invvar,
-  const T* __restrict__ vals,
-  const int n1,
-  const int n2,
-  const U epsilon,
-  const V* __restrict__ gamma,
-  const V* __restrict__ beta
-  )
-{
-  cuApplyLayerNorm_<T, U, V>(output_vals, mean, invvar, vals, n1, n2, epsilon, gamma, beta, false);
-}
-
-template<typename T, typename U, typename V=T> __global__
 void cuApplyRMSNorm(
   V* __restrict__ output_vals,
   U* __restrict__ invvar,
