@@ -346,7 +346,7 @@ def main(job_config: JobConfig):
                         losses = []
                         pp_schedule.step(target=labels, losses=losses)
                     else:
-                        schedule.step()
+                        pp_schedule.step()
 
                 # accumulate losses across pipeline microbatches
                 loss = (
