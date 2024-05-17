@@ -36,56 +36,36 @@ __device__ void cuWelfordOnlineSum(const U curr, U& mu, U& sigma2, U& count) {
 }
 
 
-template<typename U> __device__
-void cuChanOnlineSum(
-  const U muB,
-  const U sigma2B,
-  const U countB,
-  U& mu,
-  U& sigma2,
-  U& count)
-{
-  U delta = muB - mu;
-  U nA = count;
-  U nB = countB;
-  count = count + countB;
-  U nX = count;
-  if (nX > U(0)) {
-    nA = nA / nX;
-    nB = nB / nX;
-    mu = nA*mu + nB*muB;
-    sigma2 = sigma2 + sigma2B + delta * delta * nA * nB * nX;
-  } else {
-    mu = U(0);
-    sigma2 = U(0);
-  }
+template<typename U>
+__device__ void cuChanOnlineSum(const U muB, const U sigma2B, const U countB, U& mu, U& sigma2, U& count) {
+    U delta = muB - mu;
+    U nA = count;
+    U nB = countB;
+    count += countB;
+    U nX = count;
+    if (nX > U(0)) {
+        U nA_div_nX = nA / nX;
+        U nB_div_nX = nB / nX;
+        mu = nA_div_nX * mu + nB_div_nX * muB;
+        sigma2 += sigma2B + delta * delta * nA_div_nX * nB_div_nX * nX;
+    } else {
+        mu = U(0);
+        sigma2 = U(0);
+    }
 }
 
-
-template<typename U> __device__
-void cuRMSOnlineSum(
-  const U curr,
-  U& sigma2)
-{
-  sigma2 = sigma2 + curr * curr;
+template<typename U>
+__device__ void cuRMSOnlineSum(const U curr, U& sigma2) {
+    sigma2 += curr * curr;
 }
 
-template<typename U> __device__
-void cuChanRMSOnlineSum(
-  const U sigma2B,
-  U& sigma2)
-{
-  sigma2 = sigma2 + sigma2B;
+template<typename U>
+__device__ void cuChanRMSOnlineSum(const U sigma2B, U& sigma2) {
+    sigma2 += sigma2B;
 }
 
 template<typename T, typename U>
-__device__ void cuWelfordSigma2(
-    const T* __restrict__ vals,
-    const int n1,
-    const int n2,
-    const int i1,
-    U& sigma2,
-    U* buf) {
+__device__ void cuWelfordSigma2(const T* __restrict__ vals, const int n1, const int n2, const int i1, U& sigma2, U* buf) {
     // Assumptions:
     // 1) blockDim.x == warpSize
     // 2) Tensor is contiguous
@@ -93,7 +73,6 @@ __device__ void cuWelfordSigma2(
     //
     // compute sum of squares over n2
     sigma2 = U(0);
-
     if (i1 < n1) {
         // one warp normalizes one n1 index,
         // synchronization is implicit
@@ -104,9 +83,12 @@ __device__ void cuWelfordSigma2(
         // unrolled loop
         for (int l = thrx * 4; l < n2; l += 4 * numx) {
             U tmp = U(0);
-            for (int k = 0; k < 4 && l + k < n2; ++k) {
-                const U curr = static_cast<U>(lvals[l + k]);
-                tmp += curr * curr;
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                if (l + k < n2) {
+                    const U curr = static_cast<U>(lvals[l + k]);
+                    tmp += curr * curr;
+                }
             }
             sigma2 += tmp;
         }
@@ -257,56 +239,6 @@ V clamp_by_magnitude(V curr_gamma, double eps)
   }
 }
 
-/*
-template<typename T, typename U, typename V, bool MemoryEfficient> __device__
-void cuLoadWriteStridedInputs(
-    const int i1_block,
-    const int thr_load_row_off,
-    const int thr_load_col_off,
-    const int i2_off,
-    const int row_stride,
-    U* warp_buf1,
-    U* warp_buf2,
-    const T* input_or_output,
-    const V* dout,
-    const int i1_end,
-    const int n2,
-    const U* __restrict__ mean,
-    const U* __restrict__ invvar,
-    const V* __restrict__ gamma,
-    const V* __restrict__ beta,
-    const double eps,
-    bool rms_only
-    )
-{
-  int i1 = i1_block+thr_load_row_off;
-  if (i1 < i1_end) {
-    for (int k = 0;  k < blockDim.y;  ++k) {
-      int i2 = i2_off + k;
-      int load_idx = i1*n2+i2;
-      int write_idx = thr_load_row_off*row_stride+thr_load_col_off+k;
-      if (i2<n2) {
-        U c_h = static_cast<U>(input_or_output[load_idx]);
-        U curr_dout = static_cast<U>(dout[load_idx]);
-
-          if (MemoryEfficient) {
-            warp_buf2[write_idx] = curr_dout * (c_h) / static_cast<U>(clamp_by_magnitude(gamma[i2], eps));
-          } else {
-            warp_buf2[write_idx] = curr_dout * (c_h) * invvar[i1];
-          }
-
-      } else {
-        warp_buf2[write_idx] = U(0);
-      }
-    }
-  } else {
-    for (int k = 0;  k < blockDim.y;  ++k) {
-      int write_idx = thr_load_row_off*row_stride+thr_load_col_off+k;
-      warp_buf2[write_idx] = U(0);
-    }
-  }
-}
-*/
 template<typename T, typename U, typename V, bool MemoryEfficient>
 __device__ void cuLoadWriteStridedInputs(
     const int i1_block,
@@ -355,100 +287,6 @@ __device__ void cuLoadWriteStridedInputs(
         }
     }
 }
-/*
-template<typename T, typename U, typename V, bool MemoryEfficient> __device__
-void cuLoadAddStridedInputs(
-    const int i1_block,
-    const int thr_load_row_off,
-    const int thr_load_col_off,
-    const int i2_off,
-    const int row_stride,
-    U* warp_buf1,
-    U* warp_buf2,
-    const T* input_or_output,
-    const V* dout,
-    const int i1_end,
-    const int n2,
-    const U* __restrict__ mean,
-    const U* __restrict__ invvar,
-    const V* __restrict__ gamma,
-    const V* __restrict__ beta,
-    const double eps,
-    bool rms_only
-    )
-{
-  int i1 = i1_block+thr_load_row_off;
-  if (i1 < i1_end) {
-    for (int k = 0;  k < blockDim.y;  ++k) {
-      int i2 = i2_off + k;
-      int load_idx = i1*n2+i2;
-      int write_idx = thr_load_row_off*row_stride+thr_load_col_off+k;
-      if (i2<n2) {
-        U c_h = static_cast<U>(input_or_output[load_idx]);
-        U curr_dout = static_cast<U>(dout[load_idx]);
-
-        if (MemoryEfficient) {
-            warp_buf2[write_idx] += curr_dout * (c_h) / static_cast<U>(clamp_by_magnitude(gamma[i2], eps));
-          } else {
-            warp_buf2[write_idx] += curr_dout * (c_h) * invvar[i1];
-          }
-
-      }
-    }
-  }
-}
-
-template<typename T, typename U, typename V, bool MemoryEfficient>
-__device__ void cuLoadAddStridedInputs(
-    const int i1_block,
-    const int thr_load_row_off,
-    const int thr_load_col_off,
-    const int i2_off,
-    const int row_stride,
-    U* warp_buf2,
-    const T* input_or_output,
-    const V* dout,
-    const int i1_end,
-    const int n2,
-    const U* __restrict__ invvar,
-    const V* __restrict__ gamma,
-    const double eps)
-{
-    int i1 = i1_block + thr_load_row_off;
-
-    if (i1 < i1_end) {
-        extern __shared__ U shared_mem[];
-        U* c_h = shared_mem;
-        U* curr_dout = shared_mem + blockDim.y;
-
-        for (int k = 0; k < blockDim.y; ++k) {
-            int i2 = i2_off + k;
-            if (i2 < n2) {
-                int load_idx = i1 * n2 + i2;
-                c_h[k] = static_cast<U>(input_or_output[load_idx]);
-                curr_dout[k] = static_cast<U>(dout[load_idx]);
-            }
-        }
-
-        __syncthreads();
-
-        for (int k = 0; k < blockDim.y; ++k) {
-            int i2 = i2_off + k;
-            int write_idx = thr_load_row_off * row_stride + thr_load_col_off + k;
-
-            if (i2 < n2) {
-                if (MemoryEfficient) {
-                    U gamma_val = static_cast<U>(gamma[i2]);
-                    U gamma_clamped = static_cast<U>(clamp_by_magnitude(gamma_val, eps));
-                    warp_buf2[write_idx] += curr_dout[k] * c_h[k] / gamma_clamped;
-                } else {
-                    warp_buf2[write_idx] += curr_dout[k] * c_h[k] * invvar[i1];
-                }
-            }
-        }
-    }
-}
-*/
 
 template<typename T, typename U, typename V, bool MemoryEfficient>
 __device__ __forceinline__ void cuLoadAddStridedInputs(
@@ -721,20 +559,13 @@ void cuComputeGradInput(
         for (int k = 0;  k < 4;  ++k) {
           const U c_h = static_cast<U>(k_h[l+k]);
           const U c_loss = static_cast<U>(k_dout[l+k]);
-          if (!rms_only) {
-            sum_loss1 += c_loss * gamma[l+k];
-            if (MemoryEfficient) {
-              sum_loss2 += c_loss * (c_h - beta[l+k]);
-            } else {
-              sum_loss2 += c_loss * gamma[l+k] * (c_h - c_mean) * c_invvar;
-            }
-          } else {
+
             if (MemoryEfficient) {
               sum_loss2 += c_loss * c_h;
             } else {
               sum_loss2 += c_loss * gamma[l+k] * (c_h) * c_invvar;
             }
-          }
+
         }
       }
       for (;  l < n2;  ++l) {
@@ -761,39 +592,25 @@ void cuComputeGradInput(
         for (int k = 0;  k < 4;  ++k) {
           const U c_h = static_cast<U>(k_h[l+k]);
           const U c_loss = static_cast<U>(k_dout[l+k]);
-          if (!rms_only) {
-            sum_loss1 += c_loss;
-            if (MemoryEfficient) {
-              sum_loss2 += c_loss * c_h;
-            } else {
-              sum_loss2 += c_loss * (c_h - c_mean) * c_invvar;
-            }
-          } else {
+
             if (MemoryEfficient) {
               sum_loss2 += c_loss * c_h;
             } else {
               sum_loss2 += c_loss * (c_h) * c_invvar;
             }
-          }
+
         }
       }
       for (;  l < n2;  ++l) {
         const U c_h = static_cast<U>(k_h[l]);
         const U c_loss = static_cast<U>(k_dout[l]);
-        if (!rms_only) {
-          sum_loss1 += c_loss;
-          if (MemoryEfficient) {
-            sum_loss2 += c_loss * c_h;
-          } else {
-            sum_loss2 += c_loss * (c_h - c_mean) * c_invvar;
-          }
-        } else {
-          if (MemoryEfficient) {
+
+        if (MemoryEfficient) {
             sum_loss2 += c_loss * c_h;
           } else {
             sum_loss2 += c_loss * (c_h) * c_invvar;
           }
-        }
+
       }
     }
     // intra-warp reductions
@@ -851,20 +668,13 @@ void cuComputeGradInput(
         const U c_h = static_cast<U>(k_h[l]);
         const U c_loss = static_cast<U>(k_dout[l]);
         U f_grad_input = fH * c_loss;
-        if (!rms_only) {
-          f_grad_input -= sum_loss1;
-          if (MemoryEfficient) {
-            f_grad_input -= c_h * sum_loss2;
-          } else {
-            f_grad_input -= (c_h - c_mean) * c_invvar * sum_loss2;
-          }
-        } else {
-          if (MemoryEfficient) {
+
+        if (MemoryEfficient) {
             f_grad_input -= c_h * sum_loss2;
           } else {
             f_grad_input -= c_h * c_invvar * sum_loss2;
           }
-        }
+
         f_grad_input *= term1;
         k_grad_input[l] = static_cast<T>(f_grad_input);
       }
