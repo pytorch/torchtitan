@@ -17,6 +17,10 @@ except ModuleNotFoundError:
 from torchtitan.logging_utils import logger
 
 
+def string_list(raw_arg):
+    return raw_arg.split(",")
+
+
 class JobConfig:
     """
     A helper class to manage the train configuration.
@@ -202,10 +206,56 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
-            "--training.pipeline_parallel_degree",
+            "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
-            help="Pipeline Parallelism degree. 1 means disabled.",
+            help="""
+                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
+                If using looped schedules, this still specifies the number of physical ranks, not the number
+                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_points",
+            type=string_list,
+            nargs="+",
+            default=[],
+            help="""
+                Specify comma-separated names of modules to use as the beginning of a split point.
+
+                e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
+                the first containing all the layers up to layers.0,
+                the second containing layers.0 and up to layers.2,
+                the third containing layers.2 and all the remaining layers.
+
+                Note: fully-automated splitting may be enabled in the future,
+                but currently the split points must be specified manually for both manual and tracer.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_schedule",
+            type=str,
+            choices=["1f1b", "gpipe"],
+            default="gpipe",
+            help="""
+                Specify the Pipeline Parallel schedule to use.
+
+                The schedule must be compatible with the split points and stages_per_rank.
+
+                Looped schedules are not yet supported in torchtitan.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_mode",
+            type=str,
+            choices=["manual", "tracer"],
+            default="manual",
+            help="""
+                Specify the split method (e.g. the Pipeline Parallelism Front End)
+
+                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
+                implementation manually, and then wrap it in a PipelineStage.
+
+                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
+                split via the provided split points, unflattened into an nn.Module,
+                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
         )
         self.parser.add_argument(
             "--training.compile",
@@ -408,6 +458,10 @@ class JobConfig:
                 aux_parser.add_argument(
                     "--" + arg, action="store_true" if val else "store_false"
                 )
+            elif arg == "experimental.pipeline_parallel_split_points":
+                # type inference breaks here, since the type is just 'list' and it ends up flattening
+                # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
+                aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
 
