@@ -130,7 +130,7 @@ namespace {
 //      {
 //          extern __device__ void error(void);
 //          error();
-//          return NULL;
+//          return nullptr;
 //      }
 //  };
 // https://github.com/NVIDIA/apex/issues/246
@@ -185,7 +185,7 @@ void cuApplyRMSNorm(
     U c_invvar = rsqrt(sigma2 + epsilon);
     const int numx = blockDim.x * blockDim.y;
     const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
-    if (gamma != NULL) {
+    if (gamma != nullptr) {
       for (int i = thrx;  i < n2;  i+=numx) {
         U curr = static_cast<U>(lvals[i]);
         ovals[i] = gamma[i] * static_cast<V>(c_invvar * curr);
@@ -547,6 +547,7 @@ __global__ void cuComputeGradInput(
     }
 }
 */
+
 template<typename T, typename U, typename V, bool MemoryEfficient> __global__
 void cuComputeGradInput(
     const V* __restrict__ dout,
@@ -563,7 +564,7 @@ void cuComputeGradInput(
     bool rms_only)
 {
   for (auto i1=blockIdx.y; i1 < n1; i1 += gridDim.y) {
-    U sum_loss1 = U(0);
+    //U sum_loss1 = U(0);
     U sum_loss2 = U(0);
     const T* k_h = input_or_output + i1*n2;
     const V* k_dout = dout + i1*n2;
@@ -571,7 +572,7 @@ void cuComputeGradInput(
     const U c_mean = !MemoryEfficient ? mean[i1] : 0.;
     const int numx = blockDim.x * blockDim.y;
     const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
-    if (gamma != NULL) {
+    if (gamma != nullptr) {
       int l = 4*thrx;
       for (;  l+3 < n2;  l+=4*numx) {
         for (int k = 0;  k < 4;  ++k) {
@@ -589,20 +590,13 @@ void cuComputeGradInput(
       for (;  l < n2;  ++l) {
         const U c_h = static_cast<U>(k_h[l]);
         const U c_loss = static_cast<U>(k_dout[l]);
-        if (!rms_only) {
-          sum_loss1 += c_loss * gamma[l];
-          if (MemoryEfficient) {
-            sum_loss2 += c_loss * (c_h - beta[l]);
-          } else {
-            sum_loss2 += c_loss * gamma[l] * (c_h - c_mean) * c_invvar;
-          }
-        } else {
+
           if (MemoryEfficient) {
             sum_loss2 += c_loss * c_h;
           } else {
             sum_loss2 += c_loss * gamma[l] * (c_h) * c_invvar;
           }
-        }
+
       }
     } else {
       int l = 4*thrx;
@@ -667,7 +661,7 @@ void cuComputeGradInput(
     U fH = (U)n2;
     U term1 = (U(1) / fH) * c_invvar;
     T* k_grad_input = grad_input + i1*n2;
-    if (gamma != NULL) {
+    if (gamma != nullptr) {
       for (int l = thrx;  l < n2;  l+=numx) {
         const U c_h = static_cast<U>(k_h[l]);
         const U c_loss = static_cast<U>(k_dout[l]);
@@ -683,27 +677,147 @@ void cuComputeGradInput(
         f_grad_input *= term1;
         k_grad_input[l] = static_cast<T>(f_grad_input);
       }
-    } else {
-      for (int l = thrx;  l < n2;  l+=numx) {
-        const U c_h = static_cast<U>(k_h[l]);
-        const U c_loss = static_cast<U>(k_dout[l]);
-        U f_grad_input = fH * c_loss;
-
-        if (MemoryEfficient) {
-            f_grad_input -= c_h * sum_loss2;
-          } else {
-            f_grad_input -= c_h * c_invvar * sum_loss2;
-          }
-
-        f_grad_input *= term1;
-        k_grad_input[l] = static_cast<T>(f_grad_input);
-      }
     }
+
+
     // prevent race where buf is written again before reads are done
     __syncthreads();
   }
 }
+/*
 
+template<typename T, typename U, typename V, bool MemoryEfficient>
+__global__ void cuComputeGradInput(
+    const V* __restrict__ dout,
+    const T* __restrict__ input_or_output,
+    const int n1,
+    const int n2,
+    const U* __restrict__ mean,
+    const U* __restrict__ invvar,
+    U epsilon,
+    const V* gamma,
+    const V* beta,
+    T* grad_input,
+    const double eps,
+    bool rms_only)
+{
+    for (auto i1 = blockIdx.y; i1 < n1; i1 += gridDim.y) {
+        U sum_loss2 = U(0);
+        const T* k_h = input_or_output + i1 * n2;
+        const V* k_dout = dout + i1 * n2;
+        const U c_invvar = invvar[i1];
+        const U c_mean = !MemoryEfficient ? mean[i1] : U(0);
+        const int numx = blockDim.x * blockDim.y;
+        const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
+
+        if (gamma != nullptr) {
+            int l = 4 * thrx;
+            for (; l + 3 < n2; l += 4 * numx) {
+                for (int k = 0; k < 4; ++k) {
+                    const U c_h = static_cast<U>(k_h[l + k]);
+                    const U c_loss = static_cast<U>(k_dout[l + k]);
+
+                    if (MemoryEfficient) {
+                        sum_loss2 += c_loss * c_h;
+                    } else {
+                        sum_loss2 += c_loss * gamma[l + k] * c_h * c_invvar;
+                    }
+                }
+            }
+            for (; l < n2; ++l) {
+                const U c_h = static_cast<U>(k_h[l]);
+                const U c_loss = static_cast<U>(k_dout[l]);
+
+                if (MemoryEfficient) {
+                    sum_loss2 += c_loss * c_h;
+                } else {
+                    sum_loss2 += c_loss * gamma[l] * c_h * c_invvar;
+                }
+            }
+        } else {
+            int l = 4 * thrx;
+            for (; l + 3 < n2; l += 4 * numx) {
+                for (int k = 0; k < 4; ++k) {
+                    const U c_h = static_cast<U>(k_h[l + k]);
+                    const U c_loss = static_cast<U>(k_dout[l + k]);
+
+                    if (MemoryEfficient) {
+                        sum_loss2 += c_loss * c_h;
+                    } else {
+                        sum_loss2 += c_loss * c_h * c_invvar;
+                    }
+                }
+            }
+            for (; l < n2; ++l) {
+                const U c_h = static_cast<U>(k_h[l]);
+                const U c_loss = static_cast<U>(k_dout[l]);
+
+                if (MemoryEfficient) {
+                    sum_loss2 += c_loss * c_h;
+                } else {
+                    sum_loss2 += c_loss * c_h * c_invvar;
+                }
+            }
+        }
+
+        // Intra-warp reductions
+        for (int mask = blockDim.x / 2; mask > 0; mask /= 2) {
+            sum_loss2 += WARP_SHFL_XOR(sum_loss2, mask);
+        }
+
+        // Inter-warp reductions
+        if (blockDim.y > 1) {
+            SharedMemory<U> shared;
+            U* buf = shared.getPointer();
+
+            if (threadIdx.y == 0) {
+                buf[threadIdx.x] = sum_loss2;
+            }
+            __syncthreads();
+
+            for (int offset = blockDim.y / 2; offset > 0; offset /= 2) {
+                if (threadIdx.y < offset) {
+                    sum_loss2 += buf[threadIdx.x + blockDim.x * offset];
+                }
+                __syncthreads();
+
+                if (threadIdx.y == 0) {
+                    buf[threadIdx.x] = sum_loss2;
+                }
+                __syncthreads();
+            }
+
+            if (threadIdx.y == 0) {
+                sum_loss2 = buf[threadIdx.x];
+            }
+            __syncthreads();
+        }
+
+        // All threads now have the two sums over l
+        U fH = static_cast<U>(n2);
+        U term1 = (U(1) / fH) * c_invvar;
+        T* k_grad_input = grad_input + i1 * n2;
+
+        if (gamma != nullptr) {
+            for (int l = thrx; l < n2; l += numx) {
+                const U c_h = static_cast<U>(k_h[l]);
+                const U c_loss = static_cast<U>(k_dout[l]);
+                const U k_gamma = static_cast<U>(clamp_by_magnitude(gamma[l], eps));
+                U f_grad_input = fH * c_loss * k_gamma;
+
+                if (MemoryEfficient) {
+                    f_grad_input -= c_h / k_gamma * sum_loss2;
+                } else {
+                    f_grad_input -= c_h * c_invvar * sum_loss2;
+                }
+
+                f_grad_input *= term1;
+                k_grad_input[l] = static_cast<T>(f_grad_input);
+            }
+        }
+    }
+}
+*/
 
 template<typename T, typename U, typename V=T>
 void HostApplyRMSNorm(
@@ -748,7 +862,7 @@ void cuda_rms_norm(
           input->DATA_PTR<scalar_t_in>(),
           n1,n2,
           epsilon,
-          gamma != NULL ? gamma->DATA_PTR<scalar_t_out>() : NULL);
+          gamma != nullptr ? gamma->DATA_PTR<scalar_t_out>() : nullptr);
       )
 }
 
@@ -861,7 +975,7 @@ void cuda_rms_norm_gradient(
     using namespace at;
     DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT_INOUT_TYPES(
       input_or_output->scalar_type(),
-      gamma == NULL ? input_or_output->scalar_type() :  gamma->scalar_type(),
+      gamma == nullptr ? input_or_output->scalar_type() :  gamma->scalar_type(),
       "cuComputeGradInputRMS",
       using accscalar_t = at::acc_type<scalar_t_in, true>;
       HostRMSNormGradient(
@@ -869,12 +983,12 @@ void cuda_rms_norm_gradient(
         invvar->DATA_PTR<accscalar_t>(),
         input_or_output,
         n1,n2,
-            // TMJ pass NULL argument for gamma, beta, grad_gamma and grad_beta
-            // if gamma Tensor is NULL on input.
-        gamma != NULL ? gamma->DATA_PTR<scalar_t_out>() : NULL,
+            // TMJ pass nullptr argument for gamma, beta, grad_gamma and grad_beta
+            // if gamma Tensor is nullptr on input.
+        gamma != nullptr ? gamma->DATA_PTR<scalar_t_out>() : nullptr,
         epsilon,
         grad_input->DATA_PTR<scalar_t_in>(),
-        gamma != NULL ? grad_gamma->DATA_PTR<scalar_t_out>() : NULL,
+        gamma != nullptr ? grad_gamma->DATA_PTR<scalar_t_out>() : nullptr,
         memory_efficient);
     )
 }
