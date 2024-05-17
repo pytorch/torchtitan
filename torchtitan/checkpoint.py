@@ -15,7 +15,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_optimizer_state_dict,
@@ -267,6 +266,15 @@ class CheckpointManager:
                 self.async_future.result()
 
     def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
+        try:
+            from torch.distributed._state_dict_utils import (
+                _copy_state_dict,
+                _create_cpu_state_dict,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "Please install the latest PyTorch nightly to use async checkpointing with pinned memory."
+            ) from e
         state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
         if self.cpu_offload_state_dict is None:
             logger.debug(f"Preparing the CPU memory, {time.monotonic()=}.:.2f")
@@ -341,7 +349,8 @@ class CheckpointManager:
             step_counts = []
             for filename in os.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
-                if match:
+                metadata_probe = os.path.join(self.folder, filename, ".metadata")
+                if match and os.path.isfile(metadata_probe):
                     step_counts.append(int(match.group(1)))
             if not step_counts:
                 return False
