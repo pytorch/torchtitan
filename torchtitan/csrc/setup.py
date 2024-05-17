@@ -7,7 +7,7 @@ setup(
     name=f"titan_cuda",
     description="Fused RMSNorm",
     keywords="rmsnorm ",
-    version="1.5.1412.2024",
+    version="1.5.162.2024",
     url="https://github.com/lessw2020/4Bit_AdamW_Triton",
     packages=find_packages(),
     cmdclass={'build_ext': BuildExtension},

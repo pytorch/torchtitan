@@ -7,20 +7,20 @@ description = "Llama 3 debug training"
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
-flavor = "debugmodel"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+flavor = "4B"
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 

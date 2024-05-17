@@ -10,6 +10,9 @@ global titan_cuda
 titan_cuda = None
 
 
+from apex._autocast_utils import _cast_if_autocast_enabled
+
+
 # Reference implementation from Huggingface
 def manual_rms_norm(input, normalized_shape, weight, eps):
     # layer norm should always be calculated in float32
@@ -59,33 +62,10 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
         return grad_input, grad_weight, None, None, None
 
 
-class FusedRMSNormFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, normalized_shape, eps, memory_efficient=True):
-        global titan_cuda
-        if titan_cuda is None:
-            titan_cuda = importlib.import_module("titan_cuda")
-        ctx.normalized_shape = normalized_shape
-        ctx.eps = eps
-        ctx.memory_efficient = memory_efficient
-        input_ = input.contiguous()
-        output, invvar = titan_cuda.rms_forward(input_, ctx.normalized_shape, ctx.eps)
-        if ctx.memory_efficient:
-            ctx.save_for_backward(output, invvar)
-        else:
-            ctx.save_for_backward(input_, invvar)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_or_output, invvar = ctx.saved_tensors
-        grad_input = None
-        grad_input = titan_cuda.rms_backward(
-            grad_output.contiguous(), invvar, input_or_output,
-            ctx.normalized_shape, ctx.eps, ctx.memory_efficient
-        )
-        return grad_input, None, None, None
-
+def fused_rms_norm_affine(input, weight, normalized_shape, eps=1e-6, memory_efficient=False):
+    #args = _cast_if_autocast_enabled(input, weight, normalized_shape, eps, memory_efficient)
+    #with torch.cuda.amp.autocast(enabled=False):
+    return FusedRMSNormAffineFunction.apply(input, weight, normalized_shape, eps, memory_efficient)
 
 
 class FusedRMSNorm(torch.nn.Module):
@@ -171,8 +151,11 @@ class FusedRMSNorm(torch.nn.Module):
             init.ones_(self.weight)
 
     def forward(self, input):
-        output = FusedRMSNormAffineFunction.apply(input.float(), self.weight, self.normalized_shape, self.eps, self.memory_efficient)
-        return output.type_as(input)
+        #output = FusedRMSNormAffineFunction.apply(input, self.weight, self.normalized_shape, self.eps, self.memory_efficient)
+        #return output#.type_as(input)
+        return fused_rms_norm_affine(
+                input, self.weight, self.normalized_shape, self.eps, self.memory_efficient
+            )
 
     def extra_repr(self):
         return "{normalized_shape}, eps={eps}, " "elementwise_affine={elementwise_affine}".format(**self.__dict__)
