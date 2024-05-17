@@ -193,10 +193,10 @@ def pipeline_llama_manual(
         pp_rank,
     )
 
-    if pp_rank == 0:
+    if pp_rank < pp_size - 1:
         model.norm = None
         model.output = None
-    elif pp_rank == pp_size - 1:
+    if pp_rank > 0:
         model.tok_embeddings = None
     names = list(model.layers.keys())
     for name in names:
@@ -209,40 +209,39 @@ def pipeline_llama_manual(
     # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
     # layers of the model that map to this stage, not the whole model.
 
-    # Get example input
     if pp_rank == 0:
+        # first layer
         input_shape = (job_config.training.batch_size, job_config.training.seq_len)
         input = torch.randint(
             model_config.vocab_size, input_shape, dtype=torch.int64, device=device
         )
-
-        # HACK- can't use shape inference via execution of the PP stage inside ManualPipelineStage API, becuase the
-        # real output shapes will change after applying TP.  So we hardcode output shapes here, and thus bypass doing
-        # shape inference.
-        # the real fix is to use lazy shape inference during first PP forward, and not need to specify anything here.
-        output_shape = (
-            job_config.training.batch_size,
-            int(job_config.training.seq_len // parallel_dims.tp),
-            model_config.dim,
-        )
-        output = torch.empty(output_shape, dtype=torch.float32, device=device)
     else:
-        # TODO(whc) can we rely on shape inference so that user doesn't have to compute TP impact on seq_len
+        # later layers (assume all start w/ a transformer layer)
         input_shape = (
             job_config.training.batch_size,
             int(job_config.training.seq_len // parallel_dims.tp),
             model_config.dim,
         )
-        input = torch.randint(
-            model_config.vocab_size, input_shape, dtype=torch.float32, device=device
+        input = torch.rand(input_shape, dtype=torch.float32, device=device)
+
+    if pp_rank == pp_size - 1:
+        # last layer
+        output_shape = (
+            job_config.training.batch_size,
+            int(job_config.training.seq_len // parallel_dims.tp),
+            model_config.vocab_size,
         )
-        # TODO wrong shape, need to consider output layer
+        output_dtype = torch.float32
+        output = torch.rand(input_shape, dtype=torch.float32, device=device)
+    else:
+        # earlier layers (assume all end in a transformer layer)
         output_shape = (
             job_config.training.batch_size,
             int(job_config.training.seq_len // parallel_dims.tp),
             model_config.dim,
         )
-        output = torch.empty(output_shape, dtype=torch.float32, device=device)
+        output_dtype = torch.float32
+        output = torch.rand(input_shape, dtype=torch.float32, device=device)
 
     model.to_empty(device=device)
     stage = ManualPipelineStage(
