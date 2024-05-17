@@ -212,30 +212,18 @@ void cuApplyLayerNorm_(
     U c_invvar = rsqrt(sigma2 + epsilon);
     const int numx = blockDim.x * blockDim.y;
     const int thrx = threadIdx.x + threadIdx.y * blockDim.x;
-    if (gamma != NULL && (beta != NULL || rms_only)) {
+    if (gamma != NULL) {
       for (int i = thrx;  i < n2;  i+=numx) {
         U curr = static_cast<U>(lvals[i]);
-        if (!rms_only) {
-          ovals[i] = gamma[i] * static_cast<V>(c_invvar * (curr - mu)) + beta[i];
-        } else {
-          ovals[i] = gamma[i] * static_cast<V>(c_invvar * curr);
-        }
-
+        ovals[i] = gamma[i] * static_cast<V>(c_invvar * curr);
       }
     } else {
       for (int i = thrx;  i < n2;  i+=numx) {
         U curr = static_cast<U>(lvals[i]);
-        if (!rms_only) {
-          ovals[i] = static_cast<V>(c_invvar * (curr - mu));
-        } else {
-          ovals[i] = static_cast<V>(c_invvar * curr);
-        }
+        ovals[i] = static_cast<V>(c_invvar * curr);
       }
     }
     if (threadIdx.x == 0 && threadIdx.y == 0) {
-      if (!rms_only) {
-        mean[i1] = mu;
-      }
       invvar[i1] = c_invvar;
     }
     __syncthreads();
