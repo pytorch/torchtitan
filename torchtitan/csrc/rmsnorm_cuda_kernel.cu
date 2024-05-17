@@ -247,7 +247,7 @@ V clamp_by_magnitude(V curr_gamma, double eps)
   }
 }
 
-
+/*
 template<typename T, typename U, typename V, bool MemoryEfficient> __device__
 void cuLoadWriteStridedInputs(
     const int i1_block,
@@ -295,6 +295,55 @@ void cuLoadWriteStridedInputs(
       warp_buf2[write_idx] = U(0);
     }
   }
+}
+*/
+template<typename T, typename U, typename V, bool MemoryEfficient>
+__device__ void cuLoadWriteStridedInputs(
+    const int i1_block,
+    const int thr_load_row_off,
+    const int thr_load_col_off,
+    const int i2_off,
+    const int row_stride,
+    U* warp_buf1,
+    U* warp_buf2,
+    const T* input_or_output,
+    const V* dout,
+    const int i1_end,
+    const int n2,
+    const U* __restrict__ mean,
+    const U* __restrict__ invvar,
+    const V* __restrict__ gamma,
+    const V* __restrict__ beta,
+    const double eps)
+{
+    int i1 = i1_block + thr_load_row_off;
+
+    if (i1 < i1_end) {
+        for (int k = 0; k < blockDim.y; ++k) {
+            int i2 = i2_off + k;
+
+            if (i2 < n2) {
+                int load_idx = i1 * n2 + i2;
+                int write_idx = thr_load_row_off * row_stride + thr_load_col_off + k;
+
+                U c_h = static_cast<U>(input_or_output[load_idx]);
+                U curr_dout = static_cast<U>(dout[load_idx]);
+
+                if (MemoryEfficient) {
+                    U gamma_val = static_cast<U>(gamma[i2]);
+                    U gamma_clamped = static_cast<U>(clamp_by_magnitude(gamma_val, eps));
+                    warp_buf2[write_idx] = curr_dout * c_h / gamma_clamped;
+                } else {
+                    warp_buf2[write_idx] = curr_dout * c_h * invvar[i1];
+                }
+            }
+        }
+    } else {
+        for (int k = 0; k < blockDim.y; ++k) {
+            int write_idx = thr_load_row_off * row_stride + thr_load_col_off + k;
+            warp_buf2[write_idx] = U(0);
+        }
+    }
 }
 
 template<typename T, typename U, typename V, bool MemoryEfficient> __device__
@@ -371,7 +420,7 @@ void cuComputePartGradGammaBeta(
     U* warp_buf2 = warp_buf1 + blockDim.y * blockDim.y * row_stride;
     // compute partial sums from strided inputs
     // do this to increase number of loads in flight
-    cuLoadWriteStridedInputs<T, U, V, MemoryEfficient>(i1_beg,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf1,warp_buf2,input_or_output,dout,i1_end,n2,mean,invvar,gamma,beta,eps, rms_only);
+    cuLoadWriteStridedInputs<T, U, V, MemoryEfficient>(i1_beg,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf1,warp_buf2,input_or_output,dout,i1_end,n2,mean,invvar,gamma,beta,eps);
     for (int i1_block = i1_beg+blockDim.y*blockDim.y;  i1_block < i1_end;  i1_block+=blockDim.y*blockDim.y) {
       cuLoadAddStridedInputs<T, U, V, MemoryEfficient>(i1_block,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf1,warp_buf2,input_or_output,dout,i1_end,n2,mean,invvar,gamma,beta,eps, rms_only);
     }
@@ -438,9 +487,7 @@ void cuComputeGradGammaBeta(
       const U* part_grad_beta_ptr = part_grad_beta + threadIdx.y * num_warp_reductions * n2 + i2;
       for (int warp_offset = 0;  warp_offset < num_warp_reductions;  ++warp_offset) {
         sum_gamma += part_grad_gamma_ptr[warp_offset*n2];
-        if (!rms_only) {
-          sum_beta += part_grad_beta_ptr[warp_offset*n2];
-        }
+
       }
       // inter-warp reductions
       const int nbsize3 = blockDim.x * blockDim.y / 2;
@@ -449,27 +496,20 @@ void cuComputeGradGammaBeta(
         if (threadIdx.y >= offset && threadIdx.y < 2*offset) {
           const int write_idx = (threadIdx.y - offset) * blockDim.x + threadIdx.x;
           buf[write_idx] = sum_gamma;
-          if (!rms_only) {
-            buf[write_idx+nbsize3] = sum_beta;
-          }
+
         }
         __syncthreads();
         // bottom half sums
         if (threadIdx.y < offset) {
           const int read_idx = threadIdx.y * blockDim.x + threadIdx.x;
           sum_gamma += buf[read_idx];
-          if (!rms_only) {
-            sum_beta += buf[read_idx+nbsize3];
-          }
+
         }
         __syncthreads();
       }
       // write out fully summed gradients
       if (threadIdx.y == 0) {
         grad_gamma[i2] = sum_gamma;
-        if (!rms_only) {
-          grad_beta[i2] = sum_beta;
-        }
       }
     }
 }
@@ -582,9 +622,6 @@ void cuComputeGradInput(
     }
     // intra-warp reductions
     for (int mask = blockDim.x/2;  mask > 0;  mask /= 2) {
-      if (!rms_only) {
-        sum_loss1 += WARP_SHFL_XOR(sum_loss1, mask);
-      }
       sum_loss2 += WARP_SHFL_XOR(sum_loss2, mask);
     }
     // inter-warp reductions
@@ -595,33 +632,21 @@ void cuComputeGradInput(
         // upper half of warps write to shared
         if (threadIdx.y >= offset && threadIdx.y < 2*offset) {
           const int wrt_i = (threadIdx.y - offset) * blockDim.x + threadIdx.x;
-          if (!rms_only) {
-            buf[2*wrt_i] = sum_loss1;
-          }
           buf[2*wrt_i+1] = sum_loss2;
         }
         __syncthreads();
         // lower half merges
         if (threadIdx.y < offset) {
           const int read_i = threadIdx.y * blockDim.x + threadIdx.x;
-          if (!rms_only) {
-            sum_loss1 += buf[2*read_i];
-          }
           sum_loss2 += buf[2*read_i+1];
         }
         __syncthreads();
       }
       if (threadIdx.y == 0) {
-        if (!rms_only) {
-          buf[2*threadIdx.x] = sum_loss1;
-        }
         buf[2*threadIdx.x+1] = sum_loss2;
       }
       __syncthreads();
       if (threadIdx.y !=0) {
-        if (!rms_only) {
-          sum_loss1 = buf[2*threadIdx.x];
-        }
         sum_loss2 = buf[2*threadIdx.x+1];
       }
     }
@@ -635,21 +660,13 @@ void cuComputeGradInput(
         const U c_loss = static_cast<U>(k_dout[l]);
         const U k_gamma = static_cast<U>(clamp_by_magnitude(gamma[l], eps));
         U f_grad_input = fH * c_loss * k_gamma;
-        if (!rms_only) {
-          const U k_beta = beta[l];
-          f_grad_input -= sum_loss1;
-          if (MemoryEfficient) {
-            f_grad_input -= (c_h - k_beta) / k_gamma * sum_loss2;
-          } else {
-            f_grad_input -= (c_h - c_mean) * c_invvar * sum_loss2;
-          }
-        } else {
+
           if (MemoryEfficient) {
             f_grad_input -= c_h / k_gamma * sum_loss2;
           } else {
             f_grad_input -= c_h * c_invvar * sum_loss2;
           }
-        }
+
         f_grad_input *= term1;
         k_grad_input[l] = static_cast<T>(f_grad_input);
       }
