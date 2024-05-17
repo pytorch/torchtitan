@@ -345,7 +345,7 @@ __device__ void cuLoadWriteStridedInputs(
         }
     }
 }
-
+/*
 template<typename T, typename U, typename V, bool MemoryEfficient> __device__
 void cuLoadAddStridedInputs(
     const int i1_block,
@@ -388,6 +388,98 @@ void cuLoadAddStridedInputs(
   }
 }
 
+template<typename T, typename U, typename V, bool MemoryEfficient>
+__device__ void cuLoadAddStridedInputs(
+    const int i1_block,
+    const int thr_load_row_off,
+    const int thr_load_col_off,
+    const int i2_off,
+    const int row_stride,
+    U* warp_buf2,
+    const T* input_or_output,
+    const V* dout,
+    const int i1_end,
+    const int n2,
+    const U* __restrict__ invvar,
+    const V* __restrict__ gamma,
+    const double eps)
+{
+    int i1 = i1_block + thr_load_row_off;
+
+    if (i1 < i1_end) {
+        extern __shared__ U shared_mem[];
+        U* c_h = shared_mem;
+        U* curr_dout = shared_mem + blockDim.y;
+
+        for (int k = 0; k < blockDim.y; ++k) {
+            int i2 = i2_off + k;
+            if (i2 < n2) {
+                int load_idx = i1 * n2 + i2;
+                c_h[k] = static_cast<U>(input_or_output[load_idx]);
+                curr_dout[k] = static_cast<U>(dout[load_idx]);
+            }
+        }
+
+        __syncthreads();
+
+        for (int k = 0; k < blockDim.y; ++k) {
+            int i2 = i2_off + k;
+            int write_idx = thr_load_row_off * row_stride + thr_load_col_off + k;
+
+            if (i2 < n2) {
+                if (MemoryEfficient) {
+                    U gamma_val = static_cast<U>(gamma[i2]);
+                    U gamma_clamped = static_cast<U>(clamp_by_magnitude(gamma_val, eps));
+                    warp_buf2[write_idx] += curr_dout[k] * c_h[k] / gamma_clamped;
+                } else {
+                    warp_buf2[write_idx] += curr_dout[k] * c_h[k] * invvar[i1];
+                }
+            }
+        }
+    }
+}
+*/
+template<typename T, typename U, typename V, bool MemoryEfficient>
+__device__ __forceinline__ void cuLoadAddStridedInputs(
+    const int i1_block,
+    const int thr_load_row_off,
+    const int thr_load_col_off,
+    const int i2_off,
+    const int row_stride,
+    U* warp_buf2,
+    const T* __restrict__ input_or_output,
+    const V* __restrict__ dout,
+    const int i1_end,
+    const int n2,
+    const U* __restrict__ invvar,
+    const V* __restrict__ gamma,
+    const double eps)
+{
+    //constexpr double eps = 1e-8;  // Example value
+
+    int i1 = i1_block + thr_load_row_off;
+
+    if (i1 < i1_end) {
+        for (int k = 0; k < blockDim.y; ++k) {
+            int i2 = i2_off + k;
+            int write_idx = thr_load_row_off * row_stride + thr_load_col_off + k;
+
+            if (i2 < n2) {
+                int load_idx = i1 * n2 + i2;
+                U c_h = static_cast<U>(__ldg(&input_or_output[load_idx]));
+                U curr_dout = static_cast<U>(__ldg(&dout[load_idx]));
+
+                if (MemoryEfficient) {
+                    U gamma_val = static_cast<U>(__ldg(&gamma[i2]));
+                    U gamma_clamped = static_cast<U>(clamp_by_magnitude(gamma_val, eps));
+                    warp_buf2[write_idx] += curr_dout * c_h / gamma_clamped;
+                } else {
+                    warp_buf2[write_idx] += curr_dout * c_h * __ldg(&invvar[i1]);
+                }
+            }
+        }
+    }
+}
 
 template<typename T, typename U, typename V, bool MemoryEfficient> __global__
 void cuComputePartGradGammaBeta(
@@ -422,7 +514,7 @@ void cuComputePartGradGammaBeta(
     // do this to increase number of loads in flight
     cuLoadWriteStridedInputs<T, U, V, MemoryEfficient>(i1_beg,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf1,warp_buf2,input_or_output,dout,i1_end,n2,mean,invvar,gamma,beta,eps);
     for (int i1_block = i1_beg+blockDim.y*blockDim.y;  i1_block < i1_end;  i1_block+=blockDim.y*blockDim.y) {
-      cuLoadAddStridedInputs<T, U, V, MemoryEfficient>(i1_block,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf1,warp_buf2,input_or_output,dout,i1_end,n2,mean,invvar,gamma,beta,eps, rms_only);
+      cuLoadAddStridedInputs<T, U, V, MemoryEfficient>(i1_block,thr_load_row_off,thr_load_col_off,i2_off,row_stride,warp_buf2,input_or_output,dout,i1_end,n2,invvar,gamma,eps);
     }
     __syncthreads();
     // inter-warp reductions
