@@ -9,7 +9,7 @@
 #include "type_shim.h"
 #include "static_switch.h"
 
-
+/*
 template<typename U> __device__
 void cuWelfordOnlineSum(
   const U curr,
@@ -23,6 +23,16 @@ void cuWelfordOnlineSum(
   mu = lmean;
   U delta2 = curr - lmean;
   sigma2 = sigma2 + delta * delta2;
+}
+*/
+
+template<typename U>
+__device__ void cuWelfordOnlineSum(const U curr, U& mu, U& sigma2, U& count) {
+    ++count;
+    U delta = curr - mu;
+    mu += delta / count;
+    U delta2 = curr - mu;
+    sigma2 += delta * delta2;
 }
 
 
