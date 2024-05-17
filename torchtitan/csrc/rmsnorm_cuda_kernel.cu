@@ -180,22 +180,19 @@ struct SharedMemory <double>
         return s_double;
     }
 };
-}
+} // end namespace
 
 
-template<typename T, typename U, typename V> __device__
-void cuApplyLayerNorm_(
+template<typename T, typename U, typename V=T> __global__
+void cuApplyRMSNorm(
   V* __restrict__ output_vals,
-  U* __restrict__ mean,
   U* __restrict__ invvar,
   const T* __restrict__ vals,
   const int n1,
   const int n2,
   const U epsilon,
-  const V* __restrict__ gamma,
-  const V* __restrict__ beta,
-  bool rms_only
-  )
+  const V* __restrict__ gamma)
+
 {
   // Assumptions:
   // 1) blockDim.x == warpSize
@@ -228,19 +225,6 @@ void cuApplyLayerNorm_(
     }
     __syncthreads();
   }
-}
-
-template<typename T, typename U, typename V=T> __global__
-void cuApplyRMSNorm(
-  V* __restrict__ output_vals,
-  U* __restrict__ invvar,
-  const T* __restrict__ vals,
-  const int n1,
-  const int n2,
-  const U epsilon,
-  const V* __restrict__ gamma)
-{
-  cuApplyLayerNorm_<T, U, V>(output_vals, NULL, invvar, vals, n1, n2, epsilon, gamma, NULL, true);
 }
 
 
@@ -294,34 +278,20 @@ void cuLoadWriteStridedInputs(
       if (i2<n2) {
         U c_h = static_cast<U>(input_or_output[load_idx]);
         U curr_dout = static_cast<U>(dout[load_idx]);
-        if (!rms_only) {
-          warp_buf1[write_idx] = curr_dout;
-          if (MemoryEfficient) {
-            U curr_beta = static_cast<U>(beta[i2]);
-            warp_buf2[write_idx] = curr_dout * (c_h - curr_beta) / static_cast<U>(clamp_by_magnitude(gamma[i2], eps));
-          } else {
-            warp_buf2[write_idx] = curr_dout * (c_h - mean[i1]) * invvar[i1];
-          }
-        } else {
+
           if (MemoryEfficient) {
             warp_buf2[write_idx] = curr_dout * (c_h) / static_cast<U>(clamp_by_magnitude(gamma[i2], eps));
           } else {
             warp_buf2[write_idx] = curr_dout * (c_h) * invvar[i1];
           }
-        }
+
       } else {
-        if (!rms_only) {
-          warp_buf1[write_idx] = U(0);
-        }
         warp_buf2[write_idx] = U(0);
       }
     }
   } else {
     for (int k = 0;  k < blockDim.y;  ++k) {
       int write_idx = thr_load_row_off*row_stride+thr_load_col_off+k;
-      if (!rms_only) {
-        warp_buf1[write_idx] = U(0);
-      }
       warp_buf2[write_idx] = U(0);
     }
   }
