@@ -1,4 +1,4 @@
-name: 4 GPU Unit Test
+name: 8 GPU Unit Test
 
 on:
   push:
