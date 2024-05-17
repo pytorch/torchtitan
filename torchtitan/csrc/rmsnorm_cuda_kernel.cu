@@ -912,7 +912,96 @@ void cuda_rms_norm(
       )
 }
 
+template<typename T, typename U=float, typename V=T>
+void HostRMSNormGradient(
+    const V* dout,
+    const U* invvar,
+    at::Tensor* input_or_output,
+    int n1,
+    int n2,
+    const V* gamma,
+    double epsilon,
+    T* grad_input,
+    V* grad_gamma,
+    bool memory_efficient)
+{
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
 
+    if (gamma != nullptr) {
+        constexpr int part_size = 16;
+        constexpr int threads2_x = 32;
+        constexpr int threads2_y = 4;
+        const dim3 threads2(threads2_x, threads2_y, 1);
+        const dim3 blocks2((n2 + threads2_x - 1) / threads2_x, part_size, 1);
+
+        constexpr int nshared2_a = 2 * sizeof(U) * threads2_y * threads2_y * (threads2_x + 1);
+        constexpr int nshared2_b = threads2_x * threads2_y * sizeof(U);
+        constexpr int nshared2 = nshared2_a > nshared2_b ? nshared2_a : nshared2_b;
+
+        const auto part_grad_dtype = (input_or_output->scalar_type() == at::ScalarType::Half ||
+                                      input_or_output->scalar_type() == at::ScalarType::BFloat16)
+                                     ? at::ScalarType::Float
+                                     : input_or_output->scalar_type();
+
+        at::Tensor part_grad_gamma = at::empty({part_size, n2}, input_or_output->options().dtype(part_grad_dtype));
+
+        BOOL_SWITCH(memory_efficient, MemoryEfficient, [&] {
+            auto kernel = &cuComputePartGradGammaBeta<T, U, V, MemoryEfficient>;
+            kernel<<<blocks2, threads2, nshared2, stream>>>(
+                dout,
+                input_or_output->DATA_PTR<T>(),
+                n1, n2,
+                invvar,
+                invvar,  // unused
+                U(epsilon),
+                gamma,
+                gamma,  // unused
+                part_grad_gamma.DATA_PTR<U>(),
+                part_grad_gamma.DATA_PTR<U>(),  // unused
+                epsilon);
+        });
+
+        constexpr int threads3_x = 32;
+        constexpr int threads3_y = 8;
+        const dim3 threads3(threads3_x, threads3_y, 1);
+        const dim3 blocks3((n2 + threads3_x - 1) / threads3_x, 1, 1);
+        constexpr int nshared3 = threads3_x * threads3_y * sizeof(U);
+
+        cuComputeGradGammaBeta<<<blocks3, threads3, nshared3, stream>>>(
+            part_grad_gamma.DATA_PTR<U>(),
+            part_grad_gamma.DATA_PTR<U>(),  // unused
+            part_size,
+            n1, n2,
+            grad_gamma,
+            grad_gamma,  // unused
+            true);  // unused
+    }
+
+    // compute grad_input
+    const uint64_t maxGridY = at::cuda::getCurrentDeviceProperties()->maxGridSize[1];
+    const dim3 blocks1(1, std::min((uint64_t)n1, maxGridY), 1);
+    constexpr int threads1_x = 32;
+    constexpr int threads1_y = 4;
+    const dim3 threads1(threads1_x, threads1_y, 1);
+    constexpr int nshared = threads1_y > 1 ? threads1_y * threads1_x * sizeof(U) : 0;
+
+    BOOL_SWITCH(memory_efficient, MemoryEfficient, [&] {
+        auto kernel = cuComputeGradInput<T, U, V, MemoryEfficient>;
+        kernel<<<blocks1, threads1, nshared, stream>>>(
+            dout,
+            input_or_output->DATA_PTR<T>(),
+            n1, n2,
+            invvar,
+            invvar,  // unused
+            U(epsilon),
+            gamma,
+            gamma,  // unused
+            grad_input,
+            epsilon,
+            true);  // unused
+    });
+}
+/*
 template<typename T, typename U=float, typename V=T>
 void HostRMSNormGradient(
     const V* dout,
@@ -949,28 +1038,27 @@ void HostRMSNormGradient(
                         input_or_output->DATA_PTR<T>(),
                         n1,n2,
                         invvar, /* unused */
+                        /*
                         invvar,
                         U(epsilon),
                         gamma,
                         gamma, /* unused */
+                        /*
                         part_grad_gamma.DATA_PTR<U>(),
-                        part_grad_gamma.DATA_PTR<U>(), /* unused */
+                        part_grad_gamma.DATA_PTR<U>(), /* unused
                         epsilon);
       });
-
-
-
 
       const dim3 threads3(32,8,1);
       const dim3 blocks3((n2+threads2.x-1)/threads2.x,1,1);
       const int nshared3 = threads3.x * threads3.y * sizeof(U);
       cuComputeGradGammaBeta<<<blocks3, threads3, nshared3, stream>>>(
                       part_grad_gamma.DATA_PTR<U>(),
-                      part_grad_gamma.DATA_PTR<U>(), /* unused */
+                      part_grad_gamma.DATA_PTR<U>(), /* unused
                       part_size,
                       n1,n2,
                       grad_gamma,
-                      grad_gamma, /* unused */
+                      grad_gamma, /* unused
                       true);
     }
 
@@ -988,16 +1076,17 @@ void HostRMSNormGradient(
               dout,
               input_or_output->DATA_PTR<T>(),
               n1,n2,
-              invvar, /* unused */
+              invvar, /* unused
               invvar,
               U(epsilon),
               gamma,
-              gamma, /* unused */
+              gamma, /* unused
               grad_input,
               epsilon,
               true);
     });
 }
+*/
 
 
 void cuda_rms_norm_gradient(
