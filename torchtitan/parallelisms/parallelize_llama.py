@@ -215,6 +215,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         if enable_compile:
             # turn on per-transformer block compile after AC wrapping and before FSDP
             # TODO: dynamic shape have some issues so we turn it off for now.
+            torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
         model.layers[layer_id] = transformer_block
 
