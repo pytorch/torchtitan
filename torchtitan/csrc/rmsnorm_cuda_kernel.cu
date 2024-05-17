@@ -439,6 +439,7 @@ __device__ void cuLoadAddStridedInputs(
     }
 }
 */
+
 template<typename T, typename U, typename V, bool MemoryEfficient>
 __device__ __forceinline__ void cuLoadAddStridedInputs(
     const int i1_block,
@@ -480,7 +481,7 @@ __device__ __forceinline__ void cuLoadAddStridedInputs(
         }
     }
 }
-
+/*
 template<typename T, typename U, typename V, bool MemoryEfficient> __global__
 void cuComputePartGradGammaBeta(
     const V* __restrict__ dout,
@@ -554,7 +555,80 @@ void cuComputePartGradGammaBeta(
       part_grad_gamma[blockIdx.y*n2+i2] = warp_buf2[idx1] + warp_buf2[idx2];
     }
 }
+*/
+template<typename T, typename U, typename V, bool MemoryEfficient>
+__global__ void cuComputePartGradGammaBeta(
+    const V* __restrict__ dout,
+    const T* __restrict__ input_or_output,
+    const int n1,
+    const int n2,
+    const U* __restrict__ mean,
+    const U* __restrict__ invvar,
+    U epsilon,
+    const V* __restrict__ gamma,
+    const V* __restrict__ beta,
+    U* part_grad_gamma,
+    U* part_grad_beta,
+    const double eps)
+{
+    const int block_size = blockDim.y * blockDim.y;
+    const int numsegs_n1 = (n1 + block_size - 1) / block_size;
+    const int segs_per_block = (numsegs_n1 + gridDim.y - 1) / gridDim.y;
+    const int i1_beg = blockIdx.y * segs_per_block * block_size;
+    const int i1_end = min((blockIdx.y + 1) * segs_per_block * block_size, n1);
 
+    const int row_stride = blockDim.x + 1;
+    const int thr_load_col_off = (threadIdx.x * blockDim.y) & (blockDim.x - 1);
+    const int thr_load_row_off = (threadIdx.x * blockDim.y) / blockDim.x + threadIdx.y * blockDim.y;
+    const int i2_off = blockIdx.x * blockDim.x + thr_load_col_off;
+
+    SharedMemory<U> shared;
+    U* buf = shared.getPointer();
+    U* warp_buf1 = buf;
+    U* warp_buf2 = warp_buf1 + blockDim.y * blockDim.y * row_stride;
+
+    cuLoadWriteStridedInputs<T, U, V, MemoryEfficient>(
+        i1_beg, thr_load_row_off, thr_load_col_off, i2_off, row_stride,
+        warp_buf1, warp_buf2, input_or_output, dout, i1_end, n2, mean, invvar, gamma, beta, eps);
+
+    for (int i1_block = i1_beg + block_size; i1_block < i1_end; i1_block += block_size) {
+        cuLoadAddStridedInputs<T, U, V, MemoryEfficient>(
+            i1_block, thr_load_row_off, thr_load_col_off, i2_off, row_stride,
+            warp_buf2, input_or_output, dout, i1_end, n2, invvar, gamma, eps);
+    }
+    __syncthreads();
+
+    // inter-warp reductions
+    U acc2 = U(0);
+    for (int k = 0; k < blockDim.y; ++k) {
+        int row1 = threadIdx.y + k * blockDim.y;
+        int idx1 = row1 * row_stride + threadIdx.x;
+        acc2 += warp_buf2[idx1];
+    }
+    warp_buf2[threadIdx.y * row_stride + threadIdx.x] = acc2;
+    __syncthreads();
+
+    // sum all warps
+    for (int offset = blockDim.y / 2; offset > 0; offset /= 2) {
+        if (threadIdx.y < offset) {
+            int row1 = threadIdx.y;
+            int row2 = threadIdx.y + offset;
+            int idx1 = row1 * row_stride + threadIdx.x;
+            int idx2 = row2 * row_stride + threadIdx.x;
+            warp_buf2[idx1] += warp_buf2[idx2];
+        }
+        __syncthreads();
+    }
+
+    int i2 = blockIdx.x * blockDim.x + threadIdx.x;
+    if (threadIdx.y == 0 && i2 < n2) {
+        int row1 = threadIdx.y;
+        int row2 = threadIdx.y + 1;
+        int idx1 = row1 * row_stride + threadIdx.x;
+        int idx2 = row2 * row_stride + threadIdx.x;
+        part_grad_gamma[blockIdx.y * n2 + i2] = warp_buf2[idx1] + warp_buf2[idx2];
+    }
+}
 template<typename U, typename V> __global__
 void cuComputeGradGammaBeta(
     const U* part_grad_gamma,
@@ -881,9 +955,10 @@ void HostRMSNormGradient(
                         gamma, /* unused */
                         part_grad_gamma.DATA_PTR<U>(),
                         part_grad_gamma.DATA_PTR<U>(), /* unused */
-                        epsilon,
-                        true);
+                        epsilon);
       });
+
+
 
 
       const dim3 threads3(32,8,1);
