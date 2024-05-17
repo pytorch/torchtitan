@@ -46,6 +46,82 @@ integration_tests_flavors["debug_model.toml"] = [
     OverrideDefinitions(
         [
             [
+                "--checkpoint.enable_checkpoint",
+                f"--job.dump_folder {args.output_dir}/pp_1f1b/",
+                "--experimental.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_split_points layers.1",
+                "--experimental.pipeline_parallel_schedule 1f1b",
+                "--training.data_parallel_degree 1",
+                "--model.norm_type fused_rmsnorm",
+            ],
+        ],
+        "PP 1D test 1f1b",
+        requires_seed_checkpoint=True,
+        ngpu=2,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--job.dump_folder {args.output_dir}/pp_gpipe/",
+                "--experimental.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_split_points layers.1",
+                "--experimental.pipeline_parallel_schedule gpipe",
+                "--training.data_parallel_degree 1",
+                "--model.norm_type fused_rmsnorm",
+            ],
+        ],
+        "PP 1D test gpipe",
+        requires_seed_checkpoint=True,
+        ngpu=2,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--job.dump_folder {args.output_dir}/pp_dp_1f1b/",
+                "--experimental.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_split_points layers.1",
+                "--experimental.pipeline_parallel_schedule 1f1b",
+                "--training.data_parallel_degree 2",
+                "--model.norm_type fused_rmsnorm",
+            ],
+        ],
+        "PP+DP 1f1b 2D test",
+        requires_seed_checkpoint=True,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--job.dump_folder {args.output_dir}/pp_dp_gpipe/",
+                "--experimental.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_split_points layers.1",
+                "--experimental.pipeline_parallel_schedule gpipe",
+                "--training.data_parallel_degree 2",
+                "--model.norm_type fused_rmsnorm",
+            ],
+        ],
+        "PP+DP gpipe 2D test",
+        requires_seed_checkpoint=True,
+    ),
+    OverrideDefinitions(
+        [
+            [
+                "--checkpoint.enable_checkpoint",
+                f"--job.dump_folder {args.output_dir}/pp_tp/",
+                "--experimental.pipeline_parallel_degree 2",
+                "--experimental.pipeline_parallel_split_points layers.1",
+                "--training.tensor_parallel_degree 2",
+                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
+            ],
+        ],
+        "PP+TP 2D test",
+        requires_seed_checkpoint=True,
+    ),
+    OverrideDefinitions(
+        [
+            [
                 f"--job.dump_folder {args.output_dir}/default/",
             ],
         ],
@@ -103,49 +179,6 @@ integration_tests_flavors["debug_model.toml"] = [
             ],
         ],
         "Checkpoint Integration Test - Save Model Weights Only bf16",
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--job.dump_folder {args.output_dir}/pp/",
-                "--experimental.pipeline_parallel_degree 2",
-                "--experimental.pipeline_parallel_split_points layers.1",
-                "--training.data_parallel_degree 1",
-                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
-            ],
-        ],
-        "PP 1D test",
-        requires_seed_checkpoint=True,
-        ngpu=2,
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--job.dump_folder {args.output_dir}/pp_dp/",
-                "--experimental.pipeline_parallel_degree 2",
-                "--experimental.pipeline_parallel_split_points layers.1",
-                "--training.data_parallel_degree 2",
-                "--model.norm_type fused_rmsnorm",
-            ],
-        ],
-        "PP+DP 2D test",
-        requires_seed_checkpoint=True,
-    ),
-    OverrideDefinitions(
-        [
-            [
-                "--checkpoint.enable_checkpoint",
-                f"--job.dump_folder {args.output_dir}/pp_tp/",
-                "--experimental.pipeline_parallel_degree 2",
-                "--experimental.pipeline_parallel_split_points layers.1",
-                "--training.tensor_parallel_degree 2",
-                "--model.norm_type rmsnorm",  # TODO fix fused_rmsnorm issue
-            ],
-        ],
-        "PP+TP 2D test",
-        requires_seed_checkpoint=True,
     ),
     # oh.. not enough GPUs?
     # OverrideDefinitions(
