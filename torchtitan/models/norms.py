@@ -213,7 +213,15 @@ def _rms_norm_bwd_kernel_sm(
     tl.store(DW + row_block_id * N + cols, dw, mask=mask)
 
 
+from torch.distributed._tensor.experimental import local_map
+from torch.distributed._tensor.placement_types import _Partial, Shard
+
 class TritonFusedRMSNorm(torch.autograd.Function):
+
+    @local_map(
+        out_placements=[Shard(1)],
+        in_placements=[Shard(1)]
+    )
     @staticmethod
     def forward(ctx, x, weight, eps):
         x_shape_start = x.shape
@@ -256,6 +264,10 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         y = y.reshape(x_shape_start)
         return y
 
+    @local_map(
+        out_placements=[_Partial()],
+        input_placements=[Shard(1)],
+    )
     @staticmethod
     def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
