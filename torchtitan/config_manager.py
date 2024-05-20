@@ -270,6 +270,18 @@ class JobConfig:
                 and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
         )
         self.parser.add_argument(
+            "--experimental.pipeline_parallel_microbatches",
+            type=int,
+            default=None,
+            help="""
+                How many microbatches to split the full training batch into when using pipeline parallelism.
+
+                The overall training batch size must be evenly divisible by the number of microbatches.
+
+                The default value will be the number of pipeline stages, if unspecified.
+            """,
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=torch_dtype,
             default="bfloat16",
