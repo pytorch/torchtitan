@@ -184,9 +184,10 @@ def pipeline_llama_manual(
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
-    # heuristically == PP dim but should be a config
-    microbatches = parallel_dims.pp
-    stage_idx = pp_rank  # TODO support virtual stages
+    microbatches = (
+        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
+    )
+    stage_idx = pp_rank
     this_stage_layer_names = split_stage_fqns(
         _llama_fqns(len(model.layers)),
         job_config.experimental.pipeline_parallel_split_points,
@@ -303,7 +304,7 @@ def pipeline_llama_tracer(
     # Create a pipeline representation from the model
     pipe = pipeline(
         model,
-        parallel_dims.pp,
+        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp,
         example_args=_llama_trace_input(job_config, model_config),
         split_spec=split_spec,
     )
