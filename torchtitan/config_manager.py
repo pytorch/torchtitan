@@ -24,6 +24,12 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
+TORCH_DTYPE_ARGS = [
+    "checkpoint.export_dtype",
+    "training.mixed_precision_param",
+    "training.mixed_precision_reduce",
+]
+
 
 def torch_dtype(dtype_str: str) -> torch.dtype:
     return DTYPE_MAP[dtype_str]
@@ -222,7 +228,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.mixed_precision_param",
             type=torch_dtype,
-            default="bfloat16",
+            default=torch_dtype("bfloat16"),
             choices=["bfloat16", "float32"],
             help="""
                 torch dtype to use for parameters when applying mixed precision via FSDP.
@@ -232,7 +238,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.mixed_precision_reduce",
             type=torch_dtype,
-            default="float32",
+            default=torch_dtype("float32"),
             choices=["float32"],
             help="""
                 torch dtype to use for reductions when applying mixed precision via FSDP.
@@ -306,7 +312,7 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.export_dtype",
             type=torch_dtype,
-            default="float32",
+            default=torch_dtype("float32"),
             choices=["float16", "bfloat16", "float32"],
             help="""
                 Converts to the specified precision when training completes and model_weights_only=true.
@@ -394,6 +400,9 @@ class JobConfig:
             try:
                 with open(config_file, "rb") as f:
                     for k, v in tomllib.load(f).items():
+                        for k_, v_ in v.items():
+                            if ".".join([k, k_]) in TORCH_DTYPE_ARGS:
+                                v[k_] = torch_dtype(v_)
                         # to prevent overwrite of non-specified keys
                         args_dict[k] |= v
             except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
@@ -437,7 +446,9 @@ class JobConfig:
         # aux parser to parse the command line only args, with no defaults from main parser
         aux_parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS)
         for arg, val in vars(args).items():
-            if isinstance(val, bool):
+            if arg in TORCH_DTYPE_ARGS:
+                aux_parser.add_argument("--" + arg, type=torch_dtype)
+            elif isinstance(val, bool):
                 aux_parser.add_argument(
                     "--" + arg, action="store_true" if val else "store_false"
                 )
