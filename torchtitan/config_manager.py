@@ -9,12 +9,24 @@ import sys
 from collections import defaultdict
 from typing import Tuple, Union
 
+import torch
+
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
 
 from torchtitan.logging_utils import logger
+
+DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def torch_dtype(dtype_str: str) -> torch.dtype:
+    return DTYPE_MAP[dtype_str]
 
 
 def string_list(raw_arg):
@@ -258,6 +270,26 @@ class JobConfig:
                 and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
         )
         self.parser.add_argument(
+            "--training.mixed_precision_param",
+            type=torch_dtype,
+            default="bfloat16",
+            choices=["bfloat16", "float32"],
+            help="""
+                torch dtype to use for parameters when applying mixed precision via FSDP.
+                This feature only takes effect when data_parallel_degree > 1
+            """,
+        )
+        self.parser.add_argument(
+            "--training.mixed_precision_reduce",
+            type=torch_dtype,
+            default="float32",
+            choices=["float32"],
+            help="""
+                torch dtype to use for reductions when applying mixed precision via FSDP.
+                This feature only takes effect when data_parallel_degree > 1
+            """,
+        )
+        self.parser.add_argument(
             "--training.compile",
             action="store_true",
             help="Whether to compile the model",
@@ -323,8 +355,9 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--checkpoint.export_dtype",
-            type=str,
+            type=torch_dtype,
             default="float32",
+            choices=["float16", "bfloat16", "float32"],
             help="""
                 Converts to the specified precision when training completes and model_weights_only=true.
                 Currently supports float32, float16, and bfloat16.
