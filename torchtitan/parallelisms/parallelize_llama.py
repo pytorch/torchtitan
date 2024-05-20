@@ -225,7 +225,9 @@ def pipeline_llama_manual(
                 int(job_config.training.seq_len // parallel_dims.tp),
                 model_config.dim,
             ),
-            dtype=torch.bfloat16 if parallel_dims.dp_enabled else torch.float32,
+            dtype=job_config.training.mixed_precision_param
+            if parallel_dims.dp_enabled
+            else torch.float32,
             device=device,
         )
 
@@ -248,7 +250,9 @@ def pipeline_llama_manual(
                 int(job_config.training.seq_len // parallel_dims.tp),
                 model_config.dim,
             ),
-            dtype=torch.bfloat16 if parallel_dims.dp_enabled else torch.float32,
+            dtype=job_config.training.mixed_precision_param
+            if parallel_dims.dp_enabled
+            else torch.float32,
             device=device,
         )
 
@@ -386,10 +390,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
-        # TODO: Expose `reduce_dtype` as a config option.
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
+            param_dtype=job_config.training.mixed_precision_param,
+            reduce_dtype=job_config.training.mixed_precision_param,
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
