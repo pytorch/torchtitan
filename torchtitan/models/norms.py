@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from apex._autocast_utils import _cast_if_autocast_enabled
+#from .fused_rms_norm import FusedRMSNorm as cudaFusedRMSNorm
 
 global fused_layer_norm_cuda
 fused_layer_norm_cuda = None
@@ -29,7 +30,7 @@ class FusedRMSNormAffineFunction(torch.autograd.Function):
     def forward(ctx, input, weight, normalized_shape, eps, memory_efficient=False):
         global fused_layer_norm_cuda
         if fused_layer_norm_cuda is None:
-            fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
+            fused_layer_norm_cuda = importlib.import_module("titan_cuda")
         ctx.normalized_shape = normalized_shape
         ctx.eps = eps
         ctx.memory_efficient = memory_efficient
@@ -109,38 +110,6 @@ class nvFusedRMSNorm(torch.nn.Module):
     This layer uses statistics computed from input data in both training and
     evaluation modes.
 
-    Args:
-        normalized_shape (int or list or torch.Size): input shape from an expected input
-            of size
-
-            .. math::
-                [* \times \text{normalized}\_\text{shape}[0] \times \text{normalized}\_\text{shape}[1]
-                    \times \ldots \times \text{normalized}\_\text{shape}[-1]]
-
-            If a single integer is used, it is treated as a singleton list, and this module will
-            normalize over the last dimension which is expected to be of that specific size.
-        eps: a value added to the denominator for numerical stability. Default: 1e-5
-        elementwise_affine: a boolean value that when set to ``True``, this module
-            has learnable per-element affine parameters initialized to ones (for weights)
-            and zeros (for biases). Default: ``True``.
-
-    Shape:
-        - Input: :math:`(N, *)`
-        - Output: :math:`(N, *)` (same shape as input)
-
-    Examples::
-
-        >>> input = torch.randn(20, 5, 10, 10)
-        >>> # With Learnable Parameters
-        >>> m = apex.normalization.FusedRMSNorm(input.size()[1:])
-        >>> # Without Learnable Parameters
-        >>> m = apex.normalization.FusedRMSNorm(input.size()[1:], elementwise_affine=False)
-        >>> # Normalize over last two dimensions
-        >>> m = apex.normalization.FusedRMSNorm([10, 10])
-        >>> # Normalize over last dimension of size 10
-        >>> m = apex.normalization.FusedRMSNorm(10)
-        >>> # Activating the module
-        >>> output = m(input)
 
     .. _`Root Mean Square Layer Normalization`: https://arxiv.org/pdf/1910.07467.pdf
     """
@@ -168,8 +137,6 @@ class nvFusedRMSNorm(torch.nn.Module):
             nn.init.ones_(self.weight)
 
     def forward(self, input):
-        #if torch.jit.is_tracing() or torch.jit.is_scripting() or not input.is_cuda:
-        #    return manual_rms_norm(input, self.normalized_shape, self.weight, self.eps)
 
         if self.elementwise_affine:
             return fused_rms_norm_affine(
