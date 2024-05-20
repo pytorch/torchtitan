@@ -399,7 +399,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
         mp_policy = MixedPrecisionPolicy(
             param_dtype=job_config.training.mixed_precision_param,
-            reduce_dtype=job_config.training.mixed_precision_param,
+            reduce_dtype=job_config.training.mixed_precision_reduce,
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
