@@ -6,7 +6,6 @@
 
 import enum
 import os
-import pickle
 import re
 import time
 from multiprocessing import get_context
@@ -23,9 +22,8 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import DataLoader
-from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torch.utils.data import DataLoader
 from torchtitan.logging_utils import init_logger, logger
 
 
@@ -61,33 +59,6 @@ class OptimizerWrapper(Stateful):
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         set_optimizer_state_dict(self.model, self.optim, optim_state_dict=state_dict)
-
-
-class DataLoaderWrapper(Stateful):
-    def __init__(self, dataloader: DataLoader) -> None:
-        self.dataloader = dataloader
-        # Use global rank for now even though dataloader state could be same across dp groups
-        self.rank_id = str(
-            dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
-        )
-
-    def state_dict(self) -> Dict[str, Any]:
-        if isinstance(self.dataloader, StatefulDataLoader):
-            return {self.rank_id: pickle.dumps(self.dataloader.state_dict())}
-        return {}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        if isinstance(self.dataloader, StatefulDataLoader):
-            # State is empty
-            if not state_dict:
-                return
-
-            if self.rank_id not in state_dict:
-                logger.warning(f"DataLoader state is empty for rank {self.rank_id}. ")
-                return
-
-            # Load state for the current rank
-            self.dataloader.load_state_dict(pickle.loads(state_dict[self.rank_id]))
 
 
 class Terminate:
@@ -149,7 +120,7 @@ class CheckpointManager:
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
                 "lr_scheduler": lr_scheduler,
-                "dataloader": DataLoaderWrapper(dataloader),
+                "dataloader": dataloader,
             }
         )
 
