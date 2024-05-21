@@ -11,7 +11,7 @@ authors = [
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
     # Hugging Face integrations
-    "datasets",
+    "datasets>=2.19.0",
 
     # Tokenization
     "blobfile",
