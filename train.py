@@ -245,6 +245,7 @@ def main(job_config: JobConfig):
         model=model,
         optimizer=optimizer,
         lr_scheduler=scheduler,
+        dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
     )
