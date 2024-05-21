@@ -1,5 +1,5 @@
 torch >= 2.2.0.dev
-datasets
+datasets >= 2.19.0
 tomli >= 1.1.0 ; python_version < "3.11"
 tensorboard
 sentencepiece
