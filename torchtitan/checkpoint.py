@@ -22,6 +22,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import init_logger, logger
 
@@ -103,6 +104,7 @@ class CheckpointManager:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -118,6 +120,7 @@ class CheckpointManager:
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
                 "lr_scheduler": lr_scheduler,
+                "dataloader": dataloader,
             }
         )
 
