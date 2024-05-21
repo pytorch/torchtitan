@@ -11,6 +11,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
+from torchtitan.logging_utils import logger
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -191,7 +193,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         if override_arg:
             cmd += " " + " ".join(override_arg)
-        print(
+        logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
 
@@ -203,14 +205,14 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str):
             assert (
                 dump_folder_arg is not None
             ), "Can't use seed checkpoint if folder is not specified"
-            print("Creating seed checkpoint")
+            logger.info("Creating seed checkpoint")
             result = _run_cmd(
                 f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
             )
-            print(result.stdout)
+            logger.info(result.stdout)
 
         result = _run_cmd(cmd)
-        print(result.stdout)
+        logger.info(result.stdout)
         if result.returncode != 0:
             raise Exception(
                 f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
