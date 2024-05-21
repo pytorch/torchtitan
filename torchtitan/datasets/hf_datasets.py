@@ -160,7 +160,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
 
 
-class DpAwareDataLoader(StatefulDataLoader, Stateful):
+class DPAwareDataLoader(StatefulDataLoader, Stateful):
     """
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once for DP ranks.
     """
@@ -201,4 +201,4 @@ def build_hf_data_loader(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    return DpAwareDataLoader(rank, hf_ds, batch_size=batch_size)
+    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
