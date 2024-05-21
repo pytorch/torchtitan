@@ -162,7 +162,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
 class DPAwareDataLoader(StatefulDataLoader, Stateful):
     """
-    A wrapper around the StatefulDataLoader that ensures that the state is stored only once for DP ranks.
+    A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
 
     def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
