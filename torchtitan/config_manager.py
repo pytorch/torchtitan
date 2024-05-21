@@ -270,9 +270,9 @@ class JobConfig:
             type=int,
             default=None,
             help="""
-                How many microbatches to split the full training batch into when using pipeline parallelism.
+                How many microbatches to split the global training batch into when using pipeline parallelism.
 
-                The overall training batch size must be evenly divisible by the number of microbatches.
+                The global training batch size must be evenly divisible by the number of microbatches.
 
                 The default value will be the number of pipeline stages, if unspecified.
             """,
@@ -500,7 +500,8 @@ class JobConfig:
                     "--" + arg, action="store_true" if val else "store_false"
                 )
             elif arg == "experimental.pipeline_parallel_split_points":
-                # type inference breaks here, since the type is just 'list' and it ends up flattening
+                # without this special case, type inference breaks here,
+                # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
