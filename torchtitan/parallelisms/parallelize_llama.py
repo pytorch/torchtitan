@@ -28,7 +28,7 @@ from torch.distributed.tensor.parallel import (
 
 from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
 
 
@@ -210,8 +210,8 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
         assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=job_config.training.mixed_precision_param,
-            reduce_dtype=job_config.training.mixed_precision_reduce,
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
         ac_mode = job_config.activation_checkpoint.mode
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
