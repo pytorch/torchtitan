@@ -10,7 +10,14 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
-from torchdata.stateful_dataloader import StatefulDataLoader
+
+try:
+    from torchdata.stateful_dataloader import StatefulDataLoader
+except ModuleNotFoundError as e:
+    raise ImportError(
+        "Please install the latest torchdata nightly to use StatefulDataloader via:"
+        "pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly"
+    ) from e
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging_utils import logger
