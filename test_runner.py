@@ -142,11 +142,20 @@ def build_test_list(args):
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--training.compile --model.norm_type=rmsnorm",
                     f"--job.dump_folder {args.output_dir}/1d_compile/",
                 ],
             ],
             "1D compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+                    f"--job.dump_folder {args.output_dir}/2d_compile/",
+                ],
+            ],
+            "2D compile",
         ),
         OverrideDefinitions(
             [
