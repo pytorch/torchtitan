@@ -13,7 +13,7 @@ from torch.utils.data import IterableDataset
 
 try:
     from torchdata.stateful_dataloader import StatefulDataLoader
-except ModuleNotFoundError as e:
+except ImportError as e:
     raise ImportError(
         "Please install the latest torchdata nightly to use StatefulDataloader via:"
         "pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly"
