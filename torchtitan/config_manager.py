@@ -155,6 +155,12 @@ class JobConfig:
         self.parser.add_argument(
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
+        self.parser.add_argument(
+            "--optimizer.fused",
+            default=False,
+            action="store_true",
+            help="Whether the fused implementation(CUDA only) is used.",
+        )
 
         # training configs
         self.parser.add_argument(

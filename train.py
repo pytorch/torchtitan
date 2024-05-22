@@ -88,14 +88,16 @@ def build_optimizer(model, job_config: JobConfig):
     # build optimizer
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
+    fused = job_config.optimizer.fused
+    # when fused = False, foreach = True by default.
     if name == "Adam":
         # TODO: make the optimizer options configurable by toml/cmd args
         optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=fused
         )
     elif name == "AdamW":
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
+            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, fused=fused
         )
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
