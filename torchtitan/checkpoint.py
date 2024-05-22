@@ -22,15 +22,9 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torchtitan.config_manager import JobConfig
+from torch.utils.data import DataLoader
+from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import init_logger, logger
-
-
-DTYPE_MAP = {
-    "float16": torch.float16,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
 
 
 class IntervalType(enum.Enum):
@@ -110,6 +104,7 @@ class CheckpointManager:
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -125,6 +120,7 @@ class CheckpointManager:
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
                 "lr_scheduler": lr_scheduler,
+                "dataloader": dataloader,
             }
         )
 
@@ -141,7 +137,7 @@ class CheckpointManager:
         self.pg = dist.new_group(backend="gloo")
 
         self.model_weights_only = ckpt_config.model_weights_only
-        self.export_dtype = DTYPE_MAP[ckpt_config.export_dtype]
+        self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
 
         self.mp = None
         async_mode = ckpt_config.async_mode.lower()
