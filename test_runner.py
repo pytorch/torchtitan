@@ -5,13 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import logging
 import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
-from torchtitan.logging_utils import logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     import tomllib
