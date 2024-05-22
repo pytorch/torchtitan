@@ -32,7 +32,12 @@ from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_scheduler
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.parallelisms import (
+    models_parallelize_fns,
+    models_pipelining_fns,
+    ParallelDims,
+)
+from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
@@ -122,11 +127,12 @@ def main(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
-        pp=job_config.training.pipeline_parallel_degree,
+        pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    torch.cuda.set_device(device)
     init_distributed(job_config)
 
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -144,6 +150,10 @@ def main(job_config: JobConfig):
         dp_rank = dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
+
+    if parallel_dims.pp_enabled:
+        pp_mesh = world_mesh["pp"]
+
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -201,13 +211,26 @@ def main(job_config: JobConfig):
     # obtain the peak flops of bf16 type for MFU calculation
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
-    # apply PT-D parallelisms and activation checkpointing
+    if parallel_dims.pp_enabled:
+        stage, model = models_pipelining_fns[model_name](
+            model, world_mesh, parallel_dims, job_config, device, model_config
+        )
+
+    # apply PT-D DP/TP parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
-    # allocate sharded model on GPU and initialize weights via DTensor
+
     model.to_empty(device="cuda")
-    model.init_weights()
+
+    if parallel_dims.pp_enabled:
+        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+    else:
+        # If PP is enabled, we can't rely on init_weights, because some layers are missing.
+        # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
+
+        # allocate sharded model on GPU and initialize weights via DTensor
+        model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -231,6 +254,7 @@ def main(job_config: JobConfig):
         model=model,
         optimizer=optimizer,
         lr_scheduler=scheduler,
+        dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
     )
@@ -243,7 +267,13 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint.load()
+    checkpoint_loaded = checkpoint.load()
+
+    if parallel_dims.pp_enabled and not checkpoint_loaded:
+        raise RuntimeError(
+            "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
+            "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
+        )
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
@@ -285,14 +315,33 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-
             optimizer.zero_grad()
 
-            # forward / backward
-            with loss_parallel_ctx():
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels)
-                loss.backward()
+            if parallel_dims.pp_enabled:
+                # pipeline parallel forward / backward inside step() call
+                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+
+                with loss_parallel_ctx():
+                    if pp_mesh.get_local_rank() == 0:
+                        pp_schedule.step(input_ids)
+                    elif is_last_stage:
+                        losses = []
+                        pp_schedule.step(target=labels, losses=losses)
+                    else:
+                        pp_schedule.step()
+
+                # accumulate losses across pipeline microbatches
+                loss = (
+                    torch.mean(torch.stack(losses))
+                    if is_last_stage
+                    else torch.Tensor([-1.0])
+                )
+            else:
+                # Non-PP forward / backward
+                with loss_parallel_ctx():
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    loss.backward()
 
             # clip gradients
             torch.nn.utils.clip_grad_norm_(

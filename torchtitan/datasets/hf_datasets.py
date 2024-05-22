@@ -4,10 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional
+import pickle
+from typing import Any, Dict, List, Optional
 
 import torch
-from torch.utils.data import DataLoader, IterableDataset
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import IterableDataset
+
+try:
+    from torchdata.stateful_dataloader import StatefulDataLoader
+except ImportError as e:
+    raise ImportError(
+        "Please install the latest torchdata nightly to use StatefulDataloader via:"
+        "pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly"
+    ) from e
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging_utils import logger
@@ -23,7 +33,7 @@ _supported_datasets = {
 }
 
 
-class HuggingFaceDataset(IterableDataset):
+class HuggingFaceDataset(IterableDataset, Stateful):
     """PyTorch Representation of the HuggingFace Dataset.
 
     Args:
@@ -99,31 +109,89 @@ class HuggingFaceDataset(IterableDataset):
         self.seq_len = seq_len
         self.infinite = infinite
 
+        # variables for checkpointing
+        self._sample_idx = 0
+        self._all_tokens: List[int] = []
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
-        all_tokens: List[int] = []
 
         while True:
-            for sample in iter(self._data):
+            for sample in self._get_data_iter():
                 sample_text = sample["text"]
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
-                all_tokens.extend(sample_tokens)
+                self._all_tokens.extend(sample_tokens)
+                self._sample_idx += 1
 
-                while len(all_tokens) >= max_buffer_token_len:
-                    x = torch.LongTensor(all_tokens[:max_buffer_token_len])
+                while len(self._all_tokens) >= max_buffer_token_len:
+                    x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
                     # update tokens to the remaining tokens
-                    all_tokens = all_tokens[max_buffer_token_len:]
+                    self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
                     yield input, label
+
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
                 break
             else:
+                # Reset offset for the next iteration
+                self._sample_idx = 0
                 logger.warning(
                     f"Dataset {self.dataset_name} is being re-looped. "
                     "Loss related metrics might be misleading."
                 )
+
+    def _get_data_iter(self):
+        if self._sample_idx == 0:
+            return iter(self._data)
+
+        # Skip samples
+        if isinstance(self._data, IterableDataset):
+            it = iter(self._data)
+            # Naively iterate through the samples as skip may not be supported
+            for _ in range(self._sample_idx):
+                next(it)
+            return it
+
+        # As skipping to the end throws an error in case of map-style dataset, return an empty iterator
+        if self._sample_idx == len(self._data):
+            return iter([])
+        return iter(self._data.skip(self._sample_idx))
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict["sample_idx"]
+        self._all_tokens = state_dict["token_buffer"]
+
+    def state_dict(self):
+        return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
+
+
+class DPAwareDataLoader(StatefulDataLoader, Stateful):
+    """
+    A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
+    """
+
+    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
+        super().__init__(hf_ds, batch_size)
+        self._dp_rank = dp_rank
+        self._rank_id = f"dp_rank_{dp_rank}"
+
+    def state_dict(self) -> Dict[str, Any]:
+        # Store state only for dp rank to avoid replicating the same state across other dimensions
+        return {self._rank_id: pickle.dumps(super().state_dict())}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # State being empty is valid, don't log a warning
+        if not state_dict:
+            return
+
+        if self._rank_id not in state_dict:
+            logger.warning(
+                f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}."
+            )
+            return
+        super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
 
 
 def build_hf_data_loader(
@@ -140,4 +208,4 @@ def build_hf_data_loader(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    return DataLoader(hf_ds, batch_size=batch_size)
+    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)

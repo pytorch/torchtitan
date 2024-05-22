@@ -9,12 +9,24 @@ import sys
 from collections import defaultdict
 from typing import Tuple, Union
 
+import torch
+
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
 
 from torchtitan.logging_utils import logger
+
+TORCH_DTYPE_MAP = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def string_list(raw_arg):
+    return raw_arg.split(",")
 
 
 class JobConfig:
@@ -202,10 +214,88 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
-            "--training.pipeline_parallel_degree",
+            "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
-            help="Pipeline Parallelism degree. 1 means disabled.",
+            help="""
+                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
+                If using looped schedules, this still specifies the number of physical ranks, not the number
+                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_points",
+            type=string_list,
+            nargs="+",
+            default=[],
+            help="""
+                Specify comma-separated names of modules to use as the beginning of a split point.
+
+                e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
+                the first containing all the layers up to layers.0,
+                the second containing layers.0 and up to layers.2,
+                the third containing layers.2 and all the remaining layers.
+
+                Note: fully-automated splitting may be enabled in the future,
+                but currently the split points must be specified manually for both manual and tracer.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_schedule",
+            type=str,
+            choices=["1f1b", "gpipe"],
+            default="1f1b",
+            help="""
+                Specify the Pipeline Parallel schedule to use.
+
+                The schedule must be compatible with the split points and stages_per_rank.
+
+                Looped schedules are not yet supported in torchtitan.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_split_mode",
+            type=str,
+            choices=["manual", "tracer"],
+            default="manual",
+            help="""
+                Specify the split method (e.g. the Pipeline Parallelism Front End)
+
+                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
+                implementation manually, and then wrap it in a PipelineStage.
+
+                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
+                split via the provided split points, unflattened into an nn.Module,
+                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_microbatches",
+            type=int,
+            default=None,
+            help="""
+                How many microbatches to split the global training batch into when using pipeline parallelism.
+
+                The global training batch size must be evenly divisible by the number of microbatches.
+
+                The default value will be the number of pipeline stages, if unspecified.
+            """,
+        )
+        self.parser.add_argument(
+            "--training.mixed_precision_param",
+            type=str,
+            default="bfloat16",
+            choices=["bfloat16", "float32"],
+            help="""
+                torch dtype to use for parameters when applying mixed precision via FSDP.
+                This feature only takes effect when data_parallel_degree > 1
+            """,
+        )
+        self.parser.add_argument(
+            "--training.mixed_precision_reduce",
+            type=str,
+            default="float32",
+            choices=["float32"],
+            help="""
+                torch dtype to use for reductions when applying mixed precision via FSDP.
+                This feature only takes effect when data_parallel_degree > 1
+            """,
         )
         self.parser.add_argument(
             "--training.compile",
@@ -275,6 +365,7 @@ class JobConfig:
             "--checkpoint.export_dtype",
             type=str,
             default="float32",
+            choices=["float16", "bfloat16", "float32"],
             help="""
                 Converts to the specified precision when training completes and model_weights_only=true.
                 Currently supports float32, float16, and bfloat16.
@@ -408,6 +499,11 @@ class JobConfig:
                 aux_parser.add_argument(
                     "--" + arg, action="store_true" if val else "store_false"
                 )
+            elif arg == "experimental.pipeline_parallel_split_points":
+                # without this special case, type inference breaks here,
+                # since the inferred type is just 'list' and it ends up flattening
+                # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
+                aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
 
