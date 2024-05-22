@@ -48,6 +48,21 @@ def build_test_list(args):
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_1f1b_3stage/",
+                    "--experimental.pipeline_parallel_degree 3",
+                    "--experimental.pipeline_parallel_split_points layers.1, layers.2",
+                    "--experimental.pipeline_parallel_schedule 1f1b",
+                    "--training.data_parallel_degree 1",
+                ],
+            ],
+            "PP 1D test 1f1b with 3 PP stages",
+            requires_seed_checkpoint=True,
+            ngpu=3,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     f"--job.dump_folder {args.output_dir}/pp_1f1b/",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
