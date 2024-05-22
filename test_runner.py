@@ -131,7 +131,7 @@ def build_test_list(args):
         OverrideDefinitions(
             [
                 [
-                    "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm
+                    "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
                     f"--job.dump_folder {args.output_dir}/2d_compile/",
                 ],
             ],
