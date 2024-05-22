@@ -5,13 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import logging
 import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
-from torchtitan.logging_utils import logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     import tomllib
@@ -122,11 +124,20 @@ def build_test_list(args):
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--training.compile --model.norm_type=rmsnorm",
                     f"--job.dump_folder {args.output_dir}/1d_compile/",
                 ],
             ],
             "1D compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+                    f"--job.dump_folder {args.output_dir}/2d_compile/",
+                ],
+            ],
+            "2D compile",
         ),
         OverrideDefinitions(
             [

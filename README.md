@@ -37,6 +37,7 @@ We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
 
 ### Coming soon
+
 1. Async checkpointing
 2. FP8 support
 3. Context Parallel
