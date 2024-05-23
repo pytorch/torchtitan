@@ -45,6 +45,30 @@ def build_test_list(args):
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_reload/",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_schedule 1f1b",
+                    "--training.data_parallel_degree 1",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_reload/",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_schedule 1f1b",
+                    "--training.data_parallel_degree 1",
+                    "--training.steps 20",
+                ],
+            ],
+            "PP reload checkpoint test",
+            requires_seed_checkpoint=True,
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     f"--job.dump_folder {args.output_dir}/pp_1f1b/",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
