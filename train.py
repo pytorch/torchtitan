@@ -211,24 +211,29 @@ def main(job_config: JobConfig):
     # obtain the peak flops of bf16 type for MFU calculation
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
+    # TODO(whc) make pipelining fn return a list of stages and a list of models
     if parallel_dims.pp_enabled:
         stage, model = models_pipelining_fns[model_name](
             model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
+    # TODO(whc) make models_parallelize_fns accept a list of models and apply parallelism to each one
     # apply PT-D DP/TP parallelisms and activation checkpointing
     model = models_parallelize_fns[model_name](
         model, world_mesh, parallel_dims, job_config
     )
 
+    # TODO(whc) make a helper that to_empty's each model in list of models
     model.to_empty(device="cuda")
 
     if parallel_dims.pp_enabled:
+        # TODO(whc) pass list of stages instead of stage. still get back just one 'schedule'
         pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
     else:
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
 
+        # TODO(whc) on non-PP codepath, we can set model = models[0] here and use model again in train loop below
         # allocate sharded model on GPU and initialize weights via DTensor
         model.init_weights()
 
@@ -238,6 +243,10 @@ def main(job_config: JobConfig):
         f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
+
+    # TODO(whc) Make a wrapper class for Optimizers, Schedulers, expose 'step' API for convenience
+    # e.g. optimizers = build_optimizers(models, job_config)
+    #      schedulers = build_schedulers(optimizers, job_config)
 
     # build optimizer after applying parallelisms to the model
     optimizer = build_optimizer(model, job_config)
@@ -250,6 +259,7 @@ def main(job_config: JobConfig):
     # train loop
     model.train()
 
+    # TODO(whc) Make CheckpointManager accept lists of models, optimizers, schedulers but save a single logical ckpt from them
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
