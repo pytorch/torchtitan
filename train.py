@@ -47,6 +47,7 @@ from torchtitan.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
+    move_to_empty,
     NoColor,
     set_pg_timeouts,
 )
@@ -188,16 +189,21 @@ def main(job_config: JobConfig):
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
-        model = model_cls.from_model_args(model_config)
+        whole_model = model_cls.from_model_args(model_config)
+
+    # In 1D/2D cases or PP with simple schedules, model_parts is just one item
+    # for PP with looped schedules, each item is one stage-model-chunk
+    # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
+    model_parts = [whole_model]
 
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
         build_fp8_linear(model, job_config)
 
     # log model size
-    model_param_count = get_num_params(model)
+    model_param_count = get_num_params(whole_model)
     num_flop_per_token = get_num_flop_per_token(
-        get_num_params(model, exclude_embedding=True),
+        get_num_params(whole_model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
     )
@@ -211,31 +217,28 @@ def main(job_config: JobConfig):
     # obtain the peak flops of bf16 type for MFU calculation
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
-    # TODO(whc) make pipelining fn return a list of stages and a list of models
     if parallel_dims.pp_enabled:
-        stage, model = models_pipelining_fns[model_name](
-            model, world_mesh, parallel_dims, job_config, device, model_config
+        stages, model_parts = models_pipelining_fns[model_name](
+            whole_model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
-    # TODO(whc) make models_parallelize_fns accept a list of models and apply parallelism to each one
     # apply PT-D DP/TP parallelisms and activation checkpointing
-    model = models_parallelize_fns[model_name](
-        model, world_mesh, parallel_dims, job_config
+    model_parts = models_parallelize_fns[model_name](
+        model_parts, world_mesh, parallel_dims, job_config
     )
 
-    # TODO(whc) make a helper that to_empty's each model in list of models
-    model.to_empty(device="cuda")
+    move_to_empty(model_parts, device="cuda")
 
     if parallel_dims.pp_enabled:
-        # TODO(whc) pass list of stages instead of stage. still get back just one 'schedule'
-        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+        pp_schedule = build_pipeline_schedule(
+            job_config, parallel_dims, stages, loss_fn
+        )
     else:
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
 
-        # TODO(whc) on non-PP codepath, we can set model = models[0] here and use model again in train loop below
         # allocate sharded model on GPU and initialize weights via DTensor
-        model.init_weights()
+        whole_model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(

@@ -16,6 +16,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.logging_utils import logger
 
 
+def move_to_empty(model_parts: List[torch.nn.Module], device: torch.device):
+    for model in model_parts:
+        model.to_empty(device="cuda")
+
+
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh)
