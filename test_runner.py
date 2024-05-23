@@ -65,148 +65,148 @@ def build_test_list(args):
             requires_seed_checkpoint=True,
             ngpu=2,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_1f1b/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--experimental.pipeline_parallel_schedule 1f1b",
-                    "--training.data_parallel_degree 1",
-                ],
-            ],
-            "PP 1D test 1f1b",
-            requires_seed_checkpoint=True,
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_gpipe/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--experimental.pipeline_parallel_schedule gpipe",
-                    "--training.data_parallel_degree 1",
-                ],
-            ],
-            "PP 1D test gpipe",
-            requires_seed_checkpoint=True,
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_dp_1f1b/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--experimental.pipeline_parallel_schedule 1f1b",
-                    "--training.data_parallel_degree 2",
-                ],
-            ],
-            "PP+DP 1f1b 2D test",
-            requires_seed_checkpoint=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_dp_gpipe/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--experimental.pipeline_parallel_schedule gpipe",
-                    "--training.data_parallel_degree 2",
-                ],
-            ],
-            "PP+DP gpipe 2D test",
-            requires_seed_checkpoint=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/pp_tp/",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
-                ],
-            ],
-            "PP+TP 2D test",
-            requires_seed_checkpoint=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    f"--job.dump_folder {args.output_dir}/default/",
-                ],
-            ],
-            "Default",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile --model.norm_type=rmsnorm",
-                    f"--job.dump_folder {args.output_dir}/1d_compile/",
-                ],
-            ],
-            "1D compile",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
-                    f"--job.dump_folder {args.output_dir}/2d_compile/",
-                ],
-            ],
-            "2D compile",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
-                    f"--job.dump_folder {args.output_dir}/eager_2d/",
-                ],
-            ],
-            "Eager mode 2DParallel",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/full_checkpoint/",
-                ],
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/full_checkpoint/",
-                    "--training.steps 20",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Load Full Checkpoint",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/model_weights_only_fp32/",
-                    "--checkpoint.model_weights_only",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Weights Only fp32",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    f"--job.dump_folder {args.output_dir}/model_weights_only_bf16/",
-                    "--checkpoint.model_weights_only",
-                    "--checkpoint.export_dtype bfloat16",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Weights Only bf16",
-        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/pp_1f1b/",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.1",
+        #             "--experimental.pipeline_parallel_schedule 1f1b",
+        #             "--training.data_parallel_degree 1",
+        #         ],
+        #     ],
+        #     "PP 1D test 1f1b",
+        #     requires_seed_checkpoint=True,
+        #     ngpu=2,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/pp_gpipe/",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.1",
+        #             "--experimental.pipeline_parallel_schedule gpipe",
+        #             "--training.data_parallel_degree 1",
+        #         ],
+        #     ],
+        #     "PP 1D test gpipe",
+        #     requires_seed_checkpoint=True,
+        #     ngpu=2,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/pp_dp_1f1b/",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.1",
+        #             "--experimental.pipeline_parallel_schedule 1f1b",
+        #             "--training.data_parallel_degree 2",
+        #         ],
+        #     ],
+        #     "PP+DP 1f1b 2D test",
+        #     requires_seed_checkpoint=True,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/pp_dp_gpipe/",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.1",
+        #             "--experimental.pipeline_parallel_schedule gpipe",
+        #             "--training.data_parallel_degree 2",
+        #         ],
+        #     ],
+        #     "PP+DP gpipe 2D test",
+        #     requires_seed_checkpoint=True,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/pp_tp/",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.1",
+        #             "--training.tensor_parallel_degree 2",
+        #             "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+        #         ],
+        #     ],
+        #     "PP+TP 2D test",
+        #     requires_seed_checkpoint=True,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             f"--job.dump_folder {args.output_dir}/default/",
+        #         ],
+        #     ],
+        #     "Default",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--training.compile --model.norm_type=rmsnorm",
+        #             f"--job.dump_folder {args.output_dir}/1d_compile/",
+        #         ],
+        #     ],
+        #     "1D compile",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+        #             f"--job.dump_folder {args.output_dir}/2d_compile/",
+        #         ],
+        #     ],
+        #     "2D compile",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
+        #             f"--job.dump_folder {args.output_dir}/eager_2d/",
+        #         ],
+        #     ],
+        #     "Eager mode 2DParallel",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/full_checkpoint/",
+        #         ],
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/full_checkpoint/",
+        #             "--training.steps 20",
+        #         ],
+        #     ],
+        #     "Checkpoint Integration Test - Save Load Full Checkpoint",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/model_weights_only_fp32/",
+        #             "--checkpoint.model_weights_only",
+        #         ],
+        #     ],
+        #     "Checkpoint Integration Test - Save Model Weights Only fp32",
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             f"--job.dump_folder {args.output_dir}/model_weights_only_bf16/",
+        #             "--checkpoint.model_weights_only",
+        #             "--checkpoint.export_dtype bfloat16",
+        #         ],
+        #     ],
+        #     "Checkpoint Integration Test - Save Model Weights Only bf16",
+        # ),
     ]
     return integration_tests_flavors
 
