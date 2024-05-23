@@ -39,8 +39,12 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
-    def __init__(self, model: nn.Module) -> None:
-        self.model = model
+    def __init__(self, model_or_models: Union[nn.Module, List[nn.Module]]) -> None:
+        self._models = (
+            [model_or_models]
+            if isinstance(model_or_models, nn.Module)
+            else model_or_models
+        )
 
     def state_dict(self) -> None:
         return get_model_state_dict(self.model)
@@ -101,9 +105,9 @@ def checkpoint_mp(recv, send):
 class CheckpointManager:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        model_parts: List[nn.Module],
+        optimizers: List[torch.optim.Optimizer],
+        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -113,11 +117,57 @@ class CheckpointManager:
 
         if not self.enable_checkpoint:
             return
+        """
+        Tricky changes for Pipeline Parallelism
+
+        1. even for simple PP schedules, we introduce a problem where there is a separate optimizer on stage1's rank
+        vs stage0's rank.  When saving, these collide and one of them is lost.  Then when reloading, only one stage can
+        restore its optimizer states, others will error.
+            --> no fix yet
+
+        2. with looped schedules, we have multiple logical models per rank. This complicates both model state and
+        optimizer state handling in dcp.
+            a) Model states
+            - ideally, we support resharding the model.  so we want to collapse the states back into one logical state-dict
+            - this means we merge the state-dicts from each model_part into one when saving and loading
+
+            b) Optimizer states
+            - if we create one optimizer object per model_part, we add a similar but orthogonal problem to (1), namely,
+            we have two optimziers on this local rank, and if we were to save them to the same "optim" key they would collide.
+            However, unlike (1), we have control over them both in one place, so we could save them under separate keys to avoid
+            the collision. Since this doesn't solve (1), it is only a temporary workaround. Also, if we go this route,
+            it would not be possible to load the optimizer states into a different parallelism configuration (resharding).
+            - if we enable one optimizer object to handle multiple model_parts, e.g. by wrapping model_parts in a ModuleList,
+            then we could correctly save the optimizer states for this PP rank.  But we still have the bug in (1) preventing us from
+            reloading the optimizer states.
+
+            In any case, we won't be able to reload a PP checkpoint with optimizer states even without reshard, until (1) is fixed.
+            And the fix for (1) might change the option space for handling (2) as well.
+
+            So, for now I will only save the model weights for PP in this PR, while we figure out the full story for (1).
+
+        Note: haven't thought much about lr_scheduler's states.
+        """
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
 
         self.states = states
+
+        """plan
+        for save-
+            model: merge the state-dicts into one in __init__, then save/load model will 'just work',
+            and model portion would be 'reshardable'
+
+            optim: store each one in a separate key for now,
+            make a note/post explaining the issues and possible long term plan
+        """
         self.states.update(
             {
-                "model": ModelWrapper(model),
+                "model": ModelWrapper(model_parts),
                 "optimizer": OptimizerWrapper(model, optimizer),
                 "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
@@ -194,6 +244,9 @@ class CheckpointManager:
             #      'tok_embeddings.weight':...,
             #      'layers.0.attention.wq.weight': ...
             # }.
+
+            # TODO(whc) if we have multiple model parts on this rank, should we merge all their keys into a flat state dict
+            # or keep them as separate state dicts under named keys like _models_0 and _models_1?
             self.states = self.states["model"].state_dict()
 
             # For now, we will manually pop the freqs_cis buffer, as we made this permanent

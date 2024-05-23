@@ -29,7 +29,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import (
@@ -90,23 +90,45 @@ class TrainState(Stateful):
         self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
-def build_optimizer(model, job_config: JobConfig):
-    # build optimizer
-    name = job_config.optimizer.name
-    lr = job_config.optimizer.lr
-    if name == "Adam":
-        # TODO: make the optimizer options configurable by toml/cmd args
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
-    elif name == "AdamW":
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
-    else:
-        raise NotImplementedError(f"Optimizer {name} not added.")
+def build_optimizers(model_parts, job_config: JobConfig):
+    def _build_optimizer(model):
+        name = job_config.optimizer.name
+        lr = job_config.optimizer.lr
+        if name == "Adam":
+            # TODO: make the optimizer options configurable by toml/cmd args
+            optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=lr,
+                betas=(0.9, 0.95),
+                weight_decay=0.1,
+                foreach=True,
+            )
+        elif name == "AdamW":
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=lr,
+                betas=(0.9, 0.95),
+                weight_decay=0.1,
+                foreach=True,
+            )
+        else:
+            raise NotImplementedError(f"Optimizer {name} not added.")
 
-    return optimizer
+        return optimizer
+
+    class OptimizersContainer:
+        def __init__(self, optimizers):
+            self.optimizers = optimizers
+
+        def step(self):
+            for optimizer in self.optimizers:
+                optimizer.step()
+
+        def zero_grad(self):
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
+
+    return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -247,13 +269,9 @@ def main(job_config: JobConfig):
         f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
     )
 
-    # TODO(whc) Make a wrapper class for Optimizers, Schedulers, expose 'step' API for convenience
-    # e.g. optimizers = build_optimizers(models, job_config)
-    #      schedulers = build_schedulers(optimizers, job_config)
-
     # build optimizer after applying parallelisms to the model
-    optimizer = build_optimizer(model, job_config)
-    scheduler = get_lr_scheduler(optimizer, job_config)
+    optimizers = build_optimizers(model_parts, job_config)
+    lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
 
     metric_logger = build_metric_logger(job_config)
 
@@ -262,11 +280,10 @@ def main(job_config: JobConfig):
     # train loop
     model.train()
 
-    # TODO(whc) Make CheckpointManager accept lists of models, optimizers, schedulers but save a single logical ckpt from them
     checkpoint = CheckpointManager(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
+        model_partss=model_parts,
+        optimizers=optimizers.optimizers,
+        lr_schedulers=schedulers.schedulers,
         dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
