@@ -19,7 +19,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
 )
 from torch.distributed.pipelining import pipeline, SplitPoint
-from torch.distributed.pipelining._PipelineStage import (
+from torch.distributed.pipelining.PipelineStage import (
     _PipelineStage,
     ManualPipelineStage,
 )
