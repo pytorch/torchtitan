@@ -120,11 +120,30 @@ def build_test_list(args):
                     f"--job.dump_folder {args.output_dir}/pp_tracer/",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_mode tracer",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
                 ],
             ],
             "PP tracer frontend test",
             requires_seed_checkpoint=True,
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_dp_tracer/",
+                    "--training.data_parallel_degree 2",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_mode tracer",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
+                    "--training.mixed_precision_param float32",  # tracer doesn't support mixed precision yet
+                ],
+            ],
+            "PP tracer frontend 2D PP+DP test",
+            requires_seed_checkpoint=True,
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
