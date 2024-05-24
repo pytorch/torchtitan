@@ -42,7 +42,7 @@ class AsyncMode(str, enum.Enum):
 
 class ModelWrapper(Stateful):
     def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
-        self.model = [model] if isinstance(self.model, nn.Module) else model
+        self.model = [model] if isinstance(model, nn.Module) else model
 
     def state_dict(self) -> None:
         return {
@@ -52,7 +52,7 @@ class ModelWrapper(Stateful):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         func = functools.partial(
             set_model_state_dict,
-            state_dict=state_dict
+            model_state_dict=state_dict,
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
@@ -64,8 +64,8 @@ class OptimizerWrapper(Stateful):
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
     ) -> None:
-        self.model = [model] if isinstance(self.model, nn.Module) else model
-        self.optim = [optim] if isinstance(self.optim, torch.optim.Optimizer) else optim
+        self.model = [model] if isinstance(model, nn.Module) else model
+        self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
 
     def state_dict(self) -> None:
         func = functools.partial(
@@ -77,8 +77,7 @@ class OptimizerWrapper(Stateful):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         func = functools.partial(
             set_optimizer_state_dict,
-            model=self.model,
-            optimizers=self.optim,
+            optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
         list(map(func, self.model, self.optim))
