@@ -107,7 +107,6 @@ def build_test_list(args):
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
                     "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
                 ],
             ],
             "PP+TP 2D test",
