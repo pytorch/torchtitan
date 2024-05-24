@@ -12,6 +12,11 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
+from functools import partial
+
+from torch.distributed._tensor.experimental import local_map
+from torch.distributed._tensor.placement_types import _Partial, Replicate, Shard
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
 
 def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     """
@@ -29,6 +34,7 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
     Raises:
         NotImplementedError: If an unknown norm_type is provided.
     """
+    print(f"create_norm: {norm_type}; dim={dim}")
     norm_type = norm_type.lower()  # Normalize to lowercase
 
     if norm_type == "layernorm":
@@ -214,8 +220,11 @@ def _rms_norm_bwd_kernel_sm(
 
 
 class TritonFusedRMSNorm(torch.autograd.Function):
+    @partial(local_map, out_placements=[Shard(1)], in_placements=(None, [Shard(1)], [Replicate()], None))
     @staticmethod
     def forward(ctx, x, weight, eps):
+        if isinstance(x, AsyncCollectiveTensor):
+            x = x.wait()
         x_shape_start = x.shape
 
         # Flatten input
@@ -256,8 +265,12 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         y = y.reshape(x_shape_start)
         return y
 
+    @partial(local_map, out_placements=([Shard(1)], [_Partial()], None), in_placements=(None, [Shard(1)]))
     @staticmethod
     def backward(ctx, dy):
+        if isinstance(dy, AsyncCollectiveTensor):
+            dy = dy.wait()
+
         x, weight, rstd = ctx.saved_tensors
         eps = ctx.eps
         x_shape_start = ctx.x_shape_start
