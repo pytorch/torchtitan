@@ -223,7 +223,6 @@ class TritonFusedRMSNorm(torch.autograd.Function):
     @partial(local_map, out_placements=[Shard(1)], in_placements=(None, [Shard(1)], [Replicate()], None))
     @staticmethod
     def forward(ctx, x, weight, eps):
-    # def forward(mesh, ctx, x, weight, eps):
         x = x.wait()
         x_shape_start = x.shape
 
@@ -265,7 +264,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         y = y.reshape(x_shape_start)
         return y
 
-    @partial(local_map, out_placements=([Shard(1)], [Replicate()], None), in_placements=(None, [Shard(1)]))
+    @partial(local_map, out_placements=([Shard(1)], [_Partial()], None), in_placements=(None, [Shard(1)]))
     @staticmethod
     def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
