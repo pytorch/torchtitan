@@ -224,6 +224,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, eps):
     # def forward(mesh, ctx, x, weight, eps):
+        x = x.wait()
         x_shape_start = x.shape
 
         # Flatten input
