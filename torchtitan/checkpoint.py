@@ -21,6 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
+    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
@@ -49,7 +50,11 @@ class ModelWrapper(Stateful):
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        func = functools.partial(set_model_state_dict, state_dict=state_dict)
+        func = functools.partial(
+            set_model_state_dict,
+            state_dict=state_dict
+            options=StateDictOptions(strict=False),
+        )
         list(map(func, self.model))
 
 
