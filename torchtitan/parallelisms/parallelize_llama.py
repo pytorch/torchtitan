@@ -18,11 +18,11 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.pipelining import pipeline, SplitPoint
-from torch.distributed.pipelining._PipelineStage import (
-    _PipelineStage,
-    ManualPipelineStage,
-)
+# from torch.distributed.pipelining import pipeline, SplitPoint
+# from torch.distributed.pipelining._PipelineStage import (
+#     _PipelineStage,
+#     ManualPipelineStage,
+# )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -136,18 +136,19 @@ def get_tp_parallel_strategy(
 def pipeline_llama(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
-    if job_config.experimental.pipeline_parallel_split_mode == "manual":
-        return pipeline_llama_manual(
-            model, world_mesh, parallel_dims, job_config, device, model_config
-        )
-    elif job_config.experimental.pipeline_parallel_split_mode == "tracer":
-        return pipeline_llama_tracer(
-            model, world_mesh, parallel_dims, job_config, device, model_config
-        )
-    else:
-        raise NotImplementedError(
-            f"{job_config.experimental.pipeline_parallel_split_mode} is not a valid split mode"
-        )
+    pass
+    # if job_config.experimental.pipeline_parallel_split_mode == "manual":
+    #     return pipeline_llama_manual(
+    #         model, world_mesh, parallel_dims, job_config, device, model_config
+    #     )
+    # elif job_config.experimental.pipeline_parallel_split_mode == "tracer":
+    #     return pipeline_llama_tracer(
+    #         model, world_mesh, parallel_dims, job_config, device, model_config
+    #     )
+    # else:
+    #     raise NotImplementedError(
+    #         f"{job_config.experimental.pipeline_parallel_split_mode} is not a valid split mode"
+    #     )
 
 
 def _llama_trace_input(job_config, model_config, device="meta"):

@@ -34,10 +34,10 @@ from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import (
     models_parallelize_fns,
-    models_pipelining_fns,
+    # models_pipelining_fns,
     ParallelDims,
 )
-from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
+# from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
 from torchtitan.profiling import maybe_enable_profiling
 from torchtitan.utils import (
     Color,
@@ -223,14 +223,14 @@ def main(job_config: JobConfig):
 
     model.to_empty(device="cuda")
 
-    if parallel_dims.pp_enabled:
-        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
-    else:
+    # if parallel_dims.pp_enabled:
+    #     pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+    # else:
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
 
         # allocate sharded model on GPU and initialize weights via DTensor
-        model.init_weights()
+    model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -319,23 +319,24 @@ def main(job_config: JobConfig):
 
             if parallel_dims.pp_enabled:
                 # pipeline parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+                # is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with loss_parallel_ctx():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
-                    else:
-                        pp_schedule.step()
+                # with loss_parallel_ctx():
+                #     if pp_mesh.get_local_rank() == 0:
+                #         pp_schedule.step(input_ids)
+                #     elif is_last_stage:
+                #         losses = []
+                #         pp_schedule.step(target=labels, losses=losses)
+                #     else:
+                #         pp_schedule.step()
 
-                # accumulate losses across pipeline microbatches
-                loss = (
-                    torch.mean(torch.stack(losses))
-                    if is_last_stage
-                    else torch.Tensor([-1.0])
-                )
+                # # accumulate losses across pipeline microbatches
+                # loss = (
+                #     torch.mean(torch.stack(losses))
+                #     if is_last_stage
+                #     else torch.Tensor([-1.0])
+                # )
+                pass
             else:
                 # Non-PP forward / backward
                 with loss_parallel_ctx():
