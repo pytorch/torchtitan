@@ -116,6 +116,19 @@ def build_test_list(args):
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_tracer/",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
+                ],
+            ],
+            "PP tracer frontend test",
+            requires_seed_checkpoint=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     f"--job.dump_folder {args.output_dir}/default/",
                 ],
             ],
