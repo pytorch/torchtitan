@@ -89,22 +89,28 @@ class TrainState(Stateful):
         self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
-def build_optimizer(model, job_config: JobConfig):
+def build_optimizer(model, job_config: JobConfig, color):
     # build optimizer
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
+    beta1 = job_config.optimizer.beta1
+    beta2 = job_config.optimizer.beta2
+    cfg_weight_decay = job_config.optimizer.weight_decay
+
     if name == "Adam":
-        # TODO: make the optimizer options configurable by toml/cmd args
         optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
+            model.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=cfg_weight_decay, foreach=True
         )
     elif name == "AdamW":
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
+            model.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=cfg_weight_decay, foreach=True
         )
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
 
+    logger.info(
+        f"{color.blue}Optimizer {color.yellow}{name}{color.blue} ready: {color.yellow} "
+        f"lr={lr}, {color.green}beta1={beta1}, beta2={beta2}{color.reset}")
     return optimizer
 
 
@@ -240,7 +246,7 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizer = build_optimizer(model, job_config)
+    optimizer = build_optimizer(model, job_config, color)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
     metric_logger = build_metric_logger(job_config)
