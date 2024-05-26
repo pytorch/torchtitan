@@ -166,7 +166,10 @@ class JobConfig:
             "--optimizer.beta2", type=float, default=0.95, help="beta2 rate to use"
         )
         self.parser.add_argument(
-            "--optimizer.weight_decay", type=float, default=0.1, help="weight decay rate to use"
+            "--optimizer.weight_decay",
+            type=float,
+            default=0.1,
+            help="weight decay rate to use",
         )
 
         # training configs

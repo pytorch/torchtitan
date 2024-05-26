@@ -99,18 +99,27 @@ def build_optimizer(model, job_config: JobConfig, color):
 
     if name == "Adam":
         optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=cfg_weight_decay, foreach=True
+            model.parameters(),
+            lr=lr,
+            betas=(beta1, beta2),
+            weight_decay=cfg_weight_decay,
+            foreach=True,
         )
     elif name == "AdamW":
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=cfg_weight_decay, foreach=True
+            model.parameters(),
+            lr=lr,
+            betas=(beta1, beta2),
+            weight_decay=cfg_weight_decay,
+            foreach=True,
         )
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
 
     logger.info(
-        f"{color.blue}Optimizer {color.yellow}{name}{color.blue} ready: {color.yellow} "
-        f"lr={lr}, {color.green}beta1={beta1}, beta2={beta2}{color.reset}")
+        f"{color.blue}Optimizer {color.green}{name}{color.blue} ready: {color.green} "
+        f"lr={lr}, {color.yellow}beta1={beta1}, beta2={beta2}{color.reset}"
+    )
     return optimizer
 
 
