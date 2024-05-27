@@ -8,6 +8,7 @@ import enum
 import os
 import re
 import time
+import shutil
 from multiprocessing import get_context
 from typing import Any, Dict
 
@@ -110,6 +111,7 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
+        self.keep_latest_k = ckpt_config.keep_latest_k
 
         if not self.enable_checkpoint:
             return
@@ -313,6 +315,19 @@ class CheckpointManager:
         else:
             dcp.save(self.states, checkpoint_id=checkpoint_id)
         self.reset()
+        if self.keep_latest_k > 0:
+            discovered_checkpoints = []
+            for filename in os.listdir(self.folder):
+                match = re.search(r"step-(\d+)", filename)
+                path = os.path.join(self.folder, filename)
+                discovered_checkpoints.append((int(match.group(1)), path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+
+            for _, path in to_delete:
+                logger.info(f"Deleting old checkpoint {path}")
+                shutil.rmtree(path, ignore_errors=True)
 
         logger.info(
             "Finished saving the checkpoint (or staging if async is enabled)"
