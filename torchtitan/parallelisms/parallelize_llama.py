@@ -334,7 +334,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         # Apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in model.layers.items():
             layer_plan = {
-                "attention_norm": SequenceParallel(),
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
                     desired_input_layouts=(Replicate(), None),
@@ -343,7 +342,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "attention.wk": col_parallel_strategy(),
                 "attention.wv": col_parallel_strategy(),
                 "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
-                "ffn_norm": SequenceParallel(),
+                "attention_norm": SequenceParallel(),
                 "feed_forward": PrepareModuleInput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
@@ -351,6 +350,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "feed_forward.w1": col_parallel_strategy(),
                 "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
                 "feed_forward.w3": col_parallel_strategy(),
+                "ffn_norm": SequenceParallel(),
             }
 
             # Adjust attention module to use the local number of heads
