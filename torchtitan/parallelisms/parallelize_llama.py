@@ -369,7 +369,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
     enable_compile = job_config.training.compile
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in model.layers.named_children():
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         if enable_compile:
@@ -379,7 +379,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # compile time.
             # torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
-        model.layers[layer_id] = transformer_block
+        model.layers.register_module(layer_id, transformer_block)
 
     if ac_config.mode in ("full", "selective"):
         logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
