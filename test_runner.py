@@ -259,7 +259,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument("--config_dir", default="./train_configs")
-    parser.add_argument("--test", default="all", help="test to run, acceptable values: `test_id` in `build_test_list` (default: all)")
+    parser.add_argument(
+        "--test",
+        default="all",
+        help="test to run, acceptable values: `test_id` in `build_test_list` (default: all)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
