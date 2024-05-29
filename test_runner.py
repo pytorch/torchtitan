@@ -132,6 +132,7 @@ def build_test_list(args):
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    f"--job.dump_folder {args.output_dir}/pp_dp_tracer/",
                     "--training.data_parallel_degree 2",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
@@ -141,7 +142,6 @@ def build_test_list(args):
                 ],
             ],
             "PP tracer frontend 2D PP+DP test",
-            "pp_dp_tracer",
             requires_seed_checkpoint=True,
             ngpu=4,
         ),
