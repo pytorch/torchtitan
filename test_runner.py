@@ -29,7 +29,7 @@ class OverrideDefinitions:
 
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
-    test_id: str = "default"
+    test_name: str = "default"
     requires_seed_checkpoint: bool = False
     ngpu: int = 4
 
@@ -212,8 +212,8 @@ def _run_cmd(cmd):
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     for override_arg in test_flavor.override_args:
-        test_id = test_flavor.test_id
-        dump_folder_arg = f"--job.dump_folder {output_dir}/{test_id}"
+        test_name = test_flavor.test_name
+        dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
 
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
         cmd += " " + dump_folder_arg
@@ -251,7 +251,7 @@ def run_tests(args):
                 )
                 if is_integration_test:
                     for test_flavor in integration_tests_flavors[config_file]:
-                        if args.test == "all" or test_flavor.test_id == args.test:
+                        if args.test == "all" or test_flavor.test_name == args.test:
                             run_test(test_flavor, full_path, args.output_dir)
 
 
@@ -262,7 +262,7 @@ def main():
     parser.add_argument(
         "--test",
         default="all",
-        help="test to run, acceptable values: `test_id` in `build_test_list` (default: all)",
+        help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
     args = parser.parse_args()
 
