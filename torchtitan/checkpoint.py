@@ -315,19 +315,7 @@ class CheckpointManager:
         else:
             dcp.save(self.states, checkpoint_id=checkpoint_id)
         self.reset()
-        if self.keep_latest_k > 0:
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                path = os.path.join(self.folder, filename)
-                discovered_checkpoints.append((int(match.group(1)), path))
-
-            discovered_checkpoints.sort()
-            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
-
-            for _, path in to_delete:
-                logger.info(f"Deleting old checkpoint {path}")
-                shutil.rmtree(path, ignore_errors=True)
+        self._purge_stale_checkpoints()
 
         logger.info(
             "Finished saving the checkpoint (or staging if async is enabled)"
@@ -379,3 +367,18 @@ class CheckpointManager:
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
+
+    def _purge_stale_checkpoints(self):
+        if self.keep_latest_k > 0:
+            discovered_checkpoints = []
+            for filename in os.listdir(self.folder):
+                match = re.search(r"step-(\d+)", filename)
+                path = os.path.join(self.folder, filename)
+                discovered_checkpoints.append((int(match.group(1)), path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+
+            for _, path in to_delete:
+                logger.info(f"Deleting old checkpoint {path}")
+                shutil.rmtree(path, ignore_errors=True)
