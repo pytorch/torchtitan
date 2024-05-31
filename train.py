@@ -26,7 +26,7 @@ from torch.distributed.tensor.parallel import loss_parallel
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_hf_data_loader, create_tokenizer
+from torchtitan.datasets import build_experimental_data_loader, build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_scheduler
@@ -154,15 +154,22 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
-    data_loader = build_hf_data_loader(
-        job_config.training.dataset,
-        job_config.training.dataset_path,
-        tokenizer,
-        job_config.training.batch_size,
-        job_config.training.seq_len,
-        dp_degree,
-        dp_rank,
-    )
+    if job_config.dataset.use_experimental_dataloader:
+        data_loader = build_experimental_data_loader(
+            job_config,
+            dp_rank,
+            dp_degree,
+        )
+    else:
+        data_loader = build_hf_data_loader(
+            job_config.training.dataset,
+            job_config.training.dataset_path,
+            tokenizer,
+            job_config.training.batch_size,
+            job_config.training.seq_len,
+            dp_degree,
+            dp_rank,
+        )
 
     # loss_parallel enables dispatching to efficient loss operators
     loss_parallel_ctx = (
