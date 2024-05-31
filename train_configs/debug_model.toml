@@ -3,7 +3,6 @@
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
-# TODO: turn this back on once ci have tokenizer
 use_for_integration_test = true
 
 [profiling]
@@ -50,7 +49,7 @@ interval_type = "steps"
 interval = 5
 model_weights_only = false
 export_dtype = "float32"
-async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']
