@@ -190,16 +190,15 @@ def pipeline_llama_manual(
     splits = job_config.experimental.pipeline_parallel_split_points
     start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
     stop_layer = splits[stage_idx] if stage_idx < pp_size - 1 else None
-
     if pp_rank > 0:
         model.tok_embeddings = None
 
-    drop_layers = True
+    drop_layers = start_layer is not None
     for name in list(model.layers.keys()):
         # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
-        if start_layer is None or f"layers.{name}" == start_layer:
+        if f"layers.{name}" == start_layer:
             drop_layers = False
-        if stop_layer is not None and f"layers.{name}" == stop_layer:
+        if f"layers.{name}" == stop_layer:
             drop_layers = True
         if drop_layers:
             del model.layers[name]
