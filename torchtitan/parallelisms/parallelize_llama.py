@@ -377,7 +377,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # TODO: dynamic shape have some issues so we turn it off for now.
             # TODO: inline inbuilt nn modules does not work yet, enable it to accelarate
             # compile time.
-            # torch._dynamo.config.inline_inbuilt_nn_modules = True
+            torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
         model.layers[layer_id] = transformer_block
 
