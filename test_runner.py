@@ -130,6 +130,22 @@ def build_test_list():
         ),
         OverrideDefinitions(
             [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.data_parallel_degree 2",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_mode tracer",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
+                    "--training.mixed_precision_param float32",  # tracer doesn't support mixed precision yet
+                ],
+            ],
+            "PP tracer frontend 2D PP+DP test",
+            "pp_dp_tracer",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [],
             ],
             "default",

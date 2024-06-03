@@ -332,7 +332,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         )
 
         # Apply tensor + sequence parallelism to every transformer block
-        for layer_id, transformer_block in model.layers.items():
+        for layer_id, transformer_block in model.layers.named_children():
             layer_plan = {
                 "attention": PrepareModuleInput(
                     input_layouts=(Shard(1), None),
@@ -408,20 +408,29 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
         fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_id, transformer_block in model.layers.items():
+        for layer_id, transformer_block in model.layers.named_children():
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately.
             # When using Pipeline Parallelism, generally zero-2 is best so as to avoid repeated reshardings
             # per microbatch.
-            reshard_after_forward = (
-                int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
-            )
+            if parallel_dims.pp_enabled:
+                reshard_after_forward = False
+            else:
+                reshard_after_forward = int(layer_id) < len(model.layers) - 1
             fully_shard(
                 transformer_block,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            model.layers[layer_id] = transformer_block
+            model.layers.register_module(layer_id, transformer_block)
+            # TODO: the above line is not very egonomic.
+            # Q1: what is the contract of `fully_shard`? Would it transform
+            # module in place? @awgu indicates that it would. Then, we shouldn't
+            # need to register the module with its parent again.
+            # Q2: does this requirement come from Activation Checkpointing, and
+            # maybe this line too?
+            # `transformer_block = torch.compile(transformer_block`)
+            # If that's the case, should this line be moved above to after AC?
         model = fully_shard(
             model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
         )
