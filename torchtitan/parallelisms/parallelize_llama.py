@@ -420,8 +420,13 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-            model.layers[layer_id] = transformer_block
-        model = fully_shard(
+        fully_shard(
+            model.tok_embeddings,
+            **fsdp_config,
+            reshard_after_forward=not parallel_dims.pp_enabled,
+        )
+        fully_shard([model.norm, model.output], **fsdp_config, reshard_after_forward=False)
+        fully_shard(
             model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
         )
         logger.info("Applied FSDP to the model")
