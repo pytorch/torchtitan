@@ -244,7 +244,12 @@ def main(job_config: JobConfig):
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    metric_logger = build_metric_logger(job_config)
+    if parallel_dims.pp_enabled:
+        pp_size = pp_mesh.size()
+        metrics_log_rank = int((world_mesh.size() // pp_size) * (pp_size - 1))
+    else:
+        metrics_log_rank = 0
+    metric_logger = build_metric_logger(job_config, metrics_log_rank=metrics_log_rank)
 
     train_state = TrainState()
 

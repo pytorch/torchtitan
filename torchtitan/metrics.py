@@ -111,7 +111,17 @@ class MetricLogger:
             self.writer.close()
 
 
-def build_metric_logger(config: JobConfig, tag: Optional[str] = None):
+def build_metric_logger(
+    config: JobConfig, metrics_log_rank: int = 0, tag: Optional[str] = None
+):
+    """
+    metrics_log_rank controls which rank acts as 'rank 0' for logging metrics.
+
+    If 'tb_config.rank_0_only' is set, then `metrics_log_rank` will be used as the rank to log metrics.
+    This is intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
+    parallelism is enabled, without forcing logging from all ranks to capture loss information when using pipeline
+    parallelism.
+    """
     dump_dir = config.job.dump_folder
     tb_config = config.metrics
     save_tb_folder = tb_config.save_tb_folder
@@ -125,7 +135,7 @@ def build_metric_logger(config: JobConfig, tag: Optional[str] = None):
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
         if tb_config.rank_0_only:
-            enable_tb = torch.distributed.get_rank() == 0
+            enable_tb = torch.distributed.get_rank() == metrics_log_rank
         else:
             rank_str = f"rank_{torch.distributed.get_rank()}"
             log_dir = os.path.join(log_dir, rank_str)
