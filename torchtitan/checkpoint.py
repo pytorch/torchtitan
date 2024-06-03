@@ -41,15 +41,30 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
-    def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
+    def __init__(
+        self, model: Union[nn.Module, List[nn.Module]], ignore_check: bool = False
+    ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
+        self.ignore_check = ignore_check
 
     def state_dict(self) -> None:
-        return {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
-        }
+        if self.ignore_check:
+            return {
+                k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+            }
+        else:
+            keys = set()
+            sd: Dict[str, Any] = {}
+            for submodule_sd in (get_model_state_dict(m) for m in self.model):
+                submodule_sd_keys = set(submodule_sd.keys())
+                if submodule_sd_keys & keys:
+                    raise RuntimeError(f"{k} exists in more than one nn.Module")
+                sd.update(submodule_sd)
+                keys.update(submodule_sd_keys)
+            return sd
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # TODO: do we actually need to set strict to False?
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=state_dict,
@@ -63,18 +78,36 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+        ignore_check: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        if len(self.model) != len(self.optim):
+            raise ValueError(
+                "The number of models should be the same of the number of the optimizer"
+            )
+        self.ignore_check = ignore_check
 
     def state_dict(self) -> None:
         func = functools.partial(
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+        if self.ignore_check:
+            return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+        else:
+            keys = set()
+            osd: Dict[str, Any] = {}
+            for submodule_osd in (func(m, o) for m, o in zip(self.model, self.optim)):
+                submodule_osd_keys = set(submodule_osd.keys())
+                if submodule_osd_keys & keys:
+                    raise RuntimeError(f"{k} exists in more than one nn.Module")
+                osd.update(submodule_osd)
+                keys.update(submodule_osd_keys)
+            return osd
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # TODO: can we do some check here?
         func = functools.partial(
             set_optimizer_state_dict,
             optim_state_dict=state_dict,
