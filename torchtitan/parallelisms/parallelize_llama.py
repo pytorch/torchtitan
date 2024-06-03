@@ -425,7 +425,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             **fsdp_config,
             reshard_after_forward=not parallel_dims.pp_enabled,
         )
-        fully_shard([model.norm, model.output], **fsdp_config, reshard_after_forward=False)
+        fully_shard(
+            [model.norm, model.output], **fsdp_config, reshard_after_forward=False
+        )
         fully_shard(
             model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
         )
