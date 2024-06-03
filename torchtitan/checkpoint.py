@@ -7,6 +7,7 @@
 import enum
 import os
 import re
+import shutil
 import time
 from multiprocessing import get_context
 from typing import Any, Dict
@@ -54,15 +55,28 @@ class ModelWrapper(Stateful):
 
 
 class OptimizerWrapper(Stateful):
-    def __init__(self, model: nn.Module, optim: torch.optim.Optimizer) -> None:
-        self.model = model
-        self.optim = optim
+    def __init__(
+        self,
+        model: Union[nn.Module, List[nn.Module]],
+        optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+    ) -> None:
+        self.model = [model] if isinstance(model, nn.Module) else model
+        self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
 
     def state_dict(self) -> None:
-        return get_optimizer_state_dict(self.model, self.optim)
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        set_optimizer_state_dict(self.model, self.optim, optim_state_dict=state_dict)
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        list(map(func, self.model, self.optim))
 
 
 class Terminate:
@@ -114,6 +128,7 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
+        self.keep_latest_k = ckpt_config.keep_latest_k
 
         if not self.enable_checkpoint:
             return
@@ -168,7 +183,7 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(model, optimizer),
+                "optimizer": OptimizerWrapper(model_parts, optimizers),
                 "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
             }
@@ -366,6 +381,7 @@ class CheckpointManager:
         else:
             dcp.save(self.states, checkpoint_id=checkpoint_id)
         self.reset()
+        self._purge_stale_checkpoints()
 
         logger.info(
             "Finished saving the checkpoint (or staging if async is enabled)"
@@ -417,3 +433,18 @@ class CheckpointManager:
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
+
+    def _purge_stale_checkpoints(self):
+        if self.keep_latest_k > 0:
+            discovered_checkpoints = []
+            for filename in os.listdir(self.folder):
+                match = re.search(r"step-(\d+)", filename)
+                path = os.path.join(self.folder, filename)
+                discovered_checkpoints.append((int(match.group(1)), path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+
+            for _, path in to_delete:
+                logger.info(f"Deleting old checkpoint {path}")
+                shutil.rmtree(path, ignore_errors=True)

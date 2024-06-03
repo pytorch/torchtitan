@@ -249,7 +249,8 @@ def main(job_config: JobConfig):
         model_parts, world_mesh, parallel_dims, job_config
     )
 
-    move_to_empty(model_parts, device="cuda")
+    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+    move_to_empty(model_parts, device=init_device)
 
     if parallel_dims.pp_enabled:
         pp_schedule = build_pipeline_schedule(
@@ -283,7 +284,7 @@ def main(job_config: JobConfig):
     checkpoint = CheckpointManager(
         model_partss=model_parts,
         optimizers=optimizers.optimizers,
-        lr_schedulers=schedulers.schedulers,
+        lr_schedulers=lr_schedulers.schedulers,
         dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
@@ -345,7 +346,7 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-            optimizer.zero_grad()
+            optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
                 # pipeline parallel forward / backward inside step() call
@@ -374,14 +375,15 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), job_config.training.max_norm, foreach=True
-            )
+            for model in model_parts:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), job_config.training.max_norm, foreach=True
+                )
 
             # optimizer step
             checkpoint.wait_for_staging()
-            optimizer.step()
-            scheduler.step()
+            optimizers.step()
+            lr_schedulers.step()
 
             losses_since_last_log.append(loss)
 
