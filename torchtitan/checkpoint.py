@@ -50,7 +50,9 @@ class ModelWrapper(Stateful):
     def state_dict(self) -> None:
         if self.ignore_check:
             return {
-                k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+                k: v
+                for sd in map(get_model_state_dict, self.model)
+                for k, v in sd.items()
             }
         else:
             keys = set()
@@ -94,7 +96,9 @@ class OptimizerWrapper(Stateful):
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
         if self.ignore_check:
-            return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+            return {
+                k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()
+            }
         else:
             keys = set()
             osd: Dict[str, Any] = {}
