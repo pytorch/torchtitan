@@ -119,13 +119,14 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_mode tracer",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
                 ],
             ],
             "PP tracer frontend test",
             "pp_tracer",
             requires_seed_checkpoint=True,
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
