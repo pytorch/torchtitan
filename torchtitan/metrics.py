@@ -113,16 +113,21 @@ class MetricLogger:
 
 def build_metric_logger(config: JobConfig, tag: Optional[str] = None):
     dump_dir = config.job.dump_folder
-    save_tb_folder = config.metrics.save_tb_folder
-    # since we don't have run id yet, use current minute as identifier
+    tb_config = config.metrics
+    save_tb_folder = tb_config.save_tb_folder
+    # since we don't have run id, use current minute as the identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
     log_dir = os.path.join(dump_dir, save_tb_folder, datetime_str)
 
-    enable_tb = config.metrics.enable_tensorboard
+    enable_tb = tb_config.enable_tensorboard
     if enable_tb:
         logger.info(
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
+        if tb_config.rank_0_only:
+            enable_tb = torch.distributed.get_rank() == 0
+        else:
+            rank_str = f"rank_{torch.distributed.get_rank()}"
+            log_dir = os.path.join(log_dir, rank_str)
 
-    rank_str = f"rank_{torch.distributed.get_rank()}"
-    return MetricLogger(os.path.join(log_dir, rank_str), tag, enable_tb)
+    return MetricLogger(log_dir, tag, enable_tb)

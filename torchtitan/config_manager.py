@@ -125,6 +125,12 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
+        self.parser.add_argument(
+            "--metrics.rank_0_only",
+            default=True,
+            action="store_true",
+            help="Whether to save TensorBoard metrics only for rank 0 or for all ranks",
+        )
 
         # model configs
         self.parser.add_argument(
@@ -402,7 +408,15 @@ class JobConfig:
                 "disabled" is the default mode.
             """,
         )
-
+        self.parser.add_argument(
+            "--checkpoint.keep_latest_k",
+            type=int,
+            default=0,
+            help="""
+                Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
+                0 is the default value.
+            """,
+        )
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
