@@ -43,6 +43,7 @@ from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_metrics_rank,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
@@ -221,7 +222,8 @@ def main(job_config: JobConfig):
         model, world_mesh, parallel_dims, job_config
     )
 
-    model.to_empty(device="cuda")
+    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+    model.to_empty(device=init_device)
 
     if parallel_dims.pp_enabled:
         pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
@@ -243,7 +245,9 @@ def main(job_config: JobConfig):
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    metric_logger = build_metric_logger(job_config)
+    metric_logger = build_metric_logger(
+        job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
+    )
 
     train_state = TrainState()
 

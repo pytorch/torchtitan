@@ -18,10 +18,11 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.pipelining import pipeline, SplitPoint
-from torch.distributed.pipelining.PipelineStage import (
-    _PipelineStage,
+from torch.distributed.pipelining import (
     ManualPipelineStage,
+    pipeline,
+    PipelineStage,
+    SplitPoint,
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -159,6 +160,14 @@ def _llama_trace_input(job_config, model_config, device="meta"):
     return (tokens,)
 
 
+def _mixed_precision_dtype(
+    job_config: JobConfig, parallel_dims, default: torch.dtype = torch.float32
+) -> torch.dtype:
+    """Get the mixed precision dtype if fsdp is enabled, otherwise return the default"""
+    mp_arg = job_config.training.mixed_precision_param
+    return TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else default
+
+
 def pipeline_llama_manual(
     model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
 ):
@@ -181,16 +190,15 @@ def pipeline_llama_manual(
     splits = job_config.experimental.pipeline_parallel_split_points
     start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
     stop_layer = splits[stage_idx] if stage_idx < pp_size - 1 else None
-
     if pp_rank > 0:
         model.tok_embeddings = None
 
-    drop_layers = True
+    drop_layers = start_layer is not None
     for name in list(model.layers.keys()):
         # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
-        if start_layer is None or f"layers.{name}" == start_layer:
+        if f"layers.{name}" == start_layer:
             drop_layers = False
-        if stop_layer is not None and f"layers.{name}" == stop_layer:
+        if f"layers.{name}" == stop_layer:
             drop_layers = True
         if drop_layers:
             del model.layers[name]
@@ -204,8 +212,7 @@ def pipeline_llama_manual(
     # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can leave model on meta device longer and
     # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
     # layers of the model that map to this stage, not the whole model.
-    mp_arg = job_config.training.mixed_precision_param
-    mp_dtype = TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else torch.float32
+    mp_dtype = _mixed_precision_dtype(job_config, parallel_dims)
     batch_size = job_config.training.batch_size
     local_seq_len = int(job_config.training.seq_len // parallel_dims.tp)
     layers_io_shape = (batch_size, local_seq_len, model_config.dim)
@@ -216,12 +223,7 @@ def pipeline_llama_manual(
     )
     if pp_rank == 0:
         # first layer
-        input = torch.randint(
-            model_config.vocab_size,
-            size=(batch_size, job_config.training.seq_len),
-            dtype=torch.int64,
-            device=device,
-        )
+        (input,) = _llama_trace_input(job_config, model_config, device=device)
     else:
         # later layers (assume all start w/ a transformer layer)
         input = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
@@ -257,21 +259,21 @@ def pipeline_llama_tracer(
             "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
         )
 
-    # TODO(whc) maybe we can just fix this by feeding bf16 into the tracer for its input shapes?
-    raise NotImplementedError(
-        "pipeline tracer doesn't work with fsdp mixed precision currently. "
-        "To work around, edit fsdp mixed precision config to use fp32."
-    )
+    if _mixed_precision_dtype(job_config, parallel_dims) == torch.bfloat16:
+        raise NotImplementedError(
+            "pipeline tracer doesn't work with fsdp mixed precision currently. "
+            "To work around, edit fsdp mixed precision config to use fp32."
+        )
+
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
-    stage_idx = pp_mesh.get_local_rank()
+    stage_idx = pp_rank
     layers_per_rank = len(model.layers) // parallel_dims.pp
     split_spec = {
         f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
         for i in range(1, parallel_dims.pp)
     }
 
-    # Create a pipeline representation from the model
     pipe = pipeline(
         model,
         job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp,
@@ -279,10 +281,9 @@ def pipeline_llama_tracer(
         split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
-    stage = _PipelineStage(
-        stage_module=model,
-        stage_index=pp_rank,
-        pipe_info=pipe.pipe_info,
+    stage = PipelineStage(
+        pipe,
+        stage_index=stage_idx,
         device=device,
         group=pp_mesh.get_group(),
     )
@@ -367,7 +368,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
     enable_compile = job_config.training.compile
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in model.layers.named_children():
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         if enable_compile:
@@ -377,7 +378,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # compile time.
             # torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
-        model.layers[layer_id] = transformer_block
+        model.layers.register_module(layer_id, transformer_block)
 
     if ac_config.mode in ("full", "selective"):
         logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
