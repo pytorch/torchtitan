@@ -408,7 +408,15 @@ class JobConfig:
                 "disabled" is the default mode.
             """,
         )
-
+        self.parser.add_argument(
+            "--checkpoint.keep_latest_k",
+            type=int,
+            default=0,
+            help="""
+                Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
+                0 is the default value.
+            """,
+        )
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
