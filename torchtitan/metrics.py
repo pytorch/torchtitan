@@ -14,7 +14,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 
-
 # named tuple for passing GPU memory stats for logging
 GPUMemStats = namedtuple(
     "GPUMemStats",

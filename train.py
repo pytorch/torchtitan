@@ -43,6 +43,7 @@ from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_metrics_rank,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
@@ -244,12 +245,9 @@ def main(job_config: JobConfig):
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    if parallel_dims.pp_enabled:
-        pp_size = pp_mesh.size()
-        metrics_log_rank = int((world_mesh.size() // pp_size) * (pp_size - 1))
-    else:
-        metrics_log_rank = 0
-    metric_logger = build_metric_logger(job_config, metrics_log_rank=metrics_log_rank)
+    metric_logger = build_metric_logger(
+        job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
+    )
 
     train_state = TrainState()
 
