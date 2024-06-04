@@ -40,10 +40,11 @@ def get_metrics_rank(world_mesh: DeviceMesh, parallel_dims: ParallelDims) -> int
     Returns global rank 0 in non-pipeline-parallel configs, and returns the global
     rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
     """
-    assert (
-        world_mesh.mesh_dim_names[0] == "pp"
-    ), "get_metrics_rank assumes pp is the outer mesh dim"
     if parallel_dims.pp_enabled:
+        assert (
+            world_mesh.mesh_dim_names[0] == "pp"
+        ), "get_metrics_rank assumes pp is the outer mesh dim"
+        pp_mesh = world_mesh["pp"]
         pp_size = pp_mesh.size()
         metrics_log_rank = int((world_mesh.size() // pp_size) * (pp_size - 1))
     else:
