@@ -208,8 +208,17 @@ def build_test_list():
                     "--training.tensor_parallel_degree 2",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
                 ],
+                [
+                    "--training.steps 20",
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--training.data_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+                ],
             ],
-            "PP+DP+TP 3D test",
+            "PP+DP+TP 3D test with save/load resume ckpt",
             "pp_dp_tp",
             requires_seed_checkpoint=True,
             ngpu=8,
@@ -230,11 +239,20 @@ def _run_cmd(cmd):
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
-    for override_arg in test_flavor.override_args:
-        test_name = test_flavor.test_name
-        dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    test_name = test_flavor.test_name
+    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
-        all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+    if test_flavor.requires_seed_checkpoint:
+        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
+        logger.info(
+            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
+        )
+        result = _run_cmd(cmd)
+        logger.info(result.stdout)
+
+    for override_arg in test_flavor.override_args:
+
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         cmd += " " + dump_folder_arg
         if override_arg:
@@ -242,14 +260,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-
-        if test_flavor.requires_seed_checkpoint:
-            logger.info("Creating seed checkpoint")
-            result = _run_cmd(
-                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
-            )
-            logger.info(result.stdout)
-
         result = _run_cmd(cmd)
         logger.info(result.stdout)
         if result.returncode != 0:
