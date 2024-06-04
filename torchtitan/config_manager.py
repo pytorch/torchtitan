@@ -129,7 +129,11 @@ class JobConfig:
             "--metrics.rank_0_only",
             default=True,
             action="store_true",
-            help="Whether to save TensorBoard metrics only for rank 0 or for all ranks",
+            help="""
+                Whether to save TensorBoard metrics only for rank 0 or for all ranks.
+                When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
+                which is the only stage that computes loss metrics.
+            """,
         )
 
         # model configs
