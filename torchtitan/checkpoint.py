@@ -8,7 +8,6 @@ import enum
 import functools
 import os
 import re
-import shutil
 import time
 from multiprocessing import get_context
 from typing import Any, Dict, List, Union
@@ -42,32 +41,15 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
-    def __init__(
-        self, model: Union[nn.Module, List[nn.Module]], ignore_check: bool = False
-    ) -> None:
+    def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.ignore_check = ignore_check
 
     def state_dict(self) -> None:
-        if self.ignore_check:
-            return {
-                k: v
-                for sd in map(get_model_state_dict, self.model)
-                for k, v in sd.items()
-            }
-        else:
-            keys = set()
-            sd: Dict[str, Any] = {}
-            for submodule_sd in (get_model_state_dict(m) for m in self.model):
-                submodule_sd_keys = set(submodule_sd.keys())
-                if submodule_sd_keys & keys:
-                    raise RuntimeError(f"{k} exists in more than one nn.Module")
-                sd.update(submodule_sd)
-                keys.update(submodule_sd_keys)
-            return sd
+        return {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # TODO: do we actually need to set strict to False?
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=state_dict,
@@ -81,38 +63,18 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
-        ignore_check: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
-        if len(self.model) != len(self.optim):
-            raise ValueError(
-                "The number of models should be the same of the number of the optimizer"
-            )
-        self.ignore_check = ignore_check
 
     def state_dict(self) -> None:
         func = functools.partial(
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        if self.ignore_check:
-            return {
-                k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()
-            }
-        else:
-            keys = set()
-            osd: Dict[str, Any] = {}
-            for submodule_osd in (func(m, o) for m, o in zip(self.model, self.optim)):
-                submodule_osd_keys = set(submodule_osd.keys())
-                if submodule_osd_keys & keys:
-                    raise RuntimeError(f"{k} exists in more than one nn.Module")
-                osd.update(submodule_osd)
-                keys.update(submodule_osd_keys)
-            return osd
+        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # TODO: can we do some check here?
         func = functools.partial(
             set_optimizer_state_dict,
             optim_state_dict=state_dict,
@@ -170,7 +132,6 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.keep_latest_k = ckpt_config.keep_latest_k
 
         if not self.enable_checkpoint:
             return
@@ -374,7 +335,6 @@ class CheckpointManager:
         else:
             dcp.save(self.states, checkpoint_id=checkpoint_id)
         self.reset()
-        self._purge_stale_checkpoints()
 
         logger.info(
             "Finished saving the checkpoint (or staging if async is enabled)"
@@ -426,18 +386,3 @@ class CheckpointManager:
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
-
-    def _purge_stale_checkpoints(self):
-        if self.keep_latest_k > 0:
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                path = os.path.join(self.folder, filename)
-                discovered_checkpoints.append((int(match.group(1)), path))
-
-            discovered_checkpoints.sort()
-            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
-
-            for _, path in to_delete:
-                logger.info(f"Deleting old checkpoint {path}")
-                shutil.rmtree(path, ignore_errors=True)
