@@ -14,7 +14,6 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.logging_utils import logger
-from torchtitan.parallelisms import ParallelDims
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
@@ -33,22 +32,6 @@ def _warn_overwrite_env(env, val):
             f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
         )
     os.environ[env] = val
-
-
-def get_metrics_rank(world_mesh: DeviceMesh, parallel_dims: ParallelDims) -> int:
-    """
-    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
-    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
-    """
-    if parallel_dims.pp_enabled:
-        assert (
-            world_mesh.mesh_dim_names[0] == "pp"
-        ), "get_metrics_rank assumes pp is the outer mesh dim"
-        pp_mesh = world_mesh["pp"]
-        pp_size = pp_mesh.size()
-        metrics_log_rank = int((world_mesh.size() // pp_size) * (pp_size - 1))
-    else:
-        metrics_log_rank = 0
 
 
 def set_pg_timeouts(timeout, world_mesh):
