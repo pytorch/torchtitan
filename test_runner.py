@@ -226,8 +226,8 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    f"--optimizer.name Adam --optimizer.fused --job.dump_folder {args.output_dir}/fused_adamw/",
-                    f"--optimizer.name AdamW --optimizer.fused --job.dump_folder {args.output_dir}/fused_adamw/",
+                    "--optimizer.name Adam --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.fused",
                 ]
             ],
             "Fused Optimizer Test",
