@@ -223,6 +223,15 @@ def build_test_list():
             requires_seed_checkpoint=True,
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    f"--optimizer.name Adam --optimizer.fused --job.dump_folder {args.output_dir}/fused_adamw/",
+                    f"--optimizer.name AdamW --optimizer.fused --job.dump_folder {args.output_dir}/fused_adamw/",
+                ]
+            ],
+            "Fused Optimizer Test",
+        ),
     ]
     return integration_tests_flavors
 
