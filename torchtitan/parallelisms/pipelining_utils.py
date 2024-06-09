@@ -19,8 +19,12 @@ def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
     )
+    n_microbatches = job_config.experimental.pipeline_parallel_microbatches
+    if n_microbatches is None:
+        n_microbatches = job_config.experimental.pipeline_parallel_degree
+
     return schedule_class(
         stage,
-        n_microbatches=stage.chunks,
+        n_microbatches=n_microbatches,
         loss_fn=loss_fn,
     )
