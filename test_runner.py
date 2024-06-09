@@ -261,7 +261,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(result.stdout)
 
     for override_arg in test_flavor.override_args:
-
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         cmd += " " + dump_folder_arg
         if override_arg:

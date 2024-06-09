@@ -18,12 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.pipelining import (
-    ManualPipelineStage,
-    pipeline,
-    PipelineStage,
-    SplitPoint,
-)
+from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -236,12 +231,11 @@ def pipeline_llama_manual(
         output = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
 
     model.to_empty(device=device)
-    stage = ManualPipelineStage(
+    stage = PipelineStage(
         model,
         pp_rank,
         pp_size,
         device,
-        microbatches,
         input_args=input.chunk(microbatches)[0],
         output_args=output.chunk(microbatches)[0],
         group=pp_mesh.get_group("pp"),
