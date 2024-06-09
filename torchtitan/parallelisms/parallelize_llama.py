@@ -190,16 +190,15 @@ def pipeline_llama_manual(
     splits = job_config.experimental.pipeline_parallel_split_points
     start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
     stop_layer = splits[stage_idx] if stage_idx < pp_size - 1 else None
-
     if pp_rank > 0:
         model.tok_embeddings = None
 
-    drop_layers = True
+    drop_layers = start_layer is not None
     for name in list(model.layers.keys()):
         # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
-        if start_layer is None or f"layers.{name}" == start_layer:
+        if f"layers.{name}" == start_layer:
             drop_layers = False
-        if stop_layer is not None and f"layers.{name}" == stop_layer:
+        if f"layers.{name}" == stop_layer:
             drop_layers = True
         if drop_layers:
             del model.layers[name]
@@ -364,7 +363,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
     enable_compile = job_config.training.compile
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in model.layers.named_children():
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         if enable_compile:
@@ -374,7 +373,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # compile time.
             # torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
-        model.layers[layer_id] = transformer_block
+        model.layers.register_module(layer_id, transformer_block)
 
     if ac_config.mode in ("full", "selective"):
         logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
