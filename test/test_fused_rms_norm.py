@@ -15,6 +15,7 @@ from torch.distributed._tensor.debug import CommDebugMode
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
+    skip_if_lt_x_gpu,
     with_comms,
 )
 
@@ -26,6 +27,7 @@ class TestFusedRMSNorm(DTensorTestBase):
     def world_size(self):
         return 4
 
+    @skip_if_lt_x_gpu(4)
     @with_comms
     def test_fused_rms_norm(self):
         mesh = init_device_mesh(
