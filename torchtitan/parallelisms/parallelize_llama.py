@@ -261,6 +261,10 @@ def pipeline_llama_tracer(
 
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
+    microbatches = (
+        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
+    )
+    (input,) = _llama_trace_input(job_config, model_config, device=device)
     stage_idx = pp_rank
     split_spec = {
         layer_name: SplitPoint.BEGINNING
@@ -268,7 +272,7 @@ def pipeline_llama_tracer(
     }
     pipe = pipeline(
         model,
-        mb_args=_llama_trace_input(job_config, model_config),
+        mb_args=(input.chunk(microbatches)[0],),
         split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
