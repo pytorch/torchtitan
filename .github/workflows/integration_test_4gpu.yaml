@@ -1,13 +1,20 @@
-name: 4 GPU Unit Test
+name: 4 GPU Integration Test
 
 on:
   push:
     branches: [ main ]
   pull_request:
+  schedule:
+    # Runs hourly
+    - cron: '0 * * * *'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
 
 jobs:
   build-test:
@@ -33,4 +40,4 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/
         mkdir artifacts-to-be-uploaded
-        python ./test_runner.py artifacts-to-be-uploaded
+        python ./test_runner.py artifacts-to-be-uploaded --ngpu 4
