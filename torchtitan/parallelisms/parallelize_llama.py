@@ -262,12 +262,10 @@ def pipeline_llama_tracer(
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     stage_idx = pp_rank
-    layers_per_rank = len(model.layers) // parallel_dims.pp
     split_spec = {
-        f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
-        for i in range(1, parallel_dims.pp)
+        layer_name: SplitPoint.BEGINNING
+        for layer_name in job_config.experimental.pipeline_parallel_split_points
     }
-
     pipe = pipeline(
         model,
         job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp,
