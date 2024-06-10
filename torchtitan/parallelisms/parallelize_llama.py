@@ -272,9 +272,8 @@ def pipeline_llama_tracer(
         split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
-    stage = PipelineStage(
-        pipe,
-        stage_index=stage_idx,
+    stage = pipe.build_stage(
+        stage_idx,
         device=device,
         group=pp_mesh.get_group(),
     )
