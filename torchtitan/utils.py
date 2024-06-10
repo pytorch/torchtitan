@@ -50,6 +50,8 @@ def get_metrics_rank(world_mesh: DeviceMesh, parallel_dims: ParallelDims) -> int
     else:
         metrics_log_rank = 0
 
+    return metrics_log_rank
+
 
 def set_pg_timeouts(timeout, world_mesh):
     """
