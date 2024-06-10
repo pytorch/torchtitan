@@ -268,8 +268,7 @@ def pipeline_llama_tracer(
     }
     pipe = pipeline(
         model,
-        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp,
-        example_args=_llama_trace_input(job_config, model_config),
+        mb_args=_llama_trace_input(job_config, model_config),
         split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
