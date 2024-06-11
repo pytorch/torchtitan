@@ -43,6 +43,7 @@ from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_metrics_rank,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
@@ -93,15 +94,21 @@ def build_optimizer(model, job_config: JobConfig):
     # build optimizer
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
+    fused = job_config.optimizer.fused
+
+    # Common parameters for both optimizers
+    optimizer_kwargs = {
+        "lr": lr,
+        "betas": (0.9, 0.95),
+        "weight_decay": 0.1,
+        "fused": fused,
+        "foreach": not fused,
+    }
     if name == "Adam":
         # TODO: make the optimizer options configurable by toml/cmd args
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
+        optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
     elif name == "AdamW":
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
+        optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
     else:
         raise NotImplementedError(f"Optimizer {name} not added.")
 
@@ -244,7 +251,9 @@ def main(job_config: JobConfig):
     optimizer = build_optimizer(model, job_config)
     scheduler = get_lr_scheduler(optimizer, job_config)
 
-    metric_logger = build_metric_logger(job_config)
+    metric_logger = build_metric_logger(
+        job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
+    )
 
     train_state = TrainState()
 
