@@ -18,12 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
-from torch.distributed.pipelining import (
-    ManualPipelineStage,
-    pipeline,
-    PipelineStage,
-    SplitPoint,
-)
+from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -236,12 +231,11 @@ def pipeline_llama_manual(
         output = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
 
     model.to_empty(device=device)
-    stage = ManualPipelineStage(
+    stage = PipelineStage(
         model,
         pp_rank,
         pp_size,
         device,
-        microbatches,
         input_args=input.chunk(microbatches)[0],
         output_args=output.chunk(microbatches)[0],
         group=pp_mesh.get_group("pp"),
@@ -267,23 +261,23 @@ def pipeline_llama_tracer(
 
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
+    microbatches = (
+        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
+    )
+    (input,) = _llama_trace_input(job_config, model_config, device=device)
     stage_idx = pp_rank
-    layers_per_rank = len(model.layers) // parallel_dims.pp
     split_spec = {
-        f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
-        for i in range(1, parallel_dims.pp)
+        layer_name: SplitPoint.BEGINNING
+        for layer_name in job_config.experimental.pipeline_parallel_split_points
     }
-
     pipe = pipeline(
         model,
-        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp,
-        example_args=_llama_trace_input(job_config, model_config),
+        mb_args=(input.chunk(microbatches)[0],),
         split_spec=split_spec,
     )
     model = pipe.get_stage_module(stage_idx)
-    stage = PipelineStage(
-        pipe,
-        stage_index=stage_idx,
+    stage = pipe.build_stage(
+        stage_idx,
         device=device,
         group=pp_mesh.get_group(),
     )
@@ -376,7 +370,7 @@ def _parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     # apply AC + torch.compile
     ac_config = job_config.activation_checkpoint
     enable_compile = job_config.training.compile
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in model.layers.named_children():
         if ac_config.mode in ("full", "selective"):
             transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         if enable_compile:
@@ -386,7 +380,7 @@ def _parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
             # compile time.
             # torch._dynamo.config.inline_inbuilt_nn_modules = True
             transformer_block = torch.compile(transformer_block, dynamic=False)
-        model.layers[layer_id] = transformer_block
+        model.layers.register_module(layer_id, transformer_block)
 
     if ac_config.mode in ("full", "selective"):
         logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

@@ -43,6 +43,7 @@ from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_metrics_rank,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
@@ -91,26 +92,27 @@ class TrainState(Stateful):
 
 
 def build_optimizers(model_parts, job_config: JobConfig):
+    """Wrap one optimizer per model part in an OptimizersContainer which provides a single 
+    step() and zero_grad() method for all the child optimizers.
+    """
     def _build_optimizer(model):
         name = job_config.optimizer.name
         lr = job_config.optimizer.lr
+        fused = job_config.optimizer.fused
+
+        # Common parameters for both optimizers
+        optimizer_kwargs = {
+            "lr": lr,
+            "betas": (0.9, 0.95),
+            "weight_decay": 0.1,
+            "fused": fused,
+            "foreach": not fused,
+        }        
         if name == "Adam":
             # TODO: make the optimizer options configurable by toml/cmd args
-            optimizer = torch.optim.Adam(
-                model.parameters(),
-                lr=lr,
-                betas=(0.9, 0.95),
-                weight_decay=0.1,
-                foreach=True,
-            )
+            optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
         elif name == "AdamW":
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=lr,
-                betas=(0.9, 0.95),
-                weight_decay=0.1,
-                foreach=True,
-            )
+            optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
         else:
             raise NotImplementedError(f"Optimizer {name} not added.")
 
@@ -274,7 +276,9 @@ def main(job_config: JobConfig):
     optimizers = build_optimizers(model_parts, job_config)
     lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
 
-    metric_logger = build_metric_logger(job_config)
+    metric_logger = build_metric_logger(
+        job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
+    )
 
     train_state = TrainState()
 

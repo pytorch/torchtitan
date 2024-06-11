@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import enum
+import functools
 import os
 import re
 import shutil
 import time
 from multiprocessing import get_context
-from typing import Any, Dict
+from typing import Any, Dict, List, Union
 
 import torch
 import torch.distributed as dist
@@ -21,6 +22,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
+    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
@@ -40,18 +42,21 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
-    def __init__(self, model_or_models: Union[nn.Module, List[nn.Module]]) -> None:
-        self._models = (
-            [model_or_models]
-            if isinstance(model_or_models, nn.Module)
-            else model_or_models
-        )
+    def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
+        self.model = [model] if isinstance(model, nn.Module) else model
 
     def state_dict(self) -> None:
-        return get_model_state_dict(self.model)
+        return {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        set_model_state_dict(self.model, state_dict)
+        func = functools.partial(
+            set_model_state_dict,
+            model_state_dict=state_dict,
+            options=StateDictOptions(strict=False),
+        )
+        list(map(func, self.model))
 
 
 class OptimizerWrapper(Stateful):
