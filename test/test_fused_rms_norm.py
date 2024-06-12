@@ -12,7 +12,6 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.distributed._tensor.debug import CommDebugMode
-from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     skip_if_lt_x_gpu,
@@ -51,7 +50,3 @@ class TestFusedRMSNorm(DTensorTestBase):
             out.backward(grad_out)
 
         self.assertEqual(comm_mode.get_total_counts(), 0)
-
-
-if __name__ == "__main__":
-    run_tests()
