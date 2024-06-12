@@ -36,13 +36,13 @@ class TestFusedRMSNorm(DTensorTestBase):
         x = torch.randn(4, 4, 4, device=self.device_type)  # Shard(1)
         w = torch.randn(4, device=self.device_type, requires_grad=True)  # Replicate
 
-        dx = distribute_tensor(x, mesh, [Shard(1)])
-        dw = distribute_tensor(w, mesh, [Replicate()])
+        dist_x = distribute_tensor(x, mesh, [Shard(1)])
+        dist_w = distribute_tensor(w, mesh, [Replicate()])
 
         comm_mode = CommDebugMode()
         # fused rmsnorm
         with comm_mode:
-            out = fused_rms_norm_fn(dx, dw)
+            out = fused_rms_norm_fn(dist_x, dist_w)
 
         self.assertEqual(comm_mode.get_total_counts(), 0)
 
