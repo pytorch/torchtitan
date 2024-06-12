@@ -12,11 +12,25 @@
 
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
-
+import torch
 import torch.nn as nn
+import contextlib
+import torch.distributed as dist
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
+import float8_experimental.config as config
+
+@contextlib.contextmanager
+def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):
+    prev = config.enable_fsdp_fp8_all_gather
+    dist.barrier()
+    config.enable_fsdp_fp8_all_gather = enable_fsdp_fp8_all_gather
+    try:
+        yield
+    finally:
+        dist.barrier()
+        config.enable_fsdp_fp8_all_gather = prev
 
 
 def build_fp8_linear(model: nn.Module, job_config: JobConfig):
@@ -28,6 +42,7 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
     This will mutate the model inplace.
     """
     linear_type = job_config.training.fp8_linear.lower()
+    enable_fsdp_fp8_all_gather = job_config.training.enable_fsdp_fp8_all_gather if hasattr(job_config.training, 'enable_fsdp_fp8_all_gather') else False
     try:
         from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
 
@@ -50,5 +65,6 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
         float8_linear_type = linear_type_map[linear_type.lower()]
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
-        swap_linear_with_float8_linear(model, float8_linear_type)
+        with set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather):
+            swap_linear_with_float8_linear(model, float8_linear_type)
         logger.info(f"Swapped to {linear_type} float8 linear layers")
