@@ -123,12 +123,14 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_mode tracer",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
                 ],
             ],
             "PP tracer frontend test",
             "pp_tracer",
             requires_seed_checkpoint=True,
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -161,8 +163,17 @@ def build_test_list():
                     "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
                 ],
             ],
-            "Eager mode 2DParallel",
-            "eager_2d",
+            "Eager mode 2DParallel with rmsnorm",
+            "eager_2d_rmsnorm",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 2 --model.norm_type=fused_rmsnorm",
+                ],
+            ],
+            "Eager mode 2DParallel with fused_rmsnorm",
+            "eager_2d_fused_rmsnorm",
         ),
         OverrideDefinitions(
             [
@@ -261,7 +272,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(result.stdout)
 
     for override_arg in test_flavor.override_args:
-
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         cmd += " " + dump_folder_arg
         if override_arg:
