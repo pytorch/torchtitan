@@ -38,6 +38,18 @@ fp8_linear = ""
 compile = false
 dataset = "c4"
 
+[dataset]
+use_experimental_dataloader = false
+data_logical_shards = 768
+bos_token = 0
+eos_token = 1
+# dataset_path = "/fsx/datasets/"
+# datasets = "CommonCrawl,C4,Github,Wikipedia,Books,ArXiv,StackExchange"
+# dataset_weights = "67,15,4.5,4.5,4.5,2.5,2"
+dataset_path = "./torchtitan/datasets/experimental/llama2"
+datasets = "c4_mini"
+dataset_weights = "1"
+
 [checkpoint]
 enable_checkpoint = false
 folder = "checkpoint"
