@@ -38,15 +38,30 @@ class TestFusedRMSNorm(DTensorTestBase):
         dist_x = distribute_tensor(x, mesh, [Shard(1)])
         dist_w = distribute_tensor(w, mesh, [Replicate()])
 
+        x = x.clone().detach()
+        w = w.clone().detach().requires_grad_()
+
+        self.assertEqual(dist_x.full_tensor(), x)
+        self.assertEqual(dist_w.full_tensor(), w)
+
+        # fused rmsnorm on DTensor
         comm_mode = CommDebugMode()
         # fused rmsnorm
         with comm_mode:
-            out = fused_rms_norm_fn(dist_x, dist_w)
+            dist_out = fused_rms_norm_fn(dist_x, dist_w)
 
         self.assertEqual(comm_mode.get_total_counts(), 0)
 
         with comm_mode:
-            grad_out = torch.ones_like(out)
-            out.backward(grad_out)
+            dist_grad_out = torch.ones_like(dist_out)
+            dist_out.backward(dist_grad_out)
 
         self.assertEqual(comm_mode.get_total_counts(), 0)
+
+        # fused rmsnorm on Tensor
+        out = fused_rms_norm_fn(x, w)
+        grad_out = torch.ones_like(out)
+        out.backward(grad_out)
+
+        self.assertEqual(dist_out.full_tensor(), out)
+        self.assertEqual(dist_grad_out.full_tensor(), grad_out)
