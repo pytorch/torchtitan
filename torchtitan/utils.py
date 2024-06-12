@@ -50,6 +50,8 @@ def get_metrics_rank(world_mesh: DeviceMesh, parallel_dims: ParallelDims) -> int
     else:
         metrics_log_rank = 0
 
+    return metrics_log_rank
+
 
 def set_pg_timeouts(timeout, world_mesh):
     """
@@ -70,9 +72,7 @@ def set_pg_timeouts(timeout, world_mesh):
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
-    groups = (
-        [world_mesh.get_group()] if world_mesh.ndim == 1 else world_mesh.get_group()
-    )
+    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
 
     # None represents the 'default' PG, not part of the mesh
     groups.append(None)

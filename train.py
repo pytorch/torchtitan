@@ -351,6 +351,9 @@ def main(job_config: JobConfig):
                 with loss_parallel_ctx():
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
                     loss.backward()
 
             # clip gradients
