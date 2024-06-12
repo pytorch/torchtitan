@@ -7,7 +7,7 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import List, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol

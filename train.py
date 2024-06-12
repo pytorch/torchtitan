@@ -92,9 +92,10 @@ class TrainState(Stateful):
 
 
 def build_optimizers(model_parts, job_config: JobConfig):
-    """Wrap one optimizer per model part in an OptimizersContainer which provides a single 
+    """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
     """
+
     def _build_optimizer(model):
         name = job_config.optimizer.name
         lr = job_config.optimizer.lr
@@ -107,7 +108,7 @@ def build_optimizers(model_parts, job_config: JobConfig):
             "weight_decay": 0.1,
             "fused": fused,
             "foreach": not fused,
-        }        
+        }
         if name == "Adam":
             # TODO: make the optimizer options configurable by toml/cmd args
             optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
@@ -283,10 +284,11 @@ def main(job_config: JobConfig):
     train_state = TrainState()
 
     # train loop
-    model.train()
+    for model in model_parts:
+        model.train()
 
     checkpoint = CheckpointManager(
-        model_partss=model_parts,
+        model_parts=model_parts,
         optimizers=optimizers.optimizers,
         lr_schedulers=lr_schedulers.schedulers,
         dataloader=data_loader,

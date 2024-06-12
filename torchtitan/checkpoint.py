@@ -189,7 +189,9 @@ class CheckpointManager:
             {
                 "model": ModelWrapper(model_parts),
                 "optimizer": OptimizerWrapper(model_parts, optimizers),
-                "lr_scheduler": lr_scheduler,
+                # TODO(whc) flatten lr_schedulers using a wrapper and somehow handle resharding?
+                # or store one per key and explicitly dont support resharding?
+                # "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
             }
         )
