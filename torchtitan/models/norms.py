@@ -14,8 +14,8 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
+from torch.distributed._tensor import Partial, Replicate, Shard
 from torch.distributed._tensor.experimental import local_map
-from torch.distributed._tensor.placement_types import _Partial, Replicate, Shard
 
 
 def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
@@ -268,7 +268,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
     @partial(
         local_map,
-        out_placements=([Shard(1)], [_Partial()], None),
+        out_placements=([Shard(1)], [Partial()], None),
         in_placements=(None, [Shard(1)]),
     )
     @staticmethod
