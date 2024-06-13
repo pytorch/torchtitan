@@ -190,6 +190,7 @@ def main(job_config: JobConfig):
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
+
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
