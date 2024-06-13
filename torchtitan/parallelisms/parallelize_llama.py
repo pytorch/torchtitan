@@ -27,7 +27,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torch.utils.checkpoint import _pt2_selective_checkpoint_context_fn_gen, checkpoint
+from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
@@ -60,7 +60,7 @@ def checkpoint_wrapper(module, config):
 
         def selective_checkpointing_context_fn():
             meta = defaultdict(int)
-            return _pt2_selective_checkpoint_context_fn_gen(_get_custom_policy(meta))
+            return create_selective_checkpoint_contexts(_get_custom_policy(meta))
 
         return ptd_checkpoint_wrapper(
             module,
