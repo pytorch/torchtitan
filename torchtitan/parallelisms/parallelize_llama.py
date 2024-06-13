@@ -45,10 +45,7 @@ no_recompute_list = {
 # currently selective per op and per layer checkpointing are supported
 def checkpoint_wrapper(module, config):
     if config.mode == "selective" and config.selective_ac_option == "op":
-        from torch.utils.checkpoint import (
-            CheckpointPolicy,
-            create_selective_checkpoint_contexts,
-        )
+        from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
         def _get_custom_policy(meta):
             def _custom_policy(mode, func, *args, **kwargs):
