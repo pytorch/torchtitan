@@ -27,6 +27,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torch.utils.checkpoint import checkpoint
+
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
 
@@ -54,12 +56,9 @@ def checkpoint_wrapper(module, config):
                 if func == torch.ops.aten.mm.default:
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
-                if func in no_recompute_list and not (
+                return func in no_recompute_list and not (
                     func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
-                ):
-                    return CheckpointPolicy.MUST_SAVE
-                else:
-                    return CheckpointPolicy.PREFER_RECOMPUTE
+                )
 
             return _custom_policy
 
