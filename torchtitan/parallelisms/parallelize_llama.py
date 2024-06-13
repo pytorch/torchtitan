@@ -7,6 +7,7 @@
 # this file applies the PTD parallelisms and various training techniques to the
 # llama model, i.e. activation checkpointing, etc.
 
+import copy
 from collections import defaultdict
 from typing import Dict, Tuple
 
@@ -164,7 +165,12 @@ def _mixed_precision_dtype(
 
 
 def pipeline_llama_manual(
-    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
+    whole_model,
+    world_mesh,
+    parallel_dims,
+    job_config: JobConfig,
+    device,
+    model_config: Dict,
 ):
     """
     This API extracts one torch.nn.Module objects for the part of the model configured to run inside this stage.
@@ -180,67 +186,104 @@ def pipeline_llama_manual(
     microbatches = (
         job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
     )
+    splits = job_config.experimental.pipeline_parallel_split_points
+
+    def _build_stage(stage_idx, start_layer, stop_layer, is_first=False, is_last=False):
+        model = copy.deepcopy(whole_model)
+        if not is_first:
+            model.tok_embeddings = None
+
+        drop_layers = start_layer is not None
+        for name in list(model.layers.keys()):
+            # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
+            if f"layers.{name}" == start_layer:
+                drop_layers = False
+            if f"layers.{name}" == stop_layer:
+                drop_layers = True
+            if drop_layers:
+                del model.layers[name]
+
+        if not is_last:
+            model.norm = None
+            model.output = None
+
+        # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can leave model on meta device longer and
+        # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
+        # layers of the model that map to this stage, not the whole model.
+        mp_dtype = _mixed_precision_dtype(job_config, parallel_dims)
+        batch_size = job_config.training.batch_size
+        local_seq_len = int(job_config.training.seq_len // parallel_dims.tp)
+        layers_io_shape = (batch_size, local_seq_len, model_config.dim)
+        output_layer_shape = (
+            batch_size,
+            job_config.training.seq_len,
+            model_config.vocab_size,
+        )
+        if is_first:
+            (input,) = _llama_trace_input(job_config, model_config, device=device)
+        else:
+            # later layers (assume all start w/ a transformer layer)
+            input = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
+
+        if is_last:
+            output = torch.rand(output_layer_shape, dtype=torch.float32, device=device)
+        else:
+            # earlier layers (assume all end in a transformer layer)
+            output = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
+
+        model.to_empty(device=device)
+        stage = PipelineStage(
+            model,
+            stage_idx,
+            num_stages,
+            device,
+            input_args=input.chunk(microbatches)[0],
+            output_args=output.chunk(microbatches)[0],
+            group=pp_mesh.get_group("pp"),
+        )
+        return stage, model
+
+    num_stages = len(splits) + 1
     stage_idx = pp_rank
 
-    splits = job_config.experimental.pipeline_parallel_split_points
-    start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
-    stop_layer = splits[stage_idx] if stage_idx < pp_size - 1 else None
-    if pp_rank > 0:
-        model.tok_embeddings = None
+    def stage_ids_this_rank(
+        rank: int, num_stages: int, style: str = "loop"
+    ) -> Tuple[int]:
+        """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
+        assert (
+            num_stages % pp_size == 0
+        ), f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
+        stages_per_rank = num_stages // pp_size
+        if style == "loop":
+            return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
+        elif stype == "v":
+            assert (
+                stages_per_rank == 2
+            ), f"v schedules assume 2 stages per rank, got {stages_per_rank}"
+            stage_v_pairs = list(
+                zip(range(pp_size), range(num_stages - 1, pp_size - 1, -1))
+            )
+            return stage_v_pairs[pp_rank]
 
-    drop_layers = start_layer is not None
-    for name in list(model.layers.keys()):
-        # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
-        if f"layers.{name}" == start_layer:
-            drop_layers = False
-        if f"layers.{name}" == stop_layer:
-            drop_layers = True
-        if drop_layers:
-            del model.layers[name]
-
-    if pp_rank < pp_size - 1:
-        model.norm = None
-        model.output = None
-
-    logger.info(f"PP rank {pp_rank} is using this model chunk\n{model}")
-
-    # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can leave model on meta device longer and
-    # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
-    # layers of the model that map to this stage, not the whole model.
-    mp_dtype = _mixed_precision_dtype(job_config, parallel_dims)
-    batch_size = job_config.training.batch_size
-    local_seq_len = int(job_config.training.seq_len // parallel_dims.tp)
-    layers_io_shape = (batch_size, local_seq_len, model_config.dim)
-    output_layer_shape = (
-        batch_size,
-        job_config.training.seq_len,
-        model_config.vocab_size,
-    )
-    if pp_rank == 0:
-        # first layer
-        (input,) = _llama_trace_input(job_config, model_config, device=device)
-    else:
-        # later layers (assume all start w/ a transformer layer)
-        input = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
-
-    if pp_rank == pp_size - 1:
-        # last layer
-        output = torch.rand(output_layer_shape, dtype=torch.float32, device=device)
-    else:
-        # earlier layers (assume all end in a transformer layer)
-        output = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
-
-    model.to_empty(device=device)
-    stage = PipelineStage(
-        model,
-        pp_rank,
-        pp_size,
-        device,
-        input_args=input.chunk(microbatches)[0],
-        output_args=output.chunk(microbatches)[0],
-        group=pp_mesh.get_group("pp"),
-    )
-    return [stage], [model]
+    stages = []
+    models = []
+    for stage_idx in stage_ids_this_rank(pp_rank, num_stages, style="loop"):
+        start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
+        stop_layer = splits[stage_idx] if stage_idx < num_stages - 1 else None
+        stage, model_chunk = _build_stage(
+            stage_idx,
+            start_layer,
+            stop_layer,
+            is_first=stage_idx == 0,
+            is_last=stage_idx == num_stages - 1,
+        )
+        logger.info(
+            f"PP rank {pp_rank} is building stage_idx {stage_idx}"
+            f" with start_layer {start_layer}, stop_layer {stop_layer}: model chunk \n{model_chunk}"
+        )
+        stages.append(stage)
+        models.append(model_chunk)
+    return stages, models
 
 
 def pipeline_llama_tracer(
