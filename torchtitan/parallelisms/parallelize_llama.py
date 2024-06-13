@@ -47,7 +47,7 @@ def checkpoint_wrapper(module, config):
     if config.mode == "selective" and config.selective_ac_option == "op":
         from torch.utils.checkpoint import (
             CheckpointPolicy,
-            create_selective_checkpoint_contexts
+            create_selective_checkpoint_contexts,
         )
 
         def _get_custom_policy(meta):
@@ -60,7 +60,11 @@ def checkpoint_wrapper(module, config):
                 to_save = func in no_recompute_list and not (
                     func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
                 )
-                return CheckpointPolicy.MUST_SAVE if to_save else CheckpointPolicy.PREFER_RECOMPUTE
+                return (
+                    CheckpointPolicy.MUST_SAVE
+                    if to_save
+                    else CheckpointPolicy.PREFER_RECOMPUTE
+                )
 
             return _custom_policy
 
