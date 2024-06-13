@@ -295,11 +295,6 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
 
     if parallel_dims.tp_enabled:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm not yet compatible with TP. Please use layernorm or rmsnorm."
-            )
-
         tp_mesh = world_mesh["tp"]
         (
             row_parallel_strategy,
