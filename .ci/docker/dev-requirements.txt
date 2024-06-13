@@ -1,4 +1,4 @@
-expecttest
+expecttest!=0.2.0
 pytest
 pytest-cov
 pre-commit
