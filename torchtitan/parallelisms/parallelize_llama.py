@@ -114,7 +114,7 @@ def checkpoint_wrapper(module, config):
 
 def get_tp_parallel_strategy(
     job_config: JobConfig,
-) -> Tuple[RowwiseParallel, ColwiseParallel]:
+) -> Tuple[RowwiseParallel, ColwiseParallel, PrepareModuleInput]:
     """Get the parallel strategy for the transformer model.
 
     This function handles the special case of using float8 with tensor parallelism.
@@ -123,10 +123,11 @@ def get_tp_parallel_strategy(
         from float8_experimental.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
         )
 
-        return Float8RowwiseParallel, Float8ColwiseParallel
-    return RowwiseParallel, ColwiseParallel
+        return Float8RowwiseParallel, Float8ColwiseParallel, PrepareFloat8ModuleInput
+    return RowwiseParallel, ColwiseParallel, PrepareModuleInput
 
 
 def pipeline_llama(
@@ -294,9 +295,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     if parallel_dims.tp_enabled:
         tp_mesh = world_mesh["tp"]
-        row_parallel_strategy, col_parallel_strategy = get_tp_parallel_strategy(
-            job_config
-        )
+        (
+            row_parallel_strategy,
+            col_parallel_strategy,
+            prepare_module_input,
+        ) = get_tp_parallel_strategy(job_config)
         loss_parallel = parallel_dims.loss_parallel_enabled
 
         # 1. Parallelize the first embedding and the last linear proj layer
@@ -322,7 +325,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         # Apply tensor + sequence parallelism to every transformer block
         for layer_id, transformer_block in model.layers.items():
             layer_plan = {
-                "attention": PrepareModuleInput(
+                "attention": prepare_module_input(
                     input_layouts=(Shard(1), None),
                     desired_input_layouts=(Replicate(), None),
                 ),
@@ -331,7 +334,7 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
                 "attention.wv": col_parallel_strategy(),
                 "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
                 "attention_norm": SequenceParallel(),
-                "feed_forward": PrepareModuleInput(
+                "feed_forward": prepare_module_input(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
                 ),
