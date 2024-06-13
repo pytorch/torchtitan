@@ -142,7 +142,7 @@ def main(job_config: JobConfig):
     torch.cuda.set_device(device)
     init_distributed(job_config)
 
-    # Build meshes
+    # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
@@ -256,7 +256,7 @@ def main(job_config: JobConfig):
 
     model.train()
 
-    # Load initial checkpoint
+    # load initial checkpoint
     checkpoint = CheckpointManager(
         model=model,
         optimizer=optimizer,
