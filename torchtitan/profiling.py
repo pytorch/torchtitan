@@ -6,6 +6,7 @@
 
 import contextlib
 import os
+import pickle
 import time
 
 import torch
@@ -14,6 +15,14 @@ from torchtitan.logging_utils import logger
 
 # the number of warmup steps before the active step in each profiling cycle
 WARMUP = 3
+
+# how much memory allocation/free ops to record in memory snapshots
+MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
+
+# default memory snapshot folder
+ENABLE_MEMORY_SNAPSHOT_KEY = "enable_memory_snapshot"
+MEMORY_SNAPSHOT_FOLDER_KEY = "memory_snapshot_folder"
+MEMORY_SNAPSHOT_FOLDER_DEFAULT_VALUE = "memory_snapshot"
 
 
 @contextlib.contextmanager
@@ -69,4 +78,63 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             yield torch_profiler
     else:
         torch_profiler = contextlib.nullcontext()
+        yield None
+
+
+@contextlib.contextmanager
+def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
+    enable_snapshot = getattr(config.profiling, ENABLE_MEMORY_SNAPSHOT_KEY, False)
+    if enable_snapshot:
+        snapshot_folder = getattr(
+            config.profiling,
+            MEMORY_SNAPSHOT_FOLDER_KEY,
+            MEMORY_SNAPSHOT_FOLDER_DEFAULT_VALUE,
+        )
+        snapshot_dir = os.path.join(config.job.dump_folder, snapshot_folder)
+        if not os.path.exists(snapshot_dir):
+            os.makedirs(snapshot_dir, exist_ok=True)
+        rank = torch.distributed.get_rank()
+
+        class MemoryProfiler:
+            def __init__(self, step_num: int, freq: int):
+                torch.cuda.memory._record_memory_history(
+                    max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
+                )
+                # when resume training, we start from the last step
+                self.step_num = step_num
+                self.freq = freq
+
+            def step(self, exit_ctx: bool = False):
+                if not exit_ctx and self.step_num % self.freq != 0:
+                    self.step_num += 1
+                    return
+                if not exit_ctx:
+                    curr_step = self.step_num
+                    self.step_num += 1
+                    dir_name = f"iteration_{curr_step}"
+                else:
+                    curr_step = self.step_num - 1
+                    dir_name = f"iteration_{curr_step}_exit"
+                curr_snapshot_dir = os.path.join(snapshot_dir, dir_name)
+                if not os.path.exists(curr_snapshot_dir):
+                    os.makedirs(curr_snapshot_dir, exist_ok=True)
+                logger.info(f"Dumping memory snapshot at step {curr_step}")
+                begin = time.monotonic()
+                with open(
+                    f"{curr_snapshot_dir}/rank{rank}_memory_snapshot.pickle", "wb"
+                ) as output:
+                    pickle.dump(torch.cuda.memory._snapshot(), output)
+                logger.info(
+                    f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
+                )
+                torch.distributed.barrier()
+
+        logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
+        profiler = MemoryProfiler(global_step, config.profiling.profile_freq)
+        try:
+            yield profiler
+        finally:
+            # dump snapshot when CUDA OOMs
+            profiler.step(exit_ctx=True)
+    else:
         yield None
