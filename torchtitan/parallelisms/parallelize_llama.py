@@ -295,142 +295,191 @@ def pipeline_llama_tracer(
     return (stage, model)
 
 
+def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply tensor parallelism.
+    """
+
+    assert parallel_dims.tp_enabled, "TP is not enabled"
+
+    if job_config.model.norm_type == "fused_rmsnorm":
+        raise NotImplementedError(
+            "fused_rmsnorm not yet compatible with TP. Please use layernorm or rmsnorm."
+        )
+
+    tp_mesh = world_mesh["tp"]
+    (
+        row_parallel_strategy,
+        col_parallel_strategy,
+        prepare_module_input,
+    ) = get_tp_parallel_strategy(job_config)
+    loss_parallel = parallel_dims.loss_parallel_enabled
+
+    # 1. Parallelize the first embedding and the last linear proj layer
+    # 2. Parallelize the root norm layer over the sequence dim
+    # 3. Shard the first transformer block's inputs
+    model = parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+            ),
+            "output": col_parallel_strategy(
+                input_layouts=Shard(1),
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+            "norm": SequenceParallel(),
+        },
+    )
+
+    # Apply tensor + sequence parallelism to every transformer block
+    for layer_id, transformer_block in model.layers.items():
+        layer_plan = {
+            "attention": prepare_module_input(
+                input_layouts=(Shard(1), None),
+                desired_input_layouts=(Replicate(), None),
+            ),
+            "attention.wq": col_parallel_strategy(),
+            "attention.wk": col_parallel_strategy(),
+            "attention.wv": col_parallel_strategy(),
+            "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
+            "attention_norm": SequenceParallel(),
+            "feed_forward": prepare_module_input(
+                input_layouts=(Shard(1),),
+                desired_input_layouts=(Replicate(),),
+            ),
+            "feed_forward.w1": col_parallel_strategy(),
+            "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
+            "feed_forward.w3": col_parallel_strategy(),
+            "ffn_norm": SequenceParallel(),
+        }
+
+        # Adjust attention module to use the local number of heads
+        attn_layer = transformer_block.attention
+        attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
+        attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
+
+        parallelize_module(
+            module=transformer_block,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_plan,
+        )
+
+    logger.info("Applied Tensor Parallelism to the model")
+    return model
+
+
+def apply_ac(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply activation checkpointing to the model.
+    """
+
+    ac_config = job_config.activation_checkpoint
+    assert ac_config.mode in (
+        "full",
+        "selective",
+    ), f"{ac_config.mode=}, expecting full or selective"
+
+    for layer_id, transformer_block in model.layers.named_children():
+        transformer_block = checkpoint_wrapper(transformer_block, ac_config)
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+    return model
+
+
+def apply_compile(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply torch.compile to the model.
+    """
+
+    assert job_config.training.compile, "torch.compile is not enabled"
+    if job_config.model.norm_type == "fused_rmsnorm":
+        raise NotImplementedError(
+            "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
+        )
+
+    for layer_id, transformer_block in model.layers.named_children():
+        # turn on per-transformer block compile after AC wrapping and before FSDP
+        # TODO: dynamic shape have some issues so we turn it off for now.
+        # TODO: inline inbuilt nn modules does not work yet, enable it to accelarate
+        # compile time.
+        # torch._dynamo.config.inline_inbuilt_nn_modules = True
+        transformer_block = torch.compile(transformer_block, dynamic=False)
+        model.layers.register_module(layer_id, transformer_block)
+
+    ac_config = job_config.activation_checkpoint
+    if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
+        # some temp flags for torch.compile enablement + SAC
+        torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+            True
+        )
+
+    logger.info("Compiled each TransformerBlock with torch.compile")
+    return model
+
+
+def apply_dp(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply data parallelism to the model. FSDP2 is used here.
+    """
+
+    assert parallel_dims.dp_enabled, "DP is not enabled"
+
+    dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+    assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+    )
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+
+    for layer_id, transformer_block in model.layers.items():
+        # As an optimization, do not reshard after forward for the last
+        # transformer block since FSDP would prefetch it immediately.
+        # When using Pipeline Parallelism, generally zero-2 is best so as to avoid repeated reshardings
+        # per microbatch.
+        reshard_after_forward = (
+            int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
+        )
+        fully_shard(
+            transformer_block,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+        model.layers[layer_id] = transformer_block
+
+    model = fully_shard(
+        model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
+    )
+
+    logger.info("Applied FSDP to the model")
+    return model
+
+
 def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
-    Apply SPMD parallelisms and activation checkpointing to the model.
+    Apply tensor parallelism, activation checkpointing, torch.compile, and data
+    parallelism to the model.
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
 
     if parallel_dims.tp_enabled:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm not yet compatible with TP. Please use layernorm or rmsnorm."
-            )
+        model = apply_tp(model, world_mesh, parallel_dims, job_config)
 
-        tp_mesh = world_mesh["tp"]
-        (
-            row_parallel_strategy,
-            col_parallel_strategy,
-            prepare_module_input,
-        ) = get_tp_parallel_strategy(job_config)
-        loss_parallel = parallel_dims.loss_parallel_enabled
+    if job_config.activation_checkpoint.mode != "none":
+        model = apply_ac(model, world_mesh, parallel_dims, job_config)
 
-        # 1. Parallelize the first embedding and the last linear proj layer
-        # 2. Parallelize the root norm layer over the sequence dim
-        # 3. Shard the first transformer block's inputs
-        model = parallelize_module(
-            model,
-            tp_mesh,
-            {
-                "tok_embeddings": RowwiseParallel(
-                    input_layouts=Replicate(),
-                    output_layouts=Shard(1),
-                ),
-                "output": col_parallel_strategy(
-                    input_layouts=Shard(1),
-                    output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                    use_local_output=not loss_parallel,
-                ),
-                "norm": SequenceParallel(),
-            },
-        )
+    if job_config.training.compile:
+        model = apply_compile(model, world_mesh, parallel_dims, job_config)
 
-        # Apply tensor + sequence parallelism to every transformer block
-        for layer_id, transformer_block in model.layers.items():
-            layer_plan = {
-                "attention": prepare_module_input(
-                    input_layouts=(Shard(1), None),
-                    desired_input_layouts=(Replicate(), None),
-                ),
-                "attention.wq": col_parallel_strategy(),
-                "attention.wk": col_parallel_strategy(),
-                "attention.wv": col_parallel_strategy(),
-                "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
-                "attention_norm": SequenceParallel(),
-                "feed_forward": prepare_module_input(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                ),
-                "feed_forward.w1": col_parallel_strategy(),
-                "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
-                "feed_forward.w3": col_parallel_strategy(),
-                "ffn_norm": SequenceParallel(),
-            }
-
-            # Adjust attention module to use the local number of heads
-            attn_layer = transformer_block.attention
-            attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
-            attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
-
-            parallelize_module(
-                module=transformer_block,
-                device_mesh=tp_mesh,
-                parallelize_plan=layer_plan,
-            )
-
-        logger.info("Applied Tensor Parallelism to the model")
-
-    # apply AC + torch.compile
-    ac_config = job_config.activation_checkpoint
-    enable_compile = job_config.training.compile
-    for layer_id, transformer_block in model.layers.named_children():
-        if ac_config.mode in ("full", "selective"):
-            transformer_block = checkpoint_wrapper(transformer_block, ac_config)
-        if enable_compile:
-            # turn on per-transformer block compile after AC wrapping and before FSDP
-            # TODO: dynamic shape have some issues so we turn it off for now.
-            # TODO: inline inbuilt nn modules does not work yet, enable it to accelarate
-            # compile time.
-            # torch._dynamo.config.inline_inbuilt_nn_modules = True
-            transformer_block = torch.compile(transformer_block, dynamic=False)
-        model.layers.register_module(layer_id, transformer_block)
-
-    if ac_config.mode in ("full", "selective"):
-        logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
-        if (
-            enable_compile
-            and ac_config.mode == "selective"
-            and ac_config.selective_ac_option == "op"
-        ):
-            # some temp flags for torch.compile enablement + SAC
-            torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
-                True
-            )
-    if enable_compile:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
-            )
-        logger.info("Compiled each TransformerBlock with torch.compile")
-
-    # apply DP (FSDP2)
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-        assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-        )
-        fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-        for layer_id, transformer_block in model.layers.items():
-            # As an optimization, do not reshard after forward for the last
-            # transformer block since FSDP would prefetch it immediately.
-            # When using Pipeline Parallelism, generally zero-2 is best so as to avoid repeated reshardings
-            # per microbatch.
-            reshard_after_forward = (
-                int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
-            )
-            fully_shard(
-                transformer_block,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-            model.layers[layer_id] = transformer_block
-        model = fully_shard(
-            model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
-        )
-        logger.info("Applied FSDP to the model")
+        model = apply_dp(model, world_mesh, parallel_dims, job_config)
 
     return model
