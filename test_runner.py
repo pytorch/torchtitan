@@ -163,8 +163,17 @@ def build_test_list():
                     "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
                 ],
             ],
-            "Eager mode 2DParallel",
-            "eager_2d",
+            "Eager mode 2DParallel with rmsnorm",
+            "eager_2d_rmsnorm",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 2 --model.norm_type=fused_rmsnorm",
+                ],
+            ],
+            "Eager mode 2DParallel with fused_rmsnorm",
+            "eager_2d_fused_rmsnorm",
         ),
         OverrideDefinitions(
             [
