@@ -124,9 +124,9 @@ def checkpoint_mp(recv, send):
 class CheckpointManager:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        model_parts: List[nn.Module],
+        optimizers: List[torch.optim.Optimizer],
+        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -138,11 +138,19 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return
 
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
+
         self.states = states
         self.states.update(
             {
-                "model": ModelWrapper(model),
-                "optimizer": OptimizerWrapper(model, optimizer),
+                "model": ModelWrapper(model_parts),
+                "optimizer": OptimizerWrapper(model_parts, optimizers),
+                # TODO(whc) flatten lr_schedulers using a wrapper and somehow handle resharding?
                 "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
             }
