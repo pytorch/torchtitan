@@ -362,7 +362,7 @@ def main(job_config: JobConfig):
             # optimizer step
             checkpoint.wait_for_staging()
             optimizer.step()
-            scheduler.step()
+            lr_scheduler.step()
 
             losses_since_last_log.append(loss)
 
