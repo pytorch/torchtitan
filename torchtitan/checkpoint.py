@@ -177,14 +177,6 @@ class CheckpointManager:
 
         self.states = states
 
-        """plan
-        for save-
-            model: merge the state-dicts into one in __init__, then save/load model will 'just work',
-            and model portion would be 'reshardable'
-
-            optim: store each one in a separate key for now,
-            make a note/post explaining the issues and possible long term plan
-        """
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
@@ -266,9 +258,6 @@ class CheckpointManager:
             #      'tok_embeddings.weight':...,
             #      'layers.0.attention.wq.weight': ...
             # }.
-
-            # TODO(whc) if we have multiple model parts on this rank, should we merge all their keys into a flat state dict
-            # or keep them as separate state dicts under named keys like _models_0 and _models_1?
             self.states = self.states["model"].state_dict()
 
             # For now, we will manually pop the freqs_cis buffer, as we made this permanent
