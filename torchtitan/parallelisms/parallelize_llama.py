@@ -372,7 +372,7 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     return model
 
 
-def apply_ac(model, world_mesh, parallel_dims, job_config: JobConfig):
+def apply_ac(model, job_config: JobConfig):
     """
     Apply activation checkpointing to the model.
     """
@@ -391,7 +391,7 @@ def apply_ac(model, world_mesh, parallel_dims, job_config: JobConfig):
     return model
 
 
-def apply_compile(model, world_mesh, parallel_dims, job_config: JobConfig):
+def apply_compile(model, job_config: JobConfig):
     """
     Apply torch.compile to the model.
     """
@@ -474,10 +474,10 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
         model = apply_tp(model, world_mesh, parallel_dims, job_config)
 
     if job_config.activation_checkpoint.mode != "none":
-        model = apply_ac(model, world_mesh, parallel_dims, job_config)
+        model = apply_ac(model, job_config)
 
     if job_config.training.compile:
-        model = apply_compile(model, world_mesh, parallel_dims, job_config)
+        model = apply_compile(model, job_config)
 
     if parallel_dims.dp_enabled:
         model = apply_dp(model, world_mesh, parallel_dims, job_config)
