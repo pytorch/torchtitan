@@ -300,8 +300,6 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     Apply tensor parallelism.
     """
 
-    assert parallel_dims.tp_enabled, "TP is not enabled"
-
     if job_config.model.norm_type == "fused_rmsnorm":
         raise NotImplementedError(
             "fused_rmsnorm not yet compatible with TP. Please use layernorm or rmsnorm."
@@ -378,10 +376,6 @@ def apply_ac(model, job_config: JobConfig):
     """
 
     ac_config = job_config.activation_checkpoint
-    assert ac_config.mode in (
-        "full",
-        "selective",
-    ), f"{ac_config.mode=}, expecting full or selective"
 
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = checkpoint_wrapper(transformer_block, ac_config)
@@ -396,7 +390,6 @@ def apply_compile(model, job_config: JobConfig):
     Apply torch.compile to the model.
     """
 
-    assert job_config.training.compile, "torch.compile is not enabled"
     if job_config.model.norm_type == "fused_rmsnorm":
         raise NotImplementedError(
             "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
@@ -426,8 +419,6 @@ def apply_dp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
-
-    assert parallel_dims.dp_enabled, "DP is not enabled"
 
     dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
     assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
