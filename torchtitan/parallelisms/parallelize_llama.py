@@ -335,7 +335,7 @@ def pipeline_llama_tracer(
         device=device,
         group=pp_mesh.get_group(),
     )
-    return [stage], [model]
+    return ((stage,), (model,))
 
 
 def parallelize_llama(model_parts, world_mesh, parallel_dims, job_config: JobConfig):

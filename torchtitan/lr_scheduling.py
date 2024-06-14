@@ -44,6 +44,8 @@ def get_lr_schedulers(optimizers, job_config: JobConfig):
         return warmup_scheduler
 
     class SchedulersContainer:
+        """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
+
         def __init__(self, schedulers):
             self.schedulers = schedulers
 

@@ -138,36 +138,38 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return
         """
-        Tricky changes for Pipeline Parallelism
+        Note: Pipeline Parallelism and Virtual Stages
 
-        1. even for simple PP schedules, we introduce a problem where there is a separate optimizer on stage1's rank
-        vs stage0's rank.  When saving, these collide and one of them is lost.  Then when reloading, only one stage can
+        1. even for simple PP schedules, there is a separate optimizer each PP rank.
+        rank0's optimizer would have a param_group[0] which refers to layers.0 in the original model.
+        rank1's would _also_ have a param_group[0], since it's index based, but referring to layers.1.
+        When saving, these collide and one of them is lost.  Then when reloading, only one stage can
         restore its optimizer states, others will error.
-            --> no fix yet
 
-        2. with looped schedules, we have multiple logical models per rank. This complicates both model state and
-        optimizer state handling in dcp.
-            a) Model states
-            - ideally, we support resharding the model.  so we want to collapse the states back into one logical state-dict
-            - this means we merge the state-dicts from each model_part into one when saving and loading
+            The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
+            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerWrapper.
 
-            b) Optimizer states
-            - if we create one optimizer object per model_part, we add a similar but orthogonal problem to (1), namely,
-            we have two optimziers on this local rank, and if we were to save them to the same "optim" key they would collide.
-            However, unlike (1), we have control over them both in one place, so we could save them under separate keys to avoid
-            the collision. Since this doesn't solve (1), it is only a temporary workaround. Also, if we go this route,
-            it would not be possible to load the optimizer states into a different parallelism configuration (resharding).
-            - if we enable one optimizer object to handle multiple model_parts, e.g. by wrapping model_parts in a ModuleList,
-            then we could correctly save the optimizer states for this PP rank.  But we still have the bug in (1) preventing us from
-            reloading the optimizer states.
+        2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
+        requiring us to reason about multiple 'optim' objects locally.
+        
+            We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
+            into one state dict before saving/loading. We rely on the individual state_dicts to not collide, 
+            which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
+            support described in (1).
 
-            In any case, we won't be able to reload a PP checkpoint with optimizer states even without reshard, until (1) is fixed.
-            And the fix for (1) might change the option space for handling (2) as well.
+        3. LR schedulers also index model states like optimizers and would need to be flattened properly to support
+        resharding.  Unfortunately, the implementations of different lr_schedulers do not follow a clear pattern like
+        optimizers do, so it's hard to write a generic 'flattener' utility.
 
-            So, for now I will only save the model weights for PP in this PR, while we figure out the full story for (1).
-
-        Note: haven't thought much about lr_scheduler's states.
+            TODO: This is currently unsolved and needs a fix.
         """
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
+
         assert len(model_parts) == len(
             optimizers
         ), "Must pass one optimizer per model part"
@@ -182,8 +184,7 @@ class CheckpointManager:
                 "model": ModelWrapper(model_parts),
                 "optimizer": OptimizerWrapper(model_parts, optimizers),
                 # TODO(whc) flatten lr_schedulers using a wrapper and somehow handle resharding?
-                # or store one per key and explicitly dont support resharding?
-                # "lr_scheduler": lr_scheduler,
+                "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
             }
         )

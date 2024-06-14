@@ -120,6 +120,8 @@ def build_optimizers(model_parts, job_config: JobConfig):
         return optimizer
 
     class OptimizersContainer:
+        """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages"""
+
         def __init__(self, optimizers):
             self.optimizers = optimizers
 
