@@ -32,6 +32,7 @@ class OverrideDefinitions:
     test_name: str = "default"
     requires_seed_checkpoint: bool = False
     ngpu: int = 4
+    model_flavor: str = "debugmodel"
 
     def __repr__(self):
         return self.test_descr
@@ -252,10 +253,11 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     if test_flavor.requires_seed_checkpoint:
-        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
+        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg} {model_flavor_arg}"
         logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
@@ -265,6 +267,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         cmd += " " + dump_folder_arg
+        cmd += " " + model_flavor_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
