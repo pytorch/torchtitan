@@ -29,7 +29,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import (
@@ -48,6 +48,7 @@ from torchtitan.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
+    move_to_empty,
     NoColor,
     set_pg_timeouts,
 )
@@ -90,29 +91,49 @@ class TrainState(Stateful):
         self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
-def build_optimizer(model, job_config: JobConfig):
-    # build optimizer
-    name = job_config.optimizer.name
-    lr = job_config.optimizer.lr
-    fused = job_config.optimizer.fused
+def build_optimizers(model_parts, job_config: JobConfig):
+    """Wrap one optimizer per model part in an OptimizersContainer which provides a single
+    step() and zero_grad() method for all the child optimizers.
+    """
 
-    # Common parameters for both optimizers
-    optimizer_kwargs = {
-        "lr": lr,
-        "betas": (0.9, 0.95),
-        "weight_decay": 0.1,
-        "fused": fused,
-        "foreach": not fused,
-    }
-    if name == "Adam":
-        # TODO: make the optimizer options configurable by toml/cmd args
-        optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
-    elif name == "AdamW":
-        optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
-    else:
-        raise NotImplementedError(f"Optimizer {name} not added.")
+    def _build_optimizer(model):
+        name = job_config.optimizer.name
+        lr = job_config.optimizer.lr
+        fused = job_config.optimizer.fused
 
-    return optimizer
+        # Common parameters for both optimizers
+        optimizer_kwargs = {
+            "lr": lr,
+            "betas": (0.9, 0.95),
+            "weight_decay": 0.1,
+            "fused": fused,
+            "foreach": not fused,
+        }
+        if name == "Adam":
+            # TODO: make the optimizer options configurable by toml/cmd args
+            optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
+        elif name == "AdamW":
+            optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+        else:
+            raise NotImplementedError(f"Optimizer {name} not added.")
+
+        return optimizer
+
+    class OptimizersContainer:
+        """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages"""
+
+        def __init__(self, optimizers):
+            self.optimizers = optimizers
+
+        def step(self):
+            for optimizer in self.optimizers:
+                optimizer.step()
+
+        def zero_grad(self):
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
+
+    return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -195,16 +216,21 @@ def main(job_config: JobConfig):
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
-        model = model_cls.from_model_args(model_config)
+        whole_model = model_cls.from_model_args(model_config)
+
+    # In 1D/2D cases or PP with simple schedules, model_parts is just one item
+    # for PP with looped schedules, each item is one stage-model-chunk
+    # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
+    model_parts = [whole_model]
 
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
         build_fp8_linear(model, job_config)
 
     # log model size
-    model_param_count = get_num_params(model)
+    model_param_count = get_num_params(whole_model)
     num_flop_per_token = get_num_flop_per_token(
-        get_num_params(model, exclude_embedding=True),
+        get_num_params(whole_model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
     )
@@ -219,26 +245,28 @@ def main(job_config: JobConfig):
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     if parallel_dims.pp_enabled:
-        stage, model = models_pipelining_fns[model_name](
-            model, world_mesh, parallel_dims, job_config, device, model_config
+        stages, model_parts = models_pipelining_fns[model_name](
+            whole_model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
     # apply PT-D DP/TP parallelisms and activation checkpointing
-    model = models_parallelize_fns[model_name](
-        model, world_mesh, parallel_dims, job_config
+    model_parts = models_parallelize_fns[model_name](
+        model_parts, world_mesh, parallel_dims, job_config
     )
 
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-    model.to_empty(device=init_device)
+    move_to_empty(model_parts, device=init_device)
 
     if parallel_dims.pp_enabled:
-        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+        pp_schedule = build_pipeline_schedule(
+            job_config, parallel_dims, stages, loss_fn
+        )
     else:
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
 
         # allocate sharded model on GPU and initialize weights via DTensor
-        model.init_weights()
+        whole_model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -248,8 +276,8 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizer = build_optimizer(model, job_config)
-    scheduler = get_lr_scheduler(optimizer, job_config)
+    optimizers = build_optimizers(model_parts, job_config)
+    lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
 
     metric_logger = build_metric_logger(
         job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
@@ -258,12 +286,13 @@ def main(job_config: JobConfig):
     train_state = TrainState()
 
     # train loop
-    model.train()
+    for model in model_parts:
+        model.train()
 
     checkpoint = CheckpointManager(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
+        model_parts=model_parts,
+        optimizers=optimizers.optimizers,
+        lr_schedulers=lr_schedulers.schedulers,
         dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
@@ -325,7 +354,7 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-            optimizer.zero_grad()
+            optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
                 # pipeline parallel forward / backward inside step() call
@@ -357,14 +386,15 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), job_config.training.max_norm, foreach=True
-            )
+            for model in model_parts:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), job_config.training.max_norm, foreach=True
+                )
 
             # optimizer step
             checkpoint.wait_for_staging()
-            optimizer.step()
-            scheduler.step()
+            optimizers.step()
+            lr_schedulers.step()
 
             losses_since_last_log.append(loss)
 
