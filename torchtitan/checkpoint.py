@@ -150,11 +150,16 @@ class CheckpointManager:
             {
                 "model": ModelWrapper(model_parts),
                 "optimizer": OptimizerWrapper(model_parts, optimizers),
-                # TODO(whc) flatten lr_schedulers using a wrapper and somehow handle resharding?
-                "lr_scheduler": lr_scheduler,
                 "dataloader": dataloader,
             }
         )
+        if len(lr_schedulers) == 1:
+            self.states["lr_scheduler"] = lr_schedulers[0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(lr_schedulers):
+                self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
