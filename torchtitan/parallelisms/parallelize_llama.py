@@ -338,15 +338,7 @@ def pipeline_llama_tracer(
     return ((stage,), (model,))
 
 
-def parallelize_llama(model_parts, world_mesh, parallel_dims, job_config: JobConfig):
-    """Apply SPMD parallelisms and activation checkpointing to each model in model_parts"""
-    return [
-        _parallelize_llama(m, world_mesh, parallel_dims, job_config)
-        for m in model_parts
-    ]
-
-
-def _parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
+def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply SPMD parallelisms and activation checkpointing to the model.
 

@@ -240,7 +240,6 @@ def build_test_list():
             "pp_looped_1f1b",
             requires_seed_checkpoint=True,
             ngpu=4,
-            model_flavor="debugmodel_8_layers",
         ),
         OverrideDefinitions(
             [
