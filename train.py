@@ -218,11 +218,6 @@ def main(job_config: JobConfig):
         )
         whole_model = model_cls.from_model_args(model_config)
 
-    # In 1D/2D cases or PP with simple schedules, model_parts is just one item
-    # for PP with looped schedules, each item is one stage-model-chunk
-    # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
-    model_parts = [whole_model]
-
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
         build_fp8_linear(model, job_config)
@@ -249,10 +244,16 @@ def main(job_config: JobConfig):
             whole_model, world_mesh, parallel_dims, job_config, device, model_config
         )
 
+    # In 1D/2D cases or PP with simple schedules, model_parts is just one item
+    # for PP with looped schedules, each item is one stage-model-chunk
+    # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
+    model_parts = [whole_model]
+
     # apply PT-D DP/TP parallelisms and activation checkpointing
-    model_parts = models_parallelize_fns[model_name](
-        model_parts, world_mesh, parallel_dims, job_config
-    )
+    model_parts = [
+        models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+        for m in model_parts
+    ]
 
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
     move_to_empty(model_parts, device=init_device)
