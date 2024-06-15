@@ -51,7 +51,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 1",
                 ],
@@ -66,7 +66,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 1",
                 ],
@@ -81,7 +81,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 2",
                 ],
@@ -95,7 +95,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 2",
                 ],
@@ -109,7 +109,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.tensor_parallel_degree 2",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
                 ],
@@ -123,7 +123,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_split_mode tracer",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
                 ],
@@ -206,7 +206,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
@@ -215,7 +215,7 @@ def build_test_list():
                     "--training.steps 20",
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
