@@ -9,7 +9,7 @@ use_for_integration_test = true
 enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
-enable_memory_snapshot = true
+enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
@@ -21,7 +21,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "debugmodel"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
@@ -38,11 +38,12 @@ steps = 10
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 fp8_linear = ""
-compile = false
+compile = true
 dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 
 [experimental]
 pipeline_parallel_degree = 1
+torch_spmd = true
 
 [checkpoint]
 enable_checkpoint = false
@@ -54,5 +55,5 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy

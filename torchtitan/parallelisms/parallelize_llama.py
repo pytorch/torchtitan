@@ -488,6 +488,11 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    # NOTE(lty): experimental for the PT-D 24 research internship project
+    if job_config.experimental.torch_spmd:
+        return parallelize_llama_torch_spmd(
+            model, world_mesh, parallel_dims, job_config
+        )
 
     if parallel_dims.tp_enabled:
         model = apply_tp(model, world_mesh, parallel_dims, job_config)
@@ -500,5 +505,46 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     if parallel_dims.dp_enabled:
         model = apply_dp(model, world_mesh, parallel_dims, job_config)
+
+    return model
+
+
+# NOTE(lty): experimental for the PT-D 24 research internship project
+def parallelize_llama_torch_spmd(
+    model, world_mesh, parallel_dims, job_config: JobConfig
+):
+    assert not parallel_dims.pp_enabled, "PP not supported by torch_spmd yet"
+    assert not parallel_dims.tp_enabled, "TP not supported by torch_spmd yet"
+
+    ac_config = job_config.activation_checkpoint
+    assert ac_config.mode == "none", "AC not supported by torch_spmd yet"
+
+    if parallel_dims.dp_enabled:
+        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+
+        from data_parallel import data_parallel, MixedPrecisionPolicy
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+        )
+        model = data_parallel(model, dp_mesh, mode="fully_shard", mp_policy=mp_policy)
+
+        logger.info("Applied Simple FSDP to the model")
+
+    enable_compile = job_config.training.compile
+    if enable_compile:
+        if job_config.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
+            )
+
+        # compile + SAC needs some flag
+        torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
+            True
+        )
+
+        logger.info("Compiling with torch.compile")
+        model = torch.compile(model, fullgraph=True)
 
     return model

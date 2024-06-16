@@ -212,7 +212,10 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    with torch.device("meta"):
+    # NOTE(lty): the current torch_spmd prototype doesn't compose with meta init
+    # so we init on CPU, apply parallelism, and then move to GPU
+    # with torch.device("meta"):
+    with torch.device("cpu"):
         whole_model = model_cls.from_model_args(model_config)
 
     # apply fp8 linear module swap
@@ -252,19 +255,22 @@ def main(job_config: JobConfig):
         for m in model_parts
     ]
 
-    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+    # NOTE(lty): move from CPU to GPU after applying FSDP2/torch_spmd parallelisms
+    # The original code related to meta init is commented out below
     for model in model_parts:
-        model.to_empty(device=init_device)
+        model.to("cuda")
+
+    # init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+    # for model in model_parts:
+    #     model.to_empty(device=init_device)
 
     if parallel_dims.pp_enabled:
-        pp_schedule = build_pipeline_schedule(
-            job_config, parallel_dims, stages, loss_fn
-        )
-    else:
-        # If PP is enabled, we can't rely on init_weights, because some layers are missing.
-        # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
-        # allocate sharded model on GPU and initialize weights via DTensor
-        whole_model.init_weights()
+        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+    # else:
+    #     # If PP is enabled, we can't rely on init_weights, because some layers are missing.
+    #     # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
+    #     # allocate sharded model on GPU and initialize weights via DTensor
+    #     whole_model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(

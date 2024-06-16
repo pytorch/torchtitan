@@ -241,6 +241,14 @@ class JobConfig:
             action="store_true",
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
+
+        # experimental configs
+        self.parser.add_argument(
+            "--experimental.torch_spmd",
+            default=False,
+            action="store_true",
+            help="Whether to use the experimental torch_spmd style parallelism",
+        )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_degree",
             type=int,
