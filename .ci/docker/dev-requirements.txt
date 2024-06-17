@@ -1,3 +1,4 @@
-pytest
+expecttest==0.1.6
+pytest==7.3.2
 pytest-cov
 pre-commit
