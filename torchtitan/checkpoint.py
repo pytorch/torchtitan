@@ -151,9 +151,9 @@ class CheckpointManager:
 
         2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
         requiring us to reason about multiple 'optim' objects locally.
-        
+
             We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
-            into one state dict before saving/loading. We rely on the individual state_dicts to not collide, 
+            into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
             which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
             support described in (1).
 
