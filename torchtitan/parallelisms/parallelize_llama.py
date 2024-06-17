@@ -251,7 +251,7 @@ def pipeline_llama_manual(
         output_args=output.chunk(microbatches)[0],
         group=pp_mesh.get_group("pp"),
     )
-    return (stage, model)
+    return ((stage,), (model,))
 
 
 def pipeline_llama_tracer(
@@ -292,7 +292,7 @@ def pipeline_llama_tracer(
         device=device,
         group=pp_mesh.get_group(),
     )
-    return (stage, model)
+    return ((stage,), (model,))
 
 
 def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):

@@ -124,9 +124,9 @@ def checkpoint_mp(recv, send):
 class CheckpointManager:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        model_parts: List[nn.Module],
+        optimizers: List[torch.optim.Optimizer],
+        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -138,15 +138,28 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return
 
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
+
         self.states = states
         self.states.update(
             {
-                "model": ModelWrapper(model),
-                "optimizer": OptimizerWrapper(model, optimizer),
-                "lr_scheduler": lr_scheduler,
+                "model": ModelWrapper(model_parts),
+                "optimizer": OptimizerWrapper(model_parts, optimizers),
                 "dataloader": dataloader,
             }
         )
+        if len(lr_schedulers) == 1:
+            self.states["lr_scheduler"] = lr_schedulers[0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(lr_schedulers):
+                self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
