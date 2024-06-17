@@ -1,0 +1,43 @@
+name: 4 GPU Integration Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    # Runs hourly
+    - cron: '0 * * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+jobs:
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    with:
+      runner: linux.g5.12xlarge.nvidia.gpu
+      gpu-arch-type: cuda
+      gpu-arch-version: "12.1"
+      # This image is faster to clone than the default, but it lacks CC needed by triton
+      # (1m25s vs 2m37s).
+      docker-image: torchtitan-ubuntu-20.04-clang12
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
+        python -m pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/
+        mkdir artifacts-to-be-uploaded
+        python ./test_runner.py artifacts-to-be-uploaded --ngpu 4
