@@ -256,7 +256,7 @@ def main(job_config: JobConfig):
 
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
     for model in model_parts:
-        model.to_empty(init_device)
+        model.to_empty(device=init_device)
 
     if parallel_dims.pp_enabled:
         pp_schedule = build_pipeline_schedule(
