@@ -467,6 +467,20 @@ class JobConfig:
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
         )
 
+        # estimation mode settings
+        self.parser.add_argument(
+            "--estimate.memory",
+            help="Whether to estimate memory usage for FSDP",
+            default=False,
+        )
+
+        self.parser.add_argument(
+            "--estimate.mode",
+            type=str,
+            default="fake",
+            help="Mode of estimation to use ['fake', 'real']",
+        )
+
     def parse_args(self, args_list: list = sys.argv[1:]):
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
