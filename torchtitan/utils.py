@@ -7,7 +7,7 @@
 import os
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import List, Union
+from typing import Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -15,11 +15,6 @@ import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.logging_utils import logger
 from torchtitan.parallelisms import ParallelDims
-
-
-def move_to_empty(model_parts: List[torch.nn.Module], device: torch.device):
-    for model in model_parts:
-        model.to_empty(device="cuda")
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:

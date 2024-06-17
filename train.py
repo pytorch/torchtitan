@@ -48,7 +48,6 @@ from torchtitan.utils import (
     get_num_params,
     get_peak_flops,
     init_distributed,
-    move_to_empty,
     NoColor,
     set_pg_timeouts,
 )
@@ -256,7 +255,8 @@ def main(job_config: JobConfig):
     ]
 
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-    move_to_empty(model_parts, device=init_device)
+    for model in model_parts:
+        model.to_empty(init_device)
 
     if parallel_dims.pp_enabled:
         pp_schedule = build_pipeline_schedule(
