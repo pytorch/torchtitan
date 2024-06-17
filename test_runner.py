@@ -54,6 +54,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP 1D test 1f1b",
@@ -69,6 +70,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP 1D test gpipe",
@@ -84,6 +86,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP+DP 1f1b 2D test",
@@ -98,6 +101,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP+DP gpipe 2D test",
