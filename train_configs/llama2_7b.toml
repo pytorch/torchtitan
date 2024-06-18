@@ -8,7 +8,6 @@ description = "Llama2 7B training"
 enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 100
-enable_memory_snapshot = false
 
 [metrics]
 log_freq = 10

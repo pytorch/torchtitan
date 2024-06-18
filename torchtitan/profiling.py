@@ -19,11 +19,6 @@ WARMUP = 3
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
-# default memory snapshot folder
-ENABLE_MEMORY_SNAPSHOT_KEY = "enable_memory_snapshot"
-MEMORY_SNAPSHOT_FOLDER_KEY = "memory_snapshot_folder"
-MEMORY_SNAPSHOT_FOLDER_DEFAULT_VALUE = "memory_snapshot"
-
 
 @contextlib.contextmanager
 def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
@@ -83,13 +78,9 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
 
 @contextlib.contextmanager
 def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
-    enable_snapshot = getattr(config.profiling, ENABLE_MEMORY_SNAPSHOT_KEY, False)
+    enable_snapshot = config.profiling.enable_memory_snapshot
     if enable_snapshot:
-        snapshot_folder = getattr(
-            config.profiling,
-            MEMORY_SNAPSHOT_FOLDER_KEY,
-            MEMORY_SNAPSHOT_FOLDER_DEFAULT_VALUE,
-        )
+        snapshot_folder = config.profiling.memory_snapshot_folder
         snapshot_dir = os.path.join(config.job.dump_folder, snapshot_folder)
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
@@ -105,17 +96,15 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                 self.freq = freq
 
             def step(self, exit_ctx: bool = False):
+                self.step_num += 1
                 if not exit_ctx and self.step_num % self.freq != 0:
-                    self.step_num += 1
                     return
                 if not exit_ctx:
                     curr_step = self.step_num
-                    self.step_num += 1
                     dir_name = f"iteration_{curr_step}"
                 else:
-                    # dump as iteration_0_exit if OOM at iter 0
-                    # instead of iteration_-1_exit
-                    curr_step = min(self.step_num - 1, 0)
+                    # dump as iteration_0_exit if OOM at iter 1
+                    curr_step = self.step_num - 1
                     dir_name = f"iteration_{curr_step}_exit"
                 curr_snapshot_dir = os.path.join(snapshot_dir, dir_name)
                 if not os.path.exists(curr_snapshot_dir):
@@ -135,8 +124,7 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
         profiler = MemoryProfiler(global_step, config.profiling.profile_freq)
         try:
             yield profiler
-        finally:
-            # dump snapshot when CUDA OOMs
+        except torch.OutOfMemoryError as e:
             profiler.step(exit_ctx=True)
     else:
         yield None

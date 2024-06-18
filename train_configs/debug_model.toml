@@ -9,7 +9,7 @@ use_for_integration_test = true
 enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
-enable_memory_snapshot = false
+enable_memory_snapshot = true
 
 [metrics]
 log_freq = 1
