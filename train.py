@@ -311,15 +311,6 @@ def main(job_config: JobConfig):
     ) as torch_profiler, maybe_enable_memory_snapshot(
         job_config, global_step=train_state.step
     ) as memory_profiler:
-        checkpoint.reset()
-
-        # variables used to keep info for metrics logging
-        losses_since_last_log: List[float] = []
-        ntokens_since_last_log = 0
-        data_loading_times: List[float] = []
-        time_last_log = timer()
-        gpu_memory_monitor.reset_peak_stats()
-
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
