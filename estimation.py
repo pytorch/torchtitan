@@ -51,8 +51,11 @@ def estimate_memory(job_config: JobConfig):
         job_config.model.norm_type == "fused_rmsnorm"
         and job_config.estimate.mode == "fake"
     ):
-        logger.info("Fused RMSNorm is not supported yet under fake estimation mode.")
-        return
+        logger.info(
+            "Fused RMSNorm is not supported yet under fake estimation mode. "
+            "Switching to rmsnorm."
+        )
+        job_config.model.norm_type = "rmsnorm"
 
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
