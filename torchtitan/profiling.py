@@ -113,7 +113,9 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                     self.step_num += 1
                     dir_name = f"iteration_{curr_step}"
                 else:
-                    curr_step = self.step_num - 1
+                    # dump as iteration_0_exit if OOM at iter 0
+                    # instead of iteration_-1_exit
+                    curr_step = min(self.step_num - 1, 0)
                     dir_name = f"iteration_{curr_step}_exit"
                 curr_snapshot_dir = os.path.join(snapshot_dir, dir_name)
                 if not os.path.exists(curr_snapshot_dir):
