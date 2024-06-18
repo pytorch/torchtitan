@@ -6,11 +6,16 @@
 
 import math
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 
 import triton
 import triton.language as tl
+
+from torch.distributed._tensor import Partial, Replicate, Shard
+from torch.distributed._tensor.experimental import local_map
 
 
 def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
@@ -214,6 +219,11 @@ def _rms_norm_bwd_kernel_sm(
 
 
 class TritonFusedRMSNorm(torch.autograd.Function):
+    @partial(
+        local_map,
+        out_placements=[Shard(1)],
+        in_placements=(None, [Shard(1)], [Replicate()], None),
+    )
     @staticmethod
     def forward(ctx, x, weight, eps):
         x_shape_start = x.shape
@@ -256,6 +266,11 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         y = y.reshape(x_shape_start)
         return y
 
+    @partial(
+        local_map,
+        out_placements=([Shard(1)], [Partial()], None),
+        in_placements=(None, [Shard(1)]),
+    )
     @staticmethod
     def backward(ctx, dy):
         x, weight, rstd = ctx.saved_tensors
