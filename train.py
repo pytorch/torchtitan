@@ -38,7 +38,7 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
-from torchtitan.profiling import maybe_enable_profiling
+from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import (
     Color,
     dist_max,
@@ -339,7 +339,9 @@ def main(job_config: JobConfig):
     logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
-    ) as torch_profiler:
+    ) as torch_profiler, maybe_enable_memory_snapshot(
+        job_config, global_step=train_state.step
+    ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
@@ -476,6 +478,9 @@ def main(job_config: JobConfig):
             # signals the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
+
+            if memory_profiler:
+                memory_profiler.step()
 
             # Reduce timeout after first train step for faster signal (assumes lazy init, compile are finished)
             if train_state.step == 1:
