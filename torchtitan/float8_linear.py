@@ -42,7 +42,7 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
     This will mutate the model inplace.
     """
     linear_type = job_config.training.fp8_linear.lower()
-    enable_fsdp_fp8_all_gather = job_config.training.enable_fsdp_fp8_all_gather if hasattr(job_config.training, 'enable_fsdp_fp8_all_gather') else False
+    enable_fsdp_fp8_all_gather = job_config.training.enable_fsdp_fp8_all_gather
     try:
         from float8_experimental.float8_dynamic_linear import Float8DynamicLinear
 
@@ -67,4 +67,4 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
         # Mutates the model inplace replacing instances of torch.nn.Linear with float8_linear_type
         with set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather):
             swap_linear_with_float8_linear(model, float8_linear_type)
-        logger.info(f"Swapped to {linear_type} float8 linear layers")
+        logger.info(f"Swapped to {linear_type} float8 linear layers with {enable_fsdp_fp8_all_gather=}")
