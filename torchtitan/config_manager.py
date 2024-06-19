@@ -100,6 +100,18 @@ class JobConfig:
             default=10,
             help="How often to collect profiler traces, in iterations",
         )
+        self.parser.add_argument(
+            "--profiling.enable_memory_snapshot",
+            action="store_true",
+            default=False,
+            help="Whether to dump memory snapshot",
+        )
+        self.parser.add_argument(
+            "--profiling.save_memory_snapshot_folder",
+            type=str,
+            default="memory_snapshot",
+            help="Memeory snapshot files location",
+        )
 
         # metrics configs
         self.parser.add_argument(
