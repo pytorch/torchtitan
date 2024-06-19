@@ -107,9 +107,9 @@ class JobConfig:
             help="Whether to dump memory snapshot",
         )
         self.parser.add_argument(
-            "--profiling.memory_snapshot_folder",
+            "--profiling.save_memory_snapshot_folder",
             type=str,
-            default="memory_snapshots",
+            default="memory_snapshot",
             help="Memeory snapshot files location",
         )
 

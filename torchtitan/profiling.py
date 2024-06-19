@@ -80,7 +80,7 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
 def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
     enable_snapshot = config.profiling.enable_memory_snapshot
     if enable_snapshot:
-        snapshot_folder = config.profiling.memory_snapshot_folder
+        snapshot_folder = config.profiling.save_memory_snapshot_folder
         snapshot_dir = os.path.join(config.job.dump_folder, snapshot_folder)
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
