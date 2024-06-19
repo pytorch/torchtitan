@@ -7,7 +7,9 @@ from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
 from torchtitan.logging_utils import logger
 
 
-def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
+def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
+    assert len(stages) == 1, "Looped schedules not yet supported"
+    stage = stages[0]
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
         schedule_class = Schedule1F1B
     elif job_config.experimental.pipeline_parallel_schedule == "gpipe":
@@ -19,8 +21,12 @@ def build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn):
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
     )
+    n_microbatches = job_config.experimental.pipeline_parallel_microbatches
+    if n_microbatches is None:
+        n_microbatches = job_config.experimental.pipeline_parallel_degree
+
     return schedule_class(
         stage,
-        n_microbatches=stage.chunks,
+        n_microbatches=n_microbatches,
         loss_fn=loss_fn,
     )
