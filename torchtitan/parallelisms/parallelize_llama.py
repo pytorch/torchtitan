@@ -32,6 +32,7 @@ from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
+from torchtitan.pipelning_utils import stage_ids_this_rank
 
 # for selective AC
 no_recompute_list = {
@@ -257,28 +258,9 @@ def pipeline_llama_manual(
     num_stages = len(splits) + 1
     stage_idx = pp_rank
 
-    def stage_ids_this_rank(
-        rank: int, num_stages: int, style: str = "loop"
-    ) -> Tuple[int]:
-        """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
-        assert (
-            num_stages % pp_size == 0
-        ), f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
-        stages_per_rank = num_stages // pp_size
-        if style == "loop":
-            return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
-        elif stype == "v":
-            assert (
-                stages_per_rank == 2
-            ), f"v schedules assume 2 stages per rank, got {stages_per_rank}"
-            stage_v_pairs = list(
-                zip(range(pp_size), range(num_stages - 1, pp_size - 1, -1))
-            )
-            return stage_v_pairs[pp_rank]
-
     stages = []
     models = []
-    for stage_idx in stage_ids_this_rank(pp_rank, num_stages, style="loop"):
+    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
         start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
         stop_layer = splits[stage_idx] if stage_idx < num_stages - 1 else None
         stage, model_chunk = _build_stage(
@@ -329,13 +311,17 @@ def pipeline_llama_tracer(
         mb_args=(input.chunk(microbatches)[0],),
         split_spec=split_spec,
     )
-    model = pipe.get_stage_module(stage_idx)
-    stage = pipe.build_stage(
-        stage_idx,
-        device=device,
-        group=pp_mesh.get_group(),
-    )
-    return ((stage,), (model,))
+
+    stages = []
+    models = []
+    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
+        model = pipe.get_stage_module(stage_idx)
+        stage = pipe.build_stage(
+            stage_idx,
+            device=device,
+            group=pp_mesh.get_group(),
+        )
+    return (stages, models)
 
 
 def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
