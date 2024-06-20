@@ -217,7 +217,7 @@ def main(job_config: JobConfig):
 
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
-        build_fp8_linear(model, job_config)
+        build_fp8_linear(whole_model, job_config)
 
     # log model size
     model_param_count = get_num_params(whole_model)
