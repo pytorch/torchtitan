@@ -173,24 +173,28 @@ def estimate_memory(job_config: JobConfig):
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
-                fsdp_memtracker.display_snapshot("peak", units="MB", tabulate=True)
+                fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
                 if iter_idx == 0:
                     fsdp_memtracker.reset_mod_stats()  # iter 0 does not have optimizer state
                 gc.collect(1)
 
-        fsdp_memtracker.display_modulewise_snapshots(depth=3, units="MB", tabulate=True)
+        fsdp_memtracker.display_modulewise_snapshots(
+            depth=3, units="MiB", tabulate=True
+        )
         mem_stats = torch.cuda.memory_stats()
-        peak_active_gb = mem_stats["active_bytes.all.peak"] / (1024**3)
-        peak_reserved_gb = mem_stats["reserved_bytes.all.peak"] / (1024**3)
+        peak_active = mem_stats["active_bytes.all.peak"]
+        peak_reserved = mem_stats["reserved_bytes.all.peak"]
         num_retries = mem_stats["num_alloc_retries"]
         dev = torch.device(torch.cuda.current_device())
         tracker_peak = fsdp_memtracker.get_tracker_snapshot("peak")[dev]["Total"]
 
         print(
-            f"peak active: {peak_active_gb} GB | peak reserved:"
-            f" {peak_reserved_gb} GB | num_retries: {num_retries}"
+            f"peak active: {peak_active / (1024 ** 3)} GiB | peak reserved:"
+            f" {peak_reserved / (1024 ** 3)} GB | num_retries: {num_retries}"
         )
-        print(f"Tracker Max: {tracker_peak / (1024 ** 3)} GB")
+        print(f"Tracker Max: {tracker_peak / (1024 ** 3)} GiB")
+        if job_config.estimate.mode == "real":
+            print(f"Tracker Accuracy: {tracker_peak/peak_active}")
         gc.enable()
 
 
