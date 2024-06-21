@@ -32,7 +32,7 @@ from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
-from torchtitan.pipelning_utils import stage_ids_this_rank
+from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
 
 # for selective AC
 no_recompute_list = {
@@ -297,6 +297,7 @@ def pipeline_llama_tracer(
 
     pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
+    pp_size = pp_mesh.size()
     microbatches = (
         job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
     )
@@ -306,6 +307,7 @@ def pipeline_llama_tracer(
         layer_name: SplitPoint.BEGINNING
         for layer_name in job_config.experimental.pipeline_parallel_split_points
     }
+    num_stages = len(split_spec) + 1
     pipe = pipeline(
         model,
         mb_args=(input.chunk(microbatches)[0],),
@@ -315,11 +317,13 @@ def pipeline_llama_tracer(
     stages = []
     models = []
     for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
-        model = pipe.get_stage_module(stage_idx)
-        stage = pipe.build_stage(
-            stage_idx,
-            device=device,
-            group=pp_mesh.get_group(),
+        models.append(pipe.get_stage_module(stage_idx))
+        stages.append(
+            pipe.build_stage(
+                stage_idx,
+                device=device,
+                group=pp_mesh.get_group(),
+            )
         )
     return (stages, models)
 

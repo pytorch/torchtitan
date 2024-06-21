@@ -3,6 +3,8 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from typing import Tuple
+
 from torch.distributed.pipelining import (
     Schedule1F1B,
     ScheduleGPipe,
@@ -41,7 +43,7 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
 
 # TODO(whc) should this be a utility inside torch.pipelining?
 def stage_ids_this_rank(
-    rank: int, pp_size: int, num_stages: int, style: str = "loop"
+    pp_rank: int, pp_size: int, num_stages: int, style: str = "loop"
 ) -> Tuple[int]:
     """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
     assert (
