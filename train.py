@@ -23,6 +23,7 @@ from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
+from float8_experimental.float8_linear_utils import precompute_float8_amax
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
@@ -397,6 +398,9 @@ def main(job_config: JobConfig):
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
+
+            if job_config.training.precompute_float8_amax:
+                precompute_float8_amax(model)
 
             losses_since_last_log.append(loss)
 

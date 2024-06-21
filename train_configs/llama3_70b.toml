@@ -35,6 +35,7 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1  # 8-way TP
 fp8_linear = "dynamic"
 enable_fsdp_fp8_all_gather = true
+precompute_float8_amax = true
 compile = false
 dataset = "c4"
 
