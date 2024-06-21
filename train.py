@@ -345,15 +345,21 @@ def main(job_config: JobConfig):
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
                 gc.collect(1)
 
-            # get batch
-            data_load_start = timer()
-            batch = next(data_iterator)
-            input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(timer() - data_load_start)
+            if (
+                not parallel_dims.pp_enabled
+                or pp_mesh.get_local_rank() == 0
+                or pp_mesh.get_local_rank() == pp_mesh.size() - 1
+            ):
+                # only first and last PP stage does data-loading (for inputs, labels)
+                data_load_start = timer()
+                batch = next(data_iterator)
+                input_ids, labels = batch
+                ntokens_since_last_log += labels.numel()
+                data_loading_times.append(timer() - data_load_start)
 
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
+                input_ids = input_ids.cuda()
+                labels = labels.cuda()
+
             optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
