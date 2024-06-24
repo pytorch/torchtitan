@@ -362,6 +362,7 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
 
                 if job_config.experimental.pipeline_parallel_schedule == "zb":
+                    is_last_stage = pp_mesh.get_local_rank() == 0
                     with loss_parallel_ctx():
                         if pp_mesh.get_local_rank() == 0:
                             losses = []
