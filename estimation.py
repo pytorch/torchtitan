@@ -21,10 +21,10 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from train import build_optimizer
+from train import build_optimizers
 
 
 def estimate_memory(job_config: JobConfig):
@@ -113,28 +113,31 @@ def estimate_memory(job_config: JobConfig):
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_config)
+            whole_model = model_cls.from_model_args(model_config)
 
         # apply fp8 linear module swap
         if job_config.training.fp8_linear:
-            build_fp8_linear(model, job_config)
+            build_fp8_linear(whole_model, job_config)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        model = models_parallelize_fns[model_name](
-            model, world_mesh, parallel_dims, job_config
-        )
+        model_parts = [whole_model]
+        model_parts = [models_parallelize_fns[model_name](
+            m, world_mesh, parallel_dims, job_config
+        ) for m in model_parts]
 
         init_device = "cuda"
-        model.to_empty(device=init_device)
+        for model in model_parts:
+            model.to_empty(device=init_device)
 
         if not active_fake_mode():
-            model.init_weights()
+            whole_model.init_weights()
 
         # build optimizer after applying parallelisms to the model
-        optimizer = build_optimizer(model, job_config)
-        lr_scheduler = get_lr_scheduler(optimizer, job_config)
+        optimizers = build_optimizers(model_parts, job_config)
+        lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
 
-        model.train()
+        for model in model_parts:
+            model.train()
         logger.info(f"Vocab size: {model_config.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
@@ -151,7 +154,7 @@ def estimate_memory(job_config: JobConfig):
                 device="cuda",
             ),
         )
-        fsdp_memtracker = FSDPMemTracker(mod=model, optm=optimizer)
+        fsdp_memtracker = FSDPMemTracker(mod=whole_model, optm=optimizers.optimizers[0])
         fsdp_memtracker.track_inputs(batch)
 
         with fsdp_memtracker:
@@ -159,19 +162,20 @@ def estimate_memory(job_config: JobConfig):
                 input_ids, labels = batch
                 # train step
                 with loss_parallel_ctx():
-                    pred = model(input_ids)
+                    pred = whole_model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
                     loss.backward()
 
                 # clip gradients
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm, foreach=True
-                )
+                for model in model_parts:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), job_config.training.max_norm, foreach=True
+                    )
                 # optimizer step
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizers.step()
+                lr_schedulers.step()
+                optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
                 if iter_idx == 0:
