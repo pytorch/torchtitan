@@ -394,6 +394,12 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
             parallelize_plan=layer_plan,
         )
 
+    if job_config.experimental.enable_async_tensor_parallel:
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._inductor.config._micro_pipeline_tp = True
+        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
+
     logger.info("Applied Tensor Parallelism to the model")
     return model
 
