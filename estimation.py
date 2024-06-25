@@ -121,9 +121,10 @@ def estimate_memory(job_config: JobConfig):
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         model_parts = [whole_model]
-        model_parts = [models_parallelize_fns[model_name](
-            m, world_mesh, parallel_dims, job_config
-        ) for m in model_parts]
+        model_parts = [
+            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+            for m in model_parts
+        ]
 
         init_device = "cuda"
         for model in model_parts:
