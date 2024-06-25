@@ -259,10 +259,6 @@ def main(job_config: JobConfig):
     for model in model_parts:
         model.to_empty(device=init_device)
 
-    pretrained_model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    load_from_full_model_state_dict(whole_model, pretrained_model, "cuda")
-    del pretrained_model
-
     if parallel_dims.pp_enabled:
         pp_schedule = build_pipeline_schedule(
             job_config, parallel_dims, stages, loss_fn
@@ -273,6 +269,10 @@ def main(job_config: JobConfig):
         # allocate sharded model on GPU and initialize weights via DTensor
         # whole_model.init_weights()
         pass
+
+    pretrained_model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    load_from_full_model_state_dict(whole_model, pretrained_model, "cuda")
+    del pretrained_model
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
