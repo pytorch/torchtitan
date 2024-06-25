@@ -124,9 +124,9 @@ def checkpoint_mp(recv, send):
 class CheckpointManager:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        model_parts: List[nn.Module],
+        optimizers: List[torch.optim.Optimizer],
+        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         dataloader: DataLoader,
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -137,16 +137,62 @@ class CheckpointManager:
 
         if not self.enable_checkpoint:
             return
+        """
+        Note: Pipeline Parallelism and Virtual Stages
+
+        1. even for simple PP schedules, there is a separate optimizer each PP rank.
+        rank0's optimizer would have a param_group[0] which refers to layers.0 in the original model.
+        rank1's would _also_ have a param_group[0], since it's index based, but referring to layers.1.
+        When saving, these collide and one of them is lost.  Then when reloading, only one stage can
+        restore its optimizer states, others will error.
+
+            The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
+            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerWrapper.
+
+        2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
+        requiring us to reason about multiple 'optim' objects locally.
+
+            We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
+            into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
+            which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
+            support described in (1).
+
+        3. LR schedulers also index model states like optimizers and would need to be flattened properly to support
+        resharding.  Unfortunately, the implementations of different lr_schedulers do not follow a clear pattern like
+        optimizers do, so it's hard to write a generic 'flattener' utility.
+
+            TODO: This is currently unsolved and needs a fix.
+        """
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
+
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
 
         self.states = states
+
         self.states.update(
             {
-                "model": ModelWrapper(model),
-                "optimizer": OptimizerWrapper(model, optimizer),
-                "lr_scheduler": lr_scheduler,
+                "model": ModelWrapper(model_parts),
+                "optimizer": OptimizerWrapper(model_parts, optimizers),
                 "dataloader": dataloader,
             }
         )
+        if len(lr_schedulers) == 1:
+            self.states["lr_scheduler"] = lr_schedulers[0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(lr_schedulers):
+                self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (

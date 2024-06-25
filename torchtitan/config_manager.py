@@ -100,6 +100,18 @@ class JobConfig:
             default=10,
             help="How often to collect profiler traces, in iterations",
         )
+        self.parser.add_argument(
+            "--profiling.enable_memory_snapshot",
+            action="store_true",
+            default=False,
+            help="Whether to dump memory snapshot",
+        )
+        self.parser.add_argument(
+            "--profiling.save_memory_snapshot_folder",
+            type=str,
+            default="memory_snapshot",
+            help="Memeory snapshot files location",
+        )
 
         # metrics configs
         self.parser.add_argument(
@@ -257,14 +269,15 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe"],
+            choices=["1f1b", "gpipe", "interleaved_1f1b"],
             default="1f1b",
             help="""
                 Specify the Pipeline Parallel schedule to use.
 
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules are not yet supported in torchtitan.""",
+                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_split_mode",

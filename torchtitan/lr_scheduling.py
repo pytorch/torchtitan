@@ -33,11 +33,26 @@ def linear_warmup_linear_decay(current_step: int) -> float:
     return curr_adjustment
 
 
-def get_lr_scheduler(optimizer, job_config: JobConfig):
-    """Build a linear warmup and linear decay scheduler"""
-    global _warmup_steps, _decay_steps
-    _warmup_steps = int(job_config.training.warmup_steps)
-    _decay_steps = float(max(1, job_config.training.steps - _warmup_steps))
+def get_lr_schedulers(optimizers, job_config: JobConfig):
+    def _get_lr_scheduler(optimizer):
+        """Build a linear warmup and linear decay scheduler"""
+        global _warmup_steps, _decay_steps
+        _warmup_steps = int(job_config.training.warmup_steps)
+        _decay_steps = float(max(1, job_config.training.steps - _warmup_steps))
 
-    warmup_scheduler = LambdaLR(optimizer, lr_lambda=linear_warmup_linear_decay)
-    return warmup_scheduler
+        warmup_scheduler = LambdaLR(optimizer, lr_lambda=linear_warmup_linear_decay)
+        return warmup_scheduler
+
+    class SchedulersContainer:
+        """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
+
+        def __init__(self, schedulers):
+            self.schedulers = schedulers
+
+        def step(self):
+            for schedulers in self.schedulers:
+                schedulers.step()
+
+    return SchedulersContainer(
+        [_get_lr_scheduler(optimizer) for optimizer in optimizers]
+    )

@@ -187,12 +187,12 @@ def estimate_memory(job_config: JobConfig):
         num_retries = mem_stats["num_alloc_retries"]
         dev = torch.device(torch.cuda.current_device())
         tracker_peak = fsdp_memtracker.get_tracker_snapshot("peak")[dev]["Total"]
-
+        gib = 1024**3
         print(
-            f"peak active: {peak_active / (1024 ** 3)} GiB | peak reserved:"
-            f" {peak_reserved / (1024 ** 3)} GB | num_retries: {num_retries}"
+            f"peak active: {peak_active / gib} GiB | peak reserved:"
+            f" {peak_reserved / gib} GiB | num_retries: {num_retries}"
         )
-        print(f"Tracker Max: {tracker_peak / (1024 ** 3)} GiB")
+        print(f"Tracker Max: {tracker_peak / gib} GiB")
         if job_config.estimate.mode == "real":
             print(f"Tracker Accuracy: {tracker_peak/peak_active}")
         gc.enable()
@@ -201,5 +201,7 @@ def estimate_memory(job_config: JobConfig):
 if __name__ == "__main__":
     config = JobConfig()
     config.parse_args()
-    estimate_memory(config)
-    destroy_process_group()
+    try:
+        estimate_memory(config)
+    finally:
+        destroy_process_group()
