@@ -263,6 +263,14 @@ def build_test_list():
             ],
             "Fused Optimizer Test",
         ),
+        OverrideDefinitions(
+            [
+                ["--estimate.memory=True", "--estimate.mode=real"],
+            ],
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_mem_tracker",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
