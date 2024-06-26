@@ -242,6 +242,12 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
+            "--experimental.enable_async_tensor_parallel",
+            default=False,
+            action="store_true",
+            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
+        )
+        self.parser.add_argument(
             "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
