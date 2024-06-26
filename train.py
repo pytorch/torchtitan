@@ -252,11 +252,6 @@ def main(job_config: JobConfig):
         for m in model_parts
     ]
 
-    # for ease of testing TP in lieu of FSDP
-    if job_config.training.tensor_parallel_degree == world_size:
-        for model in model_parts:
-            model.to(torch.bfloat16)
-
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
     for model in model_parts:
         model.to_empty(device=init_device)
