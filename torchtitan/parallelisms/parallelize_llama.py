@@ -530,6 +530,8 @@ def parallelize_llama_torch_spmd(
         logger.info("Applied Simple FSDP to the model")
 
     if job_config.training.compile:
+        # flag needed to make compile work on latest pytorch
+        torch._dynamo.config.inline_inbuilt_nn_modules=True
         logger.info("Compiling with torch.compile")
         model = torch.compile(model, fullgraph=True)
 
