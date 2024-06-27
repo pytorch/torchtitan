@@ -12,7 +12,6 @@ from collections import defaultdict
 from typing import Dict, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from torch.distributed._composable.replicate import replicate
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
