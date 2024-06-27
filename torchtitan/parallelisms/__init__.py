@@ -43,9 +43,7 @@ class ParallelDims:
         assert cp >= 1, cp
         assert tp >= 1, tp
         assert pp >= 1, pp
-        assert (
-            dp * cp * tp * pp == self.world_size
-        ), (
+        assert dp * cp * tp * pp == self.world_size, (
             f"Invalid parallel dims: dp({dp}) * cp ({cp}) * tp({tp}) * pp({pp}) "
             f"!= WORLD_SIZE({self.world_size})"
         )

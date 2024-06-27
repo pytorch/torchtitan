@@ -144,7 +144,9 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
             if enable_loss_parallel:
                 stack.enter_context(loss_parallel())
             if enable_compiled_autograd:
-                stack.enter_context(torch._dynamo.utils.maybe_enable_compiled_autograd(True))
+                stack.enter_context(
+                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
+                )
 
             yield
 
@@ -211,7 +213,7 @@ def main(job_config: JobConfig):
 
     train_context = get_train_context(
         parallel_dims.loss_parallel_enabled,
-        job_config.experimental.enable_compiled_autograd
+        job_config.experimental.enable_compiled_autograd,
     )
 
     if parallel_dims.cp_enabled:

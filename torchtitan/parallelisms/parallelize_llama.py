@@ -12,10 +12,11 @@ from collections import defaultdict
 from typing import Dict, Tuple
 
 import torch
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 from torch.distributed._composable.replicate import replicate
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
+
 try:
     from torch.distributed._tensor.experimental.attention import enable_context_parallel
 except ImportError:
@@ -547,7 +548,9 @@ def apply_ddp(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     if job_config.training.compile:
         if job_config.experimental.compiled_autograd:
-            torch._dynamo.config.optimize_ddp = "python_reducer_without_compiled_forward"
+            torch._dynamo.config.optimize_ddp = (
+                "python_reducer_without_compiled_forward"
+            )
         else:
             torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
