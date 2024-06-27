@@ -28,8 +28,10 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
+    dp_type: str
 
     def __post_init__(self):
+        self.dp_type = self.dp_type.lower()
         self._validate()
 
     def _validate(self):
@@ -42,6 +44,7 @@ class ParallelDims:
         assert (
             dp * tp * pp == self.world_size
         ), f"Invalid parallel dims: dp({dp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+        assert self.dp_type in ("fsdp", "ddp")
 
     def build_mesh(self, device_type):
         dims = []
