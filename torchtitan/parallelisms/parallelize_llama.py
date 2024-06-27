@@ -12,14 +12,20 @@ from collections import defaultdict
 from typing import Dict, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from torch.distributed._composable.replicate import replicate
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
+try:
+    from torch.distributed._tensor.experimental.attention import enable_context_parallel
+except ImportError:
+    print("The PyTorch version does not include the experimental CP APIs.")
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
     CheckpointImpl,
 )
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -450,12 +456,61 @@ def apply_compile(model, job_config: JobConfig):
     return model
 
 
+def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply context parallelism to the model. This is an experimental feature.
+    """
+    if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
+        raise NotImplementedError("CP + TP or CP + PP are not supported yet.")
+    cp_mesh = world_mesh["cp"]
+    # If data parallelism is not enabled, we have to enable FSDP2 for
+    # gradient reduction.
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+    )
+    fsdp_config = {"mesh": cp_mesh, "mp_policy": mp_policy}
+    callers = []
+    for layer_id, transformer_block in model.layers.items():
+        if not parallel_dims.dp_enabled:
+            reshard_after_forward = (
+                int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
+            )
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+            model.layers[layer_id] = transformer_block
+        callers.append(transformer_block.attention)
+
+    enable_context_parallel(seq_dim=2, callers=callers, device_mesh=cp_mesh)
+
+    if not parallel_dims.dp_enabled:
+        model = fully_shard(
+            model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
+        )
+    logger.info("Applied CP to the model")
+
+    return model
+
+
 def apply_fsdp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
 
-    dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+    if parallel_dims.cp_enabled:
+        # Manually create another device mesh for now as we don't support
+        # submesh flattening/reshape yet.
+        dp_mesh = init_device_mesh(
+            world_mesh.device_type,
+            (parallel_dims.dp * parallel_dims.cp,),
+            mesh_dim_names=["dp"],
+        )
+    else:
+        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+
     assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
     mp_policy = MixedPrecisionPolicy(
@@ -520,6 +575,9 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
 
     if job_config.training.compile:
         model = apply_compile(model, job_config)
+
+    if parallel_dims.cp_enabled:
+        model = apply_cp(model, world_mesh, parallel_dims, job_config)
 
     if parallel_dims.dp_enabled:
         if parallel_dims.dp_type == "fsdp":

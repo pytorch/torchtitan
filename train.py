@@ -11,6 +11,7 @@ import time
 
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
 from io import BytesIO
 from timeit import default_timer as timer
 from typing import Any, Dict, List
@@ -20,6 +21,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributed import destroy_process_group
+from torch.distributed._tensor.experimental.attention import context_parallel_buffers
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
@@ -167,6 +169,7 @@ def main(job_config: JobConfig):
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
@@ -210,6 +213,20 @@ def main(job_config: JobConfig):
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd
     )
+
+    if parallel_dims.cp_enabled:
+        cp_mesh = world_mesh["cp"]
+        context_parallel_ctx = partial(
+            context_parallel_buffers,
+            cp_rank=cp_mesh.get_local_rank(),
+            cp_world_size=cp_mesh.size(),
+        )
+    else:
+        context_parallel_ctx = partial(
+            context_parallel_buffers,
+            cp_rank=0,
+            cp_world_size=1,
+        )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
@@ -369,38 +386,43 @@ def main(job_config: JobConfig):
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(timer() - data_load_start)
 
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
             optimizers.zero_grad()
 
-            if parallel_dims.pp_enabled:
-                # pipeline parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
+            with context_parallel_ctx(
+                buffers=[input_ids, labels, model.freqs_cis],
+                seq_dims=[1, 1, 0],
+                keep_orig_buffers=[False, False, True],
+            ):
+                input_ids = input_ids.cuda()
+                labels = labels.cuda()
+                if parallel_dims.pp_enabled:
+                    # pipeline parallel forward / backward inside step() call
+                    is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
-                    else:
-                        pp_schedule.step()
+                    with train_context():
+                        if pp_mesh.get_local_rank() == 0:
+                            pp_schedule.step(input_ids)
+                        elif is_last_stage:
+                            losses = []
+                            pp_schedule.step(target=labels, losses=losses)
+                        else:
+                            pp_schedule.step()
 
-                # accumulate losses across pipeline microbatches
-                loss = (
-                    torch.mean(torch.stack(losses))
-                    if is_last_stage
-                    else torch.Tensor([-1.0])
-                )
-            else:
-                # Non-PP forward / backward
-                with train_context():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
+                    # accumulate losses across pipeline microbatches
+                    loss = (
+                        torch.mean(torch.stack(losses))
+                        if is_last_stage
+                        else torch.Tensor([-1.0])
+                    )
+                else:
+                    # Non-PP forward / backward
+                    with train_context():
+                        pred = model(input_ids)
+                        loss = loss_fn(pred, labels)
+                        # pred.shape=(bs, seq_len, vocab_size)
+                        # need to free to before bwd to avoid peaking memory
+                        del pred
+                        loss.backward()
 
             # clip gradients
             for model in model_parts:

@@ -324,6 +324,12 @@ class JobConfig:
             help="Enable CompiledAutograd to compile the backward.",
         )
         self.parser.add_argument(
+            "--experimental.context_parallel_degree",
+            type=int,
+            default=1,
+            help="Context parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
