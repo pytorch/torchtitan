@@ -265,11 +265,14 @@ def build_test_list():
         ),
         OverrideDefinitions(
             [
-                ["--estimate.memory=True", "--estimate.mode=real"],
+                [
+                    "--memory_estimation.enabled",
+                    "--memory_estimation.fake_mode_only",
+                ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
-            ngpu=4,
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
