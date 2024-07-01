@@ -488,8 +488,9 @@ class JobConfig:
         )
 
         self.parser.add_argument(
-            "--memory_estimation.fake_mode_only",
+            "--memory_estimation.disable_fake_mode",
             help="Whether to estimate memory under FakeTensorMode",
+            default=False,
             action="store_true",
         )
 

@@ -49,7 +49,7 @@ def estimate_memory(job_config: JobConfig):
     # fake tensor doesn't work with fused rmsnorm
     if (
         job_config.model.norm_type == "fused_rmsnorm"
-        and job_config.memory_estimation.fake_mode_only
+        and not job_config.memory_estimation.disable_fake_mode
     ):
         logger.info(
             "Fused RMSNorm is not supported yet under fake estimation mode. "
@@ -111,7 +111,7 @@ def estimate_memory(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    with FakeTensorMode() if job_config.memory_estimation.fake_mode_only else contextlib.nullcontext():
+    with FakeTensorMode() if not job_config.memory_estimation.disable_fake_mode else contextlib.nullcontext():
 
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
@@ -202,7 +202,7 @@ def estimate_memory(job_config: JobConfig):
             f" {peak_reserved / gib} GiB | num_retries: {num_retries}"
         )
         print(f"Tracker Max: {tracker_peak / gib} GiB")
-        if not job_config.memory_estimation.fake_mode_only and peak_active > 0:
+        if job_config.memory_estimation.disable_fake_mode and peak_active > 0:
             print(f"Tracker Accuracy: {tracker_peak/peak_active}")
         gc.enable()
 

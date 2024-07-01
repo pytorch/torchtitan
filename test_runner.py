@@ -267,12 +267,11 @@ def build_test_list():
             [
                 [
                     "--memory_estimation.enabled",
-                    "--memory_estimation.fake_mode_only",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
-            ngpu=8,
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors
