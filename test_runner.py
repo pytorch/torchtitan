@@ -242,11 +242,36 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_schedule interleaved_1f1b",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm throws cuda context error with pp
+                ],
+            ],
+            "PP looped 1f1b test",
+            "pp_looped_1f1b",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--optimizer.name Adam --optimizer.fused",
                     "--optimizer.name AdamW --optimizer.fused",
                 ]
             ],
             "Fused Optimizer Test",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--memory_estimation.enabled",
+                ]
+            ],
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_mem_tracker",
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors

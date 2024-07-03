@@ -242,6 +242,12 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
+            "--experimental.enable_async_tensor_parallel",
+            default=False,
+            action="store_true",
+            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
+        )
+        self.parser.add_argument(
             "--experimental.pipeline_parallel_degree",
             type=int,
             default=1,
@@ -269,14 +275,15 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe"],
+            choices=["1f1b", "gpipe", "interleaved_1f1b"],
             default="1f1b",
             help="""
                 Specify the Pipeline Parallel schedule to use.
 
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules are not yet supported in torchtitan.""",
+                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_split_mode",
@@ -489,6 +496,20 @@ class JobConfig:
             type=int,
             default=20000,
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
+        )
+
+        # memory estimation settings
+        self.parser.add_argument(
+            "--memory_estimation.enabled",
+            help="Whether to estimate memory usage for FSDP",
+            action="store_true",
+        )
+
+        self.parser.add_argument(
+            "--memory_estimation.disable_fake_mode",
+            help="Whether to estimate memory under FakeTensorMode",
+            default=False,
+            action="store_true",
         )
 
     def parse_args(self, args_list: list = sys.argv[1:]):
