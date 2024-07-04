@@ -439,9 +439,8 @@ class Transformer(nn.Module):
 
         h = self.norm(h) if self.norm else h
         # unfold batch and sequence dimension
-        bs = tokens.shape[0]
-        bs_seqlen = h.shape[0]
-        h = h.view(bs, bs_seqlen // bs, self.model_args.dim)
+        bs, seqlen = tokens.shape
+        h = h.view(bs, seqlen, self.model_args.dim)
         output = self.output(h).float() if self.output else h
         return output
 
