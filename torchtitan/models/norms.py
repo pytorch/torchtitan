@@ -221,8 +221,8 @@ def _rms_norm_bwd_kernel_sm(
 class TritonFusedRMSNorm(torch.autograd.Function):
     @partial(
         local_map,
-        out_placements=[Shard(1)],
-        in_placements=(None, [Shard(1)], [Replicate()], None),
+        out_placements=[Shard(0)],
+        in_placements=(None, [Shard(0)], [Replicate()], None),
     )
     @staticmethod
     def forward(ctx, x, weight, eps):
@@ -268,8 +268,8 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
     @partial(
         local_map,
-        out_placements=([Shard(1)], [Partial()], None),
-        in_placements=(None, [Shard(1)]),
+        out_placements=([Shard(0)], [Partial()], None),
+        in_placements=(None, [Shard(0)]),
     )
     @staticmethod
     def backward(ctx, dy):
