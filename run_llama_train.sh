@@ -31,7 +31,7 @@ if [ $# -ne 0 ]; then
 fi
 
 # Check if --estimate.memory=True is in the arguments
-if echo "$overrides" | grep -q -- "--estimate.memory=True"; then
+if echo "$overrides" | grep -q -- "--memory_estimation.enabled"; then
     # Calculate WORLD_SIZE as the product of NGPU and NNODES
     # Export WORLD_SIZE and LOCAL_RANK
     export WORLD_SIZE=$((NGPU * NNODES))
