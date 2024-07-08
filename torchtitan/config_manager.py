@@ -503,18 +503,18 @@ class JobConfig:
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
         )
 
-        # estimation mode settings
+        # memory estimation settings
         self.parser.add_argument(
-            "--estimate.memory",
+            "--memory_estimation.enabled",
             help="Whether to estimate memory usage for FSDP",
-            default=False,
+            action="store_true",
         )
 
         self.parser.add_argument(
-            "--estimate.mode",
-            type=str,
-            default="fake",
-            help="Mode of estimation to use ['fake', 'real']",
+            "--memory_estimation.disable_fake_mode",
+            help="Whether to estimate memory under FakeTensorMode",
+            default=False,
+            action="store_true",
         )
 
     def parse_args(self, args_list: list = sys.argv[1:]):
