@@ -265,11 +265,26 @@ def build_test_list():
         ),
         OverrideDefinitions(
             [
-                ["--estimate.memory=True", "--estimate.mode=real"],
+                [
+                    "--memory_estimation.enabled",
+                ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 1",
+                    "--training.data_parallel_degree 8",
+                    "--experimental.data_parallel_type ddp",
+                    "--experimental.enable_compiled_autograd",
+                ]
+            ],
+            "CompiledDDP",
+            "compiled_ddp",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
