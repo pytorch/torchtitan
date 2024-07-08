@@ -265,7 +265,9 @@ def build_test_list():
         ),
         OverrideDefinitions(
             [
-                ["--estimate.memory=True", "--estimate.mode=real"],
+                [
+                    "--memory_estimation.enabled",
+                ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
