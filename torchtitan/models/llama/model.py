@@ -428,13 +428,13 @@ class Transformer(nn.Module):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stage
+        # fold batch dimension and sequence dimension for more efficient allgather/reduce_scatter
         if self.tok_embeddings:
-            # fold batch dimension and sequence dimension
-            # for more efficient allgather/reduce_scatter
             tokens = tokens.view(-1)
             h = self.tok_embeddings(tokens)
         else:
             h = tokens
+            h = h.view(-1, self.model_args.dim)
 
         seqlen = self.model_args.max_seq_len
         freqs_cis = self.freqs_cis[0:seqlen]
@@ -442,12 +442,9 @@ class Transformer(nn.Module):
             h = layer(h, freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        if self.output:
-            # unfold batch and sequence dimension
-            h = h.view(-1, seqlen, self.model_args.dim)
-            output = self.output(h).float()
-        else:
-            output = h
+        # unfold batch and sequence dimension
+        h = h.view(-1, seqlen, self.model_args.dim)
+        output = self.output(h).float() if self.output else h
         return output
 
     @classmethod
