@@ -185,7 +185,7 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        # dim 0 of x is a folded dimension of [bs, seqlen]
+        # dim 0 of x is a folded dimension of (bs, seqlen)
         seqlen, _ = freqs_cis.shape
         bs_seqlen, _ = x.shape
         bs = bs_seqlen // seqlen
@@ -427,21 +427,27 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-        # fold batch dimension and sequence dimension
-        # for more efficient allgather/reduce_scatter
-        h = h.view(-1, self.model_args.dim)
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stage
+        if self.tok_embeddings:
+            # fold batch dimension and sequence dimension
+            # for more efficient allgather/reduce_scatter
+            tokens = tokens.view(-1)
+            h = self.tok_embeddings(tokens)
+        else:
+            h = tokens
 
-        freqs_cis = self.freqs_cis[0 : self.model_args.max_seq_len]
+        seqlen = self.model_args.max_seq_len
+        freqs_cis = self.freqs_cis[0:seqlen]
         for layer in self.layers.values():
             h = layer(h, freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        # unfold batch and sequence dimension
-        bs, seqlen = tokens.shape
-        h = h.view(bs, seqlen, self.model_args.dim)
-        output = self.output(h).float() if self.output else h
+        if self.output:
+            # unfold batch and sequence dimension
+            h = h.view(-1, seqlen, self.model_args.dim)
+            output = self.output(h).float()
+        else:
+            output = h
         return output
 
     @classmethod
