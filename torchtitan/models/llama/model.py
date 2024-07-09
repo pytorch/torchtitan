@@ -427,6 +427,7 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        bs = tokens.shape[0]
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stage
         # fold batch dimension and sequence dimension for more efficient allgather/reduce_scatter
         if self.tok_embeddings:
@@ -443,7 +444,7 @@ class Transformer(nn.Module):
 
         h = self.norm(h) if self.norm else h
         # unfold batch and sequence dimension
-        h = h.view(-1, seqlen, self.model_args.dim)
+        h = h.view(bs, -1, self.model_args.dim)
         output = self.output(h).float() if self.output else h
         return output
 
