@@ -350,15 +350,11 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.fp8_linear",
-            type=str,
-            default="",
-            choices=[
-                "dynamic",
-                "",
-            ],  # TODO: add "delayed" option back in when supported
+            action="store_true",
             help="""
-                Type of fp8 linear quantization to apply to the model ['', 'dynamic'].
-                This features requires you to install 'float8_experimental' which can be found
+                If true, swaps `torch.nn.Linear` with `Float8Linear` with
+                default settings (dynamic scaling).
+                This feature requires you to install 'float8_experimental' which can be found
                 here: https://github.com/pytorch-labs/float8_experimental
             """,
         )
