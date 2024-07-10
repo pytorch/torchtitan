@@ -459,6 +459,7 @@ def apply_dp(model, world_mesh, parallel_dims, job_config: JobConfig):
         reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+
     for layer_id, transformer_block in model.layers.items():
         if parallel_dims.pp_enabled:
             # For PP, do not reshard after forward to avoid per-microbatch
