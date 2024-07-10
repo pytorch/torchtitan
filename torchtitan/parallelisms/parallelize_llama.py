@@ -441,13 +441,6 @@ def apply_compile(model, job_config: JobConfig):
         transformer_block = torch.compile(transformer_block, dynamic=False)
         model.layers.register_module(layer_id, transformer_block)
 
-    ac_config = job_config.activation_checkpoint
-    if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
-        # some temp flags for torch.compile enablement + SAC
-        torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
-            True
-        )
-
     logger.info("Compiled each TransformerBlock with torch.compile")
     return model
 
