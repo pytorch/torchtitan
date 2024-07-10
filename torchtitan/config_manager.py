@@ -532,10 +532,11 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
 
     def parse_args_from_command_line(
         self, args_list
