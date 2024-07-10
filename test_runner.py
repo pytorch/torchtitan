@@ -156,7 +156,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile --model.norm_type=rmsnorm --selective_ac_option=op",
+                    "--training.compile --model.norm_type=rmsnorm --activation_checkpoint.selective_ac_option=op",
                 ],
             ],
             "1D compile with selective op AC",
