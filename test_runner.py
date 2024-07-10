@@ -156,7 +156,9 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile --model.norm_type=rmsnorm --activation_checkpoint.selective_ac_option=op",
+                    "--training.compile",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
                 ],
             ],
             "1D compile with selective op AC",
@@ -275,7 +277,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--memory_estimation.enabled",
+                    "--memory_estimation.enabled --model.norm_type rmsnorm",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
