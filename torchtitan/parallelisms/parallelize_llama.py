@@ -316,9 +316,11 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
 
     tp_mesh = world_mesh["tp"]
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears
     (
-        row_parallel_strategy,
-        col_parallel_strategy,
+        rowwise_parallel_weight,
+        colwise_parallel_weight,
         prepare_module_input,
     ) = get_tp_parallel_strategy(job_config)
     loss_parallel = parallel_dims.loss_parallel_enabled
@@ -336,7 +338,7 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
                 output_layouts=Shard(1),
             ),
             "norm": SequenceParallel(),
-            "output": col_parallel_strategy(
+            "output": colwise_parallel_weight(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
@@ -355,18 +357,18 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
                 input_layouts=(Shard(1), None),
                 desired_input_layouts=(Replicate(), None),
             ),
-            "attention.wq": col_parallel_strategy(),
-            "attention.wk": col_parallel_strategy(),
-            "attention.wv": col_parallel_strategy(),
-            "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
+            "attention.wq": colwise_parallel_weight(),
+            "attention.wk": colwise_parallel_weight(),
+            "attention.wv": colwise_parallel_weight(),
+            "attention.wo": rowwise_parallel_weight(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
-            "feed_forward.w1": col_parallel_strategy(),
-            "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
-            "feed_forward.w3": col_parallel_strategy(),
+            "feed_forward.w1": colwise_parallel_weight(),
+            "feed_forward.w2": rowwise_parallel_weight(output_layouts=Shard(1)),
+            "feed_forward.w3": colwise_parallel_weight(),
         }
 
         # Adjust attention module to use the local number of heads
