@@ -533,20 +533,37 @@ class JobConfig:
         return args_dict
 
     def _validate_config(self) -> None:
-        # TODO: Add more mandatory validations
         assert self.model.name
         assert self.model.flavor
         assert self.model.tokenizer_path
 
+        pp_split_mode = self.experimental.pipeline_parallel_split_mode
+        if pp_split_mode not in ("manual", "tracer"):
+            raise ValueError(
+                f"Invalid split mode: {self.experimental.pipeline_parallel_split_mode}"
+            )
+        if pp_split_mode == "tracer" and self.model.norm_type == "fused_rmsnorm":
+            # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr
+            # invocation stride in strict mode from `if dy.stride(-1) != 1:` in
+            # fused_rmsnorm
+            raise NotImplementedError(
+                "fused_rmsnorm is not compatible with Pipeline Tracer yet. Please use rmsnorm or layernorm."
+            )
+
         ac_config = self.activation_checkpoint
-        assert (
-            ac_config.mode in ("full", "selective", "none")
-        ), f"Unsupported AC mode: {ac_config.mode}"
+        if ac_config.mode not in ("full", "selective", "none"):
+            raise ValueError(f"Invalid AC mode: {ac_config.mode}")
         if ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
             ac_freq = int(ac_config.selective_ac_option)
-            assert (
-                ac_freq > 0
-            ), f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
+            if ac_freq <= 0:
+                raise ValueError(
+                    f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
+                )
+
+        if self.training.compile and self.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm is not compatible with torch.compile yet. Please use rmsnorm or layernorm."
+            )
 
     def parse_args_from_command_line(
         self, args_list
