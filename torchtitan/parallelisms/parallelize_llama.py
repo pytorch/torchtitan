@@ -448,7 +448,7 @@ def apply_compile(model, job_config: JobConfig):
 
 def apply_dp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
-    Apply data parallelism to the model. FSDP2 is used here.
+    Apply data parallelism (FSDP2) to the model.
     """
 
     dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
