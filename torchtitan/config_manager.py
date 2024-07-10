@@ -539,14 +539,15 @@ class JobConfig:
         assert self.model.tokenizer_path
 
         ac_config = self.activation_checkpoint
-        assert (
-            ac_config.mode in ("full", "selective", "none")
-        ), f"Unsupported AC mode: {ac_config.mode}"
+        ac_config = self.activation_checkpoint
+        if ac_config.mode not in ("full", "selective", "none"):
+            raise ValueError(f"Invalid AC mode: {ac_config.mode}")
         if ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
             ac_freq = int(ac_config.selective_ac_option)
-            assert (
-                ac_freq > 0
-            ), f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
+            if ac_freq <= 0:
+                raise ValueError(
+                    f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
+                )
 
     def parse_args_from_command_line(
         self, args_list
