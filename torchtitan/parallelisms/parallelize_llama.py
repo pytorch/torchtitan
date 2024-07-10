@@ -79,13 +79,18 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
     elif ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
         # Checkpoint every `ac_freq` of the modules passed to this function
         ac_freq = int(ac_config.selective_ac_option)
-        assert ac_freq > 0, f"{ac_freq}"
+        if ac_freq <= 0:
+            raise ValueError(
+                f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
+            )
         ptd_checkpoint_wrapper.__dict__.setdefault("_count", 0)
         ptd_checkpoint_wrapper._count += 1
         if not ac_freq or ptd_checkpoint_wrapper._count % ac_freq == 0:
             return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
         else:
             return module
+    else:
+        raise ValueError(f"Invalid AC mode: {ac_config.mode}")
 
 
 def get_tp_parallel_strategy(
