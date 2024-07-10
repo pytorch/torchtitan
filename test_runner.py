@@ -266,7 +266,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--memory_estimation.enabled",
+                    "--memory_estimation.enabled --model.norm_type rmsnorm",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",

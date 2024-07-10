@@ -57,8 +57,12 @@ def estimate_memory(job_config: JobConfig):
         )
         job_config.model.norm_type = "rmsnorm"
 
+    if job_config.model.norm_type == "compiled_rmsnorm":
+        logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
+        job_config.model.norm_type = "rmsnorm"
+
     if job_config.training.compile:
-        logger.info("Compile mode is not supported yet. " "Switching to Eager mode.")
+        logger.info("Compile mode is not supported yet. Switching to eager mode.")
         job_config.training.compile = False
 
     parallel_dims = ParallelDims(
