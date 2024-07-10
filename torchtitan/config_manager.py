@@ -537,24 +537,6 @@ class JobConfig:
         assert self.model.flavor
         assert self.model.tokenizer_path
 
-        pp_split_mode = self.experimental.pipeline_parallel_split_mode
-        if pp_split_mode not in ("manual", "tracer"):
-            raise ValueError(
-                f"Invalid split mode: {self.experimental.pipeline_parallel_split_mode}"
-            )
-        if pp_split_mode == "tracer" and self.model.norm_type == "fused_rmsnorm":
-            # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr
-            # invocation stride in strict mode from `if dy.stride(-1) != 1:` in
-            # fused_rmsnorm
-            raise NotImplementedError(
-                "fused_rmsnorm is not compatible with Pipeline Tracer yet. Please use rmsnorm or layernorm."
-            )
-
-        if self.training.compile and self.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm is not compatible with torch.compile yet. Please use rmsnorm or layernorm."
-            )
-
     def parse_args_from_command_line(
         self, args_list
     ) -> Tuple[argparse.Namespace, argparse.Namespace]:

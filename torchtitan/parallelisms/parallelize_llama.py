@@ -50,6 +50,11 @@ no_recompute_list = {
 
 
 def checkpoint_wrapper(module: torch.nn.Module, ac_config):
+    valid_ac_modes = ("full", "selective")
+    if ac_config.mode not in valid_ac_modes:
+        raise ValueError(
+            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
+        )
     if ac_config.mode == "full":
         return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
     elif ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
@@ -98,8 +103,6 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
             return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
         else:
             return module
-    else:
-        raise ValueError(f"Invalid AC mode: {ac_config.mode}")
 
 
 def get_tp_parallel_strategy(
@@ -129,6 +132,11 @@ def pipeline_llama(
     model_config: ModelArgs,
 ):
     split_mode = job_config.experimental.pipeline_parallel_split_mode
+    valid_split_modes = ("manual", "tracer")
+    if split_mode not in valid_split_modes:
+        raise ValueError(
+            f"Invalid split mode: {split_mode}. Valid split modes: {valid_split_modes}"
+        )
     if split_mode == "manual":
         return pipeline_llama_manual(
             model, world_mesh, parallel_dims, job_config, device, model_config
@@ -137,8 +145,6 @@ def pipeline_llama(
         return pipeline_llama_tracer(
             model, world_mesh, parallel_dims, job_config, device, model_config
         )
-    else:
-        raise NotImplementedError(f"{split_mode} is not a valid split mode")
 
 
 def _llama_trace_input(job_config: JobConfig, model_config: ModelArgs, device="meta"):
@@ -269,6 +275,13 @@ def pipeline_llama_tracer(
     device: DeviceType,
     model_config: ModelArgs,
 ):
+    if job_config.model.norm_type == "fused_rmsnorm":
+        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr
+        # invocation stride in strict mode from `if dy.stride(-1) != 1:` in
+        # fused_rmsnorm
+        raise NotImplementedError(
+            "fused_rmsnorm is not compatible with Pipeline Tracer yet. Please use rmsnorm or layernorm."
+        )
     if _mixed_precision_dtype(job_config, parallel_dims) != torch.float32:
         raise NotImplementedError(
             "Pipeline tracer does not work with FSDP mixed precision yet. "
@@ -408,6 +421,11 @@ def apply_ac(model: nn.Module, job_config: JobConfig):
 
 def apply_compile(model: nn.Module, job_config: JobConfig):
     """Apply torch.compile to each transformer block."""
+
+    if job_config.model.norm_type == "fused_rmsnorm":
+        raise NotImplementedError(
+            "fused_rmsnorm is not compatible with torch.compile yet. Please use rmsnorm or layernorm."
+        )
 
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: dynamic shape have some issues so we turn it off for now.
