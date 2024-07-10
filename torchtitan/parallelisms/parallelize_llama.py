@@ -13,6 +13,7 @@ from typing import Tuple, Union
 
 import torch
 import torch.nn as nn
+from torch.distributed import DeviceMesh
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._tensor import Replicate, Shard
@@ -27,13 +28,12 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from torch.distributed import DeviceMesh
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
+from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
-from torchtitan.models.llama.model import ModelArgs
 
 
 DeviceType = Union[int, str, torch.device]
@@ -119,7 +119,7 @@ def pipeline_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
-    model_config: ModelArgs
+    model_config: ModelArgs,
 ):
     split_mode = job_config.experimental.pipeline_parallel_split_mode
     if split_mode == "manual":
