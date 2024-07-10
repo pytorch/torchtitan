@@ -303,7 +303,7 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     (
         rowwise_parallel_weight,
         colwise_parallel_weight,
-        prepare_weight_input,
+        prepare_module_weight_input,
     ) = get_tp_parallel_strategy(job_config)
     loss_parallel = parallel_dims.loss_parallel_enabled
 
@@ -335,7 +335,7 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     for layer_id, transformer_block in model.layers.items():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            "attention": prepare_weight_input(
+            "attention": prepare_module_weight_input(
                 input_layouts=(Shard(1), None),
                 desired_input_layouts=(Replicate(), None),
             ),
@@ -344,7 +344,7 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
             "attention.wv": colwise_parallel_weight(),
             "attention.wo": rowwise_parallel_weight(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
-            "feed_forward": prepare_weight_input(
+            "feed_forward": prepare_module_weight_input(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
