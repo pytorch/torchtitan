@@ -41,6 +41,11 @@ no_recompute_list = {
 
 
 def checkpoint_wrapper(module: torch.nn.Module, ac_config):
+    valid_ac_modes = ("full", "selective")
+    if ac_config.mode not in valid_ac_modes:
+        raise ValueError(
+            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
+        )
     if ac_config.mode == "full":
         return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
     elif ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
@@ -89,8 +94,6 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
             return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
         else:
             return module
-    else:
-        raise ValueError(f"Invalid AC mode: {ac_config.mode}")
 
 
 def get_tp_parallel_strategy(
