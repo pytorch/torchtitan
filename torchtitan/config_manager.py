@@ -532,10 +532,21 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
+
+        ac_config = self.activation_checkpoint
+        assert (
+            ac_config.mode in ("full", "selective", "none")
+        ), f"Unsupported AC mode: {ac_config.mode}"
+        if ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
+            ac_freq = int(ac_config.selective_ac_option)
+            assert (
+                ac_freq > 0
+            ), f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
 
     def parse_args_from_command_line(
         self, args_list
