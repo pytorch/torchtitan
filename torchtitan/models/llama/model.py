@@ -79,9 +79,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     """
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    seqlen = x.shape[1]
-    freqs_cis = freqs_cis[0:seqlen]
-    assert freqs_cis.shape == (seqlen, x.shape[-1])
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
 
@@ -187,7 +185,10 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-        bs, seqlen, _ = x.shape
+        # dim 0 of x is a folded dimension of (bs, seqlen)
+        seqlen, _ = freqs_cis.shape
+        bs_seqlen, _ = x.shape
+        bs = bs_seqlen // seqlen
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         xq = xq.view(bs, seqlen, self.n_heads, self.head_dim)
@@ -209,7 +210,8 @@ class Attention(nn.Module):
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
-        output = output.view(bs, seqlen, -1)
+        # output stay folded with batch and sequence dimension
+        output = output.view(bs * seqlen, -1)
         return self.wo(output)
 
 
@@ -425,13 +427,20 @@ class Transformer(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stage
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        # fold batch dimension and sequence dimension for more efficient allgather/reduce_scatter
+        h = h.view(-1, self.model_args.dim)
 
+        seqlen = self.model_args.max_seq_len
+        freqs_cis = self.freqs_cis[0:seqlen]
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, freqs_cis)
 
         h = self.norm(h) if self.norm else h
+        # unfold batch and sequence dimension
+        bs = tokens.shape[0]
+        h = h.view(bs, -1, self.model_args.dim)
         output = self.output(h).float() if self.output else h
         return output
 
