@@ -550,16 +550,6 @@ class JobConfig:
                 "fused_rmsnorm is not compatible with Pipeline Tracer yet. Please use rmsnorm or layernorm."
             )
 
-        ac_config = self.activation_checkpoint
-        if ac_config.mode not in ("full", "selective", "none"):
-            raise ValueError(f"Invalid AC mode: {ac_config.mode}")
-        if ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
-            ac_freq = int(ac_config.selective_ac_option)
-            if ac_freq <= 0:
-                raise ValueError(
-                    f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
-                )
-
         if self.training.compile and self.model.norm_type == "fused_rmsnorm":
             raise NotImplementedError(
                 "fused_rmsnorm is not compatible with torch.compile yet. Please use rmsnorm or layernorm."
