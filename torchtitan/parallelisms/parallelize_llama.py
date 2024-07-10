@@ -55,9 +55,19 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
         raise ValueError(
             f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
         )
+
     if ac_config.mode == "full":
         return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
-    elif ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
+
+    assert ac_config.mode == "selective", f"{ac_config.mode}"
+    use_op_sac = ac_config.selective_ac_option == "op"
+    use_layer_sac = ac_config.selective_ac_option.isdigit()
+    if not use_op_sac and not use_layer_sac:
+        raise ValueError(
+            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
+            f"Valid options: 'op' or a positive int representing layer frequency"
+        )
+    if use_op_sac:
         from torch.utils.checkpoint import (
             CheckpointPolicy,
             create_selective_checkpoint_contexts,
@@ -90,7 +100,7 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
             context_fn=selective_checkpointing_context_fn,
             preserve_rng_state=False,
         )
-    elif ac_config.mode == "selective" and ac_config.selective_ac_option.isdigit():
+    elif use_layer_sac:
         # Checkpoint every `ac_freq` of the modules passed to this function
         ac_freq = int(ac_config.selective_ac_option)
         if ac_freq <= 0:
