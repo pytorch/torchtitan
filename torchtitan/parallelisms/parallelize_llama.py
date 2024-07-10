@@ -9,7 +9,7 @@
 
 import copy
 from collections import defaultdict
-from typing import Tuple, Union
+from typing import Tuple, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
@@ -32,8 +32,10 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging_utils import logger
 from torchtitan.models.llama.model import ModelArgs
-from torchtitan.parallelisms import ParallelDims
 from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
+
+if TYPE_CHECKING:
+    from torchtitan.parallelisms import ParallelDims
 
 
 DeviceType = Union[int, str, torch.device]
@@ -116,7 +118,7 @@ def get_tp_parallel_strategy(
 def pipeline_llama(
     model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
     device: DeviceType,
     model_config: ModelArgs,
@@ -154,7 +156,7 @@ def _mixed_precision_dtype(
 def pipeline_llama_manual(
     whole_model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
     device: DeviceType,
     model_config: ModelArgs,
@@ -257,7 +259,7 @@ def pipeline_llama_manual(
 def pipeline_llama_tracer(
     model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
     device: DeviceType,
     model_config: ModelArgs,
@@ -304,7 +306,7 @@ def pipeline_llama_tracer(
 def apply_tp(
     model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
     """Apply tensor parallelism."""
@@ -417,7 +419,7 @@ def apply_compile(model: nn.Module, job_config: JobConfig):
 def apply_dp(
     model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
     """Apply data parallelism (FSDP2) to the model."""
@@ -456,7 +458,7 @@ def apply_dp(
 def parallelize_llama(
     model: nn.Module,
     world_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
     """
