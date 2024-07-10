@@ -17,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama2"
 flavor = "7B"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]

@@ -21,7 +21,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "debugmodel"
-norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "compiled_rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
