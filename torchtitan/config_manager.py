@@ -165,7 +165,7 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, compiled_rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -339,15 +339,11 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.fp8_linear",
-            type=str,
-            default="",
-            choices=[
-                "dynamic",
-                "",
-            ],  # TODO: add "delayed" option back in when supported
+            action="store_true",
             help="""
-                Type of fp8 linear quantization to apply to the model ['', 'dynamic'].
-                This features requires you to install 'float8_experimental' which can be found
+                If true, swaps `torch.nn.Linear` with `Float8Linear` with
+                default settings (dynamic scaling).
+                This feature requires you to install 'float8_experimental' which can be found
                 here: https://github.com/pytorch-labs/float8_experimental
             """,
         )
@@ -548,10 +544,11 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
 
     def parse_args_from_command_line(
         self, args_list
