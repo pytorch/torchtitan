@@ -165,7 +165,7 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, compiled_rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -248,6 +248,12 @@ class JobConfig:
             default=False,
             action="store_true",
             help="Whether to use the experimental torch_spmd style parallelism",
+        )
+        self.parser.add_argument(
+            "--experimental.enable_async_tensor_parallel",
+            default=False,
+            action="store_true",
+            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_degree",
@@ -341,15 +347,11 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.fp8_linear",
-            type=str,
-            default="",
-            choices=[
-                "dynamic",
-                "",
-            ],  # TODO: add "delayed" option back in when supported
+            action="store_true",
             help="""
-                Type of fp8 linear quantization to apply to the model ['', 'dynamic'].
-                This features requires you to install 'float8_experimental' which can be found
+                If true, swaps `torch.nn.Linear` with `Float8Linear` with
+                default settings (dynamic scaling).
+                This feature requires you to install 'float8_experimental' which can be found
                 here: https://github.com/pytorch-labs/float8_experimental
             """,
         )
@@ -488,6 +490,20 @@ class JobConfig:
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
         )
 
+        # memory estimation settings
+        self.parser.add_argument(
+            "--memory_estimation.enabled",
+            help="Whether to estimate memory usage for FSDP",
+            action="store_true",
+        )
+
+        self.parser.add_argument(
+            "--memory_estimation.disable_fake_mode",
+            help="Whether to estimate memory under FakeTensorMode",
+            default=False,
+            action="store_true",
+        )
+
     def parse_args(self, args_list: list = sys.argv[1:]):
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
@@ -524,10 +540,11 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
 
     def parse_args_from_command_line(
         self, args_list
