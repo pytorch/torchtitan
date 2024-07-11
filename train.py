@@ -29,7 +29,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import build_fp8_linear
 from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_scheduler
+from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import (
@@ -38,11 +38,12 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
-from torchtitan.profiling import maybe_enable_profiling
+from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import (
     Color,
     dist_max,
     dist_mean,
+    get_metrics_rank,
     get_num_flop_per_token,
     get_num_params,
     get_peak_flops,
@@ -89,23 +90,49 @@ class TrainState(Stateful):
         self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
-def build_optimizer(model, job_config: JobConfig):
-    # build optimizer
-    name = job_config.optimizer.name
-    lr = job_config.optimizer.lr
-    if name == "Adam":
-        # TODO: make the optimizer options configurable by toml/cmd args
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
-    elif name == "AdamW":
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1, foreach=True
-        )
-    else:
-        raise NotImplementedError(f"Optimizer {name} not added.")
+def build_optimizers(model_parts, job_config: JobConfig):
+    """Wrap one optimizer per model part in an OptimizersContainer which provides a single
+    step() and zero_grad() method for all the child optimizers.
+    """
 
-    return optimizer
+    def _build_optimizer(model):
+        name = job_config.optimizer.name
+        lr = job_config.optimizer.lr
+        fused = job_config.optimizer.fused
+
+        # Common parameters for both optimizers
+        optimizer_kwargs = {
+            "lr": lr,
+            "betas": (0.9, 0.95),
+            "weight_decay": 0.1,
+            "fused": fused,
+            "foreach": not fused,
+        }
+        if name == "Adam":
+            # TODO: make the optimizer options configurable by toml/cmd args
+            optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
+        elif name == "AdamW":
+            optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+        else:
+            raise NotImplementedError(f"Optimizer {name} not added.")
+
+        return optimizer
+
+    class OptimizersContainer:
+        """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages"""
+
+        def __init__(self, optimizers):
+            self.optimizers = optimizers
+
+        def step(self):
+            for optimizer in self.optimizers:
+                optimizer.step()
+
+        def zero_grad(self):
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
+
+    return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -122,7 +149,7 @@ def main(job_config: JobConfig):
     gc.disable()
     gc.collect(1)
 
-    # init world mesh
+    # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
@@ -135,15 +162,8 @@ def main(job_config: JobConfig):
     torch.cuda.set_device(device)
     init_distributed(job_config)
 
+    # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
-    model_name = job_config.model.name
-
-    # build tokenizer
-    tokenizer_type = model_name_to_tokenizer[model_name]
-    tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
-
-    # build dataloader
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree = dp_mesh.size()
@@ -154,6 +174,13 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
+    model_name = job_config.model.name
+
+    # build tokenizer
+    tokenizer_type = model_name_to_tokenizer[model_name]
+    tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
+
+    # build dataloader
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -184,20 +211,18 @@ def main(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
+    logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
     with torch.device("meta"):
-        logger.info(
-            f"Building {model_name} {job_config.model.flavor} with {model_config}"
-        )
-        model = model_cls.from_model_args(model_config)
+        whole_model = model_cls.from_model_args(model_config)
 
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
-        build_fp8_linear(model, job_config)
+        build_fp8_linear(whole_model, job_config)
 
     # log model size
-    model_param_count = get_num_params(model)
+    model_param_count = get_num_params(whole_model)
     num_flop_per_token = get_num_flop_per_token(
-        get_num_params(model, exclude_embedding=True),
+        get_num_params(whole_model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
     )
@@ -212,26 +237,34 @@ def main(job_config: JobConfig):
     gpu_peak_flops = get_peak_flops(gpu_memory_monitor.device_name)
 
     if parallel_dims.pp_enabled:
-        stage, model = models_pipelining_fns[model_name](
-            model, world_mesh, parallel_dims, job_config, device, model_config
+        stages, model_parts = models_pipelining_fns[model_name](
+            whole_model, world_mesh, parallel_dims, job_config, device, model_config
         )
+    else:
+        # In 1D/2D cases or PP with simple schedules, model_parts is just one item
+        # for PP with looped schedules, each item is one stage-model-chunk
+        # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
+        model_parts = [whole_model]
 
     # apply PT-D DP/TP parallelisms and activation checkpointing
-    model = models_parallelize_fns[model_name](
-        model, world_mesh, parallel_dims, job_config
-    )
+    model_parts = [
+        models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+        for m in model_parts
+    ]
 
     init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-    model.to_empty(device=init_device)
+    for model in model_parts:
+        model.to_empty(device=init_device)
 
     if parallel_dims.pp_enabled:
-        pp_schedule = build_pipeline_schedule(job_config, parallel_dims, stage, loss_fn)
+        pp_schedule = build_pipeline_schedule(
+            job_config, parallel_dims, stages, loss_fn
+        )
     else:
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
-
         # allocate sharded model on GPU and initialize weights via DTensor
-        model.init_weights()
+        whole_model.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -241,20 +274,24 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizer = build_optimizer(model, job_config)
-    scheduler = get_lr_scheduler(optimizer, job_config)
+    optimizers = build_optimizers(model_parts, job_config)
+    lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
 
-    metric_logger = build_metric_logger(job_config)
+    metric_logger = build_metric_logger(
+        job_config, metrics_log_rank=get_metrics_rank(world_mesh, parallel_dims)
+    )
 
     train_state = TrainState()
 
     # train loop
-    model.train()
+    for model in model_parts:
+        model.train()
 
+    # load initial checkpoint
     checkpoint = CheckpointManager(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
+        model_parts=model_parts,
+        optimizers=optimizers.optimizers,
+        lr_schedulers=lr_schedulers.schedulers,
         dataloader=data_loader,
         states={"train_state": train_state},
         job_config=job_config,
@@ -289,19 +326,22 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
+    checkpoint.reset()
+
+    # variables used to keep info for metrics logging
+    losses_since_last_log: List[float] = []
+    ntokens_since_last_log = 0
+    data_loading_times: List[float] = []
+    time_last_log = timer()
+    gpu_memory_monitor.reset_peak_stats()
+
+    # train loop
     logger.info(f"Training starts at step {train_state.step + 1}")
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
-    ) as torch_profiler:
-        checkpoint.reset()
-
-        # variables used to keep info for metrics logging
-        losses_since_last_log: List[float] = []
-        ntokens_since_last_log = 0
-        data_loading_times: List[float] = []
-        time_last_log = timer()
-        gpu_memory_monitor.reset_peak_stats()
-
+    ) as torch_profiler, maybe_enable_memory_snapshot(
+        job_config, global_step=train_state.step
+    ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             if train_state.step > 1 and train_state.step % _gc_freq == 0:
@@ -316,7 +356,7 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
-            optimizer.zero_grad()
+            optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
                 # pipeline parallel forward / backward inside step() call
@@ -342,17 +382,21 @@ def main(job_config: JobConfig):
                 with loss_parallel_ctx():
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
                     loss.backward()
 
             # clip gradients
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), job_config.training.max_norm, foreach=True
-            )
+            for model in model_parts:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), job_config.training.max_norm, foreach=True
+                )
 
             # optimizer step
             checkpoint.wait_for_staging()
-            optimizer.step()
-            scheduler.step()
+            optimizers.step()
+            lr_schedulers.step()
 
             losses_since_last_log.append(loss)
 
@@ -434,6 +478,9 @@ def main(job_config: JobConfig):
             # signals the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
+
+            if memory_profiler:
+                memory_profiler.step()
 
             # Reduce timeout after first train step for faster signal (assumes lazy init, compile are finished)
             if train_state.step == 1:
