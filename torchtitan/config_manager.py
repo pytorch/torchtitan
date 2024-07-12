@@ -374,6 +374,77 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
+            "--training.compile_ln_mlp",
+            action="store_true",
+            help="Whether to compile only the LNMLP blocks",
+        )
+        self.parser.add_argument(
+            "--training.compile_ln_linear",
+            action="store_true",
+            help="Whether to compile only the LNLinear blocks",
+        )
+        self.parser.add_argument(
+            "--training.compile_linear",
+            action="store_true",
+            help="Whether to compile only the LNLinear blocks",
+        )
+        self.parser.add_argument(
+            "--training.horizontally_fuse_fcs",
+            action="store_true",
+            help="""
+                If true, fuses ffn.fc1 and ffn.fc3 into ffn.fc13. Note that this is required
+                to use te.LayerNormLinear for FFNs.
+                TODO also implement this for attention.
+            """,
+        )
+        self.parser.add_argument(
+            "--training.te_swap_linear",
+            action="store_true",
+            help="""
+                If true, swaps torch.nn.Linear with te.Linear 
+                (not for land)
+                
+                Note:
+                * requires training.te_float8_autocast to use float8
+            """,
+        )
+        self.parser.add_argument(
+            "--training.te_swap_ln_linear",
+            action="store_true",
+            help="""
+                If true, swaps NormFeedForward.norm_w13 from 
+                nn.Sequential(RMSNorm, nn.Linear) to te.LayerNormLinear 
+                (not for land)
+
+                Note:
+                * requires training.horizontally_fuse_fcs to enable this swap
+                * this swap happens strictly before `training.te_swap_linear` if both are enabled
+                * requires training.te_float8_autocast to use float8
+            """,
+        )
+        self.parser.add_argument(
+            "--training.te_swap_ln_mlp",
+            action="store_true",
+            help="""
+                If true, swaps `NormFeedForward` to te.LayerNormMLP
+                (not for land)
+
+                Note:
+                * requires training.horizontally_fuse_fcs to enable this swap
+                * this swap happens strictly before `training.te_swap_linear` if both are enabled
+                * this swap happens strictly before `training.te_swap_ln_linear` if both are enabled
+                * requires training.te_float8_autocast to use float8
+            """,
+        )
+        self.parser.add_argument(
+            "--training.te_float8_autocast",
+            action="store_true",
+            help="""
+                If true, enables TE's float8 autocast context manager 
+                (not for land)
+            """,
+        )
+        self.parser.add_argument(
             "--training.gc_freq",
             type=int,
             default=50,
