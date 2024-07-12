@@ -1,0 +1,29 @@
+name: CPU Unit Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    with:
+      docker-image: torchtitan-ubuntu-20.04-clang12
+      repository: pytorch/torchtitan
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+        pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly
+        pytest test --cov=. --cov-report=xml --durations=20 -vv
