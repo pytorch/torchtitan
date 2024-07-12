@@ -495,7 +495,7 @@ def apply_ddp(model, world_mesh, parallel_dims, job_config: JobConfig):
         raise RuntimeError("DDP has not supported > 1D parallelism.")
 
     if job_config.training.compile:
-        if job_config.experimental.compiled_autograd:
+        if job_config.experimental.enable_compiled_autograd:
             torch._dynamo.config.optimize_ddp = (
                 "python_reducer_without_compiled_forward"
             )

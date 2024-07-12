@@ -313,7 +313,7 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--experimental.data_parallel_type",
+            "--training.data_parallel_type",
             type=str,
             default="fsdp",
             help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",

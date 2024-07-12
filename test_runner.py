@@ -276,15 +276,13 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.tensor_parallel_degree 1",
-                    "--training.data_parallel_degree 8",
-                    "--experimental.data_parallel_type ddp",
+                    "--training.data_parallel_type ddp",
                     "--experimental.enable_compiled_autograd",
                 ]
             ],
             "CompiledDDP",
             "compiled_ddp",
-            ngpu=8,
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors
