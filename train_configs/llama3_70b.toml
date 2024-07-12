@@ -26,17 +26,15 @@ name = "AdamW"
 lr = 1.5e-4
 
 [training]
-batch_size = 16
+batch_size = 8
 seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_degree = -1
 tensor_parallel_degree = 8  # 8-way TP
-fp8_linear = true
-enable_fsdp_fp8_all_gather = true
-precompute_float8_amax = true
-compile = true
+fp8_linear = false
+compile = false
 dataset = "c4"
 
 [experimental]

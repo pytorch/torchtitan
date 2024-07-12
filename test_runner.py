@@ -273,6 +273,52 @@ def build_test_list():
             "fsdp2_mem_tracker",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fp8_linear",
+                ]
+            ],
+            "FSDP2 with bf16 all-gather",
+            "fp8_fsdp2_bf16_all_gather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fp8_linear",
+                    "--training.enable_fsdp_fp8_all_gather",
+                ]
+            ],
+            "FSDP2 with fp8 all-gather",
+            "fp8_fsdp2_fp8_all_gather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fp8_linear",
+                    "--training.enable_fsdp_fp8_all_gather",
+                    "--precompute_float8_dynamic_scale_for_fsdp",
+                ]
+            ],
+            "FSDP2 with fp8 all-gather and precomputed dynamic scales",
+            "fp8_fsdp2_fp8_all_gather_precompute_dynamic_scales",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fp8_linear",
+                    "--training.enable_fsdp_fp8_all_gather",
+                    "--precompute_float8_dynamic_scale_for_fsdp",
+                    "--training.compile",
+                ]
+            ],
+            "FSDP2 with fp8 all-gather and precomputed dynamic scales, graph-break compile",
+            "fp8_fsdp2_fp8_all_gather_precompute_dynamic_scales_compile",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
