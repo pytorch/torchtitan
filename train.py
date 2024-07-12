@@ -19,6 +19,7 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
+import torchtitan.te_utils as te_utils
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
@@ -28,6 +29,8 @@ from torchtitan.parallelisms import (
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import device_module, device_type
+import transformer_engine as te_main
+import torchao
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -35,6 +38,9 @@ from torchtitan.utils import device_module, device_type
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+    logger.info(f"PyTorch version: {torch.__version__}")
+    logger.info(f"TransformerEngine version: {te_main.__version__}")
+    logger.info(f"torchao version: {torchao.__version__}")
 
     # used for colorful printing
     color = utils.Color if job_config.metrics.enable_color_printing else utils.NoColor
@@ -113,10 +119,23 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
+    if job_config.training.horizontally_fuse_fcs:
+        # note: this is required for te.LayerNormLinear
+        te_utils.swap_norm_ffn_to_te_friendly_norm_ffn(model)
+        te_utils.swap_norm_attn_to_te_friendly_norm_attn(model)
+
     # a no-op hander if float8 is not enabled
     float8_handler = Float8Handler(job_config, parallel_dims)
     # swap to Float8Linear based on float8 configs
     float8_handler.convert_to_float8_training(model)
+
+    # not for land - set up TransformerEngine
+    if job_config.training.te_swap_ln_mlp:
+        te_utils.swap_te_friendly_norm_ffn_to_te_layernorm_mlp(model)
+    if job_config.training.te_swap_ln_linear:
+        te_utils.swap_te_friendly_norm_ffn_to_te_layernorm_linear(model)
+    if job_config.training.te_swap_linear:
+        te_utils.swap_linear_to_te_linear(model)
 
     # log model size
     model_param_count = utils.get_num_params(model)
@@ -244,6 +263,8 @@ def main(job_config: JobConfig):
 
     checkpoint.reset()
 
+    print(model)
+
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
@@ -285,7 +306,11 @@ def main(job_config: JobConfig):
                 else None
             )
 
+            # not for land - set up TransformerEngine fp8 autocast
+            maybe_te_float8_ctx = te_utils.get_maybe_fp8_autocast(job_config)
+
             if parallel_dims.pp_enabled:
+                assert not job_config.training.use_te, "unsupported"
                 # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
@@ -307,12 +332,13 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
+                    with maybe_te_float8_ctx:
+                        pred = model(input_ids)
+                        loss = loss_fn(pred, labels)
+                        # pred.shape=(bs, seq_len, vocab_size)
+                        # need to free to before bwd to avoid peaking memory
+                        del pred
+                        loss.backward()
 
             # clip gradients
             utils.clip_grad_norm_(

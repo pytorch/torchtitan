@@ -22,6 +22,7 @@ from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
+		apply_activation_checkpointing,
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -75,7 +76,7 @@ def parallelize_llama(
                 "fused_rmsnorm is not compatible with torch.compile yet. "
                 "Please use rmsnorm or layernorm."
             )
-        apply_compile(model)
+        apply_compile(model, job_config)
 
     if (
         parallel_dims.dp_shard_enabled
@@ -243,8 +244,20 @@ _save_list = {
 }
 
 
+import transformer_engine.pytorch as te
+rng_seed = 1234
+torch.manual_seed(rng_seed)
+torch.cuda.manual_seed(rng_seed)
+CUDA_RNG_STATES_TRACKER = te.distributed.CudaRNGStatesTracker()
+CUDA_RNG_STATES_TRACKER.add("model-parallel-rng", rng_seed)
+
+
+def get_cuda_rng_tracker():
+    return CUDA_RNG_STATES_TRACKER
+
+
 def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
-    valid_ac_modes = ("full", "selective")
+    valid_ac_modes = ("full", "selective", "full_te")
     if ac_config.mode not in valid_ac_modes:
         raise ValueError(
             f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
@@ -252,6 +265,23 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
 
     if ac_config.mode == "full":
         return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+    elif ac_config.mode == "full_te":
+        # copy-paste from https://github.com/NVIDIA/TransformerEngine/blob/64126aa8c469b2a97ace01f925f3d5786d5fd1bb/examples/pytorch/fsdp/fsdp.py, apply_fsdp_checkpointing
+        # note:
+        # LLaMa 3 8B on 8 H100s with this option: 
+        # 42.27 GiB, 4880 tps, strictly worse than PT-D's full AC. Have not done debugging
+        # on the cause yet.
+
+        wrapper = lambda m: ptd_checkpoint_wrapper(
+            m,
+            checkpoint_fn=te.distributed.checkpoint,
+            use_reentrant=False,
+            get_rng_state_tracker=get_cuda_rng_tracker,
+        )
+        def check_fn(submodule):
+            return True
+        apply_activation_checkpointing(module, checkpoint_wrapper_fn=wrapper, check_fn=check_fn)
+        return module
 
     assert ac_config.mode == "selective", f"{ac_config.mode}"
     use_op_sac = ac_config.selective_ac_option == "op"
@@ -314,16 +344,55 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, job_config):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
-        model.layers.register_module(layer_id, transformer_block)
+    if job_config.training.compile_ln_mlp:
+        def _apply_compile(mod):
+            for name, child in mod.named_children():
+                # hacky check, but good enough for this use case
+                # if isinstance(child, torch.nn.Sequential) and len(child) == 2:
+                if name == 'feed_forward':
+                    new_child = torch.compile(child)
+                    setattr(mod, name, new_child)
+                else:
+                    _apply_compile(child)
+                
+        logger.info("Compiling each LNMLP with torch.compile")
+        _apply_compile(model)
+    elif job_config.training.compile_ln_linear:
+        def _apply_compile(mod):
+            for name, child in mod.named_children():
+                # hacky check, but good enough for this use case
+                if isinstance(child, torch.nn.Sequential) and len(child) == 2:
+                    new_child = torch.compile(child)
+                    setattr(mod, name, new_child)
+                else:
+                    _apply_compile(child)
+                
+        logger.info("Compiling each LNLinear with torch.compile")
+        _apply_compile(model)
+    elif job_config.training.compile_linear:
+        def _apply_compile(mod):
+            for name, child in mod.named_children():
+                # hacky check, but good enough for this use case
+                if isinstance(child, torch.nn.Linear):
+                    new_child = torch.compile(child)
+                    setattr(mod, name, new_child)
+                else:
+                    _apply_compile(child)
+                
+        logger.info("Compiling each Linear with torch.compile")
+        _apply_compile(model)
+    else:
+        for layer_id, transformer_block in model.layers.named_children():
+            # transformer_block = torch.compile(transformer_block, fullgraph=True)
+            transformer_block = torch.compile(transformer_block, fullgraph=False)
+            model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+        logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def apply_fsdp(
