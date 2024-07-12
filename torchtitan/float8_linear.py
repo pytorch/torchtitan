@@ -15,6 +15,8 @@
 import contextlib
 
 import float8_experimental.config as config
+
+import torch
 import torch.nn as nn
 from float8_experimental.float8_linear import TensorScalingType
 
