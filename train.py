@@ -31,6 +31,7 @@ from torchtitan.float8_linear import (
     maybe_build_fp8_linear,
     maybe_precompute_fp8_dynamic_scale_for_fsdp,
 )
+import torchtitan.te_utils as te_utils
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
@@ -238,6 +239,10 @@ def main(job_config: JobConfig):
     # swap to Float8Linear base on fp8 config
     maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
+    # not for land - set up TransformerEngine
+    if job_config.training.use_te:
+        te_utils.swap_linear_to_te_linear(whole_model)
+
     # log model size
     model_param_count = get_num_params(whole_model)
     num_flop_per_token = get_num_flop_per_token(
@@ -377,7 +382,11 @@ def main(job_config: JobConfig):
             labels = labels.cuda()
             optimizers.zero_grad()
 
+            # not for land - set up TransformerEngine fp8 autocast
+            maybe_te_float8_ctx = te_utils.get_maybe_fp8_autocast(job_config)
+
             if parallel_dims.pp_enabled:
+                assert not job_config.training.use_te, "unsupported"
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
@@ -399,7 +408,8 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context():
-                    pred = model(input_ids)
+                    with maybe_te_float8_ctx:
+                        pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
