@@ -40,9 +40,6 @@ if TYPE_CHECKING:
 
 DeviceType = Union[int, str, torch.device]
 
-import torch._functorch.config as functorch_config
-functorch_config.activation_memory_budget = 0.0
-
 # for selective AC
 no_recompute_list = {
     torch.ops.aten.mm.default,
@@ -428,7 +425,7 @@ def apply_ac(model: nn.Module, job_config: JobConfig):
         transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model with {functorch_config.activation_memory_budget=}")
+    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
     return model
 
 

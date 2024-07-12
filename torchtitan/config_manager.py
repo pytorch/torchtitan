@@ -354,10 +354,10 @@ class JobConfig:
             help="Whether enable fp8 all-gather in FSDP",
         )
         self.parser.add_argument(
-            "--training.precompute_float8_amax",
+            "--training.precompute_float8_dynamic_scale_for_fsdp",
             action="store_true",
             default=False,
-            help="Whether precompute fp8 amax for FSDP",
+            help="Whether precompute fp8 scales dynamically for FSDP",
         )
         self.parser.add_argument(
             "--training.gc_freq",

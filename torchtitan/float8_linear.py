@@ -20,6 +20,8 @@ import torch.distributed as dist
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 import float8_experimental.config as config
+from float8_experimental.float8_linear import TensorScalingType
+
 
 @contextlib.contextmanager
 def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):
@@ -54,5 +56,5 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
     if use_fp8_linear:
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         with set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather):
-            swap_linear_with_float8_linear(model, Float8Linear)
+            swap_linear_with_float8_linear(model, scaling_type_w=TensorScalingType.DYNAMIC)
         logger.info(f"Swapped to Float8Linear layers with {enable_fsdp_fp8_all_gather=}")
