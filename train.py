@@ -19,11 +19,11 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from float8_experimental.fsdp_utils import precompute_float8_dynamic_scale_for_fsdp
 from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
-from float8_experimental.fsdp_utils import precompute_float8_dynamic_scale_for_fsdp
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
