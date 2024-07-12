@@ -371,6 +371,20 @@ class JobConfig:
             help="Whether precompute float8 scales dynamically for FSDP",
         )
         self.parser.add_argument(
+            "--training.use_te",
+            action="store_true",
+            help="""
+                If true, uses TransformerEngine (not for land)
+            """,
+        )
+        self.parser.add_argument(
+            "--training.use_te_float8",
+            action="store_true",
+            help="""
+                If true, enables TransformerEngine's float8 integration (not for land)
+            """,
+        )
+        self.parser.add_argument(
             "--training.gc_freq",
             type=int,
             default=50,
