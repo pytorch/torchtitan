@@ -21,6 +21,8 @@ if [ $# -ne 0 ]; then
     overrides="$*"
 fi
 
-torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
---local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-train.py --job.config_file ${CONFIG_FILE} $overrides
+# Calculate WORLD_SIZE as the product of NGPU and NNODES
+# Export WORLD_SIZE and LOCAL_RANK
+export WORLD_SIZE=$((NGPU * NNODES))
+export LOCAL_RANK=0
+python estimation.py --job.config_file ${CONFIG_FILE} --memory_estimation.enabled $overrides
