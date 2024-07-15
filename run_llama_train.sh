@@ -11,7 +11,6 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
 NGPU=${NGPU:-"8"}
-TRAINER_DIR=${TRAINER_DIR:-/home/$USER/local/torchtitan}
 LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
 

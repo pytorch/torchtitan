@@ -12,7 +12,6 @@ set -ex
 # NGPU=4 ./run_memory_estimation.sh
 NGPU=${NGPU:-"8"}
 NNODES=${NNODES:-"1"}
-TRAINER_DIR=${TRAINER_DIR:-/home/$USER/local/torchtitan}
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
 
 overrides=""
