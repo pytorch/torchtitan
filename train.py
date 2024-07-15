@@ -405,13 +405,13 @@ def main(job_config: JobConfig):
             lr_schedulers.step()
 
             if job_config.training.precompute_float8_dynamic_scale_for_fsdp:
-                if (not job_config.training.use_fp8_linear) or (
+                if (not job_config.training.fp8_linear) or (
                     not job_config.training.enable_fsdp_fp8_all_gather
                 ):
                     raise ValueError(
-                        "precompute_float8_dynamic_scale_for_fsdp is only ",
-                        "supported when use_fp8_linear and ",
-                        "enable_fsdp_fp8_all_gather are both enabled.",
+                        "precompute_float8_dynamic_scale_for_fsdp is only "
+                        "supported when fp8_linear and "
+                        "enable_fsdp_fp8_all_gather are both enabled"
                     )
                 precompute_float8_dynamic_scale_for_fsdp(model)
 
