@@ -18,7 +18,6 @@
 
 set -ex
 
-export USE_LIBUV=1
 TRAINER_DIR=${1:-/home/$USER/local/torchtitan}
 NGPU=1
 LOG_RANK=0
