@@ -139,6 +139,9 @@ class AdamWMini(torch.optim.Optimizer):
 
                         state["m"] = torch.zeros_like(p, dtype=torch.float32)
                         state["step"] = 0
+                        # NOTE: We must use `new_zeros` for vmean to be a
+                        # DTensor (not `torch.Tensor`) for DTensor parameters.
+                        # state["vmean"] = torch.zeros(1, device=p.device)
                         state["vmean"] = p.new_zeros(1)
                         state["dim"] = dim
 
