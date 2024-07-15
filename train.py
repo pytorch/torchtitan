@@ -219,6 +219,11 @@ def main(job_config: JobConfig):
     # apply fp8 linear module swap
     if job_config.training.fp8_linear:
         build_fp8_linear(whole_model, job_config)
+    else:
+        if job_config.training.enable_fsdp_fp8_all_gather:
+            raise ValueError(
+                "enable_fsdp_fp8_all_gather can only be used with fp8_linear"
+            )
 
     # log model size
     model_param_count = get_num_params(whole_model)
@@ -400,6 +405,14 @@ def main(job_config: JobConfig):
             lr_schedulers.step()
 
             if job_config.training.precompute_float8_dynamic_scale_for_fsdp:
+                if (not job_config.training.use_fp8_linear) or (
+                    not job_config.training.enable_fsdp_fp8_all_gather
+                ):
+                    raise ValueError(
+                        "precompute_float8_dynamic_scale_for_fsdp is only ",
+                        "supported when use_fp8_linear and ",
+                        "enable_fsdp_fp8_all_gather are both enabled.",
+                    )
                 precompute_float8_dynamic_scale_for_fsdp(model)
 
             losses_since_last_log.append(loss)

@@ -279,8 +279,8 @@ def build_test_list():
                     "--training.fp8_linear",
                 ]
             ],
-            "FSDP2 with bf16 all-gather",
-            "fp8_fsdp2_bf16_all_gather",
+            "FSDP2 with original dtype",
+            "fp8_fsdp2_orig_all_gather",
             ngpu=4,
         ),
         OverrideDefinitions(
