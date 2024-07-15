@@ -1,8 +1,9 @@
 import math
-from typing import Iterable, Tuple, Union, Optional
+from typing import Iterable, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+
 
 class AdamWMini(torch.optim.Optimizer):
     def __init__(
@@ -39,7 +40,7 @@ class AdamWMini(torch.optim.Optimizer):
             raise ValueError("Invalid n_heads value: {}".format(self.n_heads))
         if not self.n_kv_heads == int(self.n_kv_heads):
             raise ValueError("Invalid n_kv_heads value: {}".format(self.n_kv_heads))
-        
+
         optim_groups = []
         count_embd = count_output = count_wq = count_wk = 0
         for param_name, param in named_parameters:
@@ -58,17 +59,21 @@ class AdamWMini(torch.optim.Optimizer):
                 count_output += 1
             if "q_proj.weight" in param_name or "wq.weight" in param_name:
                 count_wq += 1
-                assert (self.dim * self.dim) % self.n_heads == 0, f"{self.dim} {self.n_heads}"
+                assert (
+                    self.dim * self.dim
+                ) % self.n_heads == 0, f"{self.dim} {self.n_heads}"
                 state["head_numel"] = self.dim * self.dim // self.n_heads
             if "k_proj.weight" in param_name or "wk.weight" in param_name:
                 count_wk += 1
-                assert (self.dim * self.dim) % self.n_heads == 0, f"{self.dim} {self.n_heads}"
+                assert (
+                    self.dim * self.dim
+                ) % self.n_heads == 0, f"{self.dim} {self.n_heads}"
                 state["head_numel"] = self.dim * self.dim // self.n_heads
             optim_groups.append(state)
 
         self.embd_names = {"embed", "embd", "wte", "lm_head.weight", "output.weight"}
         self.wqk_names = {"k_proj.weight", "q_proj.weight", "wq.weight", "wk.weight"}
-        
+
         defaults = dict(lr=lr, beta1=betas[0], beta2=betas[1], eps=eps)
         super().__init__(optim_groups, defaults)
 
@@ -90,7 +95,7 @@ class AdamWMini(torch.optim.Optimizer):
                         state["m"] = torch.zeros_like(p, dtype=torch.float32)
                         state["step"] = 0
                         state["v"] = torch.zeros_like(p, dtype=torch.float32)
-                    
+
                     grad = p.grad.to(torch.float32)
                     state["v"].mul_(beta2).addcmul_(grad, grad.conj(), value=1 - beta2)
                     state["step"] += 1
@@ -113,8 +118,10 @@ class AdamWMini(torch.optim.Optimizer):
                         # NOTE: We must use `zeros_like` for vmean to be a
                         # DTensor (not `torch.Tensor`) for DTensor parameters.
                         # state["vmean"] = torch.zeros(state["head"])
-                        state["vmean"] = torch.zeros_like(state["m"][0:state["head"], 0:1])
-                    
+                        state["vmean"] = torch.zeros_like(
+                            state["m"][0 : state["head"], 0:1]
+                        )
+
                     grad = p.grad.to(torch.float32)
                     head = state["head"]
                     grad = grad.view(head, dim)
