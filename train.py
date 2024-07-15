@@ -32,6 +32,7 @@ from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.optims.adamw_mini import AdamWMini
 from torchtitan.parallelisms import (
     models_parallelize_fns,
     models_pipelining_fns,
@@ -113,6 +114,13 @@ def build_optimizers(model_parts, job_config: JobConfig):
             optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
         elif name == "AdamW":
             optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+        elif name == "AdamWMini":
+            optimizer_kwargs.pop("fused")
+            optimizer_kwargs.pop("foreach")
+            optimizer_kwargs["dim"] = model.model_args.dim
+            optimizer_kwargs["n_heads"] = model.model_args.n_heads
+            optimizer_kwargs["n_kv_heads"] = model.model_args.n_kv_heads
+            optimizer = AdamWMini(model.named_parameters(), **optimizer_kwargs)
         else:
             raise NotImplementedError(f"Optimizer {name} not added.")
 
@@ -381,7 +389,10 @@ def main(job_config: JobConfig):
                 # Non-PP forward / backward
                 with loss_parallel_ctx():
                     pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
+                    if job_config.training.compile:
+                        loss = torch.compile(loss_fn)(pred, labels)
+                    else:
+                        loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
