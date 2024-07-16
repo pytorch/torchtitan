@@ -36,24 +36,26 @@ def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):
         config.enable_fsdp_fp8_all_gather = prev
 
 
-def build_fp8_linear(model: nn.Module, job_config: JobConfig):
+def build_fp8_linear(
+    model: nn.Module, job_config: JobConfig, dp_enabled: Optional[bool] = False
+):
     """
     This function converts the linear layers to `Float8Linear`. Note that today,
     only dynamic tensor scaling (the default) is supported.
 
     This will mutate the model inplace.
     """
-    use_fp8_linear = job_config.training.fp8_linear
-    enable_fsdp_fp8_all_gather = job_config.training.enable_fsdp_fp8_all_gather
+    enable_fp8_linear = job_config.training.enable_fp8_linear
+    if not enable_fp8_linear:
+        return
+    enable_fsdp_fp8_all_gather = (
+        job_config.training.enable_fsdp_fp8_all_gather and dp_enabled
+    )
     try:
         from float8_experimental.float8_linear_utils import (
             swap_linear_with_float8_linear,
         )
-    except ImportError as exc:
-        raise ImportError(
-            "float8_experimental is not installed. Please install it to use fp8 linear layers."
-        ) from exc
-    if use_fp8_linear:
+
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         with set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather):
             swap_linear_with_float8_linear(
@@ -62,3 +64,7 @@ def build_fp8_linear(model: nn.Module, job_config: JobConfig):
         logger.info(
             f"Swapped to Float8Linear layers with {enable_fsdp_fp8_all_gather=}"
         )
+    except ImportError as exc:
+        raise ImportError(
+            "float8_experimental is not installed. Please install it to use fp8 linear layers."
+        ) from exc

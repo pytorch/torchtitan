@@ -117,12 +117,22 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
 
 def get_tp_parallel_strategy(
     job_config: JobConfig,
+    model: nn.Module,
 ) -> Tuple[RowwiseParallel, ColwiseParallel, PrepareModuleInput]:
     """Get the parallel strategy for the transformer model.
 
     This function handles the special case of using float8 with tensor parallelism.
     """
-    if job_config.training.fp8_linear == "dynamic":
+    if job_config.training.enable_fp8_linear:
+        from float8_experimental.float8_linear import Float8Linear, TensorScalingType
+
+        if any(
+            isinstance(m, Float8Linear)
+            and m.scaling_type_w is TensorScalingType.DELAYED
+            for m in module.modules()
+        ):
+            raise NotImplementedError("Only supports delayed scaling")
+
         from float8_experimental.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
@@ -346,7 +356,7 @@ def apply_tp(
         rowwise_parallel_weight,
         colwise_parallel_weight,
         prepare_module_input,
-    ) = get_tp_parallel_strategy(job_config)
+    ) = get_tp_parallel_strategy(job_config, model)
     loss_parallel = parallel_dims.loss_parallel_enabled
 
     # 1. Parallelize the embedding and shard its outputs (which are the first

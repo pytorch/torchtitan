@@ -338,7 +338,7 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
-            "--training.fp8_linear",
+            "--training.enable_fp8_linear",
             action="store_true",
             help="""
                 If true, swaps `torch.nn.Linear` with `Float8Linear` with
