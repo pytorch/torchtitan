@@ -30,6 +30,7 @@ class ParallelDims:
     world_size: int
     enable_loss_parallel: bool
     dp_type: str
+    dp_replicate: int
 
     def __post_init__(self):
         self.dp_type = self.dp_type.lower()
@@ -40,6 +41,7 @@ class ParallelDims:
         if dp == -1:
             self.dp = dp = self.world_size // (cp * tp * pp)
         assert dp >= 1, dp
+        assert dp % self.dp_replicate, (self.dp_replicate, dp)
         assert cp >= 1, cp
         assert tp >= 1, tp
         assert pp >= 1, pp
@@ -47,13 +49,13 @@ class ParallelDims:
             f"Invalid parallel dims: dp({dp}) * cp ({cp}) * tp({tp}) * pp({pp}) "
             f"!= WORLD_SIZE({self.world_size})"
         )
-        assert self.dp_type in ("fsdp", "ddp")
+        assert self.dp_type in ("fsdp", "ddp", "hsdp")
 
     def build_mesh(self, device_type):
         dims = []
         names = []
         for d, name in zip(
-            [self.pp, self.dp, self.cp, self.tp], ["pp", "dp", "cp", "tp"], strict=True
+            [self.pp, self.dp * self.cp, self.tp], ["pp", "dp", "tp"], strict=True
         ):
             if d > 1:
                 dims.append(d)

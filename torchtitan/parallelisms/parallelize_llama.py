@@ -463,7 +463,11 @@ def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
         raise NotImplementedError("CP + TP or CP + PP are not supported yet.")
-    cp_mesh = world_mesh["cp"]
+    dp_mesh = world_mesh["dp"]
+    cp_mesh = dp_mesh.reshape(
+        (dp_mesh.size() // parallel_dims.cp, parallel_dims.cp),
+        ("dp", "cp")
+    )
     callers = []
     for layer_id, transformer_block in model.layers.items():
         callers.append(transformer_block.attention)
@@ -484,17 +488,17 @@ def apply_fsdp(
     Apply data parallelism to the model. FSDP2 is used here.
     """
 
-    if parallel_dims.cp_enabled:
-        # Temporary solution to enable FSDP + CP
-        dp_mesh = init_device_mesh(
-            world_mesh.device_type,
-            (parallel_dims.dp * parallel_dims.cp,),
-            mesh_dim_names=["dp"],
-        )
-    else:
+    # This mesh also includes cp degree if it is larger than 1.
+    if parallel_dims.dp_type == "fsdp":
         dp_mesh = world_mesh["dp"]
-
-    assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+    else:
+        assert parallel_dims.dp_type == "hsdp", parallel_dims.dp_type
+        dp_mesh = world_mesh["dp"]
+        dp_mesh = dp_mesh.reshape(
+            (parallel_dims.dp_replicate, dp_mesh.size() // parallel_dims.dp_replicate),
+            ("dp_replicate", "dp_shard")
+        )
+    # assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
