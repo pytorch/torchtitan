@@ -47,8 +47,6 @@ def build_fp8_linear(
     This will mutate the model inplace.
     """
     enable_fp8_linear = job_config.training.enable_fp8_linear
-    if not enable_fp8_linear:
-        return
     enable_fsdp_fp8_all_gather = (
         job_config.training.enable_fsdp_fp8_all_gather and dp_enabled
     )
