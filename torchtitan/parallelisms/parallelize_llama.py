@@ -27,7 +27,6 @@ except ImportError:
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -465,8 +464,7 @@ def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
         raise NotImplementedError("CP + TP or CP + PP are not supported yet.")
     dp_mesh = world_mesh["dp"]
     cp_mesh = dp_mesh.reshape(
-        (dp_mesh.size() // parallel_dims.cp, parallel_dims.cp),
-        ("dp", "cp")
+        (dp_mesh.size() // parallel_dims.cp, parallel_dims.cp), ("dp", "cp")
     )
     callers = []
     for layer_id, transformer_block in model.layers.items():
@@ -483,7 +481,6 @@ def apply_fsdp(
     parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
-
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
@@ -496,7 +493,7 @@ def apply_fsdp(
         dp_mesh = world_mesh["dp"]
         dp_mesh = dp_mesh.reshape(
             (parallel_dims.dp_replicate, dp_mesh.size() // parallel_dims.dp_replicate),
-            ("dp_replicate", "dp_shard")
+            ("dp_replicate", "dp_shard"),
         )
     # assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
