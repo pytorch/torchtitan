@@ -129,9 +129,9 @@ def get_tp_parallel_strategy(
         if any(
             isinstance(m, Float8Linear)
             and m.scaling_type_w is TensorScalingType.DELAYED
-            for m in module.modules()
+            for m in model.modules()
         ):
-            raise NotImplementedError("Only supports delayed scaling")
+            raise NotImplementedError("1D TP fp8 all-gather only supports dynamic scaling")
 
         from float8_experimental.float8_tensor_parallel import (
             Float8ColwiseParallel,

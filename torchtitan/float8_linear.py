@@ -13,6 +13,7 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 import contextlib
+from typing import Optional
 
 import float8_experimental.config as config
 
