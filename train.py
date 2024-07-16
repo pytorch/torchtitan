@@ -19,7 +19,6 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from float8_experimental.fsdp_utils import precompute_float8_dynamic_scale_for_fsdp
 from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -404,6 +403,10 @@ def main(job_config: JobConfig):
                 and job_config.training.enable_fsdp_fp8_all_gather
                 and job_config.training.precompute_float8_dynamic_scale_for_fsdp
             ):
+                from float8_experimental.fsdp_utils import (
+                    precompute_float8_dynamic_scale_for_fsdp,
+                )
+
                 # calculate float8 dynamic amax/scale for all-parameter for FSDP2
                 # it issues a single all-reduce for all parameters at once for better performance
                 precompute_float8_dynamic_scale_for_fsdp(model)
