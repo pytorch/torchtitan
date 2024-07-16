@@ -176,7 +176,7 @@ def main(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
-        dp_type=job_config.experimental.data_parallel_type,
+        dp_type=job_config.training.data_parallel_type,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)

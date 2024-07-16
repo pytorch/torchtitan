@@ -42,6 +42,8 @@ def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
     elif norm_type == "rmsnorm":
         return RMSNorm(dim, eps=eps)
+    elif norm_type == "compiled_rmsnorm":
+        return RMSNorm(dim, eps=eps, compile=True)
     elif norm_type == "fused_rmsnorm":
         return FusedRMSNorm(dim, eps=eps)
     else:
@@ -87,17 +89,26 @@ class RMSNorm(nn.Module):
 
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, compile: bool = False):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
+        self.rmsnorm_fn = (
+            torch.compile(self.compute_rmsnorm, fullgraph=True)
+            if compile
+            else self.compute_rmsnorm
+        )
 
-    def _norm(self, x: torch.Tensor):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    @staticmethod
+    def compute_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
+        def _norm(x, eps):
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+
+        output = _norm(x.float(), eps).type_as(x)
+        return output * weight
 
     def forward(self, x: torch.Tensor):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        return self.rmsnorm_fn(x, self.weight, self.eps)
 
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)  # type: ignore

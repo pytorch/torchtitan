@@ -57,8 +57,12 @@ def estimate_memory(job_config: JobConfig):
         )
         job_config.model.norm_type = "rmsnorm"
 
+    if job_config.model.norm_type == "compiled_rmsnorm":
+        logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
+        job_config.model.norm_type = "rmsnorm"
+
     if job_config.training.compile:
-        logger.info("Compile mode is not supported yet. " "Switching to Eager mode.")
+        logger.info("Compile mode is not supported yet. Switching to eager mode.")
         job_config.training.compile = False
 
     parallel_dims = ParallelDims(
@@ -68,7 +72,7 @@ def estimate_memory(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
-        dp_type=job_config.experimental.data_parallel_type,
+        dp_type=job_config.training.data_parallel_type,
     )
 
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")

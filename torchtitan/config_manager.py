@@ -165,7 +165,7 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, compiled_rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -313,7 +313,7 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--experimental.data_parallel_type",
+            "--training.data_parallel_type",
             type=str,
             default="fsdp",
             help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",
@@ -549,10 +549,11 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
 
     def parse_args_from_command_line(
         self, args_list
