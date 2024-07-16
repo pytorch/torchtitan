@@ -276,7 +276,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.fp8_linear",
+                    "--training.enable_fp8_linear",
                 ]
             ],
             "FSDP2 with original dtype",
@@ -286,7 +286,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.fp8_linear",
+                    "--training.enable_fp8_linear",
                     "--training.data_parallel_degree 1"
                     "--training.tensor_parallel_degree 4",
                 ]
@@ -298,24 +298,37 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.fp8_linear",
+                    "--training.enable_fp8_linear",
                     "--training.enable_fsdp_fp8_all_gather",
                 ]
             ],
             "FSDP2 with fp8 all-gather",
-            "fp8_fsdp2_fp8_all_gather",
+            "fsdp2_fp8_all_gather",
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--training.fp8_linear",
+                    "--training.enable_fp8_linear",
                     "--training.enable_fsdp_fp8_all_gather",
                     "--training.precompute_float8_dynamic_scale_for_fsdp",
                 ]
             ],
             "FSDP2 with fp8 all-gather and precomputed dynamic scales",
-            "fp8_fsdp2_fp8_all_gather_precompute_dynamic_scales",
+            "fsdp2_fp8_all_gather_precompute_dynamic_scales",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_fp8_linear",
+                    "--training.enable_fsdp_fp8_all_gather",
+                    "--training.precompute_float8_dynamic_scale_for_fsdp",
+                    "--training.tensor_parallel_degree 2",
+                ]
+            ],
+            "FSDP2 with fp8 all-gather and precomputed dynamic scales",
+            "fsdp2_tp_fp8_all_gather_precompute_dynamic_scales",
             ngpu=4,
         ),
     ]
