@@ -19,6 +19,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+from float8_experimental.fsdp_utils import precompute_float8_dynamic_scale_for_fsdp
 from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -216,8 +217,8 @@ def main(job_config: JobConfig):
         whole_model = model_cls.from_model_args(model_config)
 
     # apply fp8 linear module swap
-    if job_config.training.fp8_linear:
-        build_fp8_linear(whole_model, job_config)
+    if job_config.training.enable_fp8_linear:
+        build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
     # log model size
     model_param_count = get_num_params(whole_model)
@@ -397,6 +398,15 @@ def main(job_config: JobConfig):
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
+
+            if (
+                job_config.training.enable_fp8_linear
+                and job_config.training.enable_fsdp_fp8_all_gather
+                and job_config.training.precompute_float8_dynamic_scale_for_fsdp
+            ):
+                # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+                # it issues a single all-reduce for all parameters at once for better performance
+                precompute_float8_dynamic_scale_for_fsdp(model)
 
             losses_since_last_log.append(loss)
 
