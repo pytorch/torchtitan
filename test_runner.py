@@ -273,6 +273,17 @@ def build_test_list():
             "fsdp2_mem_tracker",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_type ddp",
+                    "--experimental.enable_compiled_autograd",
+                ]
+            ],
+            "CompiledDDP",
+            "compiled_ddp",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 

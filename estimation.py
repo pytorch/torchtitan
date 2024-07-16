@@ -67,10 +67,12 @@ def estimate_memory(job_config: JobConfig):
 
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
+        dp_type=job_config.training.data_parallel_type,
     )
 
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
