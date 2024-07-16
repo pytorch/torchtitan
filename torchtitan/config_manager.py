@@ -338,7 +338,7 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
-            "--training.fp8_linear",
+            "--training.enable_fp8_linear",
             action="store_true",
             help="""
                 If true, swaps `torch.nn.Linear` with `Float8Linear` with
@@ -346,6 +346,18 @@ class JobConfig:
                 This feature requires you to install 'float8_experimental' which can be found
                 here: https://github.com/pytorch-labs/float8_experimental
             """,
+        )
+        self.parser.add_argument(
+            "--training.enable_fsdp_fp8_all_gather",
+            action="store_true",
+            default=False,
+            help="Whether enable fp8 all-gather in FSDP",
+        )
+        self.parser.add_argument(
+            "--training.precompute_float8_dynamic_scale_for_fsdp",
+            action="store_true",
+            default=False,
+            help="Whether precompute fp8 scales dynamically for FSDP",
         )
         self.parser.add_argument(
             "--training.gc_freq",
