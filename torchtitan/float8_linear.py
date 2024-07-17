@@ -25,7 +25,7 @@ from torchtitan.logging_utils import logger
 
 
 @contextlib.contextmanager
-def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):
+def set_enable_fsdp_float8_all_gather(enable_fsdp_fp8_all_gather: bool):
     import float8_experimental.config as config
 
     prev = config.enable_fsdp_fp8_all_gather
@@ -53,8 +53,8 @@ def maybe_build_fp8_linear(
 
     This will mutate the model inplace.
     """
-    enable_fp8_linear = job_config.training.enable_fp8_linear
-    if not enable_fp8_linear:
+    enable_float8_linear = job_config.training.enable_float8_linear
+    if not enable_float8_linear:
         return
     if not is_sm90_or_later():
         warning_once(
@@ -69,15 +69,15 @@ def maybe_build_fp8_linear(
         )
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
-        enable_fsdp_fp8_all_gather = (
-            job_config.training.enable_fsdp_fp8_all_gather and dp_enabled
+        enable_fsdp_float8_all_gather = (
+            job_config.training.enable_fsdp_float8_all_gather and dp_enabled
         )
-        with set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather):
+        with set_enable_fsdp_float8_all_gather(enable_fsdp_float8_all_gather):
             swap_linear_with_float8_linear(
                 model, scaling_type_w=TensorScalingType.DYNAMIC
             )
         logger.info(
-            f"Swapped to Float8Linear layers with {enable_fsdp_fp8_all_gather=}"
+            f"Swapped to Float8Linear layers with {enable_fsdp_float8_all_gather=}"
         )
     except ImportError as exc:
         raise ImportError(
@@ -89,8 +89,8 @@ def maybe_precompute_fp8_dynamic_scale_for_fsdp(
     model: nn.Module, job_config: JobConfig
 ):
     if not (
-        job_config.training.enable_fp8_linear
-        and job_config.training.enable_fsdp_fp8_all_gather
+        job_config.training.enable_float8_linear
+        and job_config.training.enable_fsdp_float8_all_gather
         and job_config.training.precompute_float8_dynamic_scale_for_fsdp
     ):
         return
