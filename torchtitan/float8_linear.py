@@ -15,11 +15,8 @@
 import contextlib
 from typing import Optional
 
-import float8_experimental.config as config
-
 import torch
 import torch.nn as nn
-from float8_experimental.float8_linear import TensorScalingType
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
@@ -27,6 +24,8 @@ from torchtitan.logging_utils import logger
 
 @contextlib.contextmanager
 def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):
+    import float8_experimental.config as config
+
     prev = config.enable_fsdp_fp8_all_gather
     torch.distributed.barrier()
     config.enable_fsdp_fp8_all_gather = enable_fsdp_fp8_all_gather
@@ -51,6 +50,7 @@ def build_fp8_linear(
         job_config.training.enable_fsdp_fp8_all_gather and dp_enabled
     )
     try:
+        from float8_experimental.float8_linear import TensorScalingType
         from float8_experimental.float8_linear_utils import (
             swap_linear_with_float8_linear,
         )
