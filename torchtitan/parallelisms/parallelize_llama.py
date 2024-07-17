@@ -123,18 +123,10 @@ def get_tp_parallel_strategy(
 
     This function handles the special case of using float8 with tensor parallelism.
     """
-    if job_config.training.enable_fp8_linear:
-        from float8_experimental.float8_linear import Float8Linear, TensorScalingType
-
-        if any(
-            isinstance(m, Float8Linear)
-            and m.scaling_type_w is TensorScalingType.DELAYED
-            for m in model.modules()
-        ):
-            raise NotImplementedError(
-                "1D TP fp8 all-gather only supports dynamic scaling"
-            )
-
+    if job_config.training.enable_float8_linear:
+        # TODO(future PR): once float8 configuration supports delayed
+        # scaling, add a check here to enforce supported float8 all-gather
+        # configurations
         from float8_experimental.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
