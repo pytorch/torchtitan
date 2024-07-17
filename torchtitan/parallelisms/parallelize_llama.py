@@ -465,7 +465,7 @@ def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
     dp_mesh = world_mesh["dp"]
     cp_mesh = dp_mesh.reshape(
         (dp_mesh.size() // parallel_dims.cp, parallel_dims.cp), ("dp", "cp")
-    )
+    )["cp"]
     callers = []
     for layer_id, transformer_block in model.layers.items():
         callers.append(transformer_block.attention)
