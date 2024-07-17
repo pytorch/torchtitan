@@ -220,7 +220,7 @@ def main(job_config: JobConfig):
     )
 
     if parallel_dims.cp_enabled:
-        cp_mesh = world_mesh["cp"]
+        cp_mesh = world_mesh["dp"].reshape((-1, parallel_dims.cp), ("dp", "cp"))["cp"]
         context_parallel_ctx = partial(
             context_parallel_buffers,
             cp_rank=cp_mesh.get_local_rank(),
