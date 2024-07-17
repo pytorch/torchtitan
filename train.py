@@ -27,7 +27,10 @@ from torch.distributed.tensor.parallel import loss_parallel
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
-from torchtitan.float8_linear import build_fp8_linear, SM90OrLater
+from torchtitan.float8_linear import (
+    maybe_build_fp8_linear,
+    maybe_precompute_fp8_dynamic_scale_for_fsdp,
+)
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
@@ -215,9 +218,8 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         whole_model = model_cls.from_model_args(model_config)
 
-    # apply fp8 linear module swap
-    if SM90OrLater and job_config.training.enable_fp8_linear:
-        build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
+    # swap to Float8Linear base on fp8 config
+    maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
     # log model size
     model_param_count = get_num_params(whole_model)
@@ -398,19 +400,10 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
-            if (
-                SM90OrLater
-                and job_config.training.enable_fp8_linear
-                and job_config.training.enable_fsdp_fp8_all_gather
-                and job_config.training.precompute_float8_dynamic_scale_for_fsdp
-            ):
-                from float8_experimental.fsdp_utils import (
-                    precompute_float8_dynamic_scale_for_fsdp,
-                )
-
-                # calculate float8 dynamic amax/scale for all-parameter for FSDP2
-                # it issues a single all-reduce for all parameters at once for better performance
-                precompute_float8_dynamic_scale_for_fsdp(model)
+            # when fp8 config is on,
+            # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+            # it issues a single all-reduce for all parameters at once for better performance
+            maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)
 
             losses_since_last_log.append(loss)
 
