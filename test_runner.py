@@ -277,11 +277,10 @@ def build_test_list():
             [
                 [
                     "--training.data_parallel_type ddp",
-                    "--experimental.enable_compiled_autograd",
                 ]
             ],
-            "CompiledDDP",
-            "compiled_ddp",
+            "DDP",
+            "ddp",
             ngpu=4,
         ),
     ]
