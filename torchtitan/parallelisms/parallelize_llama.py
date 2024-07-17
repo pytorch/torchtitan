@@ -441,12 +441,9 @@ def apply_compile(model: nn.Module, job_config: JobConfig):
     #                remove it after it's enabled in pytorch by default
     torch._dynamo.config.inline_inbuilt_nn_modules = True
 
-    for layer_id, transformer_block in model.layers.named_children():
-        # turn on per-transformer block compile after AC wrapping and before FSDP
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
-        model.layers.register_module(layer_id, transformer_block)
+    model = torch.compile(model)
+    logger.info("Compiling the whole model with torch.compile")
 
-    logger.info("Compiled each TransformerBlock with torch.compile")
     return model
 
 
@@ -514,11 +511,12 @@ def parallelize_llama(
     if job_config.activation_checkpoint.mode != "none":
         model = apply_ac(model, job_config)
 
-    if job_config.training.compile:
-        model = apply_compile(model, job_config)
-
     if parallel_dims.dp_enabled:
         model = apply_dp(model, world_mesh, parallel_dims, job_config)
+
+    # whole-model compile should happen after FSDP wrapping
+    if job_config.training.compile:
+        model = apply_compile(model, job_config)
 
     return model
 
