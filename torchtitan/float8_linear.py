@@ -21,6 +21,9 @@ import torch.nn as nn
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 
+# Float8 is only supported on H100+ GPUs
+SM90OrLater = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0)
+
 
 @contextlib.contextmanager
 def set_enable_fsdp_fp8_all_gather(enable_fsdp_fp8_all_gather: bool):

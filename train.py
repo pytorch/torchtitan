@@ -27,7 +27,7 @@ from torch.distributed.tensor.parallel import loss_parallel
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
-from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.float8_linear import build_fp8_linear, SM90OrLater
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
@@ -216,7 +216,7 @@ def main(job_config: JobConfig):
         whole_model = model_cls.from_model_args(model_config)
 
     # apply fp8 linear module swap
-    if job_config.training.enable_fp8_linear:
+    if SM90OrLater and job_config.training.enable_fp8_linear:
         build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
     # log model size
@@ -399,7 +399,8 @@ def main(job_config: JobConfig):
             lr_schedulers.step()
 
             if (
-                job_config.training.enable_fp8_linear
+                SM90OrLater
+                and job_config.training.enable_fp8_linear
                 and job_config.training.enable_fsdp_fp8_all_gather
                 and job_config.training.precompute_float8_dynamic_scale_for_fsdp
             ):
