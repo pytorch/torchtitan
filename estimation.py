@@ -126,8 +126,8 @@ def estimate_memory(job_config: JobConfig):
             whole_model = model_cls.from_model_args(model_config)
 
         # apply fp8 linear module swap
-        if job_config.training.fp8_linear:
-            build_fp8_linear(whole_model, job_config)
+        if job_config.training.enable_fp8_linear:
+            build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         model_parts = [whole_model]
