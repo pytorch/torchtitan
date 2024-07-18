@@ -313,6 +313,17 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--training.data_parallel_type",
+            type=str,
+            default="fsdp",
+            help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",
+        )
+        self.parser.add_argument(
+            "--experimental.enable_compiled_autograd",
+            action="store_true",
+            help="Enable CompiledAutograd to compile the backward.",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
@@ -338,7 +349,7 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
-            "--training.enable_fp8_linear",
+            "--training.enable_float8_linear",
             action="store_true",
             help="""
                 If true, swaps `torch.nn.Linear` with `Float8Linear` with
@@ -348,16 +359,16 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--training.enable_fsdp_fp8_all_gather",
+            "--training.enable_fsdp_float8_all_gather",
             action="store_true",
             default=False,
-            help="Whether enable fp8 all-gather in FSDP",
+            help="Whether enable float8 all-gather in FSDP",
         )
         self.parser.add_argument(
             "--training.precompute_float8_dynamic_scale_for_fsdp",
             action="store_true",
             default=False,
-            help="Whether precompute fp8 scales dynamically for FSDP",
+            help="Whether precompute float8 scales dynamically for FSDP",
         )
         self.parser.add_argument(
             "--training.gc_freq",

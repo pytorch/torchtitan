@@ -138,6 +138,22 @@ def build_optimizers(model_parts, job_config: JobConfig):
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
+def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+    @contextlib.contextmanager
+    def context():
+        with contextlib.ExitStack() as stack:
+            if enable_loss_parallel:
+                stack.enter_context(loss_parallel())
+            if enable_compiled_autograd:
+                stack.enter_context(
+                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
+                )
+
+            yield
+
+    return context
+
+
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -160,6 +176,7 @@ def main(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
+        dp_type=job_config.training.data_parallel_type,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
@@ -194,9 +211,9 @@ def main(job_config: JobConfig):
         dp_rank,
     )
 
-    # loss_parallel enables dispatching to efficient loss operators
-    loss_parallel_ctx = (
-        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
+    train_context = get_train_context(
+        parallel_dims.loss_parallel_enabled,
+        job_config.experimental.enable_compiled_autograd,
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
@@ -364,7 +381,7 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with loss_parallel_ctx():
+                with train_context():
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -381,7 +398,7 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with loss_parallel_ctx():
+                with train_context():
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
