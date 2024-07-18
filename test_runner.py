@@ -276,6 +276,39 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+<<<<<<< HEAD
+                    "--training.enable_float8_linear",
+                ]
+            ],
+            "FSDP2 with original dtype",
+            "float8_fsdp2_orig_all_gather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.enable_fsdp_float8_all_gather",
+                ]
+            ],
+            "FSDP2 with float8 all-gather",
+            "fsdp2_float8_all_gather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.enable_fsdp_float8_all_gather",
+                    "--training.precompute_float8_dynamic_scale_for_fsdp",
+                ]
+            ],
+            "FSDP2 with float8 all-gather and precomputed dynamic scales",
+            "fsdp2_float8_all_gather_precompute_dynamic_scales",
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.data_parallel_type ddp",
                 ]
             ],
