@@ -39,5 +39,6 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
         python -m pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/
+        python -m pip install git+https://github.com/pytorch-labs/float8_experimental.git
         mkdir artifacts-to-be-uploaded
         python ./test_runner.py artifacts-to-be-uploaded --ngpu 4

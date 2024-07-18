@@ -30,7 +30,10 @@ from torch.distributed.utils import _sync_module_states_with_mesh
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
-from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.float8_linear import (
+    maybe_build_fp8_linear,
+    maybe_precompute_fp8_dynamic_scale_for_fsdp,
+)
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
@@ -252,9 +255,8 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         whole_model = model_cls.from_model_args(model_config)
 
-    # apply fp8 linear module swap
-    if job_config.training.fp8_linear:
-        build_fp8_linear(whole_model, job_config)
+    # swap to Float8Linear base on fp8 config
+    maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
     # log model size
     model_param_count = get_num_params(whole_model)
@@ -450,6 +452,11 @@ def main(job_config: JobConfig):
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
+
+            # when fp8 config is on,
+            # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+            # it issues a single all-reduce for all parameters at once for better performance
+            maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)
 
             losses_since_last_log.append(loss)
 
