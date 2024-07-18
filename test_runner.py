@@ -276,7 +276,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-<<<<<<< HEAD
                     "--training.enable_float8_linear",
                 ]
             ],
