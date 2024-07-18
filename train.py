@@ -25,6 +25,7 @@ from torch.distributed._tensor.experimental.attention import context_parallel_bu
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
+from torch.distributed.utils import _sync_module_states_with_mesh
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
@@ -189,6 +190,8 @@ def main(job_config: JobConfig):
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
+        if parallel_dims.cp_enabled:
+            dp_mesh = dp_mesh.reshape((-1, parallel_dims.cp)("dp", "cp"))["dp"]
         dp_degree = dp_mesh.size()
         dp_rank = dp_mesh.get_local_rank()
     else:
@@ -220,7 +223,7 @@ def main(job_config: JobConfig):
     )
 
     if parallel_dims.cp_enabled:
-        cp_mesh = world_mesh["cp"]
+        cp_mesh = world_mesh["dp"].reshape((-1, parallel_dims.cp), ("dp", "cp"))["cp"]
         context_parallel_ctx = partial(
             context_parallel_buffers,
             cp_rank=cp_mesh.get_local_rank(),
@@ -348,6 +351,17 @@ def main(job_config: JobConfig):
             "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
             "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
         )
+
+    if (
+        not checkpoint_loaded
+        and parallel_dims.dp_enabled
+        and parallel_dims.dp_replicate > 1
+    ):
+        # Sync parameters if HSDP is enabled.
+        replicate_mesh = dp_mesh.reshape(
+            (parallel_dims.dp_replicate, dp_mesh.size() // parallel_dims.dp_replicate)
+        )
+        _sync_module_states_with_mesh(model, replicate_mesh)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
