@@ -479,6 +479,7 @@ def apply_dp(
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
             reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            # reshard_after_forward = False
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -489,6 +490,64 @@ def apply_dp(
     )
 
     logger.info("Applied FSDP to the model")
+    return model
+
+
+def apply_offload(model: nn.Module):
+    import pynvml
+    from torchtitan.parallelisms.offload_utils import offload_to_cpu
+
+    # Set the CPU affinity based on the GPU ID
+    uuids = torch.cuda._raw_device_uuid_nvml()
+    dev_id = torch.cuda.current_device()
+    assert dev_id >= 0 and dev_id < len(uuids), f"{dev_id} {len(uuids)}"
+    uuid = uuids[dev_id]
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
+    pynvml.nvmlDeviceSetCpuAffinity(handle)
+
+    offload_stream = torch.cuda.Stream()
+    layer_id_to_ctx = {}
+
+    def register_forward_hooks(module: nn.Module):
+
+        def forward_pre_hook(module, args):
+            ctx = offload_to_cpu(offload_stream)
+            ctx.__enter__()
+            module.offload_ctx = ctx
+            return args
+
+        def forward_hook(module, input, output):
+            module.offload_ctx.__exit__(None, None, None)
+            # Wait on the previous forward layer's D2H copies to free memory
+            layer_id = module.layer_id
+            if layer_id > 0:
+                layer_id_to_ctx[layer_id - 1].wait_for_d2h()
+            layer_id_to_ctx[layer_id] = module.offload_ctx
+            return output
+
+        module.register_forward_pre_hook(forward_pre_hook)
+        module.register_forward_hook(forward_hook)
+
+    def register_backward_hooks(module: nn.Module):
+
+        def backward_hook(module: nn.Module, grad_output: torch.Tensor):
+            # Prefetch the next backward layer's H2D copies to overlap
+            layer_id = module.layer_id
+            target_layer_id = layer_id - 1
+            if target_layer_id >= 0:
+                with torch.profiler.record_function(
+                    f"copy_h2d_async for {target_layer_id}"
+                ):
+                    layer_id_to_ctx[target_layer_id].copy_h2d_async()
+            return
+
+        module.register_full_backward_pre_hook(backward_hook)
+
+    for layer in model.layers.values():
+        register_forward_hooks(layer)
+        register_backward_hooks(layer)
+
     return model
 
 
@@ -517,5 +576,8 @@ def parallelize_llama(
 
     if parallel_dims.dp_enabled:
         model = apply_dp(model, world_mesh, parallel_dims, job_config)
+
+    if job_config.experimental.offload_activations:
+        model = apply_offload(model)
 
     return model

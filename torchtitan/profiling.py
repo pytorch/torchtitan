@@ -14,7 +14,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
 
 # the number of warmup steps before the active step in each profiling cycle
-WARMUP = 3
+WARMUP = 1
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000

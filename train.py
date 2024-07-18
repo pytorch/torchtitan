@@ -400,6 +400,11 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
+            if job_config.experimental.offload_activations:
+                # NOTE: We need `gc.collect` to ensure that CPU memory is freed
+                # even though we have no explicit refs left.
+                gc.collect()
+
             # when fp8 config is on,
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -445,6 +450,7 @@ def main(job_config: JobConfig):
                 time_data_loading_pct = 100 * np.sum(data_loading_times) / time_delta
 
                 gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+                import psutil
 
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
@@ -460,6 +466,7 @@ def main(job_config: JobConfig):
                     "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
                     "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
                     "memory/num_ooms": gpu_mem_stats.num_ooms,
+                    "cpu mem(%)": psutil.cpu_percent(),
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
@@ -469,7 +476,8 @@ def main(job_config: JobConfig):
                     f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
-                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset} "
+                    f"{color.white}cpu mem(%): {psutil.cpu_percent():.2f}%{color.reset}"
                 )
 
                 losses_since_last_log.clear()
