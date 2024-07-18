@@ -15,7 +15,7 @@ class Handle:
         offload_stream: torch.cuda.Stream,
     ):
         if not torch.is_tensor(device_tensor):
-            raise ValueError(f"Expect stensor but got {device_tensor}")
+            raise ValueError(f"Expects tensor but got {device_tensor}")
         self.device_tensor: Optional[torch.Tensor] = device_tensor
         self.cpu_tensor: Optional[torch.Tensor] = None
         self.offload_stream = offload_stream
@@ -75,6 +75,7 @@ class offload_to_cpu(saved_tensors_hooks):
 
     def __init__(self, offload_stream: torch.cuda.Stream):
         self.handle_key_to_handle: Dict[HandleKey, Handle] = {}
+        self.offload_stream = offload_stream
 
         def pack_to_cpu(tensor: torch.Tensor):
             if tensor.device.type == "cpu":
@@ -128,9 +129,18 @@ class offload_to_cpu(saved_tensors_hooks):
             handle.wait_for_d2h()
 
     def copy_h2d_async(self):
+        # HACK: Sleeping for 1 ms before copy H2D helps avoid the no-overlap
+        # issue for `reshard_after_forward=True` where AG copy-out's H2D copy
+        # serializes after these H2D copies, preventing overlap.
+        # self.offload_stream.wait_stream(torch.cuda.current_stream())
+        # with torch.cuda.stream(self.offload_stream):
+        #     from torch.testing._internal.common_utils import get_cycles_per_ms
+        #     torch.cuda._sleep(int(get_cycles_per_ms()))
         for handle in self.handle_key_to_handle.values():
             handle.copy_h2d_async()
 
     def __enter__(self):
         super().__enter__()
+        # Override this to return `self` so that the context can be saved like
+        # with `offload_to_cpu(offload_stream) as ctx:`
         return self
