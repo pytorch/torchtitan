@@ -66,6 +66,11 @@ class offload_to_cpu(saved_tensors_hooks):
     :meth:`copy_h2d_async` to issue the H2D copy as async before the compute
     with which to overlap has been issued. When the activation is used in
     backward, we will wait for that H2D copy without user intervention.
+
+    The D2H and H2D copies always used pinned memory, so the user should take
+    care to ensure sufficient CPU RAM to be pinned. Otherwise the program can
+    become slow or freeze. The first few iterations will be much slower due to
+    repeated ``cudaHostAlloc`` calls to warmup the CPU caching allocator.
     """
 
     def __init__(self, offload_stream: torch.cuda.Stream):
