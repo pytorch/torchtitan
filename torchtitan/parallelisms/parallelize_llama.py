@@ -16,6 +16,8 @@ import torch.nn as nn
 from torch.distributed import DeviceMesh
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+
+from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -453,13 +455,15 @@ def apply_compile(model: nn.Module, job_config: JobConfig):
     return model
 
 
-def apply_dp(
+def apply_fsdp(
     model: nn.Module,
     world_mesh: DeviceMesh,
     parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
-    """Apply data parallelism (FSDP2) to the model."""
+    """
+    Apply data parallelism to the model. FSDP2 is used here.
+    """
 
     dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
     assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
@@ -492,6 +496,29 @@ def apply_dp(
     return model
 
 
+def apply_ddp(
+    model: nn.Module,
+    world_mesh: DeviceMesh,
+    parallel_dims: "ParallelDims",
+    job_config: JobConfig,
+):
+    if world_mesh.ndim > 1:
+        raise RuntimeError("DDP has not supported > 1D parallelism.")
+
+    if job_config.training.compile:
+        if job_config.experimental.enable_compiled_autograd:
+            torch._dynamo.config.optimize_ddp = (
+                "python_reducer_without_compiled_forward"
+            )
+        else:
+            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+
+    model = replicate(model, device_mesh=world_mesh, bucket_cap_mb=100)
+
+    logger.info("Applied DDP to the model")
+    return model
+
+
 def parallelize_llama(
     model: nn.Module,
     world_mesh: DeviceMesh,
@@ -516,6 +543,9 @@ def parallelize_llama(
         model = apply_compile(model, job_config)
 
     if parallel_dims.dp_enabled:
-        model = apply_dp(model, world_mesh, parallel_dims, job_config)
+        if parallel_dims.dp_type == "fsdp":
+            model = apply_fsdp(model, world_mesh, parallel_dims, job_config)
+        else:
+            model = apply_ddp(model, world_mesh, parallel_dims, job_config)
 
     return model

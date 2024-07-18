@@ -313,6 +313,17 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--training.data_parallel_type",
+            type=str,
+            default="fsdp",
+            help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",
+        )
+        self.parser.add_argument(
+            "--experimental.enable_compiled_autograd",
+            action="store_true",
+            help="Enable CompiledAutograd to compile the backward.",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
