@@ -304,6 +304,15 @@ def build_test_list():
             ],
             "FSDP2 with float8 all-gather and precomputed dynamic scales",
             "fsdp2_float8_all_gather_precompute_dynamic_scales",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_type ddp",
+                ]
+            ],
+            "DDP",
+            "ddp",
             ngpu=4,
         ),
     ]
