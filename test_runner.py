@@ -350,8 +350,7 @@ def build_test_list():
                     "--training.enable_float8_linear",
                     "--training.enable_fsdp_float8_all_gather",
                     "--training.precompute_float8_dynamic_scale_for_fsdp",
-                    "--training.data_parallel_degree 1",
-                    "--training.tensor_parallel_degree 4",
+                    "--training.tensor_parallel_degree 2",
                 ]
             ],
             "2D FSDP2 + TP with float8 all-gather and precomputed dynamic scales, eager mode",
@@ -364,8 +363,7 @@ def build_test_list():
                     "--training.enable_float8_linear",
                     "--training.enable_fsdp_float8_all_gather",
                     "--training.precompute_float8_dynamic_scale_for_fsdp",
-                    "--training.data_parallel_degree 1",
-                    "--training.tensor_parallel_degree 4",
+                    "--training.tensor_parallel_degree 2",
                     "--training.compile",
                 ]
             ],
