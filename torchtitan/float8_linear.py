@@ -74,7 +74,9 @@ def maybe_build_fp8_linear(
         )
         with set_enable_fsdp_float8_all_gather(enable_fsdp_float8_all_gather):
             swap_linear_with_float8_linear(
-                model, scaling_type_w=TensorScalingType.DYNAMIC
+                model,
+                scaling_type_w=TensorScalingType.DYNAMIC,
+                skip_fqn_list=["output"],
             )
         logger.info(
             f"Swapped to Float8Linear layers with {enable_fsdp_float8_all_gather=}"

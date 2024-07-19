@@ -117,7 +117,7 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
             return module
 
 
-def get_tp_parallel_strategy(
+def get_tp_parallel_strategy_for_transformer_block(
     job_config: JobConfig,
     model: nn.Module,
 ) -> Tuple[RowwiseParallel, ColwiseParallel, PrepareModuleInput]:
@@ -346,13 +346,6 @@ def apply_tp(
     """Apply tensor parallelism."""
 
     tp_mesh = world_mesh["tp"]
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears
-    (
-        rowwise_parallel_weight,
-        colwise_parallel_weight,
-        prepare_module_input,
-    ) = get_tp_parallel_strategy(job_config, model)
     loss_parallel = parallel_dims.loss_parallel_enabled
 
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -368,13 +361,21 @@ def apply_tp(
                 output_layouts=Shard(1),
             ),
             "norm": SequenceParallel(),
-            "output": colwise_parallel_weight(
+            "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
         },
     )
+
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears
+    (
+        rowwise_parallel_weight,
+        colwise_parallel_weight,
+        prepare_module_input,
+    ) = get_tp_parallel_strategy_for_transformer_block(job_config, model)
 
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
