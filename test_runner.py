@@ -308,6 +308,18 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.enable_float8_linear",
+                    "--training.enable_fsdp_float8_all_gather",
+                    "--training.precompute_float8_dynamic_scale_for_fsdp",
+                    "--training.compile",
+                ]
+            ],
+            "FSDP2 with float8 all-gather and precomputed dynamic scales",
+            "fsdp2_float8_all_gather_precompute_dynamic_scales_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.data_parallel_type ddp",
                 ]
             ],
