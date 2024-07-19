@@ -302,8 +302,9 @@ def build_test_list():
                     "--training.precompute_float8_dynamic_scale_for_fsdp",
                 ]
             ],
-            "FSDP2 with float8 all-gather and precomputed dynamic scales",
+            "FSDP2 with float8 all-gather and precomputed dynamic scales, eager mode",
             "fsdp2_float8_all_gather_precompute_dynamic_scales",
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
@@ -314,8 +315,63 @@ def build_test_list():
                     "--training.compile",
                 ]
             ],
-            "FSDP2 with float8 all-gather and precomputed dynamic scales",
+            "FSDP2 with float8 all-gather and precomputed dynamic scales, compile mode",
             "fsdp2_float8_all_gather_precompute_dynamic_scales_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.data_parallel_degree 1",
+                    "--training.tensor_parallel_degree 4",
+                ]
+            ],
+            "1D TP with float8 all-gather, eager mode",
+            "tp_float8_all_gather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.data_parallel_degree 1",
+                    "--training.tensor_parallel_degree 4",
+                    "--training.compile",
+                ]
+            ],
+            "1D TP with float8 all-gather, compile mode",
+            "tp_float8_all_gather_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.enable_fsdp_float8_all_gather",
+                    "--training.precompute_float8_dynamic_scale_for_fsdp",
+                    "--training.data_parallel_degree 1",
+                    "--training.tensor_parallel_degree 4",
+                ]
+            ],
+            "2D FSDP2 + TP with float8 all-gather and precomputed dynamic scales, eager mode",
+            "fsdp2_tp_float8_all_gather_precompute_dynamic_scales",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_float8_linear",
+                    "--training.enable_fsdp_float8_all_gather",
+                    "--training.precompute_float8_dynamic_scale_for_fsdp",
+                    "--training.data_parallel_degree 1",
+                    "--training.tensor_parallel_degree 4",
+                    "--training.compile",
+                ]
+            ],
+            "2D FSDP2 + TP with float8 all-gather and precomputed dynamic scales, compile mode",
+            "fsdp2_tp_float8_all_gather_precompute_dynamic_scales_compile",
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
