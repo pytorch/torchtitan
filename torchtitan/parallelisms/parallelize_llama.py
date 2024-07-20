@@ -416,18 +416,26 @@ def apply_tp(
     # updates expressly for async tensor parallel
     if job_config.experimental.enable_async_tensor_parallel:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
         torch._dynamo.config.cache_size_limit = 10000
-        logger.info("Updating torch._dynamo.config.cache_size_limit to 10000 to support Async TP")
+        logger.info(
+            "Updating torch._dynamo.config.cache_size_limit to 10000 to support Async TP"
+        )
 
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
         if not job_config.training.compile:
-            logger.warning(f"Async TP requires compilation...auto enabling compile = True for this job to resolve.")
+            logger.warning(
+                "Async TP requires compilation...auto enabling compile = True for this job to resolve."
+            )
             job_config.training.compile = True
 
-    logger.info(f"Applied{' Async ' if job_config.experimental.enable_async_tensor_parallel else ' '}Tensor Parallelism to the model")
+    logger.info(
+        f"Applied{' Async ' if job_config.experimental.enable_async_tensor_parallel else ' '}Tensor Parallelism to the model"
+    )
     return model
+
 
 def apply_ac(model: nn.Module, job_config: JobConfig):
     """Apply activation checkpointing to the model."""
