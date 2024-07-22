@@ -64,13 +64,13 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
-        # stage_index_to_group_rank=stage_index_to_group_rank,
+        stage_index_to_group_rank=stage_index_to_group_rank,
     )
 
     if zb_schedule:
         # TODO(whc) if we allow creating PipelineScheduleMulti directly from csv, we have some ux refactoring to do
         schedule.use_full_backward = False
-        schedule.load_csv(os.path.join(PARALLELISM_DIR, "zb.csv"))
+        schedule._load_csv(os.path.join(PARALLELISM_DIR, "zb.csv"))
 
     return schedule
 

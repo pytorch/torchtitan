@@ -383,7 +383,7 @@ def main(job_config: JobConfig):
 
                 with train_context():
                     if job_config.experimental.pipeline_parallel_schedule == "zb":
-                        # is_last_stage = pp_mesh.get_local_rank() == 0
+                        is_last_stage = pp_mesh.get_local_rank() == 0
                         if pp_mesh.get_local_rank() == 0:
                             losses = []
                             pp_schedule.step(input_ids, target=labels, losses=losses)
