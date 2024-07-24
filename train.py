@@ -397,7 +397,14 @@ def main(job_config: JobConfig):
 
                     if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
                         comm_mode = tc["comm_mode"]
-                        comm_mode.log_comm_debug_tracing_table_to_file(file_name=job_config.comm_debug.dump_file, noise_level=job_config.comm_debug.noise_level)
+                        comm_mode.log_comm_debug_tracing_table_to_file(
+                            file_name=job_config.comm_debug.dump_file,
+                            noise_level=job_config.comm_debug.noise_level
+                        )
+                        comm_mode.generate_json_dump(
+                            file_name=job_config.comm_debug.dump_json,
+                            noise_level=job_config.comm_debug.noise_level
+                        )
 
                 # accumulate losses across pipeline microbatches
                 loss = (
