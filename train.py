@@ -386,7 +386,7 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context():
+                with train_context() as tc:
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -421,7 +421,7 @@ def main(job_config: JobConfig):
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
-                    
+
                     if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
                         comm_mode = tc["comm_mode"]
                         comm_mode.log_comm_debug_tracing_table_to_file(
