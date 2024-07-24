@@ -8,7 +8,6 @@ import contextlib
 import gc
 import os
 import time
-
 from dataclasses import dataclass, field
 from datetime import timedelta
 from io import BytesIO
@@ -16,14 +15,6 @@ from timeit import default_timer as timer
 from typing import Any, Dict, List
 
 import numpy as np
-
-import torch
-import torch.nn.functional as F
-from torch.distributed import destroy_process_group
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor.parallel import loss_parallel
-from torch.distributed._tensor.debug import CommDebugMode
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
@@ -54,6 +45,14 @@ from torchtitan.utils import (
     NoColor,
     set_pg_timeouts,
 )
+
+import torch
+import torch.nn.functional as F
+from torch.distributed import destroy_process_group
+from torch.distributed._tensor.debug import CommDebugMode
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor.parallel import loss_parallel
 
 
 @dataclass
@@ -138,7 +137,11 @@ def build_optimizers(model_parts, job_config: JobConfig):
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool, enable_comm_debug_mode: bool):
+def get_train_context(
+    enable_loss_parallel: bool,
+    enable_compiled_autograd: bool,
+    enable_comm_debug_mode: bool,
+):
     @contextlib.contextmanager
     def context():
         context_managers = {}
@@ -395,15 +398,18 @@ def main(job_config: JobConfig):
                     else:
                         pp_schedule.step()
 
-                    if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
+                    if (
+                        job_config.comm_debug.enable_comm_debug_mode
+                        and train_state.step == 1
+                    ):
                         comm_mode = tc["comm_mode"]
                         comm_mode.log_comm_debug_tracing_table_to_file(
                             file_name=job_config.comm_debug.dump_file,
-                            noise_level=job_config.comm_debug.noise_level
+                            noise_level=job_config.comm_debug.noise_level,
                         )
                         comm_mode.generate_json_dump(
                             file_name=job_config.comm_debug.dump_json,
-                            noise_level=job_config.comm_debug.noise_level
+                            noise_level=job_config.comm_debug.noise_level,
                         )
 
                 # accumulate losses across pipeline microbatches
@@ -422,15 +428,18 @@ def main(job_config: JobConfig):
                     del pred
                     loss.backward()
 
-                    if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
+                    if (
+                        job_config.comm_debug.enable_comm_debug_mode
+                        and train_state.step == 1
+                    ):
                         comm_mode = tc["comm_mode"]
                         comm_mode.log_comm_debug_tracing_table_to_file(
                             file_name=job_config.comm_debug.dump_file,
-                            noise_level=job_config.comm_debug.noise_level
+                            noise_level=job_config.comm_debug.noise_level,
                         )
                         comm_mode.generate_json_dump(
                             file_name=job_config.comm_debug.dump_json,
-                            noise_level=job_config.comm_debug.noise_level
+                            noise_level=job_config.comm_debug.noise_level,
                         )
 
             # clip gradients
