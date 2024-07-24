@@ -23,7 +23,7 @@ from torch.distributed import destroy_process_group
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
-
+from torch.distributed._tensor.debug import CommDebugMode
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
@@ -138,9 +138,10 @@ def build_optimizers(model_parts, job_config: JobConfig):
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool, enable_comm_debug_mode: bool):
     @contextlib.contextmanager
     def context():
+        context_managers = {}
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(loss_parallel())
@@ -148,8 +149,11 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
                 stack.enter_context(
                     torch._dynamo.utils.maybe_enable_compiled_autograd(True)
                 )
+            if enable_comm_debug_mode:
+                comm_mode = stack.enter_context(CommDebugMode())
+                context_managers["comm_mode"] = comm_mode
 
-            yield
+            yield context_managers
 
     return context
 
@@ -214,6 +218,7 @@ def main(job_config: JobConfig):
     train_context = get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
+        job_config.comm_debug.enable_comm_debug_mode,
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
@@ -390,6 +395,10 @@ def main(job_config: JobConfig):
                     else:
                         pp_schedule.step()
 
+                    if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
+                        comm_mode = tc["comm_mode"]
+                        comm_mode.log_comm_debug_tracing_table_to_file(file_name=job_config.comm_debug.dump_file, noise_level=job_config.comm_debug.noise_level)
+
                 # accumulate losses across pipeline microbatches
                 loss = (
                     torch.mean(torch.stack(losses))
@@ -398,13 +407,19 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with train_context():
+                with train_context() as tc:
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
+                    
+                    if job_config.comm_debug.enable_comm_debug_mode and train_state.step == 1:
+                        comm_mode = tc["comm_mode"]
+                        comm_mode.log_comm_debug_tracing_table_to_file(file_name=job_config.comm_debug.dump_file, noise_level=job_config.comm_debug.noise_level)
+                        comm_mode.generate_json_dump(file_name=job_config.comm_debug.dump_json, noise_level=job_config.comm_debug.noise_level)
+            
 
             # clip gradients
             for model in model_parts:
