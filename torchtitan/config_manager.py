@@ -11,14 +11,12 @@ from typing import Tuple, Union
 
 import torch
 
-
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
 
 from torchtitan.logging_utils import logger
-
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,

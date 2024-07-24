@@ -389,7 +389,7 @@ def main(job_config: JobConfig):
                 # pipeline parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context() as tc:
+                with train_context() as train_contexts:
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -402,7 +402,7 @@ def main(job_config: JobConfig):
                         job_config.comm_debug.enable_comm_debug_mode
                         and train_state.step == 1
                     ):
-                        comm_mode = tc["comm_mode"]
+                        comm_mode = train_contexts["comm_mode"]
                         comm_mode.log_comm_debug_tracing_table_to_file(
                             file_name=job_config.comm_debug.dump_file,
                             noise_level=job_config.comm_debug.noise_level,
@@ -420,7 +420,7 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with train_context() as tc:
+                with train_context() as train_contexts:
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
@@ -432,7 +432,7 @@ def main(job_config: JobConfig):
                         job_config.comm_debug.enable_comm_debug_mode
                         and train_state.step == 1
                     ):
-                        comm_mode = tc["comm_mode"]
+                        comm_mode = train_contexts["comm_mode"]
                         comm_mode.log_comm_debug_tracing_table_to_file(
                             file_name=job_config.comm_debug.dump_file,
                             noise_level=job_config.comm_debug.noise_level,
