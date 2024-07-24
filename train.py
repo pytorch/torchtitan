@@ -15,6 +15,14 @@ from timeit import default_timer as timer
 from typing import Any, Dict, List
 
 import numpy as np
+
+import torch
+import torch.nn.functional as F
+from torch.distributed import destroy_process_group
+from torch.distributed._tensor.debug import CommDebugMode
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor.parallel import loss_parallel
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, create_tokenizer
@@ -45,14 +53,6 @@ from torchtitan.utils import (
     NoColor,
     set_pg_timeouts,
 )
-
-import torch
-import torch.nn.functional as F
-from torch.distributed import destroy_process_group
-from torch.distributed._tensor.debug import CommDebugMode
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor.parallel import loss_parallel
 
 
 @dataclass
