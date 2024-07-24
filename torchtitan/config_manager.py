@@ -482,6 +482,32 @@ class JobConfig:
             """,
         )
 
+        # commdebugmode configs
+        self.parser.add_argument(
+            "--comm_debug.enable_comm_debug_mode",
+            default=False,
+            action="store_true",
+            help="Whether to enable CommDebugMode, should be used only on first step",
+        )
+        self.parser.add_argument(
+            "--comm_debug.dump_file",
+            type=str,
+            default="torchtitan_comm_debug_dump.txt",
+            help="Which file to dump CommDebugMode's output to",
+        )
+        self.parser.add_argument(
+            "--comm_debug.dump_json",
+            type=str,
+            default="torchtitan_comm_debug_log.json",
+            help="Which file to dump CommDebugMode's json to",
+        )
+        self.parser.add_argument(
+            "--comm_debug.noise_level",
+            type=int,
+            default=2,
+            help="Sets noise level for CommDebugMode's output, controls how much info is displayed",
+        )
+
         # communications library settings
         self.parser.add_argument(
             "--comm.init_timeout_seconds",
