@@ -55,6 +55,9 @@ from torchtitan.utils import (
     set_pg_timeouts,
 )
 
+from transformers import AutoModelForCausalLM
+from torch.distributed._tensor import distribute_tensor
+from torch import nn
 
 @dataclass
 class TrainState(Stateful):
@@ -283,7 +286,12 @@ def main(job_config: JobConfig):
         # If PP is enabled, we can't rely on init_weights, because some layers are missing.
         # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
         # allocate sharded model on GPU and initialize weights via DTensor
-        whole_model.init_weights()
+        # whole_model.init_weights()
+        pass
+
+    pretrained_model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    load_from_full_model_state_dict(whole_model, pretrained_model, "cuda")
+    del pretrained_model
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -520,6 +528,58 @@ def main(job_config: JobConfig):
     metric_logger.close()
     logger.info("Training completed")
 
+def load_from_full_model_state_dict(
+        model: "FSDPModule",
+        full_sd: Dict[str, Any],
+        device: torch.device,
+    ):
+        """
+        Converting full state dict into a sharded state dict
+        and loading it into FSDP model
+        - 'full' means plain tensor
+        - 'sharded' means `DTensor` where reach rank has a shard of the plain tensor
+        """
+        print(model)
+
+        param_mapping = {
+            'model.embed_tokens.weight': 'tok_embeddings.weight'
+        }
+
+        for i, _ in enumerate(full_sd.model.layers):
+            param_mapping.update({
+                f'model.layers.{i}.self_attn.q_proj.weight': f'layers.{i}.attention.wq.weight',
+                f'model.layers.{i}.self_attn.k_proj.weight': f'layers.{i}.attention.wk.weight',
+                f'model.layers.{i}.self_attn.v_proj.weight': f'layers.{i}.attention.wv.weight',
+                f'model.layers.{i}.self_attn.o_proj.weight': f'layers.{i}.attention.wo.weight',
+                f'model.layers.{i}.mlp.gate_proj.weight': f'layers.{i}.feed_forward.w1.weight',
+                f'model.layers.{i}.mlp.down_proj.weight': f'layers.{i}.feed_forward.w2.weight',
+                f'model.layers.{i}.mlp.up_proj.weight': f'layers.{i}.feed_forward.w3.weight',
+                f'model.layers.{i}.input_layernorm.weight': f'layers.{i}.attention_norm.weight',
+                f'model.layers.{i}.post_attention_layernorm.weight': f'layers.{i}.ffn_norm.weight'
+            })
+
+        param_mapping.update({
+            'model.norm.weight': 'norm.weight',
+            'lm_head.weight': 'output.weight'
+        })
+
+        meta_sharded_sd = model.state_dict()
+        sharded_sd = {}
+        for param_name, full_tensor in full_sd.named_parameters():
+            
+            sharded_meta_param = meta_sharded_sd.get(param_mapping[param_name])
+            # print(sharded_meta_param)
+            full_tensor = full_tensor.to(sharded_meta_param.dtype).to(device)
+            # print(param_name, full_tensor, sharded_meta_param)
+
+            sharded_tensor = distribute_tensor(
+                full_tensor,
+                sharded_meta_param.device_mesh,
+                sharded_meta_param.placements,
+            )
+            sharded_sd[param_name] = nn.Parameter(sharded_tensor)
+        # choose `assign=True` since we cannot call `copy_` on meta tensor
+        return model.load_state_dict(sharded_sd, strict=False, assign=True)
 
 if __name__ == "__main__":
     config = JobConfig()
