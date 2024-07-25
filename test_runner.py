@@ -214,31 +214,32 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Weights Only bf16",
             "model_weights_only_bf16",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--training.data_parallel_degree 2",
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
-                ],
-                [
-                    "--training.steps 20",
-                    "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--training.data_parallel_degree 2",
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
-                ],
-            ],
-            "PP+DP+TP 3D test with save/load resume ckpt",
-            "pp_dp_tp",
-            requires_seed_checkpoint=True,
-            ngpu=8,
-        ),
+        # TODO: Enable 3D checkpoint test once the 2D _raise_not_implemented_if_2d hook is removed.
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--checkpoint.enable_checkpoint",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.4",
+        #             "--training.data_parallel_degree 2",
+        #             "--training.tensor_parallel_degree 2",
+        #             "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+        #         ],
+        #         [
+        #             "--training.steps 20",
+        #             "--checkpoint.enable_checkpoint",
+        #             "--experimental.pipeline_parallel_degree 2",
+        #             "--experimental.pipeline_parallel_split_points layers.4",
+        #             "--training.data_parallel_degree 2",
+        #             "--training.tensor_parallel_degree 2",
+        #             "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+        #         ],
+        #     ],
+        #     "PP+DP+TP 3D test with save/load resume ckpt",
+        #     "pp_dp_tp",
+        #     requires_seed_checkpoint=True,
+        #     ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
