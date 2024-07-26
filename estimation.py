@@ -14,7 +14,6 @@ from torch._guards import active_fake_mode
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed import destroy_process_group
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
-from torch.distributed.tensor.parallel import loss_parallel
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config_manager import JobConfig
