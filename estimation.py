@@ -19,12 +19,15 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import create_tokenizer
-from torchtitan.float8_linear import build_fp8_linear
+from torchtitan.float8_linear import (
+    maybe_build_fp8_linear,
+    maybe_precompute_fp8_dynamic_scale_for_fsdp,
+)
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from train import build_optimizers
+from train import build_optimizers, get_train_context
 
 
 def estimate_memory(job_config: JobConfig):
@@ -61,9 +64,10 @@ def estimate_memory(job_config: JobConfig):
         logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
         job_config.model.norm_type = "rmsnorm"
 
-    if job_config.training.compile:
+    if job_config.training.compile or job_config.experimental.enable_compiled_autograd:
         logger.info("Compile mode is not supported yet. Switching to eager mode.")
         job_config.training.compile = False
+        job_config.experimental.enable_compiled_autograd = False
 
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
@@ -96,9 +100,9 @@ def estimate_memory(job_config: JobConfig):
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
-    # loss_parallel enables dispatching to efficient loss operators
-    loss_parallel_ctx = (
-        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
+    train_context = get_train_context(
+        parallel_dims.loss_parallel_enabled,
+        job_config.experimental.enable_compiled_autograd,
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
@@ -124,9 +128,8 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             whole_model = model_cls.from_model_args(model_config)
 
-        # apply fp8 linear module swap
-        if job_config.training.enable_fp8_linear:
-            build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
+        # swap to Float8Linear base on fp8 config
+        maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         model_parts = [whole_model]
@@ -171,7 +174,7 @@ def estimate_memory(job_config: JobConfig):
             for iter_idx in range(2):
                 input_ids, labels = batch
                 # train step
-                with loss_parallel_ctx():
+                with train_context():
                     pred = whole_model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
@@ -185,6 +188,10 @@ def estimate_memory(job_config: JobConfig):
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
+                # when fp8 config is on,
+                # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+                # it issues a single all-reduce for all parameters at once for better performance
+                maybe_precompute_fp8_dynamic_scale_for_fsdp(whole_model, job_config)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
