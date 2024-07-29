@@ -352,8 +352,7 @@ class JobConfig:
             "--training.enable_float8_linear",
             action="store_true",
             help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear` with
-                default settings (dynamic scaling).
+                If true, swaps `torch.nn.Linear` with `Float8Linear`.
                 This feature requires you to install 'float8_experimental' which can be found
                 here: https://github.com/pytorch-labs/float8_experimental
             """,
@@ -369,6 +368,25 @@ class JobConfig:
             action="store_true",
             default=False,
             help="Whether precompute float8 scales dynamically for FSDP",
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_input",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+            choices=["dynamic", "delayed"],
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_weight",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_grad_output",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
         )
         self.parser.add_argument(
             "--training.gc_freq",
