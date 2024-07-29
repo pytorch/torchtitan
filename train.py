@@ -116,6 +116,65 @@ def build_optimizers(model_parts, job_config: JobConfig):
             optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
         elif name == "AdamW":
             optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+        elif name == "GaLoreAdamW":
+            from torchtitan.optims.galore_adamw import GaLoreAdamW
+
+            optimizer_kwargs.pop("fused")
+            optimizer_kwargs.pop("foreach")
+            galore_kwargs = {}
+            galore_kwargs["rank"] = job_config.optimizer.galore_rank
+            galore_kwargs["update_proj_gap"] = (
+                job_config.optimizer.galore_update_proj_gap
+            )
+            galore_kwargs["scale"] = job_config.optimizer.galore_scale
+            galore_kwargs["proj_type"] = job_config.optimizer.galore_proj_type
+            nongalore_params = []
+            galore_params = []
+            for module_name, module in model.named_modules():
+                for param_name, param in module.named_parameters(recurse=False):
+                    if (
+                        isinstance(module, torch.nn.Linear)
+                        and "weight" in param_name
+                        and (
+                            "attention" in module_name or "feed_forward" in module_name
+                        )
+                    ):
+                        galore_params.append(param)
+                    else:
+                        nongalore_params.append(param)
+            if not job_config.optimizer.galore_in_backward:
+                param_groups = [
+                    {"params": nongalore_params},
+                    {"params": galore_params, **galore_kwargs},
+                ]
+                optimizer = GaLoreAdamW(param_groups, **optimizer_kwargs)
+                return optimizer
+            else:
+                from torchtitan.lr_scheduling import _get_lr_scheduler
+
+                param_to_optim: Dict[nn.Parameter, torch.optim.Optimizer] = {}
+                for param in nongalore_params:
+                    param_to_optim[param] = GaLoreAdamW([param], **optimizer_kwargs)
+                for param in galore_params:
+                    param_group = [{"params": [param], **galore_kwargs}]
+                    param_to_optim[param] = GaLoreAdamW(param_group, **optimizer_kwargs)
+
+                param_to_scheduler: Dict[nn.Parameter, torch.optim.LRScheduler] = {}
+                for param, optim in param_to_optim.items():
+                    param_to_scheduler[param] = _get_lr_scheduler(job_config, optim)
+
+                def optimizer_hook(param: torch.nn.Parameter) -> None:
+                    if param.grad is None:
+                        return
+                    optim = param_to_optim[param]
+                    optim.step()
+                    optim.zero_grad()
+                    param_to_scheduler[param].step()
+
+                for param in param_to_optim:
+                    param.register_post_accumulate_grad_hook(optimizer_hook)
+
+                return GaLoreAdamW([torch.empty(0)], **optimizer_kwargs)
         else:
             raise NotImplementedError(f"Optimizer {name} not added.")
 
