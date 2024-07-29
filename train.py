@@ -232,7 +232,12 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    logger.info(f"Detailed training config local batch_size: {job_config.training.batch_size}, seq_len: {job_config.training.seq_len}, total_steps: {job_config.training.steps}({job_config.training.warmup_steps}), activation_checkpoint: {job_config.activation_checkpoint.mode}")
+    logger.info(
+        f"Detailed training config, local_batch_size: {job_config.training.batch_size}, "
+        f"seq_len: {job_config.training.seq_len}, "
+        f"total_steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
+        f"activation_checkpoint: {job_config.activation_checkpoint.mode}"
+    )
     with torch.device("meta"):
         whole_model = model_cls.from_model_args(model_config)
 
