@@ -30,6 +30,7 @@ from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import (
     maybe_build_fp8_linear,
     maybe_precompute_fp8_dynamic_scale_for_fsdp,
+    maybe_sync_float8_amax_and_scale_history,
 )
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
@@ -412,12 +413,15 @@ def main(job_config: JobConfig):
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
 
+            # if float8 is enabled, sync float8 amaxes and scales
+            maybe_sync_float8_amax_and_scale_history(model, job_config)
+
             # optimizer step
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
 
-            # when fp8 config is on,
+            # when float8 config is on,
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
             maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)
