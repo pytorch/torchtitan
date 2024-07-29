@@ -74,6 +74,9 @@ Once you have confirmed access, you can run the following command to download th
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
+# llama3.1 tokenizer.model
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
+
 # llama3 tokenizer.model
 python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
 
