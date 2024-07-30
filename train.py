@@ -232,12 +232,6 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    logger.info(
-        f"Detailed training config, local_batch_size: {job_config.training.batch_size}, "
-        f"seq_len: {job_config.training.seq_len}, "
-        f"total_steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
-        f"activation_checkpoint: {job_config.activation_checkpoint.mode}"
-    )
     with torch.device("meta"):
         whole_model = model_cls.from_model_args(model_config)
 
@@ -361,7 +355,12 @@ def main(job_config: JobConfig):
     gpu_memory_monitor.reset_peak_stats()
 
     # train loop
-    logger.info(f"Training starts at step {train_state.step + 1}")
+    logger.info(
+        f"Training starts at step {train_state.step + 1}, "
+        f"with local batch size: {job_config.training.batch_size}, "
+        f"sequence length: {job_config.training.seq_len}, "
+        f"total steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
+    )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
