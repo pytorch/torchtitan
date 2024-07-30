@@ -59,9 +59,19 @@ def maybe_build_fp8_linear(
         enable_fsdp_float8_all_gather = (
             job_config.training.enable_fsdp_float8_all_gather and dp_enabled
         )
+        scaling_type_input = ScalingType(job_config.training.float8_scaling_type_input)
+        scaling_type_weight = ScalingType(
+            job_config.training.float8_scaling_type_weight
+        )
+        scaling_type_grad_output = ScalingType(
+            job_config.training.float8_scaling_type_grad_output
+        )
         float8_config = Float8LinearConfig(
             enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-            cast_config_weight=CastConfig(scaling_type=ScalingType.DYNAMIC),
+            cast_config_input=CastConfig(scaling_type=scaling_type_input),
+            cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
+            cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
+            enable_pre_and_post_forward=False,
         )
         convert_to_float8_training(
             model,
@@ -95,3 +105,34 @@ def maybe_precompute_fp8_dynamic_scale_for_fsdp(
     from float8_experimental import precompute_float8_dynamic_scale_for_fsdp
 
     precompute_float8_dynamic_scale_for_fsdp(model)
+
+
+_sync_float8_amax_and_scale_history = None
+
+
+def maybe_sync_float8_amax_and_scale_history(model: nn.Module, job_config: JobConfig):
+    if not (
+        job_config.training.enable_float8_linear
+        and (
+            job_config.training.float8_scaling_type_input == "delayed"
+            or job_config.training.float8_scaling_type_weight == "delayed"
+            or job_config.training.float8_scaling_type_grad_output == "delayed"
+        )
+    ):
+        return
+
+    from float8_experimental import sync_float8_amax_and_scale_history
+
+    # TODO(future): see if precalculating the modules to sync over is going to
+    # meaningfully help performance
+
+    global _sync_float8_amax_and_scale_history
+    if _sync_float8_amax_and_scale_history is None:
+        if job_config.training.compile:
+            _sync_float8_amax_and_scale_history = torch.compile(
+                sync_float8_amax_and_scale_history
+            )
+        else:
+            _sync_float8_amax_and_scale_history = sync_float8_amax_and_scale_history
+
+    sync_float8_amax_and_scale_history(model)
