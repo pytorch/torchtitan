@@ -50,6 +50,21 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_schedule flexible_interleaved_1f1b",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm throws cuda context error with pp
+                ],
+            ],
+            "PP looped flexible 1f1b test",
+            "pp_looped_flexible_1f1b",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
