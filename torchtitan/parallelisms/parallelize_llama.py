@@ -129,7 +129,9 @@ def get_tp_parallel_strategy_for_transformer_block(
         # TODO(future PR): once float8 configuration supports delayed
         # scaling, add a check here to enforce supported float8 all-gather
         # configurations
-        from float8_experimental.float8_tensor_parallel import (
+        # TODO(future PR): add the items below to __init__.py of torchao.float8,
+        # and import from there
+        from torchao.float8.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
             PrepareFloat8ModuleInput,
