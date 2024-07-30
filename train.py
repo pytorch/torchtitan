@@ -355,7 +355,12 @@ def main(job_config: JobConfig):
     gpu_memory_monitor.reset_peak_stats()
 
     # train loop
-    logger.info(f"Training starts at step {train_state.step + 1}")
+    logger.info(
+        f"Training starts at step {train_state.step + 1}, "
+        f"with local batch size: {job_config.training.batch_size}, "
+        f"sequence length: {job_config.training.seq_len}, "
+        f"total steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
+    )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
