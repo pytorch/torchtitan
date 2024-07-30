@@ -531,7 +531,7 @@ def parallelize_llama_torch_spmd(
     assert ac_config.mode == "none", "AC not supported by torch_spmd yet"
 
     if parallel_dims.dp_enabled:
-        from data_parallel import data_parallel, MixedPrecisionPolicy
+        from torch_spmd.data_parallel import data_parallel, MixedPrecisionPolicy
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],

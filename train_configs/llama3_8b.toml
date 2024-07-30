@@ -12,8 +12,8 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
+enable_color_printing = false
 enable_tensorboard = false
-enable_color_printing = true
 save_tb_folder = "tb"
 
 [model]
@@ -36,7 +36,7 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1
 fp8_linear = false
 compile = true
-dataset = "c4_mini"
+dataset = "c4"
 mixed_precision_param = "bfloat16"
 mixed_precision_reduce = "bfloat16"
 
