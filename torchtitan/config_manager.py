@@ -353,8 +353,8 @@ class JobConfig:
             action="store_true",
             help="""
                 If true, swaps `torch.nn.Linear` with `Float8Linear`.
-                This feature requires you to install 'float8_experimental' which can be found
-                here: https://github.com/pytorch-labs/float8_experimental
+                This feature requires you to install 'torchao' which can be found
+                here: https://github.com/pytorch/ao
             """,
         )
         self.parser.add_argument(
