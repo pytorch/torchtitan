@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# [Note] Getting the 'float8_experimental' package:
-# This script requires the 'float8_experimental' package to function correctly.
+# [Note] Getting the 'torchao' package:
+# This script requires the 'torchao' package to function correctly.
 # Please ensure you have this package installed from the appropriate repository.
-# You can obtain it from https://github.com/pytorch-labs/float8_experimental.
-# Either clone and run `pip install .` or run `pip install git+https://github.com/pytorch-labs/float8_experimental.git`
+# You can obtain it from https://github.com/pytorch/ao by following the
+# installation instructions.
 
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
@@ -48,7 +48,7 @@ def maybe_build_fp8_linear(
         )
         return
     try:
-        from float8_experimental import (
+        from torchao.float8 import (
             CastConfig,
             convert_to_float8_training,
             Float8LinearConfig,
@@ -83,7 +83,7 @@ def maybe_build_fp8_linear(
         )
     except ImportError as exc:
         raise ImportError(
-            "float8_experimental is not installed. Please install it to use fp8 linear layers."
+            "torchao is not installed. Please install it to use fp8 linear layers."
         ) from exc
 
 
@@ -102,7 +102,7 @@ def maybe_precompute_fp8_dynamic_scale_for_fsdp(
             "Skipped precomputing fp8 scales because SM90 or later is not available",
         )
         return
-    from float8_experimental import precompute_float8_dynamic_scale_for_fsdp
+    from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
 
     precompute_float8_dynamic_scale_for_fsdp(model)
 
@@ -121,7 +121,7 @@ def maybe_sync_float8_amax_and_scale_history(model: nn.Module, job_config: JobCo
     ):
         return
 
-    from float8_experimental import sync_float8_amax_and_scale_history
+    from torchao.float8 import sync_float8_amax_and_scale_history
 
     # TODO(future): see if precalculating the modules to sync over is going to
     # meaningfully help performance
