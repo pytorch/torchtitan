@@ -12,127 +12,128 @@
 
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
-import functools
-from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch._logging import warning_once
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
+from torchtitan.parallelisms import ParallelDims
 
 
-@functools.lru_cache(None)
 def is_sm90_or_later():
     # Float8 is only supported on H100+ GPUs
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0)
 
 
-def maybe_build_fp8_linear(
-    model: nn.Module, job_config: JobConfig, dp_enabled: Optional[bool] = False
-):
-    """
-    This function converts the linear layers to `Float8Linear`. Note that today,
-    only dynamic tensor scaling (the default) is supported.
+class Float8Handler:
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        self.enabled = False
 
-    This will mutate the model inplace.
-    """
-    enable_float8_linear = job_config.training.enable_float8_linear
-    if not enable_float8_linear:
-        return
-    if not is_sm90_or_later():
-        warning_once(
-            logger,
-            "Failed to swap to Float8Linear because SM90 or later is not available",
-        )
-        return
-    try:
-        from torchao.float8 import (
-            CastConfig,
-            convert_to_float8_training,
-            Float8LinearConfig,
-            ScalingType,
-        )
+        float8_config = job_config.float8
+        if not float8_config.enable_float8_linear:
+            return
+        if not is_sm90_or_later():
+            logger.warning(
+                "Failed to swap to Float8Linear because SM90 or later is not available",
+            )
+            return
+        try:
+            from torchao.float8 import CastConfig, Float8LinearConfig, ScalingType
+        except ImportError as e:
+            raise ImportError(
+                "torchao is not installed. Please install it to use fp8 linear layers."
+            ) from e
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
-            job_config.training.enable_fsdp_float8_all_gather and dp_enabled
+            parallel_dims.dp_enabled
+            and parallel_dims.dp_type == "fsdp"
+            and float8_config.enable_fsdp_float8_all_gather
         )
-        scaling_type_input = ScalingType(job_config.training.float8_scaling_type_input)
-        scaling_type_weight = ScalingType(
-            job_config.training.float8_scaling_type_weight
-        )
-        scaling_type_grad_output = ScalingType(
-            job_config.training.float8_scaling_type_grad_output
-        )
-        float8_config = Float8LinearConfig(
+        scaling_type_input = ScalingType(float8_config.scaling_type_input)
+        scaling_type_weight = ScalingType(float8_config.scaling_type_weight)
+        scaling_type_grad_output = ScalingType(float8_config.scaling_type_grad_output)
+        self.config = Float8LinearConfig(
             enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
             cast_config_input=CastConfig(scaling_type=scaling_type_input),
             cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
             cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
             enable_pre_and_post_forward=False,
         )
+
+        self.enabled = True
+
+        # for precompute_fp8_dynamic_scale_for_fsdp
+        self.precompute_scale = (
+            enable_fsdp_float8_all_gather
+            and float8_config.precompute_float8_dynamic_scale_for_fsdp
+        )
+
+        # for sync_float8_amax_and_scale_history
+        self.delayed_scaling = (
+            scaling_type_input == "delayed"
+            or scaling_type_weight == "delayed"
+            or scaling_type_grad_output == "delayed"
+        )
+        self._sync_float8_amax_and_scale_history = None
+        self.compile = job_config.training.compile
+
+        logger.info("Float8 training active")
+
+    def convert_to_float8_training(self, model: nn.Module):
+        """
+        This function converts the linear layers of `model` to `Float8Linear`.
+        Note that today, only dynamic tensor scaling (the default) is supported.
+        This will mutate the model inplace.
+        """
+        if not self.enabled:
+            return
+
+        from torchao.float8 import convert_to_float8_training
+
+        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
         convert_to_float8_training(
             model,
-            config=float8_config,
+            config=self.config,
             module_filter_fn=lambda mod, fqn: fqn != "output",
         )
         logger.info(
-            f"Swapped to Float8Linear layers with {enable_fsdp_float8_all_gather=}"
+            "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
+            f"{self.config.enable_fsdp_float8_all_gather}"
         )
-    except ImportError as exc:
-        raise ImportError(
-            "torchao is not installed. Please install it to use fp8 linear layers."
-        ) from exc
 
+    def precompute_fp8_dynamic_scale_for_fsdp(self, model: nn.Module):
+        if not self.enabled:
+            return
 
-def maybe_precompute_fp8_dynamic_scale_for_fsdp(
-    model: nn.Module, job_config: JobConfig
-):
-    if not (
-        job_config.training.enable_float8_linear
-        and job_config.training.enable_fsdp_float8_all_gather
-        and job_config.training.precompute_float8_dynamic_scale_for_fsdp
-    ):
-        return
-    if not is_sm90_or_later():
-        warning_once(
-            logger,
-            "Skipped precomputing fp8 scales because SM90 or later is not available",
-        )
-        return
-    from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+        if not self.precompute_scale:
+            return
 
-    precompute_float8_dynamic_scale_for_fsdp(model)
+        from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
 
+        precompute_float8_dynamic_scale_for_fsdp(model)
 
-_sync_float8_amax_and_scale_history = None
+    def sync_float8_amax_and_scale_history(self, model: nn.Module):
+        if not self.enabled:
+            return
 
+        if not self.delayed_scaling:
+            return
 
-def maybe_sync_float8_amax_and_scale_history(model: nn.Module, job_config: JobConfig):
-    if not (
-        job_config.training.enable_float8_linear
-        and (
-            job_config.training.float8_scaling_type_input == "delayed"
-            or job_config.training.float8_scaling_type_weight == "delayed"
-            or job_config.training.float8_scaling_type_grad_output == "delayed"
-        )
-    ):
-        return
+        from torchao.float8 import sync_float8_amax_and_scale_history
 
-    from torchao.float8 import sync_float8_amax_and_scale_history
+        # TODO(vkuzo): see if precalculating the modules to sync over is going to
+        # meaningfully help performance
 
-    # TODO(future): see if precalculating the modules to sync over is going to
-    # meaningfully help performance
+        if self._sync_float8_amax_and_scale_history is None:
+            if self.compile:
+                self._sync_float8_amax_and_scale_history = torch.compile(
+                    sync_float8_amax_and_scale_history
+                )
+            else:
+                self._sync_float8_amax_and_scale_history = (
+                    sync_float8_amax_and_scale_history
+                )
 
-    global _sync_float8_amax_and_scale_history
-    if _sync_float8_amax_and_scale_history is None:
-        if job_config.training.compile:
-            _sync_float8_amax_and_scale_history = torch.compile(
-                sync_float8_amax_and_scale_history
-            )
-        else:
-            _sync_float8_amax_and_scale_history = sync_float8_amax_and_scale_history
-
-    sync_float8_amax_and_scale_history(model)
+        self._sync_float8_amax_and_scale_history(model)

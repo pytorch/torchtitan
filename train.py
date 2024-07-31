@@ -15,11 +15,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
-from torchtitan.float8_linear import (
-    maybe_build_fp8_linear,
-    maybe_precompute_fp8_dynamic_scale_for_fsdp,
-    maybe_sync_float8_amax_and_scale_history,
-)
+from torchtitan.float8_linear import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
@@ -120,8 +116,10 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         whole_model = model_cls.from_model_args(model_config)
 
+    # a no-op hander if fp8 is not enabled
+    float8_handler = Float8Handler(job_config, parallel_dims)
     # swap to Float8Linear base on fp8 config
-    maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
+    float8_handler.convert_to_float8_training(whole_model)
 
     # log model size
     model_param_count = utils.get_num_params(whole_model)
@@ -307,18 +305,17 @@ def main(job_config: JobConfig):
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
 
-            # if float8 is enabled, sync float8 amaxes and scales
-            maybe_sync_float8_amax_and_scale_history(model, job_config)
+            # sync float8 amaxes and scales
+            float8_handler.sync_float8_amax_and_scale_history(model)
 
             # optimizer step
             checkpoint.maybe_wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
 
-            # when float8 config is on,
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)
+            float8_handler.precompute_fp8_dynamic_scale_for_fsdp(model)
 
             losses_since_last_log.append(loss)
 
