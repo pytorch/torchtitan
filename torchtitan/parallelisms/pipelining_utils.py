@@ -7,6 +7,7 @@ from typing import Tuple
 
 from torch.distributed.pipelining import (
     Schedule1F1B,
+    ScheduleFlexibleInterleaved1F1B,
     ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
@@ -22,6 +23,12 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
         schedule_class = ScheduleGPipe
     elif job_config.experimental.pipeline_parallel_schedule == "interleaved_1f1b":
         schedule_class = ScheduleInterleaved1F1B
+        looped_schedule = True
+    elif (
+        job_config.experimental.pipeline_parallel_schedule
+        == "flexible_interleaved_1f1b"
+    ):
+        schedule_class = ScheduleFlexibleInterleaved1F1B
         looped_schedule = True
     else:
         raise NotImplementedError(

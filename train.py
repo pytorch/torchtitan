@@ -30,6 +30,7 @@ from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import (
     maybe_build_fp8_linear,
     maybe_precompute_fp8_dynamic_scale_for_fsdp,
+    maybe_sync_float8_amax_and_scale_history,
 )
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
@@ -355,7 +356,12 @@ def main(job_config: JobConfig):
     gpu_memory_monitor.reset_peak_stats()
 
     # train loop
-    logger.info(f"Training starts at step {train_state.step + 1}")
+    logger.info(
+        f"Training starts at step {train_state.step + 1}, "
+        f"with local batch size: {job_config.training.batch_size}, "
+        f"sequence length: {job_config.training.seq_len}, "
+        f"total steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
+    )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -412,12 +418,15 @@ def main(job_config: JobConfig):
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
 
+            # if float8 is enabled, sync float8 amaxes and scales
+            maybe_sync_float8_amax_and_scale_history(model, job_config)
+
             # optimizer step
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
 
-            # when fp8 config is on,
+            # when float8 config is on,
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
             maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)
