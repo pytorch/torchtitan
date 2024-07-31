@@ -60,7 +60,10 @@ class ParallelDims:
                 names.append(name)
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         names = tuple(names)
-        return init_device_mesh(device_type, dims, mesh_dim_names=names)
+        world_mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        if self.cp > 1 and self.dp > 1:
+            world_mesh.create_view_dim(dims=("dp", "cp"), name="dp_cp")
+        return world_mesh
 
     @property
     def dp_enabled(self):

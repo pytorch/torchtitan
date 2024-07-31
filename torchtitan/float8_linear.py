@@ -4,15 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# [Note] Getting the 'float8_experimental' package:
-# This script requires the 'float8_experimental' package to function correctly.
+# [Note] Getting the 'torchao' package:
+# This script requires the 'torchao' package to function correctly.
 # Please ensure you have this package installed from the appropriate repository.
-# You can obtain it from https://github.com/pytorch-labs/float8_experimental.
-# Either clone and run `pip install .` or run `pip install git+https://github.com/pytorch-labs/float8_experimental.git`
+# You can obtain it from https://github.com/pytorch/ao by following the
+# installation instructions.
 
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
-import contextlib
 import functools
 from typing import Optional
 
@@ -22,20 +21,6 @@ from torch._logging import warning_once
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging_utils import logger
-
-
-@contextlib.contextmanager
-def set_enable_fsdp_float8_all_gather(enable_fsdp_fp8_all_gather: bool):
-    import float8_experimental.config as config
-
-    prev = config.enable_fsdp_fp8_all_gather
-    torch.distributed.barrier()
-    config.enable_fsdp_fp8_all_gather = enable_fsdp_fp8_all_gather
-    try:
-        yield
-    finally:
-        torch.distributed.barrier()
-        config.enable_fsdp_fp8_all_gather = prev
 
 
 @functools.lru_cache(None)
@@ -63,25 +48,42 @@ def maybe_build_fp8_linear(
         )
         return
     try:
-        from float8_experimental.float8_linear import TensorScalingType
-        from float8_experimental.float8_linear_utils import (
-            swap_linear_with_float8_linear,
+        from torchao.float8 import (
+            CastConfig,
+            convert_to_float8_training,
+            Float8LinearConfig,
+            ScalingType,
         )
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
             job_config.training.enable_fsdp_float8_all_gather and dp_enabled
         )
-        with set_enable_fsdp_float8_all_gather(enable_fsdp_float8_all_gather):
-            swap_linear_with_float8_linear(
-                model, scaling_type_w=TensorScalingType.DYNAMIC
-            )
+        scaling_type_input = ScalingType(job_config.training.float8_scaling_type_input)
+        scaling_type_weight = ScalingType(
+            job_config.training.float8_scaling_type_weight
+        )
+        scaling_type_grad_output = ScalingType(
+            job_config.training.float8_scaling_type_grad_output
+        )
+        float8_config = Float8LinearConfig(
+            enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
+            cast_config_input=CastConfig(scaling_type=scaling_type_input),
+            cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
+            cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
+            enable_pre_and_post_forward=False,
+        )
+        convert_to_float8_training(
+            model,
+            config=float8_config,
+            module_filter_fn=lambda mod, fqn: fqn != "output",
+        )
         logger.info(
             f"Swapped to Float8Linear layers with {enable_fsdp_float8_all_gather=}"
         )
     except ImportError as exc:
         raise ImportError(
-            "float8_experimental is not installed. Please install it to use fp8 linear layers."
+            "torchao is not installed. Please install it to use fp8 linear layers."
         ) from exc
 
 
@@ -100,6 +102,37 @@ def maybe_precompute_fp8_dynamic_scale_for_fsdp(
             "Skipped precomputing fp8 scales because SM90 or later is not available",
         )
         return
-    from float8_experimental.fsdp_utils import precompute_float8_dynamic_scale_for_fsdp
+    from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
 
     precompute_float8_dynamic_scale_for_fsdp(model)
+
+
+_sync_float8_amax_and_scale_history = None
+
+
+def maybe_sync_float8_amax_and_scale_history(model: nn.Module, job_config: JobConfig):
+    if not (
+        job_config.training.enable_float8_linear
+        and (
+            job_config.training.float8_scaling_type_input == "delayed"
+            or job_config.training.float8_scaling_type_weight == "delayed"
+            or job_config.training.float8_scaling_type_grad_output == "delayed"
+        )
+    ):
+        return
+
+    from torchao.float8 import sync_float8_amax_and_scale_history
+
+    # TODO(future): see if precalculating the modules to sync over is going to
+    # meaningfully help performance
+
+    global _sync_float8_amax_and_scale_history
+    if _sync_float8_amax_and_scale_history is None:
+        if job_config.training.compile:
+            _sync_float8_amax_and_scale_history = torch.compile(
+                sync_float8_amax_and_scale_history
+            )
+        else:
+            _sync_float8_amax_and_scale_history = sync_float8_amax_and_scale_history
+
+    sync_float8_amax_and_scale_history(model)
