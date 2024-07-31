@@ -137,7 +137,7 @@ def main(job_config: JobConfig):
 
     if parallel_dims.pp_enabled:
         stages, model_parts = models_pipelining_fns[model_name](
-            whole_model, world_mesh, parallel_dims, job_config, device, model_config
+            whole_model, pp_mesh, parallel_dims, job_config, device, model_config
         )
     else:
         # In 1D/2D cases or PP with simple schedules, model_parts is just one item
