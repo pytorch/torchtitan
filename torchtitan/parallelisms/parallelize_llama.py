@@ -541,7 +541,7 @@ def parallelize_llama(
             model,
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
-            enable_float8=job_config.training.enable_float8_linear,
+            enable_float8=job_config.float8.enable_float8_linear,
             enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
         )
 
