@@ -14,7 +14,7 @@ from datetime import timedelta
 from functools import partial
 from io import BytesIO
 from timeit import default_timer as timer
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -25,6 +25,7 @@ from torch.distributed._tensor.experimental.attention import context_parallel_bu
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor.parallel import loss_parallel
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.checkpoint import CheckpointManager
 from torchtitan.config_manager import JobConfig
@@ -32,6 +33,7 @@ from torchtitan.datasets import build_hf_data_loader, create_tokenizer
 from torchtitan.float8_linear import (
     maybe_build_fp8_linear,
     maybe_precompute_fp8_dynamic_scale_for_fsdp,
+    maybe_sync_float8_amax_and_scale_history,
 )
 from torchtitan.logging_utils import init_logger, logger
 from torchtitan.lr_scheduling import get_lr_schedulers
@@ -140,18 +142,40 @@ def build_optimizers(model_parts, job_config: JobConfig):
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+def get_train_context(
+    enable_loss_parallel: bool,
+    enable_compiled_autograd: bool,
+    cp_mesh: Optional[DeviceMesh],
+):
+    if cp_mesh is not None:
+        context_parallel_ctx = partial(context_parallel_buffers, mesh=cp_mesh)
+    else:
+        context_parallel_ctx = partial(context_parallel_buffers, mesh=None)
+
     @contextlib.contextmanager
-    def context():
+    def context(
+        cp_buffers: List[torch.Tensor],
+        cp_seq_dims: List[int],
+        cp_restore_funcs: List[Optional[Callable]],
+    ):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(loss_parallel())
+
             if enable_compiled_autograd:
                 stack.enter_context(
                     torch._dynamo.utils.maybe_enable_compiled_autograd(True)
                 )
 
-            yield
+            buffers = stack.enter_context(
+                context_parallel_ctx(
+                    buffers=cp_buffers,
+                    seq_dims=cp_seq_dims,
+                    restore_funcs=cp_restore_funcs,
+                )
+            )
+
+            yield buffers
 
     return context
 
@@ -217,21 +241,8 @@ def main(job_config: JobConfig):
     train_context = get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
+        world_mesh["cp"] if parallel_dims.cp_enabled else None,
     )
-
-    if parallel_dims.cp_enabled:
-        cp_mesh = world_mesh["cp"]
-        context_parallel_ctx = partial(
-            context_parallel_buffers,
-            cp_rank=cp_mesh.get_local_rank(),
-            cp_world_size=cp_mesh.size(),
-        )
-    else:
-        context_parallel_ctx = partial(
-            context_parallel_buffers,
-            cp_rank=0,
-            cp_world_size=1,
-        )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
@@ -372,7 +383,12 @@ def main(job_config: JobConfig):
     gpu_memory_monitor.reset_peak_stats()
 
     # train loop
-    logger.info(f"Training starts at step {train_state.step + 1}")
+    logger.info(
+        f"Training starts at step {train_state.step + 1}, "
+        f"with local batch size: {job_config.training.batch_size}, "
+        f"sequence length: {job_config.training.seq_len}, "
+        f"total steps: {job_config.training.steps}({job_config.training.warmup_steps}), "
+    )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -387,32 +403,36 @@ def main(job_config: JobConfig):
             data_load_start = timer()
             batch = next(data_iterator)
             input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
+            ntokens_since_last_log += labels.numel() // parallel_dims.cp
             data_loading_times.append(timer() - data_load_start)
 
             optimizers.zero_grad()
 
-            with context_parallel_ctx(
-                buffers=[input_ids, labels, model.freqs_cis],
-                seq_dims=[1, 1, 0],
-                keep_orig_buffers=[False, False, True],
-            ):
-                input_ids = input_ids.cuda()
-                labels = labels.cuda()
+            with train_context(
+                cp_buffers=[input_ids, labels, model.freqs_cis],
+                cp_seq_dims=[1, 1, 0],
+                cp_restore_funcs=[
+                    None,
+                    None,
+                    lambda buf, m=model: setattr(m, "freqs_cis", buf),
+                ],
+            ) as cp_buffers:
+                input_ids = cp_buffers[0].cuda()
+                labels = cp_buffers[1].cuda()
+                model.freqs_cis = cp_buffers[2]
+
                 if parallel_dims.pp_enabled:
                     # pipeline parallel forward / backward inside step() call
                     is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                    with train_context():
-                        if pp_mesh.get_local_rank() == 0:
-                            pp_schedule.step(input_ids)
-                        elif is_last_stage:
-                            losses = []
-                            pp_schedule.step(target=labels, losses=losses)
-                        else:
-                            pp_schedule.step()
+                    if pp_mesh.get_local_rank() == 0:
+                        pp_schedule.step(input_ids)
+                    elif is_last_stage:
+                        losses = []
+                        pp_schedule.step(target=labels, losses=losses)
+                    else:
+                        pp_schedule.step()
 
-                    # accumulate losses across pipeline microbatches
                     loss = (
                         torch.mean(torch.stack(losses))
                         if is_last_stage
@@ -420,13 +440,12 @@ def main(job_config: JobConfig):
                     )
                 else:
                     # Non-PP forward / backward
-                    with train_context():
-                        pred = model(input_ids)
-                        loss = loss_fn(pred, labels)
-                        # pred.shape=(bs, seq_len, vocab_size)
-                        # need to free to before bwd to avoid peaking memory
-                        del pred
-                        loss.backward()
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
+                    loss.backward()
 
             # clip gradients
             for model in model_parts:
@@ -434,12 +453,15 @@ def main(job_config: JobConfig):
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
 
+            # if float8 is enabled, sync float8 amaxes and scales
+            maybe_sync_float8_amax_and_scale_history(model, job_config)
+
             # optimizer step
             checkpoint.wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
 
-            # when fp8 config is on,
+            # when float8 config is on,
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
             maybe_precompute_fp8_dynamic_scale_for_fsdp(model, job_config)

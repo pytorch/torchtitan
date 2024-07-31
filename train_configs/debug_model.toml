@@ -43,6 +43,7 @@ dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 
 [experimental]
 pipeline_parallel_degree = 1
+enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = false

@@ -27,7 +27,6 @@ except ImportError:
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -123,7 +122,7 @@ def checkpoint_wrapper(module: torch.nn.Module, ac_config):
             return module
 
 
-def get_tp_parallel_strategy(
+def get_tp_parallel_strategy_for_transformer_block(
     job_config: JobConfig,
     model: nn.Module,
 ) -> Tuple[RowwiseParallel, ColwiseParallel, PrepareModuleInput]:
@@ -135,7 +134,9 @@ def get_tp_parallel_strategy(
         # TODO(future PR): once float8 configuration supports delayed
         # scaling, add a check here to enforce supported float8 all-gather
         # configurations
-        from float8_experimental.float8_tensor_parallel import (
+        # TODO(future PR): add the items below to __init__.py of torchao.float8,
+        # and import from there
+        from torchao.float8.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
             PrepareFloat8ModuleInput,
@@ -352,13 +353,6 @@ def apply_tp(
     """Apply tensor parallelism."""
 
     tp_mesh = world_mesh["tp"]
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears
-    (
-        rowwise_parallel_weight,
-        colwise_parallel_weight,
-        prepare_module_input,
-    ) = get_tp_parallel_strategy(job_config, model)
     loss_parallel = parallel_dims.loss_parallel_enabled
 
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -374,13 +368,21 @@ def apply_tp(
                 output_layouts=Shard(1),
             ),
             "norm": SequenceParallel(),
-            "output": colwise_parallel_weight(
+            "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
         },
     )
+
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears
+    (
+        rowwise_parallel_weight,
+        colwise_parallel_weight,
+        prepare_module_input,
+    ) = get_tp_parallel_strategy_for_transformer_block(job_config, model)
 
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
@@ -418,13 +420,27 @@ def apply_tp(
             parallelize_plan=layer_plan,
         )
 
+    # updates expressly for async tensor parallel
     if job_config.experimental.enable_async_tensor_parallel:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._dynamo.config.cache_size_limit = 10000
+        logger.info(
+            "Updating torch._dynamo.config.cache_size_limit to 10000 to support Async TP"
+        )
 
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
-    logger.info("Applied Tensor Parallelism to the model")
+        if not job_config.training.compile:
+            logger.warning(
+                "Async TP requires compilation...auto enabling compile = True for this job to resolve."
+            )
+            job_config.training.compile = True
+
+    logger.info(
+        f"Applied{' Async ' if job_config.experimental.enable_async_tensor_parallel else ' '}Tensor Parallelism to the model"
+    )
     return model
 
 
@@ -465,8 +481,8 @@ def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
     Apply context parallelism to the model. This is an experimental feature.
     """
-    if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
-        raise NotImplementedError("CP + TP or CP + PP are not supported yet.")
+    if parallel_dims.pp_enabled:
+        raise NotImplementedError("CP + PP is not supported yet.")
     cp_mesh = world_mesh["cp"]
     callers = []
     for layer_id, transformer_block in model.layers.items():
@@ -483,22 +499,18 @@ def apply_fsdp(
     parallel_dims: "ParallelDims",
     job_config: JobConfig,
 ):
-
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
 
     if parallel_dims.cp_enabled:
         # Temporary solution to enable FSDP + CP
-        dp_mesh = init_device_mesh(
-            world_mesh.device_type,
-            (parallel_dims.dp * parallel_dims.cp,),
-            mesh_dim_names=["dp"],
-        )
+        if parallel_dims.dp_enabled:
+            dp_mesh = world_mesh["dp_cp"]
+        else:
+            dp_mesh = world_mesh["cp"]
     else:
         dp_mesh = world_mesh["dp"]
-
-    assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -524,6 +536,17 @@ def apply_fsdp(
         model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
     )
 
+    if parallel_dims.pp_enabled:
+        # TODO
+        # This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check to avoid using 2D/3D DCP since
+        # without strided sharding, DCP can not safely support resharding for 2D/3D.  However, for PP to work, even
+        # without resharding, we load a seed-checkpoint and need to disable the safety mechanism.  This hack should be
+        # removed after strided sharding is landed in DCP.
+        for module in model.modules():
+            assert len(module._load_state_dict_pre_hooks) <= 1
+            module._load_state_dict_pre_hooks.clear()
+            assert len(module._state_dict_pre_hooks) <= 1
+            module._state_dict_pre_hooks.clear()
     logger.info("Applied FSDP to the model")
     return model
 
@@ -577,7 +600,7 @@ def parallelize_llama(
     if parallel_dims.cp_enabled:
         model = apply_cp(model, world_mesh, parallel_dims, job_config)
 
-    if parallel_dims.dp_enabled:
+    if parallel_dims.dp_enabled or parallel_dims.cp_enabled:
         if parallel_dims.dp_type == "fsdp":
             model = apply_fsdp(model, world_mesh, parallel_dims, job_config)
         else:
