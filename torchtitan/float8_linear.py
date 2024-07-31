@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch._logging import warning_once
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 
 @functools.lru_cache(None)

@@ -32,7 +32,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
 
