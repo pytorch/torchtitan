@@ -119,7 +119,7 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
     if parallel_dims.pp_enabled:
         world_size = parallel_dims.world_size
         pp_size = parallel_dims.pp
-        metrics_log_rank = (world_mesh.size() // pp_size) * (pp_size - 1)
+        metrics_log_rank = (world_size // pp_size) * (pp_size - 1)
     else:
         metrics_log_rank = 0
 

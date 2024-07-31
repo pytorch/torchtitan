@@ -10,7 +10,6 @@ import time
 from datetime import timedelta
 
 import torch
-
 import torchtitan.utils as utils
 from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.checkpoint import CheckpointManager, TrainState
