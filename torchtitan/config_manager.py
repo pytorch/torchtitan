@@ -275,7 +275,7 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b"],
+            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
             default="1f1b",
             help="""
                 Specify the Pipeline Parallel schedule to use.
@@ -352,10 +352,9 @@ class JobConfig:
             "--training.enable_float8_linear",
             action="store_true",
             help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear` with
-                default settings (dynamic scaling).
-                This feature requires you to install 'float8_experimental' which can be found
-                here: https://github.com/pytorch-labs/float8_experimental
+                If true, swaps `torch.nn.Linear` with `Float8Linear`.
+                This feature requires you to install 'torchao' which can be found
+                here: https://github.com/pytorch/ao
             """,
         )
         self.parser.add_argument(
@@ -369,6 +368,25 @@ class JobConfig:
             action="store_true",
             default=False,
             help="Whether precompute float8 scales dynamically for FSDP",
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_input",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+            choices=["dynamic", "delayed"],
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_weight",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+        )
+        self.parser.add_argument(
+            "--training.float8_scaling_type_grad_output",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
         )
         self.parser.add_argument(
             "--training.gc_freq",
