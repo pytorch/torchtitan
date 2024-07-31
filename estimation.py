@@ -16,10 +16,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
-from torchtitan.float8_linear import (
-    maybe_build_fp8_linear,
-    maybe_precompute_fp8_dynamic_scale_for_fsdp,
-)
+from torchtitan.float8_linear import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
@@ -127,8 +124,10 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             whole_model = model_cls.from_model_args(model_config)
 
+        # a no-op hander if fp8 is not enabled
+        float8_handler = Float8Handler(job_config, parallel_dims)
         # swap to Float8Linear base on fp8 config
-        maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
+        float8_handler.convert_to_float8_training(whole_model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         model_parts = [whole_model]
@@ -184,13 +183,14 @@ def estimate_memory(job_config: JobConfig):
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), job_config.training.max_norm, foreach=True
                     )
+                # sync float8 amaxes and scales
+                float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
-                # when fp8 config is on,
                 # calculate float8 dynamic amax/scale for all-parameter for FSDP2
                 # it issues a single all-reduce for all parameters at once for better performance
-                maybe_precompute_fp8_dynamic_scale_for_fsdp(whole_model, job_config)
+                float8_handler.precompute_fp8_dynamic_scale_for_fsdp(model)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
