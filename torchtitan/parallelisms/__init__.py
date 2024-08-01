@@ -8,8 +8,17 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 from torchtitan.parallelisms.parallelize_llama import parallelize_llama, pipeline_llama
+from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
+
+
+__all__ = [
+    "build_pipeline_schedule",
+    "models_parallelize_fns",
+    "models_pipelining_fns",
+    "ParallelDims",
+]
 
 models_parallelize_fns = {
     "llama2": parallelize_llama,
