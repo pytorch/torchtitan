@@ -190,9 +190,12 @@ class Attention(nn.Module):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        xq = xq.view(bs, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bs, seqlen, self.n_kv_heads, self.head_dim)
-        xv = xv.view(bs, seqlen, self.n_kv_heads, self.head_dim)
+        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+        # local heads from sizes of xq, xk, and xv as TP may have sharded them
+        # after the above linear ops.
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 

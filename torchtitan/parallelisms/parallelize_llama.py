@@ -398,11 +398,6 @@ def apply_tp(
             "feed_forward.w3": colwise_parallel_weight(),
         }
 
-        # Adjust attention module to use the local number of heads
-        attn_layer = transformer_block.attention
-        attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
-        attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
-
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_mesh,
