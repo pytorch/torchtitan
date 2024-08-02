@@ -441,12 +441,15 @@ def apply_ac(model: nn.Module, ac_config: JobConfig):
 
 def apply_compile(model: nn.Module):
     """Apply torch.compile to each transformer block."""
+
+    # the following flag can be used to to accelarate per-block compilation
+    # TODO(bdhirsh): turning it off because it's currently not working with 2D
+    # TODO(anijain): remove it after it's enabled in pytorch by default
+    # torch._dynamo.config.inline_inbuilt_nn_modules = True
+
     for layer_id, transformer_block in model.layers.named_children():
-        # TODO: dynamic shape have some issues so we turn it off for now.
-        # TODO: inline inbuilt nn modules does not work yet, enable it to accelarate
-        # compile time.
-        # torch._dynamo.config.inline_inbuilt_nn_modules = True
-        transformer_block = torch.compile(transformer_block, dynamic=False)
+        # turn on per-transformer block compile after AC wrapping and before FSDP
+        transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiled each TransformerBlock with torch.compile")
