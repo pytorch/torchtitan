@@ -20,7 +20,7 @@ except ImportError as e:
     ) from e
 
 from torchtitan.datasets.tokenizer import Tokenizer
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
