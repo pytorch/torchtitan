@@ -8,8 +8,17 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 from torchtitan.parallelisms.parallelize_llama import parallelize_llama, pipeline_llama
+from torchtitan.parallelisms.pipelining_utils import build_pipeline_schedule
+
+
+__all__ = [
+    "build_pipeline_schedule",
+    "models_parallelize_fns",
+    "models_pipelining_fns",
+    "ParallelDims",
+]
 
 models_parallelize_fns = {
     "llama2": parallelize_llama,
@@ -28,8 +37,10 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
+    dp_type: str
 
     def __post_init__(self):
+        self.dp_type = self.dp_type.lower()
         self._validate()
 
     def _validate(self):
@@ -42,6 +53,7 @@ class ParallelDims:
         assert (
             dp * tp * pp == self.world_size
         ), f"Invalid parallel dims: dp({dp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+        assert self.dp_type in ("fsdp", "ddp")
 
     def build_mesh(self, device_type):
         dims = []

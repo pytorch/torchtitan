@@ -18,6 +18,14 @@ Our guiding principles when building `torchtitan`:
 
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
 
+### Dive into the code
+
+You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
+* [train.py](https://github.com/pytorch/torchtitan/blob/main/train.py) - the main training loop and high-level setup code
+* [torchtitan/parallelisms/parallelize_llama.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data / Tensor / Pipeline Parallelisms to the model
+* [torchtitan/checkpoint.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
+* [torchtitan/models/llama/model.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py) - the Llama model definition (shared for Llama2 and Llama3 variants)
+
 ## Pre-Release Updates:
 #### (4/25/2024): `torchtitan` is now public but in a pre-release state and under development.
 Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes from scratch. `torchtitan` is tested and verified with the PyTorch nightly version `torch-2.4.0.dev20240412`. (We recommend latest PyTorch nightly).
@@ -66,7 +74,7 @@ Once you have confirmed access, you can run the following command to download th
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
-# llama3 tokenizer.model
+# llama3 or 3.1 tokenizer.model
 python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
 
 # llama2 tokenizer.model

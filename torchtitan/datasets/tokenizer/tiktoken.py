@@ -26,7 +26,7 @@ import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
 from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 
 class TikTokenizer(Tokenizer):
