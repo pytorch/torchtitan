@@ -9,22 +9,19 @@ import gc
 import os
 
 import torch
-import torch.nn.functional as F
 from torch._guards import active_fake_mode
 from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.distributed import destroy_process_group
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
-from torch.distributed.tensor.parallel import loss_parallel
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import create_tokenizer
-from torchtitan.float8_linear import build_fp8_linear
-from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_schedulers
+from torchtitan.datasets import build_tokenizer
+from torchtitan.float8_linear import Float8Handler
+from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from train import build_optimizers
+from train import get_train_context
 
 
 def estimate_memory(job_config: JobConfig):
@@ -49,7 +46,7 @@ def estimate_memory(job_config: JobConfig):
     # fake tensor doesn't work with fused rmsnorm
     if (
         job_config.model.norm_type == "fused_rmsnorm"
-        and job_config.estimate.mode == "fake"
+        and not job_config.memory_estimation.disable_fake_mode
     ):
         logger.info(
             "Fused RMSNorm is not supported yet under fake estimation mode. "
@@ -57,12 +54,22 @@ def estimate_memory(job_config: JobConfig):
         )
         job_config.model.norm_type = "rmsnorm"
 
+    if job_config.model.norm_type == "compiled_rmsnorm":
+        logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
+        job_config.model.norm_type = "rmsnorm"
+
+    if job_config.training.compile or job_config.experimental.enable_compiled_autograd:
+        logger.info("Compile mode is not supported yet. Switching to eager mode.")
+        job_config.training.compile = False
+        job_config.experimental.enable_compiled_autograd = False
+
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
+        dp_type=job_config.training.data_parallel_type,
     )
 
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
@@ -85,16 +92,18 @@ def estimate_memory(job_config: JobConfig):
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
-    tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
+    tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
-    # loss_parallel enables dispatching to efficient loss operators
-    loss_parallel_ctx = (
-        loss_parallel if parallel_dims.loss_parallel_enabled else contextlib.nullcontext
+    train_context = get_train_context(
+        parallel_dims.loss_parallel_enabled,
+        job_config.experimental.enable_compiled_autograd,
     )
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
-        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+        return torch.nn.functional.cross_entropy(
+            pred.flatten(0, 1), labels.flatten(0, 1)
+        )
 
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
@@ -107,7 +116,7 @@ def estimate_memory(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    with FakeTensorMode() if job_config.estimate.mode == "fake" else contextlib.nullcontext():
+    with FakeTensorMode() if not job_config.memory_estimation.disable_fake_mode else contextlib.nullcontext():
 
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
@@ -115,9 +124,10 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             whole_model = model_cls.from_model_args(model_config)
 
-        # apply fp8 linear module swap
-        if job_config.training.fp8_linear:
-            build_fp8_linear(whole_model, job_config)
+        # a no-op hander if fp8 is not enabled
+        float8_handler = Float8Handler(job_config, parallel_dims)
+        # swap to Float8Linear base on fp8 config
+        float8_handler.convert_to_float8_training(whole_model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         model_parts = [whole_model]
@@ -135,7 +145,7 @@ def estimate_memory(job_config: JobConfig):
 
         # build optimizer after applying parallelisms to the model
         optimizers = build_optimizers(model_parts, job_config)
-        lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
+        lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
         for model in model_parts:
             model.train()
@@ -162,7 +172,7 @@ def estimate_memory(job_config: JobConfig):
             for iter_idx in range(2):
                 input_ids, labels = batch
                 # train step
-                with loss_parallel_ctx():
+                with train_context():
                     pred = whole_model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
@@ -173,9 +183,14 @@ def estimate_memory(job_config: JobConfig):
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), job_config.training.max_norm, foreach=True
                     )
+                # sync float8 amaxes and scales
+                float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
+                # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+                # it issues a single all-reduce for all parameters at once for better performance
+                float8_handler.precompute_fp8_dynamic_scale_for_fsdp(model)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
@@ -198,7 +213,7 @@ def estimate_memory(job_config: JobConfig):
             f" {peak_reserved / gib} GiB | num_retries: {num_retries}"
         )
         print(f"Tracker Max: {tracker_peak / gib} GiB")
-        if job_config.estimate.mode == "real":
+        if job_config.memory_estimation.disable_fake_mode and peak_active > 0:
             print(f"Tracker Accuracy: {tracker_peak/peak_active}")
         gc.enable()
 
@@ -209,4 +224,4 @@ if __name__ == "__main__":
     try:
         estimate_memory(config)
     finally:
-        destroy_process_group()
+        torch.distributed.destroy_process_group()
