@@ -50,6 +50,21 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_schedule flexible_interleaved_1f1b",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm throws cuda context error with pp
+                ],
+            ],
+            "PP looped flexible 1f1b test",
+            "pp_looped_flexible_1f1b",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
@@ -253,7 +268,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
                     "--experimental.pipeline_parallel_schedule interleaved_1f1b",
-                    "--model.norm_type rmsnorm",  # compiled_rmsnorm / fused_rmsnorm throws cuda context error with pp
+                    "--model.norm_type rmsnorm",  # compiled_rmsnorm / fused_rmsnorm crashes with PP
                 ],
             ],
             "PP looped 1f1b test",
@@ -279,6 +294,16 @@ def build_test_list():
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_type ddp",
+                ]
+            ],
+            "DDP",
+            "ddp",
             ngpu=4,
         ),
     ]
@@ -312,6 +337,8 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
+        if test_name == "fsdp2_mem_tracker":
+            cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_memory_estimation.sh"
         cmd += " " + dump_folder_arg
         cmd += " " + model_flavor_arg
         if override_arg:

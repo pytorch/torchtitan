@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
+from torchtitan.parallelisms import ParallelDims
 
 # named tuple for passing GPU memory stats for logging
 GPUMemStats = namedtuple(
@@ -110,16 +111,29 @@ class MetricLogger:
             self.writer.close()
 
 
+def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
+    """
+    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
+    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
+    """
+    if parallel_dims.pp_enabled:
+        world_size = parallel_dims.world_size
+        pp_size = parallel_dims.pp
+        metrics_log_rank = (world_size // pp_size) * (pp_size - 1)
+    else:
+        metrics_log_rank = 0
+
+    return metrics_log_rank
+
+
 def build_metric_logger(
-    config: JobConfig, metrics_log_rank: int = 0, tag: Optional[str] = None
+    config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ):
     """
-    metrics_log_rank controls which rank acts as 'rank 0' for logging metrics.
-
-    If 'tb_config.rank_0_only' is set, then `metrics_log_rank` will be used as the rank to log metrics.
-    This is intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
-    parallelism is enabled, without forcing logging from all ranks to capture loss information when using pipeline
-    parallelism.
+    parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
+    In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'. This is
+    intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
+    parallelism is enabled, without forcing logging from all ranks to capture loss information.
     """
     dump_dir = config.job.dump_folder
     tb_config = config.metrics
@@ -134,7 +148,7 @@ def build_metric_logger(
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
         if tb_config.rank_0_only:
-            enable_tb = torch.distributed.get_rank() == metrics_log_rank
+            enable_tb = torch.distributed.get_rank() == _get_metrics_rank(parallel_dims)
         else:
             rank_str = f"rank_{torch.distributed.get_rank()}"
             log_dir = os.path.join(log_dir, rank_str)
