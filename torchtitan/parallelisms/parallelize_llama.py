@@ -4,20 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# this file applies the PTD parallelisms and various training techniques to the
-# llama model, i.e. activation checkpointing, etc.
+# This file applies the PT-D parallelisms and various training techniques (e.g.
+# activation checkpointing and compile) to the Llama model.
 
 import copy
 from collections import defaultdict
-from typing import Dict, Tuple
+from typing import Tuple, TYPE_CHECKING, Union
 
 import torch
+import torch.nn as nn
+from torch.distributed import DeviceMesh
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+
+from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
-    CheckpointImpl,
 )
 from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
 from torch.distributed.tensor.parallel import (
@@ -28,11 +31,16 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torch.utils.checkpoint import checkpoint
-
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
+from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
+
+if TYPE_CHECKING:
+    from torchtitan.parallelisms import ParallelDims
+
+
+DeviceType = Union[int, str, torch.device]
 
 # for selective AC
 no_recompute_list = {
@@ -43,10 +51,25 @@ no_recompute_list = {
 }
 
 
-# Uses PTD FSDP AC wrapper
-# currently selective per op and per layer checkpointing are supported
-def checkpoint_wrapper(module, config):
-    if config.mode == "selective" and config.selective_ac_option == "op":
+def checkpoint_wrapper(module: torch.nn.Module, ac_config):
+    valid_ac_modes = ("full", "selective")
+    if ac_config.mode not in valid_ac_modes:
+        raise ValueError(
+            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
+        )
+
+    if ac_config.mode == "full":
+        return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+
+    assert ac_config.mode == "selective", f"{ac_config.mode}"
+    use_op_sac = ac_config.selective_ac_option == "op"
+    use_layer_sac = ac_config.selective_ac_option.isdigit()
+    if not use_op_sac and not use_layer_sac:
+        raise ValueError(
+            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
+            f"Valid options: 'op' or a positive int representing layer frequency"
+        )
+    if use_op_sac:
         from torch.utils.checkpoint import (
             CheckpointPolicy,
             create_selective_checkpoint_contexts,
@@ -76,63 +99,38 @@ def checkpoint_wrapper(module, config):
 
         return ptd_checkpoint_wrapper(
             module,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            checkpoint_fn=checkpoint,
             context_fn=selective_checkpointing_context_fn,
-            use_reentrant=False,
             preserve_rng_state=False,
         )
-    elif config.mode == "full":
-        return ptd_checkpoint_wrapper(
-            module,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            checkpoint_fn=checkpoint,
-            use_reentrant=False,
-            preserve_rng_state=False,
-        )
-
-    elif config.mode == "selective" and config.selective_ac_option.isdigit():
-        """enables selective checkpointing of candidate layers.
-        Usage:
-        'selective_ac_option' with a positive 'int' value in config controls which layers to checkpoint.
-        1 == checkpointing every one (all).
-        2 == checkpoint every 2nd one
-        """
-        ac_freq = int(config.selective_ac_option)
-        assert (
-            ac_freq >= 0
-        ), f"selective layer AC policy (ac_freq) expects a positive integer, received {ac_freq}"
-
-        checkpoint_wrapper.__dict__.setdefault("_count", 0)
-
-        checkpoint_wrapper._count += 1
-        if not ac_freq or checkpoint_wrapper._count % ac_freq == 0:
-            return ptd_checkpoint_wrapper(
-                module,
-                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-                checkpoint_fn=checkpoint,
-                use_reentrant=False,
-                preserve_rng_state=False,
+    elif use_layer_sac:
+        # Checkpoint every `ac_freq` of the modules passed to this function
+        ac_freq = int(ac_config.selective_ac_option)
+        if ac_freq <= 0:
+            raise ValueError(
+                f"Selective layer AC expects a positive int as selective_ac_option but got {ac_freq}"
             )
-        # skip activation checkpointing and store activations for this layer
+        ptd_checkpoint_wrapper.__dict__.setdefault("_count", 0)
+        ptd_checkpoint_wrapper._count += 1
+        if not ac_freq or ptd_checkpoint_wrapper._count % ac_freq == 0:
+            return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
         else:
             return module
 
-    else:
-        raise NotImplementedError(
-            "Unknown AC type or AC config. Only selective op and selective layer ac implemented currently."
-        )
 
-
-def get_tp_parallel_strategy(
-    job_config: JobConfig,
+def get_tp_parallel_strategy_for_transformer_block(
+    enable_float8: bool,
 ) -> Tuple[RowwiseParallel, ColwiseParallel, PrepareModuleInput]:
     """Get the parallel strategy for the transformer model.
 
     This function handles the special case of using float8 with tensor parallelism.
     """
-    if job_config.training.fp8_linear == "dynamic":
-        from float8_experimental.float8_tensor_parallel import (
+    if enable_float8:
+        # TODO(vkuzo): once float8 configuration supports delayed
+        # scaling, add a check here to enforce supported float8 all-gather
+        # configurations
+        # TODO(vkuzo): add the items below to __init__.py of torchao.float8,
+        # and import from there
+        from torchao.float8.float8_tensor_parallel import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
             PrepareFloat8ModuleInput,
@@ -143,23 +141,30 @@ def get_tp_parallel_strategy(
 
 
 def pipeline_llama(
-    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
+    model: nn.Module,
+    pp_mesh: DeviceMesh,
+    parallel_dims: "ParallelDims",
+    job_config: JobConfig,
+    device: DeviceType,
+    model_config: ModelArgs,
 ):
-    if job_config.experimental.pipeline_parallel_split_mode == "manual":
+    split_mode = job_config.experimental.pipeline_parallel_split_mode
+    valid_split_modes = ("manual", "tracer")
+    if split_mode not in valid_split_modes:
+        raise ValueError(
+            f"Invalid split mode: {split_mode}. Valid split modes: {valid_split_modes}"
+        )
+    if split_mode == "manual":
         return pipeline_llama_manual(
-            model, world_mesh, parallel_dims, job_config, device, model_config
+            model, pp_mesh, parallel_dims, job_config, device, model_config
         )
-    elif job_config.experimental.pipeline_parallel_split_mode == "tracer":
+    elif split_mode == "tracer":
         return pipeline_llama_tracer(
-            model, world_mesh, parallel_dims, job_config, device, model_config
-        )
-    else:
-        raise NotImplementedError(
-            f"{job_config.experimental.pipeline_parallel_split_mode} is not a valid split mode"
+            model, pp_mesh, parallel_dims, job_config, device, model_config
         )
 
 
-def _llama_trace_input(job_config, model_config, device="meta"):
+def _llama_trace_input(job_config: JobConfig, model_config: ModelArgs, device="meta"):
     """Get meta tensors with the right input shapes used for tracing"""
     tokens_shape = (job_config.training.batch_size, job_config.training.seq_len)
     tokens = torch.randint(
@@ -171,18 +176,18 @@ def _llama_trace_input(job_config, model_config, device="meta"):
 def _mixed_precision_dtype(
     job_config: JobConfig, parallel_dims, default: torch.dtype = torch.float32
 ) -> torch.dtype:
-    """Get the mixed precision dtype if fsdp is enabled, otherwise return the default"""
+    """Get the mixed precision dtype if FSDP is enabled, otherwise return the default"""
     mp_arg = job_config.training.mixed_precision_param
     return TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else default
 
 
 def pipeline_llama_manual(
-    whole_model,
-    world_mesh,
-    parallel_dims,
+    whole_model: nn.Module,
+    pp_mesh: DeviceMesh,
+    parallel_dims: "ParallelDims",
     job_config: JobConfig,
-    device,
-    model_config: Dict,
+    device: DeviceType,
+    model_config: ModelArgs,
 ):
     """
     This API extracts one torch.nn.Module objects for the part of the model configured to run inside this stage.
@@ -192,7 +197,6 @@ def pipeline_llama_manual(
     The stage object is used to create a pipeline schedule, and the model object can be used for applying SPMD
     parallelism.
     """
-    pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
     microbatches = (
@@ -280,22 +284,26 @@ def pipeline_llama_manual(
 
 
 def pipeline_llama_tracer(
-    model, world_mesh, parallel_dims, job_config: JobConfig, device, model_config: Dict
+    model: nn.Module,
+    pp_mesh: DeviceMesh,
+    parallel_dims: "ParallelDims",
+    job_config: JobConfig,
+    device: DeviceType,
+    model_config: ModelArgs,
 ):
     if job_config.model.norm_type == "fused_rmsnorm":
-        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
-        # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
+        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr
+        # invocation stride in strict mode from `if dy.stride(-1) != 1:` in
+        # fused_rmsnorm
         raise NotImplementedError(
-            "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
+            "fused_rmsnorm is not compatible with Pipeline Tracer yet. Please use rmsnorm or layernorm."
+        )
+    if _mixed_precision_dtype(job_config, parallel_dims) != torch.float32:
+        raise NotImplementedError(
+            "Pipeline tracer does not work with FSDP mixed precision yet. "
+            "To work around, set mixed_precision_param to float32."
         )
 
-    if _mixed_precision_dtype(job_config, parallel_dims) == torch.bfloat16:
-        raise NotImplementedError(
-            "pipeline tracer doesn't work with fsdp mixed precision currently. "
-            "To work around, edit fsdp mixed precision config to use fp32."
-        )
-
-    pp_mesh = world_mesh["pp"]
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
     microbatches = (
@@ -328,22 +336,18 @@ def pipeline_llama_tracer(
     return (stages, models)
 
 
-def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
-    """
-    Apply tensor parallelism.
-    """
-
-    tp_mesh = world_mesh["tp"]
-    (
-        row_parallel_strategy,
-        col_parallel_strategy,
-        prepare_module_input,
-    ) = get_tp_parallel_strategy(job_config)
-    loss_parallel = parallel_dims.loss_parallel_enabled
-
-    # 1. Parallelize the first embedding and the last linear proj layer
+def apply_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    loss_parallel: bool,
+    enable_float8: bool,
+    enable_async_tp: bool,
+):
+    """Apply tensor parallelism."""
+    # 1. Parallelize the embedding and shard its outputs (which are the first
+    # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Shard the first transformer block's inputs
+    # 3. Parallelize the final linear output layer
     model = parallelize_module(
         model,
         tp_mesh,
@@ -352,35 +356,46 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
             ),
-            "output": col_parallel_strategy(
+            "norm": SequenceParallel(),
+            "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
-            "norm": SequenceParallel(),
         },
     )
 
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears
+    (
+        rowwise_parallel_weight,
+        colwise_parallel_weight,
+        prepare_module_input,
+    ) = get_tp_parallel_strategy_for_transformer_block(enable_float8)
+
     # Apply tensor + sequence parallelism to every transformer block
+    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
+    #       by folding (and unfolding) the batch dimension and the sequence dimension.
+    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for layer_id, transformer_block in model.layers.items():
         layer_plan = {
+            "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None),
                 desired_input_layouts=(Replicate(), None),
             ),
-            "attention.wq": col_parallel_strategy(),
-            "attention.wk": col_parallel_strategy(),
-            "attention.wv": col_parallel_strategy(),
-            "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
-            "attention_norm": SequenceParallel(),
+            "attention.wq": colwise_parallel_weight(),
+            "attention.wk": colwise_parallel_weight(),
+            "attention.wv": colwise_parallel_weight(),
+            "attention.wo": rowwise_parallel_weight(output_layouts=Shard(1)),
+            "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
-            "feed_forward.w1": col_parallel_strategy(),
-            "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
-            "feed_forward.w3": col_parallel_strategy(),
-            "ffn_norm": SequenceParallel(),
+            "feed_forward.w1": colwise_parallel_weight(),
+            "feed_forward.w2": rowwise_parallel_weight(output_layouts=Shard(1)),
+            "feed_forward.w3": colwise_parallel_weight(),
         }
 
         # Adjust attention module to use the local number of heads
@@ -394,23 +409,33 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
             parallelize_plan=layer_plan,
         )
 
-    if job_config.experimental.enable_async_tensor_parallel:
+    # updates expressly for async tensor parallel
+    if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._dynamo.config.cache_size_limit = 10000
+        logger.info(
+            "Updating torch._dynamo.config.cache_size_limit to 10000 to support Async TP"
+        )
 
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
-    logger.info("Applied Tensor Parallelism to the model")
+        if not job_config.training.compile:
+            logger.warning(
+                "Async TP requires compilation...auto enabling compile = True for this job to resolve."
+            )
+            job_config.training.compile = True
+
+    logger.info(
+        f"Applied {'Async ' if enable_async_tp else ''}"
+        "Tensor Parallelism to the model"
+    )
     return model
 
 
-def apply_ac(model, job_config: JobConfig):
-    """
-    Apply activation checkpointing to the model.
-    """
-
-    ac_config = job_config.activation_checkpoint
-
+def apply_ac(model: nn.Module, ac_config: JobConfig):
+    """Apply activation checkpointing to the model."""
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = checkpoint_wrapper(transformer_block, ac_config)
         model.layers.register_module(layer_id, transformer_block)
@@ -419,18 +444,9 @@ def apply_ac(model, job_config: JobConfig):
     return model
 
 
-def apply_compile(model, job_config: JobConfig):
-    """
-    Apply torch.compile to the model.
-    """
-
-    if job_config.model.norm_type == "fused_rmsnorm":
-        raise NotImplementedError(
-            "fused_rmsnorm not yet compatible with torch.compile. Please use layernorm or rmsnorm."
-        )
-
+def apply_compile(model: nn.Module):
+    """Apply torch.compile to each transformer block."""
     for layer_id, transformer_block in model.layers.named_children():
-        # turn on per-transformer block compile after AC wrapping and before FSDP
         # TODO: dynamic shape have some issues so we turn it off for now.
         # TODO: inline inbuilt nn modules does not work yet, enable it to accelarate
         # compile time.
@@ -438,55 +454,80 @@ def apply_compile(model, job_config: JobConfig):
         transformer_block = torch.compile(transformer_block, dynamic=False)
         model.layers.register_module(layer_id, transformer_block)
 
-    ac_config = job_config.activation_checkpoint
-    if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
-        # some temp flags for torch.compile enablement + SAC
-        torch._dynamo.config._experimental_support_context_fn_in_torch_utils_checkpoint = (
-            True
-        )
-
     logger.info("Compiled each TransformerBlock with torch.compile")
     return model
 
 
-def apply_dp(model, world_mesh, parallel_dims, job_config: JobConfig):
+def apply_fsdp(
+    model: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    pp_enabled: bool,
+):
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
-
-    dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-    assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
-
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-    )
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
     for layer_id, transformer_block in model.layers.items():
-        # As an optimization, do not reshard after forward for the last
-        # transformer block since FSDP would prefetch it immediately.
-        # When using Pipeline Parallelism, generally zero-2 is best so as to avoid repeated reshardings
-        # per microbatch.
-        reshard_after_forward = (
-            int(layer_id) < len(model.layers) - 1 and not parallel_dims.pp_enabled
-        )
+        if pp_enabled:
+            # For PP, do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            reshard_after_forward = False
+        else:
+            # As an optimization, do not reshard after forward for the last
+            # transformer block since FSDP would prefetch it immediately
+            reshard_after_forward = int(layer_id) < len(model.layers) - 1
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-        model.layers[layer_id] = transformer_block
+    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
-    model = fully_shard(
-        model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
-    )
-
+    if pp_enabled:
+        # TODO
+        # This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check to avoid using 2D/3D DCP since
+        # without strided sharding, DCP can not safely support resharding for 2D/3D.  However, for PP to work, even
+        # without resharding, we load a seed-checkpoint and need to disable the safety mechanism.  This hack should be
+        # removed after strided sharding is landed in DCP.
+        for module in model.modules():
+            assert len(module._load_state_dict_pre_hooks) <= 1
+            module._load_state_dict_pre_hooks.clear()
+            assert len(module._state_dict_pre_hooks) <= 1
+            module._state_dict_pre_hooks.clear()
     logger.info("Applied FSDP to the model")
     return model
 
 
-def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
+def apply_ddp(
+    model: nn.Module,
+    dp_mesh: DeviceMesh,
+    enable_compile: bool,
+    enable_compiled_autograd: bool,
+):
+    if enable_compile:
+        if enable_compiled_autograd:
+            torch._dynamo.config.optimize_ddp = (
+                "python_reducer_without_compiled_forward"
+            )
+        else:
+            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+
+    model = replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+
+    logger.info("Applied DDP to the model")
+    return model
+
+
+def parallelize_llama(
+    model: nn.Module,
+    world_mesh: DeviceMesh,
+    parallel_dims: "ParallelDims",
+    job_config: JobConfig,
+):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
     parallelism to the model.
@@ -496,15 +537,46 @@ def parallelize_llama(model, world_mesh, parallel_dims, job_config: JobConfig):
     """
 
     if parallel_dims.tp_enabled:
-        model = apply_tp(model, world_mesh, parallel_dims, job_config)
+        model = apply_tp(
+            model,
+            world_mesh["tp"],
+            loss_parallel=parallel_dims.loss_parallel_enabled,
+            enable_float8=job_config.float8.enable_float8_linear,
+            enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
+        )
 
     if job_config.activation_checkpoint.mode != "none":
-        model = apply_ac(model, job_config)
+        model = apply_ac(model, job_config.activation_checkpoint)
 
     if job_config.training.compile:
-        model = apply_compile(model, job_config)
+        if job_config.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm is not compatible with torch.compile yet. Please use rmsnorm or layernorm."
+            )
+        model = apply_compile(model)
 
     if parallel_dims.dp_enabled:
-        model = apply_dp(model, world_mesh, parallel_dims, job_config)
+        if parallel_dims.dp_type == "fsdp":
+            dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+            assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+
+            model = apply_fsdp(
+                model,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[
+                    job_config.training.mixed_precision_reduce
+                ],
+                pp_enabled=parallel_dims.pp_enabled,
+            )
+        else:
+            if world_mesh.ndim > 1:
+                raise RuntimeError("DDP has not supported > 1D parallelism.")
+            model = apply_ddp(
+                model,
+                world_mesh,
+                enable_compile=job_config.training.compile,
+                enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
+            )
 
     return model

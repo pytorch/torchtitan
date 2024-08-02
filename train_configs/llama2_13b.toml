@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama2"
 flavor = "13B"
-norm_type = "fused_rmsnorm"  # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/tokenizer.model"
 
 [optimizer]
@@ -33,7 +33,6 @@ max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
-fp8_linear = ""
 compile = false
 dataset = "c4"
 
@@ -52,3 +51,6 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[float8]
+enable_float8_linear = false
