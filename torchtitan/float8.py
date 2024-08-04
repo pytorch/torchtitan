@@ -22,7 +22,7 @@ from torchtitan.parallelisms import ParallelDims
 
 
 def _is_sm90_or_later():
-    # _Float8 is only supported on H100+ GPUs
+    # Float8 is only supported on H100+ GPUs
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0)
 
 
