@@ -21,7 +21,7 @@ from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
 
 
-def is_sm90_or_later():
+def _is_sm90_or_later():
     # Float8 is only supported on H100+ GPUs
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0)
 
@@ -33,7 +33,7 @@ class Float8Handler:
         float8_config = job_config.float8
         if not float8_config.enable_float8_linear:
             return
-        if not is_sm90_or_later():
+        if not _is_sm90_or_later():
             logger.warning(
                 "Failed to swap to Float8Linear because SM90 or later is not available",
             )
@@ -42,7 +42,7 @@ class Float8Handler:
             from torchao.float8 import CastConfig, Float8LinearConfig, ScalingType
         except ImportError as e:
             raise ImportError(
-                "torchao is not installed. Please install it to use fp8 linear layers."
+                "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
@@ -64,7 +64,7 @@ class Float8Handler:
 
         self.enabled = True
 
-        # for precompute_fp8_dynamic_scale_for_fsdp
+        # for precompute_float8_dynamic_scale_for_fsdp
         self.precompute_scale = (
             enable_fsdp_float8_all_gather
             and float8_config.precompute_float8_dynamic_scale_for_fsdp
@@ -103,7 +103,7 @@ class Float8Handler:
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
 
-    def precompute_fp8_dynamic_scale_for_fsdp(self, model: nn.Module):
+    def precompute_float8_dynamic_scale_for_fsdp(self, model: nn.Module):
         if not self.enabled:
             return
 
