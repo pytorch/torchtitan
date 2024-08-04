@@ -124,9 +124,9 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             whole_model = model_cls.from_model_args(model_config)
 
-        # a no-op hander if fp8 is not enabled
+        # a no-op hander if float8 is not enabled
         float8_handler = Float8Handler(job_config, parallel_dims)
-        # swap to Float8Linear base on fp8 config
+        # swap to Float8Linear based on float8 configs
         float8_handler.convert_to_float8_training(whole_model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
@@ -190,7 +190,7 @@ def estimate_memory(job_config: JobConfig):
                 lr_schedulers.step()
                 # calculate float8 dynamic amax/scale for all-parameter for FSDP2
                 # it issues a single all-reduce for all parameters at once for better performance
-                float8_handler.precompute_fp8_dynamic_scale_for_fsdp(model)
+                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
