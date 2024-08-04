@@ -127,7 +127,7 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
 
 
 def build_metric_logger(
-    config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
+    job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ):
     """
     parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
@@ -135,8 +135,8 @@ def build_metric_logger(
     intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
     parallelism is enabled, without forcing logging from all ranks to capture loss information.
     """
-    dump_dir = config.job.dump_folder
-    tb_config = config.metrics
+    dump_dir = job_config.job.dump_folder
+    tb_config = job_config.metrics
     save_tb_folder = tb_config.save_tb_folder
     # since we don't have run id, use current minute as the identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
