@@ -13,6 +13,8 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
+from typing import List, Union
+
 import torch
 import torch.nn as nn
 
@@ -103,7 +105,9 @@ class Float8Handler:
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
 
-    def precompute_float8_dynamic_scale_for_fsdp(self, model: nn.Module):
+    def precompute_float8_dynamic_scale_for_fsdp(
+        self, model: Union[nn.Module, List[nn.Module]]
+    ):
         if not self.enabled:
             return
 
@@ -112,9 +116,13 @@ class Float8Handler:
 
         from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
 
-        precompute_float8_dynamic_scale_for_fsdp(model)
+        models = [model] if isinstance(model, nn.Module) else model
+        for m in models:
+            precompute_float8_dynamic_scale_for_fsdp(m)
 
-    def sync_float8_amax_and_scale_history(self, model: nn.Module):
+    def sync_float8_amax_and_scale_history(
+        self, model: Union[nn.Module, List[nn.Module]]
+    ):
         if not self.enabled:
             return
 
@@ -136,4 +144,6 @@ class Float8Handler:
                     sync_float8_amax_and_scale_history
                 )
 
-        self._sync_float8_amax_and_scale_history(model)
+        models = [model] if isinstance(model, nn.Module) else model
+        for m in models:
+            self._sync_float8_amax_and_scale_history(m)
