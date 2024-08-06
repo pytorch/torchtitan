@@ -9,18 +9,17 @@ from typing import Tuple
 
 from torch.distributed.pipelining import (
     Schedule1F1B,
+    ScheduleFlexibleInterleaved1F1B,
     ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
+from torchtitan.logging import logger
 from torch.distributed.pipelining.schedules import PipelineScheduleMulti
-
-from torchtitan.logging_utils import logger
 
 PARALLELISM_DIR = pathlib.Path(__file__).parent.resolve()
 
 
 def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
-
     looped_schedule = False
     zb_schedule = False
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
@@ -30,7 +29,13 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
     elif job_config.experimental.pipeline_parallel_schedule == "interleaved_1f1b":
         schedule_class = ScheduleInterleaved1F1B
         looped_schedule = True
-    elif job_config.experimental.pipeline_parallel_schedule == "zb":
+    elif (
+        job_config.experimental.pipeline_parallel_schedule
+        == "flexible_interleaved_1f1b"
+    ):
+        schedule_class = ScheduleFlexibleInterleaved1F1B
+        looped_schedule = True
+    elif job_config.experimental.pipeline_parallel_schedule == "zb_v":
         looped_schedule = True
         schedule_class = PipelineScheduleMulti
         zb_schedule = True
@@ -45,7 +50,7 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
     if n_microbatches is None:
         n_microbatches = job_config.experimental.pipeline_parallel_degree
 
-    if job_config.experimental.pipeline_parallel_schedule == "zb":
+    if job_config.experimental.pipeline_parallel_schedule == "zb_v":
         # TODO: hardcoded and only used for V-shaped zero bubble
         stage_index_to_group_rank = {
             0: 0,
