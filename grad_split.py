@@ -170,11 +170,11 @@ if __name__ == "__main__":
 
     print(" -- SPLIT -- ")
     # Compute gradients in two parts
-    with LoggingTensorMode():
-        print("PART 1")
-        dinputs, state = compute_grads_only_inputs2((out,), inps, weights)
-        print("PART 2")
-        dweights = compute_grads_only_weights2(weights, state)
+    # with LoggingTensorMode():
+    print("PART 1")
+    dinputs, state = compute_grads_only_inputs2((out,), inps, weights)
+    print("PART 2")
+    dweights = compute_grads_only_weights2(weights, state)
 
     out = mod2(mod1(a))
 

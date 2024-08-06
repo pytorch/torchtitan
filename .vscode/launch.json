@@ -10,7 +10,7 @@
             "name": "Launch a python script",
             "program": "${file}",
             "console": "internalConsole",
-            "python": "/home/howardhuang/.conda/envs/torchtitan/bin/python",
+            "python": "/home/howardhuang/.conda/envs/titan/bin/python",
         },
         {
             "type": "meta-python",
