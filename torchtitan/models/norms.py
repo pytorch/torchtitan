@@ -44,6 +44,7 @@ def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
         return RMSNorm(dim, eps=eps)
     elif norm_type == "compiled_rmsnorm":
         import warnings
+
         warnings.warn(
             "compiled_rmsnorm is currently experimental and not ready to use yet."
         )
