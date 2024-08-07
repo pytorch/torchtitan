@@ -277,17 +277,15 @@ def apply_ac(model: nn.Module, ac_config):
 
 
 def apply_compile(model: nn.Module):
-    """Apply torch.compile to each transformer block."""
-
-    # the following flag is used to accelarate per-TransformerBlock compilation
-    # TODO(anijain): remove it after it's enabled in pytorch by default
-    torch._dynamo.config.inline_inbuilt_nn_modules = True
-
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiled each TransformerBlock with torch.compile")
+    logger.info("Compiling each TransformerBlock with torch.compile")
     return model
 
 
