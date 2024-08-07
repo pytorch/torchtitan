@@ -22,7 +22,6 @@ from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
-    build_pipeline_schedule,
     models_parallelize_fns,
     models_pipelining_fns,
     ParallelDims,
@@ -143,11 +142,8 @@ def main(job_config: JobConfig):
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        stages, model_parts = models_pipelining_fns[model_name](
-            model, pp_mesh, parallel_dims, job_config, device, model_config
-        )
-        pp_schedule = build_pipeline_schedule(
-            job_config, parallel_dims, stages, loss_fn
+        pp_schedule, model_parts = models_pipelining_fns[model_name](
+            model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
 
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
