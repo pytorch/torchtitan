@@ -506,7 +506,7 @@ def apply_fsdp(
     if parallel_dims.cp_enabled:
         # Temporary solution to enable FSDP + CP
         if parallel_dims.dp_enabled:
-            dp_mesh = world_mesh["dp_cp"]
+            dp_mesh = world_mesh["dp", "cp"]._flatten()
         else:
             dp_mesh = world_mesh["cp"]
     else:
