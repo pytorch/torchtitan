@@ -19,6 +19,11 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 
 from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
+
+try:
+    from torch.distributed._tensor.experimental.attention import enable_context_parallel
+except ImportError:
+    print("The PyTorch version does not include the experimental CP APIs.")
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -472,6 +477,22 @@ def apply_compile(model: nn.Module, job_config: JobConfig):
     return model
 
 
+def apply_cp(model, world_mesh, parallel_dims, job_config: JobConfig):
+    """
+    Apply context parallelism to the model. This is an experimental feature.
+    """
+    if parallel_dims.pp_enabled:
+        raise NotImplementedError("CP + PP is not supported yet.")
+    cp_mesh = world_mesh["cp"]
+    callers = []
+    for layer_id, transformer_block in model.layers.items():
+        callers.append(transformer_block.attention)
+    enable_context_parallel(seq_dim=2, callers=callers, device_mesh=cp_mesh)
+    logger.info("Applied CP to the model")
+
+    return model
+
+
 def apply_fsdp(
     model: nn.Module,
     world_mesh: DeviceMesh,
@@ -482,8 +503,14 @@ def apply_fsdp(
     Apply data parallelism to the model. FSDP2 is used here.
     """
 
-    dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-    assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+    if parallel_dims.cp_enabled:
+        # Temporary solution to enable FSDP + CP
+        if parallel_dims.dp_enabled:
+            dp_mesh = world_mesh["dp", "cp"]._flatten()
+        else:
+            dp_mesh = world_mesh["cp"]
+    else:
+        dp_mesh = world_mesh["dp"]
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -570,7 +597,10 @@ def parallelize_llama(
     if job_config.training.compile:
         model = apply_compile(model, job_config)
 
-    if parallel_dims.dp_enabled:
+    if parallel_dims.cp_enabled:
+        model = apply_cp(model, world_mesh, parallel_dims, job_config)
+
+    if parallel_dims.dp_enabled or parallel_dims.cp_enabled:
         if parallel_dims.dp_type == "fsdp":
             model = apply_fsdp(model, world_mesh, parallel_dims, job_config)
         else:
