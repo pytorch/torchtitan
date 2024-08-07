@@ -43,6 +43,7 @@ Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes
 6. Learning rate scheduler, meta init, Optional Fused RMSNorm
 7. All options easily configured via [toml files](train_configs/)
 8. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning
+9. [Float8 support](docs/float8.md)
 
 We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
@@ -50,11 +51,10 @@ We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 ### Coming soon
 
 1. Async checkpointing
-2. Float8 support
-3. Context Parallel
-4. 3D Pipeline Parallel
-5. `torch.compile` support
-6. Scalable data loading solution
+2. Context Parallel
+3. 3D Pipeline Parallel
+4. `torch.compile` support
+5. Scalable data loading solution
 
 
 ## Installation
@@ -134,25 +134,6 @@ If your gpu count per node is not 8, adjust:
 ```#SBATCH --gpus-per-task```
 
 in the SBATCH command section.
-
-## Enable Float8 Training on H100s
-
-Install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/float8) so we can import float8 dtype
-```
-USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
-```
-
-Launch training job with following command
-```
-CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh --float8.enable_float8_linear --float8.enable_fsdp_float8_all_gather --float8.precompute_float8_dynamic_scale_for_fsdp
-```
-* `--float8.enable_float8_linear`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
-* `--float8.enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
-* `--float8.precompute_float8_dynamic_scale_for_fsdp` [optional]: communicate AMAX/scales efficiently in a single all-reduce for all parameters instead of doing many small all-reduce for each parameters.
-
-For scaling strategy, we are supporting tensor-wise scaling with dynamic scales. We are actively working on tensor-wise saling with delayed scales. We are also exploring row-wise sclaing
-
-For parallelsims, we are supporting FSDP float8 all-gather. We are actively working on float8 all-gather in TP.
 
 ## License
 
