@@ -185,9 +185,6 @@ def apply_tp(
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
-        # TODO: remove cache_size_limit adjustment after 2D compile is fixed
-        torch._dynamo.config.cache_size_limit = 10000
-
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
@@ -280,18 +277,15 @@ def apply_ac(model: nn.Module, ac_config):
 
 
 def apply_compile(model: nn.Module):
-    """Apply torch.compile to each transformer block."""
-
-    # the following flag can be used to to accelarate per-TransformerBlock compilation
-    # TODO(bdhirsh): turning it off because it's currently not working with 2D
-    # TODO(anijain): remove it after it's enabled in pytorch by default
-    # torch._dynamo.config.inline_inbuilt_nn_modules = True
-
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiled each TransformerBlock with torch.compile")
+    logger.info("Compiling each TransformerBlock with torch.compile")
     return model
 
 
