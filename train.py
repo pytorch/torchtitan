@@ -133,7 +133,7 @@ def main(job_config: JobConfig):
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
 
-    # loss function to be shared by Pipeline Parallel and spmd training
+    # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
             pred.flatten(0, 1), labels.flatten(0, 1)
@@ -150,7 +150,7 @@ def main(job_config: JobConfig):
         # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
         # optimizer, and checkpointing
         for m in model_parts:
-            # apply spmd-style PT-D techniques
+            # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
 
             # In PP, we cannot call init_weights directly because some layers are missing.
@@ -269,7 +269,7 @@ def main(job_config: JobConfig):
             optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
-                # pipeline parallel forward / backward inside step() call
+                # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 with train_context():
