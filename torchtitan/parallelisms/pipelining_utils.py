@@ -14,7 +14,7 @@ from torch.distributed.pipelining import (
 from torchtitan.logging import logger
 
 
-def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
+def build_pipeline_schedule(job_config, stages, loss_fn):
     looped_schedule = False
 
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
