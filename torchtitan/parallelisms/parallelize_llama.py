@@ -324,6 +324,23 @@ def apply_fsdp(
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
+    # TODO: This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check
+    # to avoid using 2D/3D DCP since without strided sharding, DCP can not safely support
+    # resharding for 2D/3D. We keep this safety check disablement here for now and will
+    # remove it when PyTorch gets the next minor release (PyTorch 2.5).
+    for module in model.modules():
+        assert len(module._load_state_dict_pre_hooks) <= 1
+        if len(module._load_state_dict_pre_hooks) == 1:
+            logger.warning(
+                "a safety check on 2D/3D DCP is detected. Please upgrade PyTorch to a "
+                "version newer than 2024-08-09 nightly release to include the change in "
+                "https://github.com/pytorch/pytorch/pull/130760"
+            )
+            module._load_state_dict_pre_hooks.clear()
+
+        assert len(module._state_dict_pre_hooks) <= 1
+        module._state_dict_pre_hooks.clear()
+
     logger.info("Applied FSDP to the model")
     return model
 
