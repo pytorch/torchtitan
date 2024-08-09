@@ -4,9 +4,9 @@ One of the main goals for TorchTitan was to provide a version of distributed LLM
 
 
 # Making the model "pipeline friendly"
-Whether you plan to manually edit your model code, or use techniques like tracing to extract model chunks, you will have to construct nn.Module objects representing the portion of the model that runs on a given pipeline stage.  Regardless of how you approach this, a few changes to the original model code can go a long way to making this process easier.
+When applying Pipeline Parallelism, you will have to construct nn.Module objects representing the portion of the model that runs on a given pipeline stage. Whether you plan to manually edit your model code, or use techniques like tracing to extract model chunks, a few changes to the original model code can go a long way to making this process easier.
 
-### Simplify the top-level model forward
+### Simplifying the top-level model forward
 Most likely, you can write your model in such a way that the top-level nn.Module owns a sequence of child modules that it calls during forward, delegating most of the complexity to the child module forwards.  If you can reduce your top level forward to mostly a for-loop over child module calls, then you'll simplify the pipeline-partitioning task to choosing the set of submodules to keep per stage.  If you have non-trivial logic in the top-level forward, you'll have to find a way to patch that logic back onto the resulting pipeline stage model, which can be annoying.
 
 example ([PR #321](https://github.com/pytorch/torchtitan/pull/321)):
