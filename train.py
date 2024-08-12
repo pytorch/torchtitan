@@ -164,11 +164,9 @@ def main(job_config: JobConfig):
         pp_schedule = build_pipeline_schedule(
             job_config, parallel_dims, stages, loss_fn
         )
-    else:
-        # If PP is enabled, we can't rely on init_weights, because some layers are missing.
-        # In the future, we may make init_weights handle missing layers, but also have to consider RNG seed propagation.
-        # allocate sharded model on GPU and initialize weights via DTensor
-        whole_model.init_weights()
+
+    for mod in model_parts:
+        mod.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -208,9 +206,10 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
-        raise RuntimeError(
-            "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
-            "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
+        # TODO: fix this by allowing each rank to set their own seed
+        logger.warning(
+            "Pipeline Parallelism is being used without a seed checkpoint. "
+            "All the substages will be initialized with random weights with same RNG state which can affect convergence."
         )
 
     metric_logger = build_metric_logger(job_config, parallel_dims)

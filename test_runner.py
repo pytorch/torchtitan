@@ -82,6 +82,22 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    # "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                    "--experimental.pipeline_parallel_schedule zb",
+                    "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
+                ],
+            ],
+            "PP ZB",
+            "pp_zb",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",

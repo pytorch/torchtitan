@@ -50,7 +50,7 @@ pipeline_parallel_split_points="layers.4"
 pipeline_parallel_schedule="1f1b"
 
 [checkpoint]
-enable_checkpoint = true
+enable_checkpoint = false
 folder = "/mnt/mffuse/outputs/hhuang/checkpoint"
 interval_type = "steps"
 interval = 500
