@@ -43,6 +43,7 @@ Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes
 6. Learning rate scheduler, meta init, Optional Fused RMSNorm
 7. All options easily configured via [toml files](train_configs/)
 8. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning
+9. [Float8 support](docs/float8.md)
 
 We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
@@ -50,11 +51,10 @@ We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 ### Coming soon
 
 1. Async checkpointing
-2. Float8 support
-3. Context Parallel
-4. 3D Pipeline Parallel
-5. `torch.compile` support
-6. Scalable data loading solution
+2. Context Parallel
+3. 3D Pipeline Parallel
+4. `torch.compile` support
+5. Scalable data loading solution
 
 
 ## Installation
@@ -64,7 +64,6 @@ git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121 # or cu118
-pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly
 ```
 
 ### Downloading a tokenizer
