@@ -29,6 +29,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
+from torchtitan.parallelisms.pipelining_utils import check_strided_sharding_enabled
 
 
 def parallelize_llama(
@@ -51,7 +52,7 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
-        model = apply_tp(
+        apply_tp(
             model,
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
@@ -60,7 +61,7 @@ def parallelize_llama(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        model = apply_ac(model, job_config.activation_checkpoint)
+        apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
@@ -69,14 +70,14 @@ def parallelize_llama(
                 "fused_rmsnorm is not compatible with torch.compile yet. "
                 "Please use rmsnorm or layernorm."
             )
-        model = apply_compile(model)
+        apply_compile(model)
 
     if parallel_dims.dp_enabled:
         if parallel_dims.dp_type == "fsdp":
             dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
             assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
 
-            model = apply_fsdp(
+            apply_fsdp(
                 model,
                 dp_mesh,
                 param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -88,14 +89,12 @@ def parallelize_llama(
         else:
             if world_mesh.ndim > 1:
                 raise RuntimeError("DDP has not supported > 1D parallelism")
-            model = apply_ddp(
+            apply_ddp(
                 model,
                 world_mesh,
                 enable_compile=job_config.training.compile,
                 enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
             )
-
-    return model
 
 
 def apply_tp(
@@ -110,7 +109,7 @@ def apply_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    model = parallelize_module(
+    parallelize_module(
         model,
         tp_mesh,
         {
@@ -185,9 +184,6 @@ def apply_tp(
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
-        # TODO: remove cache_size_limit adjustment after 2D compile is fixed
-        torch._dynamo.config.cache_size_limit = 10000
-
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
@@ -195,7 +191,6 @@ def apply_tp(
         f"Applied {'Float8 ' if enable_float8 else ''}{'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )
-    return model
 
 
 # for selective op activation checkpointing
@@ -276,23 +271,18 @@ def apply_ac(model: nn.Module, ac_config):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
-    return model
 
 
 def apply_compile(model: nn.Module):
-    """Apply torch.compile to each transformer block."""
-
-    # the following flag can be used to to accelarate per-TransformerBlock compilation
-    # TODO(bdhirsh): turning it off because it's currently not working with 2D
-    # TODO(anijain): remove it after it's enabled in pytorch by default
-    # torch._dynamo.config.inline_inbuilt_nn_modules = True
-
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiled each TransformerBlock with torch.compile")
-    return model
+    logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def apply_fsdp(
@@ -324,25 +314,11 @@ def apply_fsdp(
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
-    # TODO: This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check
-    # to avoid using 2D/3D DCP since without strided sharding, DCP can not safely support
-    # resharding for 2D/3D. We keep this safety check disablement here for now and will
-    # remove it when PyTorch gets the next minor release (PyTorch 2.5).
-    for module in model.modules():
-        assert len(module._load_state_dict_pre_hooks) <= 1
-        if len(module._load_state_dict_pre_hooks) == 1:
-            logger.warning(
-                "a safety check on 2D/3D DCP is detected. Please upgrade PyTorch to a "
-                "version newer than 2024-08-09 nightly release to include the change in "
-                "https://github.com/pytorch/pytorch/pull/130760"
-            )
-            module._load_state_dict_pre_hooks.clear()
-
-        assert len(module._state_dict_pre_hooks) <= 1
-        module._state_dict_pre_hooks.clear()
+    if pp_enabled:
+        # check if strided sharding is enabled, which is necessary for 3D DCP
+        check_strided_sharding_enabled()
 
     logger.info("Applied FSDP to the model")
-    return model
 
 
 def apply_ddp(
@@ -359,7 +335,6 @@ def apply_ddp(
         else:
             torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
-    model = replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
-    return model

@@ -122,33 +122,25 @@ def estimate_memory(job_config: JobConfig):
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
         with torch.device("meta"):
-            whole_model = model_cls.from_model_args(model_config)
+            model = model_cls.from_model_args(model_config)
 
         # a no-op hander if float8 is not enabled
         float8_handler = Float8Handler(job_config, parallel_dims)
         # swap to Float8Linear based on float8 configs
-        float8_handler.convert_to_float8_training(whole_model)
+        float8_handler.convert_to_float8_training(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        model_parts = [whole_model]
-        model_parts = [
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            for m in model_parts
-        ]
+        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
-        init_device = "cuda"
-        for model in model_parts:
-            model.to_empty(device=init_device)
-
+        model.to_empty(device="cuda")
         if not active_fake_mode():
-            whole_model.init_weights()
+            model.init_weights()
+        model.train()
 
         # build optimizer after applying parallelisms to the model
-        optimizers = build_optimizers(model_parts, job_config)
+        optimizers = build_optimizers([model], job_config)
         lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
-        for model in model_parts:
-            model.train()
         logger.info(f"Vocab size: {model_config.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
@@ -165,7 +157,7 @@ def estimate_memory(job_config: JobConfig):
                 device="cuda",
             ),
         )
-        fsdp_memtracker = FSDPMemTracker(mod=whole_model, optm=optimizers.optimizers[0])
+        fsdp_memtracker = FSDPMemTracker(mod=model, optm=optimizers.optimizers[0])
         fsdp_memtracker.track_inputs(batch)
 
         with fsdp_memtracker:
@@ -173,16 +165,15 @@ def estimate_memory(job_config: JobConfig):
                 input_ids, labels = batch
                 # train step
                 with train_context():
-                    pred = whole_model(input_ids)
+                    pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
                     loss.backward()
 
                 # clip gradients
-                for model in model_parts:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), job_config.training.max_norm, foreach=True
-                    )
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), job_config.training.max_norm, foreach=True
+                )
                 # sync float8 amaxes and scales
                 float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
