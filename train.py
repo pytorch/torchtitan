@@ -11,6 +11,7 @@ from datetime import timedelta
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.fx import GraphModule
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -166,6 +167,9 @@ def main(job_config: JobConfig):
         )
 
     for mod in model_parts:
+        # skip traced modules since we do not define init_weights in the traced module
+        if isinstance(mod, GraphModule):
+            continue
         mod.init_weights()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
