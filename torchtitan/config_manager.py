@@ -397,6 +397,12 @@ class JobConfig:
             default="1",
             help="Sampling ratios for sub-datasets, comma-separated. Do not need to sum to 1.",
         )
+        self.parser.add_argument(
+            "--dataset.num_data_workers",
+            type=int,
+            default=1,
+            help="Number of parallel dataloader processes per device.",
+        )
 
         # checkpointing configs
         self.parser.add_argument(

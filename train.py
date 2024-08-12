@@ -96,6 +96,7 @@ def main(job_config: JobConfig):
             job_config,
             dp_rank,
             dp_degree,
+            tokenizer,
         )
     else:
         data_loader = build_hf_data_loader(
