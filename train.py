@@ -23,7 +23,6 @@ from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
-    build_pipeline_schedule,
     models_parallelize_fns,
     models_pipelining_fns,
     ParallelDims,
@@ -116,17 +115,17 @@ def main(job_config: JobConfig):
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
     with torch.device("meta"):
-        whole_model = model_cls.from_model_args(model_config)
+        model = model_cls.from_model_args(model_config)
 
     # a no-op hander if float8 is not enabled
     float8_handler = Float8Handler(job_config, parallel_dims)
     # swap to Float8Linear based on float8 configs
-    float8_handler.convert_to_float8_training(whole_model)
+    float8_handler.convert_to_float8_training(model)
 
     # log model size
-    model_param_count = utils.get_num_params(whole_model)
+    model_param_count = utils.get_num_params(model)
     num_flop_per_token = utils.get_num_flop_per_token(
-        utils.get_num_params(whole_model, exclude_embedding=True),
+        utils.get_num_params(model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
     )
@@ -135,42 +134,41 @@ def main(job_config: JobConfig):
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
 
-    if parallel_dims.pp_enabled:
-        stages, model_parts = models_pipelining_fns[model_name](
-            whole_model, pp_mesh, parallel_dims, job_config, device, model_config
-        )
-    else:
-        # In 1D/2D cases or PP with simple schedules, model_parts is just one item
-        # for PP with looped schedules, each item is one stage-model-chunk
-        # we iterate all model_parts for applying SPMD parallelism, compilation, optimizer, and checkpointing
-        model_parts = [whole_model]
-
-    # apply PT-D DP/TP parallelisms and activation checkpointing
-    model_parts = [
-        models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-        for m in model_parts
-    ]
-
-    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-    for model in model_parts:
-        model.to_empty(device=init_device)
-
-    # loss fn can be shared by pipeline-parallel or non-pp execution
+    # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
             pred.flatten(0, 1), labels.flatten(0, 1)
         )
 
+    # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
-        pp_schedule = build_pipeline_schedule(
-            job_config, parallel_dims, stages, loss_fn
+        # apply PT-D Pipeline Parallel
+        pp_schedule, model_parts = models_pipelining_fns[model_name](
+            model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
+
+        # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+        # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+        # optimizer, and checkpointing
+        for m in model_parts:
+            # apply SPMD-style PT-D techniques
+            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+            m.to_empty(device="cuda")
+    else:
+        # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
+        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+
+        # move sharded model to CPU/GPU and initialize weights via DTensor
+        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        model.to_empty(device=init_device)
+        model_parts = [model]
 
     for mod in model_parts:
         # skip traced modules since we do not define init_weights in the traced module
         if isinstance(mod, GraphModule):
             continue
         mod.init_weights()
+        mod.train()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -184,10 +182,6 @@ def main(job_config: JobConfig):
     lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
     train_state = TrainState()
-
-    # train loop
-    for model in model_parts:
-        model.train()
 
     # load initial checkpoint
     checkpoint = CheckpointManager(
@@ -275,7 +269,7 @@ def main(job_config: JobConfig):
             optimizers.zero_grad()
 
             if parallel_dims.pp_enabled:
-                # pipeline parallel forward / backward inside step() call
+                # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 with train_context():
@@ -304,9 +298,9 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            for model in model_parts:
+            for m in model_parts:
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm, foreach=True
+                    m.parameters(), job_config.training.max_norm, foreach=True
                 )
 
             # sync float8 amaxes and scales
@@ -396,14 +390,14 @@ def main(job_config: JobConfig):
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
 
-            # signals the profiler that the next profiling step has started
+            # signal the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
-
             if memory_profiler:
                 memory_profiler.step()
 
-            # Reduce timeout after first train step for faster signal (assumes lazy init, compile are finished)
+            # reduce timeout after first train step for faster signal
+            # (assuming lazy init and compilation are finished)
             if train_state.step == 1:
                 utils.set_pg_timeouts(
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
