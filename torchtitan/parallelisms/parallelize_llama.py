@@ -29,7 +29,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.pipelining_utils import check_strided_sharding_enabled
+from torchtitan.parallelisms.utils import check_strided_sharding_enabled
 
 
 def parallelize_llama(
@@ -314,9 +314,8 @@ def apply_fsdp(
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
-    if pp_enabled:
-        # check if strided sharding is enabled, which is necessary for 3D DCP
-        check_strided_sharding_enabled()
+    # check if strided sharding is enabled, which is necessary for 2D/3D DCP
+    check_strided_sharding_enabled()
 
     logger.info("Applied FSDP to the model")
 
