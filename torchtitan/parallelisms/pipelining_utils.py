@@ -19,7 +19,7 @@ from torchtitan.logging import logger
 PARALLELISM_DIR = pathlib.Path(__file__).parent.resolve()
 
 
-def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
+def build_pipeline_schedule(job_config, stages, loss_fn):
     looped_schedule = False
     if job_config.experimental.pipeline_parallel_schedule == "1f1b":
         schedule_class = Schedule1F1B

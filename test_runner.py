@@ -82,7 +82,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    # "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
                     "--experimental.pipeline_parallel_microbatches 8",

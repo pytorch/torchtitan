@@ -11,8 +11,8 @@ from torchtitan.datasets.tokenizer import build_tokenizer
 
 class TestCheckpoint:
     def test_c4_resumption(self):
-        dataset_name = "c4_mini"
-        dataset_path = "./torchtitan/datasets/c4_mini"
+        dataset_name = "c4_test"
+        dataset_path = "./test/assets/c4_test"
         batch_size = 1
         seq_len = 1024
         world_size = 4

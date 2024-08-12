@@ -7,7 +7,7 @@
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
 import copy
-from typing import Union
+from typing import Callable, Union
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,10 @@ from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.pipelining_utils import stage_ids_this_rank
+from torchtitan.parallelisms.pipelining_utils import (
+    build_pipeline_schedule,
+    stage_ids_this_rank,
+)
 
 
 DeviceType = Union[int, str, torch.device]
@@ -31,6 +34,7 @@ def pipeline_llama(
     job_config: JobConfig,
     device: DeviceType,
     model_config: ModelArgs,
+    loss_fn: Callable[..., torch.Tensor],
 ):
     split_mode = job_config.experimental.pipeline_parallel_split_mode
     valid_split_modes = ("manual", "tracer")
@@ -39,13 +43,17 @@ def pipeline_llama(
             f"Invalid split mode: {split_mode}. Valid split modes: {valid_split_modes}"
         )
     if split_mode == "manual":
-        return pipeline_llama_manual(
+        stages, models = pipeline_llama_manual(
             model, pp_mesh, parallel_dims, job_config, device, model_config
         )
     elif split_mode == "tracer":
-        return pipeline_llama_tracer(
+        stages, models = pipeline_llama_tracer(
             model, pp_mesh, parallel_dims, job_config, device, model_config
         )
+
+    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+
+    return pp_schedule, models
 
 
 def _llama_trace_input(job_config: JobConfig, model_config: ModelArgs, device="meta"):
@@ -229,4 +237,4 @@ def pipeline_llama_tracer(
                 group=pp_mesh.get_group(),
             )
         )
-    return (stages, models)
+    return stages, models
