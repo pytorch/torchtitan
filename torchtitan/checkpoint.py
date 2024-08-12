@@ -5,11 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import enum
+import functools
 import os
 import re
+import shutil
 import time
+from dataclasses import dataclass, field
+from io import BytesIO
 from multiprocessing import get_context
-from typing import Any, Dict
+from typing import Any, Dict, List, Union
 
 import torch
 import torch.distributed as dist
@@ -20,11 +24,12 @@ from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
+    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.logging_utils import init_logger, logger
+from torchtitan.logging import init_logger, logger
 
 
 class IntervalType(enum.Enum):
@@ -38,27 +43,84 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
+@dataclass
+class TrainState(Stateful):
+    step: int = 0
+    global_avg_losses: List[float] = field(default_factory=list)
+    global_max_losses: List[float] = field(default_factory=list)
+    log_steps: List[int] = field(default_factory=list)
+
+    def state_dict(self) -> Dict[str, Any]:
+        # Only checkpoint global_avg_losses and global_max_losses per log frequency
+        # to avoid sync overhead in every iteration.
+        global_avg_losses_bytes = BytesIO()
+        torch.save(self.global_avg_losses, global_avg_losses_bytes)
+        global_max_losses_bytes = BytesIO()
+        torch.save(self.global_max_losses, global_max_losses_bytes)
+        log_steps_bytes = BytesIO()
+        torch.save(self.log_steps, log_steps_bytes)
+        return {
+            "step": torch.tensor(self.step, dtype=torch.int32),
+            "global_avg_losses": global_avg_losses_bytes,
+            "global_max_losses": global_max_losses_bytes,
+            "log_steps": log_steps_bytes,
+        }
+
+    def load_state_dict(self, state_dict) -> None:
+        self.step = state_dict["step"].item()
+        state_dict["global_avg_losses"].seek(0)
+        self.global_avg_losses = torch.load(
+            state_dict["global_avg_losses"], weights_only=False
+        )
+        state_dict["global_max_losses"].seek(0)
+        self.global_max_losses = torch.load(
+            state_dict["global_max_losses"], weights_only=False
+        )
+        state_dict["log_steps"].seek(0)
+        self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
+
+
 class ModelWrapper(Stateful):
-    def __init__(self, model: nn.Module) -> None:
-        self.model = model
+    def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
+        self.model = [model] if isinstance(model, nn.Module) else model
 
     def state_dict(self) -> None:
-        return get_model_state_dict(self.model)
+        return {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        set_model_state_dict(self.model, state_dict)
+        func = functools.partial(
+            set_model_state_dict,
+            model_state_dict=state_dict,
+            options=StateDictOptions(strict=False),
+        )
+        list(map(func, self.model))
 
 
 class OptimizerWrapper(Stateful):
-    def __init__(self, model: nn.Module, optim: torch.optim.Optimizer) -> None:
-        self.model = model
-        self.optim = optim
+    def __init__(
+        self,
+        model: Union[nn.Module, List[nn.Module]],
+        optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+    ) -> None:
+        self.model = [model] if isinstance(model, nn.Module) else model
+        self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
 
     def state_dict(self) -> None:
-        return get_optimizer_state_dict(self.model, self.optim)
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        set_optimizer_state_dict(self.model, self.optim, optim_state_dict=state_dict)
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        list(map(func, self.model, self.optim))
 
 
 class Terminate:
@@ -101,27 +163,74 @@ def checkpoint_mp(recv, send):
 class CheckpointManager:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         dataloader: DataLoader,
+        model_parts: List[nn.Module],
+        optimizers: List[torch.optim.Optimizer],
+        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
+        self.keep_latest_k = ckpt_config.keep_latest_k
 
         if not self.enable_checkpoint:
             return
+        """
+        Note: Pipeline Parallelism and Virtual Stages
+
+        1. even for simple PP schedules, there is a separate optimizer each PP rank.
+        rank0's optimizer would have a param_group[0] which refers to layers.0 in the original model.
+        rank1's would _also_ have a param_group[0], since it's index based, but referring to layers.1.
+        When saving, these collide and one of them is lost.  Then when reloading, only one stage can
+        restore its optimizer states, others will error.
+
+            The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
+            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerWrapper.
+
+        2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
+        requiring us to reason about multiple 'optim' objects locally.
+
+            We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
+            into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
+            which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
+            support described in (1).
+
+        3. LR schedulers also index model states like optimizers and would need to be flattened properly to support
+        resharding.  Unfortunately, the implementations of different lr_schedulers do not follow a clear pattern like
+        optimizers do, so it's hard to write a generic 'flattener' utility.
+
+            TODO: This is currently unsolved and needs a fix.
+        """
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
+
+        assert len(model_parts) == len(
+            optimizers
+        ), "Must pass one optimizer per model part"
+        assert len(model_parts) == len(
+            lr_schedulers
+        ), "Must pass one lr_scheduler per model part"
 
         self.states = states
+
         self.states.update(
             {
                 "model": ModelWrapper(model),
                 "optimizer": OptimizerWrapper(model, optimizer),
-                "lr_scheduler": lr_scheduler,
             }
         )
+        if len(lr_schedulers) == 1:
+            self.states["lr_scheduler"] = lr_schedulers[0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(lr_schedulers):
+                self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
@@ -312,13 +421,14 @@ class CheckpointManager:
         else:
             dcp.save(self.states, checkpoint_id=checkpoint_id)
         self.reset()
+        self._purge_stale_checkpoints()
 
         logger.info(
             "Finished saving the checkpoint (or staging if async is enabled)"
             f"in {time.monotonic() - begin:.2f} seconds."
         )
 
-    def wait_for_staging(self) -> None:
+    def maybe_wait_for_staging(self) -> None:
         if (
             self.enable_checkpoint
             and self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -363,3 +473,18 @@ class CheckpointManager:
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
         return True
+
+    def _purge_stale_checkpoints(self):
+        if self.keep_latest_k > 0:
+            discovered_checkpoints = []
+            for filename in os.listdir(self.folder):
+                match = re.search(r"step-(\d+)", filename)
+                path = os.path.join(self.folder, filename)
+                discovered_checkpoints.append((int(match.group(1)), path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+
+            for _, path in to_delete:
+                logger.info(f"Deleting old checkpoint {path}")
+                shutil.rmtree(path, ignore_errors=True)

@@ -32,6 +32,10 @@ class OverrideDefinitions:
     test_name: str = "default"
     requires_seed_checkpoint: bool = False
     ngpu: int = 4
+    model_flavor: str = "debugmodel"
+
+    def __repr__(self):
+        return self.test_descr
 
 
 def build_test_list():
@@ -46,10 +50,26 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_schedule flexible_interleaved_1f1b",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm throws cuda context error with pp
+                ],
+            ],
+            "PP looped flexible 1f1b test",
+            "pp_looped_flexible_1f1b",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP 1D test 1f1b",
@@ -62,9 +82,10 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP 1D test gpipe",
@@ -77,9 +98,10 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
                     "--training.data_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP+DP 1f1b 2D test",
@@ -91,9 +113,10 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
                     "--training.data_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
                 ],
             ],
             "PP+DP gpipe 2D test",
@@ -105,7 +128,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.tensor_parallel_degree 2",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
                 ],
@@ -119,13 +142,15 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.1",
+                    "--experimental.pipeline_parallel_split_points layers.4",
+                    "--experimental.pipeline_parallel_split_mode tracer",
                     "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with tracer
                 ],
             ],
             "PP tracer frontend test",
             "pp_tracer",
             requires_seed_checkpoint=True,
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -146,6 +171,17 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.compile",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "1D compile with selective op AC",
+            "1d_compile_sac_op",
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.compile --training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
                 ],
             ],
@@ -158,8 +194,17 @@ def build_test_list():
                     "--training.tensor_parallel_degree 2 --model.norm_type=rmsnorm",
                 ],
             ],
-            "Eager mode 2DParallel",
-            "eager_2d",
+            "Eager mode 2DParallel with rmsnorm",
+            "eager_2d_rmsnorm",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 2 --model.norm_type=fused_rmsnorm",
+                ],
+            ],
+            "Eager mode 2DParallel with fused_rmsnorm",
+            "eager_2d_fused_rmsnorm",
         ),
         OverrideDefinitions(
             [
@@ -195,6 +240,75 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Weights Only bf16",
             "model_weights_only_bf16",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.4",
+                    "--training.data_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+                ],
+                [
+                    "--training.steps 20",
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.4",
+                    "--training.data_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm not yet compatible with TP
+                ],
+            ],
+            "PP+DP+TP 3D test with save/load resume ckpt",
+            "pp_dp_tp",
+            requires_seed_checkpoint=True,
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_schedule interleaved_1f1b",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm throws cuda context error with pp
+                ],
+            ],
+            "PP looped 1f1b test",
+            "pp_looped_1f1b",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--optimizer.name Adam --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.fused",
+                ]
+            ],
+            "Fused Optimizer Test",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--memory_estimation.enabled --model.norm_type rmsnorm",
+                ]
+            ],
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_mem_tracker",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_type ddp",
+                ]
+            ],
+            "DDP",
+            "ddp",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
@@ -211,26 +325,30 @@ def _run_cmd(cmd):
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
+    test_name = test_flavor.test_name
+    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
+    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+
+    if test_flavor.requires_seed_checkpoint:
+        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg} {model_flavor_arg}"
+        logger.info(
+            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
+        )
+        result = _run_cmd(cmd)
+        logger.info(result.stdout)
+
     for override_arg in test_flavor.override_args:
-        test_name = test_flavor.test_name
-        dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK=0,1,2,3 ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
+        if test_name == "fsdp2_mem_tracker":
+            cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_memory_estimation.sh"
         cmd += " " + dump_folder_arg
-
+        cmd += " " + model_flavor_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-
-        if test_flavor.requires_seed_checkpoint:
-            logger.info("Creating seed checkpoint")
-            result = _run_cmd(
-                f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg}"
-            )
-            logger.info(result.stdout)
-
         result = _run_cmd(cmd)
         logger.info(result.stdout)
         if result.returncode != 0:
@@ -252,7 +370,17 @@ def run_tests(args):
                 if is_integration_test:
                     for test_flavor in integration_tests_flavors[config_file]:
                         if args.test == "all" or test_flavor.test_name == args.test:
-                            run_test(test_flavor, full_path, args.output_dir)
+                            if args.ngpu < test_flavor.ngpu:
+                                logger.info(
+                                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                                    f" because --ngpu arg is {args.ngpu}"
+                                )
+                            elif args.ngpu == 8 and test_flavor.ngpu != 8:
+                                logger.info(
+                                    f"Skipping non-8gpu test {test_flavor.test_name} on 8-gpu runner"
+                                )
+                            else:
+                                run_test(test_flavor, full_path, args.output_dir)
 
 
 def main():
@@ -264,6 +392,7 @@ def main():
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
+    parser.add_argument("--ngpu", default=4, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):

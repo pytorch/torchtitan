@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import os
 from dataclasses import dataclass
 from datetime import timedelta
@@ -13,17 +14,17 @@ import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh)
+    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
 
 def _warn_overwrite_env(env, val):
@@ -53,14 +54,25 @@ def set_pg_timeouts(timeout, world_mesh):
     torch.distributed.barrier()
     torch.cuda.synchronize()
 
-    groups = (
-        [world_mesh.get_group()] if world_mesh.ndim == 1 else world_mesh.get_group()
-    )
+    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
 
     # None represents the 'default' PG, not part of the mesh
     groups.append(None)
     for group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+
+
+# used to avoid stragglers in garbage collection
+class GarbageCollection:
+    def __init__(self, gc_freq=1000):
+        assert gc_freq > 0, "gc_freq must be a positive integer"
+        self.gc_freq = gc_freq
+        gc.disable()
+        gc.collect(1)
+
+    def run(self, step_count):
+        if step_count > 1 and step_count % self.gc_freq == 0:
+            gc.collect(1)
 
 
 TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
