@@ -394,19 +394,23 @@ class Transformer(nn.Module):
         """
         with torch.device(self.freqs_cis.device):
             self.freqs_cis = self._precompute_freqs_cis()
-        nn.init.normal_(self.tok_embeddings.weight)
+        if self.tok_embeddings is not None:
+            nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
-            layer.init_weights()
-        self.norm.reset_parameters()
+            if layer is not None:
+                layer.init_weights()
+        if self.norm is not None:
+            self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        nn.init.trunc_normal_(
-            self.output.weight,
-            mean=0.0,
-            std=final_out_std,
-            a=-cutoff_factor * final_out_std,
-            b=cutoff_factor * final_out_std,
-        )
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
