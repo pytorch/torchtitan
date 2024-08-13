@@ -783,6 +783,8 @@ class StreamingDocDataset(_StatefulDataset):
         Current worker index
     worldsize : int
         Total number of workers
+    filehandler : _ShardFileHandler
+        The file handler to use for opening/reading shard files under the given datapath
     delimiter_token : Any
         Token used to indicate sequence/document breaks. Type should match data type. Required for downstream
         sampling logic (can be removed later via PreProcessDataset if needed).
@@ -799,9 +801,6 @@ class StreamingDocDataset(_StatefulDataset):
         Maximum sequence length to return. Break long docs into chunks of this size or shorter.
     verbose : bool
         Track setup progress?
-    shuffle : bool
-        Shuffle shard file and document orders? (Disable for simple testing)
-    
     """
 
     def __init__(
@@ -1126,7 +1125,7 @@ class ScalableShardDataset(_WrapperDataset):
         dataset: StreamingDocDataset,
         delimiter_token: Any,
         n_logical_shards: int = 2048,
-        verbose=False,
+        verbose: bool = False,
     ):
         super().__init__(dataset)
         assert (
