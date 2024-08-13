@@ -20,7 +20,7 @@ except ImportError as e:
     ) from e
 
 from torchtitan.datasets.tokenizer import Tokenizer
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -28,7 +28,7 @@ from datasets.distributed import split_dataset_by_node
 # map from dataset name to a local directory, or
 # a dataset repository on the HF hub
 _supported_datasets = {
-    "c4_mini": "torchtitan/datasets/c4_mini",
+    "c4_test": "test/assets/c4_test",
     "c4": "allenai/c4",
 }
 
@@ -48,8 +48,8 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
-    We currently support the c4 dataset and a subset of it:
-    c4_mini (45K training entries)
+    We currently support the c4 dataset, and a subset of it for testing purposes:
+    c4_test (2K training entries)
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> c4 (EN) <<:
@@ -83,12 +83,12 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             if dataset_path:
                 logger.warning(
                     f"Dataset {dataset_name} is not tested or verfied. "
-                    f"Recommended datasets are: {list(_supported_datasets.keys())}."
+                    f"Recommended datasets are: {list(_supported_datasets.keys())}"
                 )
             else:
                 raise ValueError(
                     f"Dataset {dataset_name} is not supported. "
-                    f"Supported datasets are: {list(_supported_datasets.keys())}."
+                    f"Supported datasets are: {list(_supported_datasets.keys())}"
                 )
 
         if not dataset_path:
@@ -132,15 +132,12 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     yield input, label
 
             if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_name} has run out of data.")
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
-                logger.warning(
-                    f"Dataset {self.dataset_name} is being re-looped. "
-                    "Loss related metrics might be misleading."
-                )
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
 
     def _get_data_iter(self):
         if self._sample_idx == 0:
@@ -188,7 +185,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
 
         if self._rank_id not in state_dict:
             logger.warning(
-                f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}."
+                f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}"
             )
             return
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
