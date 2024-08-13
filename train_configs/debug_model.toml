@@ -14,14 +14,14 @@ save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
 log_freq = 1
-enable_color_printing = true
+enable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
 flavor = "debugmodel"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+norm_type = "compiled_rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
@@ -37,14 +37,14 @@ max_norm = 1.0  # grad norm clipping
 steps = 10
 data_parallel_degree = -1
 tensor_parallel_degree = 1
+fp8_linear = false
 compile = true
-dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+dataset = "c4_mini"  # supported datasets: c4_mini (45K), c4 (177M)
 mixed_precision_param = "bfloat16"
 mixed_precision_reduce = "bfloat16"
 
 [experimental]
 pipeline_parallel_degree = 1
-enable_async_tensor_parallel = false
 torch_spmd = true
 
 [checkpoint]
@@ -59,6 +59,3 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
-
-[float8]
-enable_float8_linear = false

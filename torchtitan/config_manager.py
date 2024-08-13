@@ -16,7 +16,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtitan.logging import logger
+from torchtitan.logging_utils import logger
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
@@ -283,7 +283,7 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
+            choices=["1f1b", "gpipe", "interleaved_1f1b"],
             default="1f1b",
             help="""
                 Specify the Pipeline Parallel schedule to use.
@@ -321,17 +321,6 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--training.data_parallel_type",
-            type=str,
-            default="fsdp",
-            help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",
-        )
-        self.parser.add_argument(
-            "--experimental.enable_compiled_autograd",
-            action="store_true",
-            help="Enable CompiledAutograd to compile the backward.",
-        )
-        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
@@ -355,6 +344,16 @@ class JobConfig:
             "--training.compile",
             action="store_true",
             help="Whether to compile the model",
+        )
+        self.parser.add_argument(
+            "--training.fp8_linear",
+            action="store_true",
+            help="""
+                If true, swaps `torch.nn.Linear` with `Float8Linear` with
+                default settings (dynamic scaling).
+                This feature requires you to install 'float8_experimental' which can be found
+                here: https://github.com/pytorch-labs/float8_experimental
+            """,
         )
         self.parser.add_argument(
             "--training.gc_freq",
@@ -451,7 +450,6 @@ class JobConfig:
                 0 is the default value.
             """,
         )
-
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
@@ -467,48 +465,6 @@ class JobConfig:
                 Selective activation checkpointing options ['int', 'op'].
                 'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
             """,
-        )
-
-        # float8 configs
-        self.parser.add_argument(
-            "--float8.enable_float8_linear",
-            action="store_true",
-            help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear`.
-                This feature requires you to install 'torchao' which can be found
-                here: https://github.com/pytorch/ao
-            """,
-        )
-        self.parser.add_argument(
-            "--float8.enable_fsdp_float8_all_gather",
-            action="store_true",
-            default=False,
-            help="Whether enable float8 all-gather in FSDP",
-        )
-        self.parser.add_argument(
-            "--float8.precompute_float8_dynamic_scale_for_fsdp",
-            action="store_true",
-            default=False,
-            help="Whether precompute float8 scales dynamically for FSDP",
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_input",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-            choices=["dynamic", "delayed"],
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_weight",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_grad_output",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
         )
 
         # communications library settings
