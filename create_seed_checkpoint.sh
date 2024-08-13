@@ -18,8 +18,6 @@
 
 set -ex
 
-export USE_LIBUV=1
-TRAINER_DIR=${1:-/home/$USER/local/torchtitan}
 NGPU=1
 LOG_RANK=0
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
