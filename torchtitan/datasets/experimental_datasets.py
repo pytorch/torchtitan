@@ -1427,7 +1427,7 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
         assert tokenizer is not None, "You must provide a tokenizer for hf_parquet raw text file shards."
         filehandler = ParquetHandler(tokenizer, cfg.dataset.col_name)
     else:
-        filehandler = _handler_map[cfg.file_type](cfg.dataset.col_name)
+        filehandler = _handler_map[cfg.dataset.file_type](cfg.dataset.col_name)
     
     # Base reader layer
     data = StreamingDocDataset(
