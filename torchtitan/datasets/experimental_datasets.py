@@ -1421,13 +1421,13 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
     ]
     droplist = droplist + [cfg.dataset.bos_token, cfg.dataset.eos_token]
     assert (
-        cfg.file_type in _handler_map
-    ), f"File type {cfg.file_type} is not recognized ({list(_handler_map.keys())})"
-    if cfg.file_type == "hf_parquet":
+        cfg.dataset.file_type in _handler_map
+    ), f"File type {cfg.dataset.file_type} is not recognized ({list(_handler_map.keys())})"
+    if cfg.dataset.file_type == "hf_parquet":
         assert tokenizer is not None, "You must provide a tokenizer for hf_parquet raw text file shards."
-        filehandler = ParquetHandler(tokenizer, cfg.col_name)
+        filehandler = ParquetHandler(tokenizer, cfg.dataset.col_name)
     else:
-        filehandler = _handler_map[cfg.file_type](cfg.col_name)
+        filehandler = _handler_map[cfg.file_type](cfg.dataset.col_name)
     
     # Base reader layer
     data = StreamingDocDataset(

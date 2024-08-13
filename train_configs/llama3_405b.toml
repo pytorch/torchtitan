@@ -49,6 +49,8 @@ dataset_path = "./torchtitan/datasets/experimental/llama3"
 datasets = "c4_mini"
 dataset_weights = "1"
 num_data_workers = 1
+col_name = "tokens"
+file_type = "arrow"
 
 [experimental]
 pipeline_parallel_degree = 1

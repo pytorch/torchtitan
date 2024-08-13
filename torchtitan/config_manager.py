@@ -403,6 +403,18 @@ class JobConfig:
             default=1,
             help="Number of parallel dataloader processes per device.",
         )
+        self.parser.add_argument(
+            "--dataset.file_type",
+            type=str,
+            default="arrow",
+            help="Shard file format. Current options are pretokenized 'arrow' and raw text 'hf_parquet'.",
+        )
+        self.parser.add_argument(
+            "--dataset.col_name",
+            type=str,
+            default="tokens",
+            help="Which column/field of the file shard contains the readable data.",
+        )
 
         # checkpointing configs
         self.parser.add_argument(
