@@ -300,6 +300,8 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
+    # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
+    # that users won't use a nightly build which is older than 20240809 by then.
     if tp_enabled:
         # check if strided sharding is enabled, which is necessary for 2D/3D DCP
         check_strided_sharding_enabled()
