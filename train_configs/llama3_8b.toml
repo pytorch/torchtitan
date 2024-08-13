@@ -37,7 +37,7 @@ compile = false
 dataset = "c4"
 
 [dataset]
-use_experimental_dataloader = false
+use_experimental_dataloader = true
 data_logical_shards = 768
 bos_token = 128000
 eos_token = 128001
