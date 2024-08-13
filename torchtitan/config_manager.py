@@ -316,7 +316,13 @@ class JobConfig:
             "--training.data_parallel_type",
             type=str,
             default="fsdp",
-            help="Data parallelism type. TorchTitan currently supports FSDP and DDP.",
+            help="Data parallelism type. TorchTitan currently supports FSDP, HSDP, and DDP.",
+        )
+        self.parser.add_argument(
+            "--training.data_parallel_replicate_degree",
+            type=int,
+            default=1,
+            help="When data_parallel_type is HSDP, data parallelism  has 2 different shardings: replicate and shard. This argument specifies the degree of replicate.",
         )
         self.parser.add_argument(
             "--experimental.enable_compiled_autograd",

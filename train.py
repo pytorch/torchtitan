@@ -29,6 +29,11 @@ from torchtitan.parallelisms import (
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
+try:
+    from torch.distributed.utils import _sync_module_states_with_mesh
+except ImportError:
+    pass
+
 
 def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
     @contextlib.contextmanager
@@ -66,6 +71,7 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
         dp_type=job_config.training.data_parallel_type,
+        dp_replicate=job_config.training.data_parallel_replicate_degree,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
@@ -77,7 +83,13 @@ def main(job_config: JobConfig):
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
     if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"]
+        if parallel_dims.dp_type == "hsdp":
+            # Both dp_replicate and dp_shard belong to data parallelism and
+            # we need to flatten them to get the true dp_mesh for the dataloader
+            # and loss gathering.
+            dp_mesh = world_mesh["dp_replicate", "dp_shard"]._flatten()
+        else:
+            dp_mesh = world_mesh["dp"]
         dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
@@ -209,6 +221,9 @@ def main(job_config: JobConfig):
             "Pipeline Parallelism is being used without a seed checkpoint. "
             "All the substages will be initialized with random weights with same RNG state which can affect convergence."
         )
+
+    if not checkpoint_loaded and parallel_dims.dp_type == "hsdp":
+        _sync_module_states_with_mesh(model, world_mesh["dp_replicate"])
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
 

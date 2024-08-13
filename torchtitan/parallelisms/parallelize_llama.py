@@ -72,9 +72,13 @@ def parallelize_llama(
         apply_compile(model)
 
     if parallel_dims.dp_enabled:
-        if parallel_dims.dp_type == "fsdp":
-            dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-            assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+        if parallel_dims.dp_type in ("fsdp", "hsdp"):
+            if parallel_dims.dp_type == "hsdp":
+                dp_mesh = world_mesh["dp_replicate", "dp_shard"]
+            elif world_mesh.ndim > 1:
+                dp_mesh = world_mesh["dp"]
+            else:
+                dp_mesh = world_mesh
 
             apply_fsdp(
                 model,
