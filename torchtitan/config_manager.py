@@ -143,8 +143,6 @@ class JobConfig:
             action="store_true",
             help="""
                 Whether to save TensorBoard metrics only for rank 0 or for all ranks.
-                When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
-                which is the only stage that computes loss metrics.
             """,
         )
 
@@ -230,87 +228,10 @@ class JobConfig:
             help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
         )
         self.parser.add_argument(
-            "--training.tensor_parallel_degree",
-            type=int,
-            default=1,
-            help="Tensor Parallelism degree. 1 means disabled.",
-        )
-        self.parser.add_argument(
             "--training.enable_loss_parallel",
             default=True,
             action="store_true",
             help="Whether to apply loss parallel when sequence parallel is enabled",
-        )
-        self.parser.add_argument(
-            "--experimental.enable_async_tensor_parallel",
-            default=False,
-            action="store_true",
-            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_degree",
-            type=int,
-            default=1,
-            help="""
-                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
-                If using looped schedules, this still specifies the number of physical ranks, not the number
-                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_points",
-            type=string_list,
-            nargs="+",
-            default=[],
-            help="""
-                Specify comma-separated names of modules to use as the beginning of a split point.
-
-                e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
-                the first containing all the layers up to layers.0,
-                the second containing layers.0 and up to layers.2,
-                the third containing layers.2 and all the remaining layers.
-
-                Note: fully-automated splitting may be enabled in the future,
-                but currently the split points must be specified manually for both manual and tracer.""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_schedule",
-            type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
-            default="1f1b",
-            help="""
-                Specify the Pipeline Parallel schedule to use.
-
-                The schedule must be compatible with the split points and stages_per_rank.
-
-                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
-                and split_points = number of stages - 1""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_mode",
-            type=str,
-            choices=["manual", "tracer"],
-            default="manual",
-            help="""
-                Specify the split method (e.g. the Pipeline Parallelism Front End)
-
-                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
-                implementation manually, and then wrap it in a PipelineStage.
-
-                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
-                split via the provided split points, unflattened into an nn.Module,
-                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_microbatches",
-            type=int,
-            default=None,
-            help="""
-                How many microbatches to split the global training batch into when using pipeline parallelism.
-
-                The global training batch size must be evenly divisible by the number of microbatches.
-
-                The default value will be the number of pipeline stages, if unspecified.
-            """,
         )
         self.parser.add_argument(
             "--training.data_parallel_type",

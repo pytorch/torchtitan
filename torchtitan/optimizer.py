@@ -11,7 +11,6 @@ from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config_manager import JobConfig
 
 
-# consider split between PP and non-PP
 def build_optimizers(model_parts, job_config: JobConfig):
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
