@@ -39,8 +39,6 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = true
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
-mixed_precision_param = "bfloat16"
-mixed_precision_reduce = "bfloat16"
 
 [experimental]
 pipeline_parallel_degree = 1
