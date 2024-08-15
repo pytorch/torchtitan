@@ -71,7 +71,6 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
         dp_type=job_config.training.data_parallel_type,
-        dp_replicate=job_config.training.data_parallel_replicate_degree,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
@@ -221,9 +220,6 @@ def main(job_config: JobConfig):
             "Pipeline Parallelism is being used without a seed checkpoint. "
             "All the substages will be initialized with random weights with same RNG state which can affect convergence."
         )
-
-    if not checkpoint_loaded and parallel_dims.dp_type == "hsdp":
-        _sync_module_states_with_mesh(model, world_mesh["dp_replicate"])
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
 

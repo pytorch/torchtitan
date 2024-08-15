@@ -226,8 +226,14 @@ class JobConfig:
         self.parser.add_argument(
             "--training.data_parallel_degree",
             type=int,
+            nargs="+",
             default=-1,
-            help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
+            help="""
+                Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP).
+                1 means disabled. If HSDP is used, there should be 2 integers. The first
+                one means the replicate degree and the second one mean the shard degree.
+                -1 is not supported in HSDP case.
+            """,
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",
@@ -608,6 +614,8 @@ class JobConfig:
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
+            elif isinstance(val, list):
+                aux_parser.add_argument("--" + arg, type=type(val[0]), nargs="+")
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
 
