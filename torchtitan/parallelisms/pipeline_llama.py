@@ -53,6 +53,7 @@ def pipeline_llama(
 
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
+    logger.info("Applied PP to the model")
     return pp_schedule, models
 
 

@@ -204,6 +204,11 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
+        if job_config.experimental.pipeline_parallel_split_mode == "tracer":
+            raise RuntimeError(
+                "Pipeline parallelism with tracer mode is not supported without a seed checkpoint."
+            )
+
         # TODO: fix this by allowing each rank to set their own seed
         logger.warning(
             "Pipeline Parallelism is being used without a seed checkpoint. "
