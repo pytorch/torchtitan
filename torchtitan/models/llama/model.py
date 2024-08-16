@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.norms import create_norm
+from torchtitan.models.norms import build_norm
 
 
 @dataclass
@@ -190,9 +190,12 @@ class Attention(nn.Module):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        xq = xq.view(bs, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bs, seqlen, self.n_kv_heads, self.head_dim)
-        xv = xv.view(bs, seqlen, self.n_kv_heads, self.head_dim)
+        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+        # local heads from sizes of xq, xk, and xv as TP may have sharded them
+        # after the above linear ops.
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
@@ -291,10 +294,10 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        self.attention_norm = create_norm(
+        self.attention_norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
-        self.ffn_norm = create_norm(
+        self.ffn_norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
@@ -370,7 +373,7 @@ class Transformer(nn.Module):
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
-        self.norm = create_norm(
+        self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
@@ -391,19 +394,23 @@ class Transformer(nn.Module):
         """
         with torch.device(self.freqs_cis.device):
             self.freqs_cis = self._precompute_freqs_cis()
-        nn.init.normal_(self.tok_embeddings.weight)
+        if self.tok_embeddings is not None:
+            nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
-            layer.init_weights()
-        self.norm.reset_parameters()
+            if layer is not None:
+                layer.init_weights()
+        if self.norm is not None:
+            self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        nn.init.trunc_normal_(
-            self.output.weight,
-            mean=0.0,
-            std=final_out_std,
-            a=-cutoff_factor * final_out_std,
-            b=cutoff_factor * final_out_std,
-        )
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
