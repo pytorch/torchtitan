@@ -350,14 +350,18 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
         {
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),
             ),
             "output": col_parallel_strategy(
-                input_layouts=Shard(1),
+                input_layouts=Shard(0),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
-            "norm": SequenceParallel(),
+            "norm": SequenceParallel(sequence_dim=0),
+            "layers.0": PrepareModuleInput(
+                input_layouts=(Replicate(), None),
+                desired_input_layouts=(Shard(0), None),
+                use_local_output=True,
+            ),
         },
     )
 
@@ -365,22 +369,22 @@ def apply_tp(model, world_mesh, parallel_dims, job_config: JobConfig):
     for layer_id, transformer_block in model.layers.items():
         layer_plan = {
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
+                input_layouts=(Shard(0), None),
                 desired_input_layouts=(Replicate(), None),
             ),
             "attention.wq": col_parallel_strategy(),
             "attention.wk": col_parallel_strategy(),
             "attention.wv": col_parallel_strategy(),
-            "attention.wo": row_parallel_strategy(output_layouts=Shard(1)),
-            "attention_norm": SequenceParallel(),
+            "attention.wo": row_parallel_strategy(output_layouts=Shard(0)),
+            "attention_norm": SequenceParallel(sequence_dim=0),
             "feed_forward": prepare_module_input(
-                input_layouts=(Shard(1),),
+                input_layouts=(Shard(0),),
                 desired_input_layouts=(Replicate(),),
             ),
             "feed_forward.w1": col_parallel_strategy(),
-            "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(1)),
+            "feed_forward.w2": row_parallel_strategy(output_layouts=Shard(0)),
             "feed_forward.w3": col_parallel_strategy(),
-            "ffn_norm": SequenceParallel(),
+            "ffn_norm": SequenceParallel(sequence_dim=0),
         }
 
         # Adjust attention module to use the local number of heads
