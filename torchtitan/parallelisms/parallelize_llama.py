@@ -481,8 +481,12 @@ def apply_dp(
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(
-        model, **fsdp_config, reshard_after_forward=not parallel_dims.pp_enabled
+        model.tok_embeddings,
+        **fsdp_config,
+        reshard_after_forward=not parallel_dims.pp_enabled,
     )
+    fully_shard([model.norm, model.output], **fsdp_config, reshard_after_forward=False)
+    fully_shard(model, **fsdp_config)
 
     logger.info("Applied FSDP to the model")
     return model
