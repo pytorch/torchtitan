@@ -29,11 +29,6 @@ from torchtitan.parallelisms import (
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
-try:
-    from torch.distributed.utils import _sync_module_states_with_mesh
-except ImportError:
-    pass
-
 
 def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
     @contextlib.contextmanager

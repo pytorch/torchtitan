@@ -231,7 +231,7 @@ class JobConfig:
             help="""
                 Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP).
                 1 means disabled. If HSDP is used, there should be 2 integers. The first
-                one means the replicate degree and the second one mean the shard degree.
+                one means the replicate degree and the second one means the shard degree.
                 -1 is not supported in HSDP case.
             """,
         )
@@ -323,12 +323,6 @@ class JobConfig:
             type=str,
             default="fsdp",
             help="Data parallelism type. TorchTitan currently supports FSDP, HSDP, and DDP.",
-        )
-        self.parser.add_argument(
-            "--training.data_parallel_replicate_degree",
-            type=int,
-            default=1,
-            help="When data_parallel_type is HSDP, data parallelism  has 2 different shardings: replicate and shard. This argument specifies the degree of replicate.",
         )
         self.parser.add_argument(
             "--experimental.enable_compiled_autograd",

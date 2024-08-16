@@ -46,7 +46,7 @@ class ParallelDims:
         assert (
             dp_replicate * dp_shard * tp * pp == self.world_size,
         ), f"Invalid parallel dims: dp({dp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        assert self.dp_type in ("fsdp", "ddp", "hsdp")
+        assert self.dp_type in ("fsdp", "ddp", "hsdp"), self.dp_type
         assert self.dp_type != "hsdp" or dp_replicate > 1, (self.dp_type, dp_replicate)
 
     def build_mesh(self, device_type):
