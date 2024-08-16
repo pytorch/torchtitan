@@ -9,24 +9,19 @@ import gc
 import os
 
 import torch
-import torch.nn.functional as F
 from torch._guards import active_fake_mode
 from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.distributed import destroy_process_group
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import create_tokenizer
-from torchtitan.float8_linear import (
-    maybe_build_fp8_linear,
-    maybe_precompute_fp8_dynamic_scale_for_fsdp,
-)
-from torchtitan.logging_utils import init_logger, logger
-from torchtitan.lr_scheduling import get_lr_schedulers
+from torchtitan.datasets import build_tokenizer
+from torchtitan.float8 import Float8Handler
+from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from train import build_optimizers, get_train_context
+from train import get_train_context
 
 
 def estimate_memory(job_config: JobConfig):
@@ -98,7 +93,7 @@ def estimate_memory(job_config: JobConfig):
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
-    tokenizer = create_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
+    tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     train_context = get_train_context(
         parallel_dims.loss_parallel_enabled,
@@ -107,7 +102,9 @@ def estimate_memory(job_config: JobConfig):
 
     # loss fn can be shared by pipeline-parallel or non-pp execution
     def loss_fn(pred, labels):
-        return F.cross_entropy(pred.flatten(0, 1), labels.flatten(0, 1))
+        return torch.nn.functional.cross_entropy(
+            pred.flatten(0, 1), labels.flatten(0, 1)
+        )
 
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
@@ -126,31 +123,25 @@ def estimate_memory(job_config: JobConfig):
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )
         with torch.device("meta"):
-            whole_model = model_cls.from_model_args(model_config)
+            model = model_cls.from_model_args(model_config)
 
-        # swap to Float8Linear base on fp8 config
-        maybe_build_fp8_linear(whole_model, job_config, parallel_dims.dp_enabled)
+        # a no-op hander if float8 is not enabled
+        float8_handler = Float8Handler(job_config, parallel_dims)
+        # swap to Float8Linear based on float8 configs
+        float8_handler.convert_to_float8_training(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        model_parts = [whole_model]
-        model_parts = [
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            for m in model_parts
-        ]
+        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
-        init_device = "cuda"
-        for model in model_parts:
-            model.to_empty(device=init_device)
-
+        model.to_empty(device="cuda")
         if not active_fake_mode():
-            whole_model.init_weights()
+            model.init_weights()
+        model.train()
 
         # build optimizer after applying parallelisms to the model
-        optimizers = build_optimizers(model_parts, job_config)
-        lr_schedulers = get_lr_schedulers(optimizers.optimizers, job_config)
+        optimizers = build_optimizers([model], job_config)
+        lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
-        for model in model_parts:
-            model.train()
         logger.info(f"Vocab size: {model_config.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
@@ -167,7 +158,7 @@ def estimate_memory(job_config: JobConfig):
                 device="cuda",
             ),
         )
-        fsdp_memtracker = FSDPMemTracker(mod=whole_model, optm=optimizers.optimizers[0])
+        fsdp_memtracker = FSDPMemTracker(mod=model, optm=optimizers.optimizers[0])
         fsdp_memtracker.track_inputs(batch)
 
         with fsdp_memtracker:
@@ -175,23 +166,23 @@ def estimate_memory(job_config: JobConfig):
                 input_ids, labels = batch
                 # train step
                 with train_context():
-                    pred = whole_model(input_ids)
+                    pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
                     loss.backward()
 
                 # clip gradients
-                for model in model_parts:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), job_config.training.max_norm, foreach=True
-                    )
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), job_config.training.max_norm, foreach=True
+                )
+                # sync float8 amaxes and scales
+                float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
-                # when fp8 config is on,
                 # calculate float8 dynamic amax/scale for all-parameter for FSDP2
                 # it issues a single all-reduce for all parameters at once for better performance
-                maybe_precompute_fp8_dynamic_scale_for_fsdp(whole_model, job_config)
+                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
@@ -225,4 +216,4 @@ if __name__ == "__main__":
     try:
         estimate_memory(config)
     finally:
-        destroy_process_group()
+        torch.distributed.destroy_process_group()
