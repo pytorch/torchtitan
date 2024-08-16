@@ -29,6 +29,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
+from torchtitan.parallelisms.utils import check_strided_sharding_enabled
 
 
 def parallelize_llama(
@@ -87,6 +88,7 @@ def parallelize_llama(
                 reduce_dtype=TORCH_DTYPE_MAP[
                     job_config.training.mixed_precision_reduce
                 ],
+                tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
             )
         else:
@@ -293,6 +295,7 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    tp_enabled: bool,
     pp_enabled: bool,
 ):
     """
@@ -300,6 +303,12 @@ def apply_fsdp(
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+
+    # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
+    # that users won't use a nightly build which is older than 20240809 by then.
+    if tp_enabled:
+        # check if strided sharding is enabled, which is necessary for 2D/3D DCP
+        check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:
@@ -316,18 +325,6 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
-
-    if pp_enabled:
-        # TODO
-        # This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check to avoid using 2D/3D DCP since
-        # without strided sharding, DCP can not safely support resharding for 2D/3D.  However, for PP to work, even
-        # without resharding, we load a seed-checkpoint and need to disable the safety mechanism.  This hack should be
-        # removed after strided sharding is landed in DCP.
-        for module in model.modules():
-            assert len(module._load_state_dict_pre_hooks) <= 1
-            module._load_state_dict_pre_hooks.clear()
-            assert len(module._state_dict_pre_hooks) <= 1
-            module._state_dict_pre_hooks.clear()
 
     logger.info("Applied FSDP to the model")
 
