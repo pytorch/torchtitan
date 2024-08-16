@@ -33,16 +33,6 @@ def linear_warmup_linear_decay(
 
 
 def get_lr_schedulers(optimizers, job_config: JobConfig):
-    def _get_lr_scheduler(optimizer):
-        """Build a linear warmup and linear decay scheduler"""
-        warmup_steps = int(job_config.training.warmup_steps)
-        decay_steps = float(max(1, job_config.training.steps - warmup_steps))
-        lr_lambda = functools.partial(
-            linear_warmup_linear_decay, warmup_steps, decay_steps
-        )
-        warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
-        return warmup_scheduler
-
     class SchedulersContainer:
         """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
 
@@ -54,5 +44,15 @@ def get_lr_schedulers(optimizers, job_config: JobConfig):
                 schedulers.step()
 
     return SchedulersContainer(
-        [_get_lr_scheduler(optimizer) for optimizer in optimizers]
+        [_get_lr_scheduler(job_config, optimizer) for optimizer in optimizers]
     )
+
+def _get_lr_scheduler(job_config: JobConfig, optimizer):
+    """Build a linear warmup and linear decay scheduler"""
+    warmup_steps = int(job_config.training.warmup_steps)
+    decay_steps = float(max(1, job_config.training.steps - warmup_steps))
+    lr_lambda = functools.partial(
+        linear_warmup_linear_decay, warmup_steps, decay_steps
+    )
+    warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+    return warmup_scheduler

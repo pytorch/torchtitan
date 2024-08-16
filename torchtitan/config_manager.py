@@ -187,6 +187,30 @@ class JobConfig:
             action="store_true",
             help="Whether the fused implementation(CUDA only) is used.",
         )
+        self.parser.add_argument(
+            "--optimizer.galore_rank", type=int, default=128, help="GaLore rank"
+        )
+        self.parser.add_argument(
+            "--optimizer.galore_update_proj_gap",
+            type=int,
+            default=200,
+            help="GaLore update projection gap",
+        )
+        self.parser.add_argument(
+            "--optimizer.galore_scale", type=float, default=1.0, help="GaLore scale"
+        )
+        self.parser.add_argument(
+            "--optimizer.galore_proj_type",
+            type=str,
+            default="std",
+            help="GaLore projection type",
+        )
+        self.parser.add_argument(
+            "--optimizer.galore_in_backward",
+            default=False,
+            action="store_true",
+            help="Whether to apply GaLore in backward"
+        )
 
         # training configs
         self.parser.add_argument(
