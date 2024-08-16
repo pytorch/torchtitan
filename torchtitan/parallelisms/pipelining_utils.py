@@ -45,10 +45,25 @@ def build_pipeline_schedule(job_config, parallel_dims, stages, loss_fn):
     if n_microbatches is None:
         n_microbatches = job_config.experimental.pipeline_parallel_degree
 
+    if job_config.experimental.pipeline_parallel_schedule == "zb":
+        stage_index_to_group_rank = {
+            0: 0,
+            1: 1,
+            2: 2,
+            3: 3,
+            4: 3,
+            5: 2,
+            6: 1,
+            7: 0,
+        }
+    else:
+        stage_index_to_group_rank = None
+
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+        stage_index_to_group_rank=stage_index_to_group_rank,
     )
 
     if zb_schedule:
