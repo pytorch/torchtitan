@@ -73,6 +73,7 @@ torch.backends.cudnn.benchmark = False
 
 #### Performance
 - Memory and WPS / MFU, which are available from logging, should meet expectations. If necessary, verify the numbers on jobs spanning multiple nodes (e.g. on 64 GPUs).
+- It is worth noting that performance expectations vary from case to case. For example, there are cases when a technique targeting at memory reduction may cause throughput regression but still be acceptable (e.g. activation checkpointing). Again, it is the contributor's job to justify the feature, whether by achieving hypothetical performance, or by comparing with exisiting well-known implementations, etc.
 - When appropriate, one should show profile traces and/or memory snapshots to prove the effectiveness.
 
 ### Best practices
