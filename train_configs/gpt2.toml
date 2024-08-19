@@ -1,0 +1,54 @@
+# torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+[job]
+dump_folder = "./outputs"
+description = "GPT-2 training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+
+[metrics]
+log_freq = 10
+enable_tensorboard = false
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "gpt2"
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+fused = true
+
+[training]
+batch_size = 16
+seq_len = 8192
+warmup_steps = 200  # lr scheduler warm up
+max_norm = 1.0  # grad norm clipping
+steps = 100
+data_parallel_degree = -1
+tensor_parallel_degree = 1
+compile = true
+dataset = "c4"
+
+[experimental]
+pipeline_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval_type = "steps"
+interval = 500
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = 'none'  # ['none', 'selective', 'full']
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
