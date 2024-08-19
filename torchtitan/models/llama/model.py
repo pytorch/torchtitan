@@ -439,8 +439,8 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
-        return output
+        chunks = h.chunk(16, dim=1)  # TODO: 16 is from the default `num_chunks`
+        return [self.output(chunk) for chunk in chunks]
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":

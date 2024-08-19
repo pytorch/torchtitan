@@ -8,6 +8,7 @@ import contextlib
 import os
 import time
 from datetime import timedelta
+from typing import List
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -42,6 +43,36 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
             yield
 
     return context
+
+
+class TokenChunkedCrossEntropyLoss(torch.nn.Module):
+    def __init__(self, num_chunks: int = 16, ignore_index: int = -100):
+        super(TokenChunkedCrossEntropyLoss, self).__init__()
+        self.num_chunks = num_chunks
+        self.ignore_index = ignore_index
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(
+            reduction="sum", ignore_index=self.ignore_index
+        )
+
+    @torch.compile()
+    def _compute_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor):
+        return self.cross_entropy_loss(logits.float(), labels)
+
+    def forward(self, logits: List[torch.Tensor], labels: torch.Tensor):
+        """
+        Args:
+            logits (List[torch.Tensor]): List of chunked logits of length
+                ``self.num_chunks``, where each chunk has shape
+                (batch_size, num_tokens / num_chunks, vocab_size).
+            labels (torch.Tensor): Ground truth labels of shape (batch_size, num_tokens).
+        """
+        total_elements = (labels != self.ignore_index).sum()
+        labels = [target_chunk.reshape(-1) for target_chunk in labels.chunk(self.num_chunks, dim=1)] 
+        logits = [logit_chunk.reshape(-1, logit_chunk.size(-1)) for logit_chunk in logits]
+        total_loss = 0.0
+        for logits_chunk, labels_chunk in zip(logits, labels):
+            total_loss += self._compute_cross_entropy(logits_chunk, labels_chunk)
+        return total_loss / total_elements
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -132,9 +163,16 @@ def main(job_config: JobConfig):
         f"{color.blue}Model {model_name} {job_config.model.flavor} "
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
+    token_chunked_cross_entropy_loss = TokenChunkedCrossEntropyLoss()
 
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
+        if isinstance(pred, torch.Tensor):
+            pred_chunks = pred.chunk(token_chunked_cross_entropy_loss.num_chunks, dim=1)
+        else:
+            assert isinstance(pred, list)
+            pred_chunks = pred
+        return token_chunked_cross_entropy_loss(pred_chunks, labels)
         return torch.nn.functional.cross_entropy(
             pred.flatten(0, 1), labels.flatten(0, 1)
         )
