@@ -40,6 +40,8 @@ def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
         return nn.LayerNorm(dim, eps=eps, bias=False)
     elif norm_type == "np_layernorm":
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
+    elif norm_type == "layernorm_bias":
+        return nn.LayerNorm(dim, eps=eps, bias=True)
     elif norm_type == "rmsnorm":
         return RMSNorm(dim, eps=eps)
     elif norm_type == "compiled_rmsnorm":

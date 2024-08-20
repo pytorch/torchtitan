@@ -112,6 +112,7 @@ def main(job_config: JobConfig):
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
+    model_config.vocab_size = 50000
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")

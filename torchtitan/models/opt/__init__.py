@@ -7,10 +7,9 @@
 # <model name> is licensed under the <license name>,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.models.opt.model import ModelArgs, Transformer
-from transformers import OPTForCausalLM
+from torchtitan.models.opt.model import ModelArgs, OPT
 
-__all__ = ["Transformer"]
+__all__ = ["OPT"]
 
 opt_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=8),

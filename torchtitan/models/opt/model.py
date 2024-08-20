@@ -15,7 +15,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.norms import build_norm
-from transformers import OPTForCausalLM
 
 
 @dataclass
@@ -176,24 +175,22 @@ class FeedForward(nn.Module):
         ffn_dim_multiplier: Optional[float],
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        # use bias for ffn
+        self.w1 = nn.Linear(dim, hidden_dim, bias=True)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=True)
 
     def forward(self, x):
         # use GELU activation function
-        return self.w2(F.gelu(self.w1(x)) * self.w3(x))
+        return self.w2(F.gelu(self.w1(x)))
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w2.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -322,6 +319,7 @@ class OPT(nn.Module):
         """
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
+        nn.init.normal_(self.pos_encoder.weight)
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
