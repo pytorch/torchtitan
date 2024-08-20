@@ -250,7 +250,7 @@ def main(job_config: JobConfig):
             optimizers.zero_grad()
             with train_context():
                 pred = model(input_ids)
-                loss = loss_fn(pred, labels)
+                loss = loss_fn(pred, labels) / job_config.training.gradient_accumulation_steps
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred
