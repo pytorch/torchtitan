@@ -240,34 +240,36 @@ def main(job_config: JobConfig):
 
             # get batch
             data_load_start = time.perf_counter()
-            batch = next(data_iterator)
-            input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(time.perf_counter() - data_load_start)
-
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
             optimizers.zero_grad()
-            with train_context():
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels) / job_config.training.gradient_accumulation_steps
-                # pred.shape=(bs, seq_len, vocab_size)
-                # need to free to before bwd to avoid peaking memory
-                del pred
-                loss.backward()
-            for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
-                )
+
+            for _ in range(job_config.training.gradient_accumulation_steps):
+                batch = next(data_iterator)
+                input_ids, labels = batch
+                ntokens_since_last_log += labels.numel()
+                input_ids = input_ids.cuda()
+                labels = labels.cuda()
+                data_loading_times.append(time.perf_counter() - data_load_start)
+
+
+                with train_context():
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels) / job_config.training.gradient_accumulation_steps
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
+                    loss.backward()
+                for m in model_parts:
+                    torch.nn.utils.clip_grad_norm_(
+                        m.parameters(), job_config.training.max_norm, foreach=True
+                    )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
             checkpoint.maybe_wait_for_staging()
             # optimizer step
-            if train_state.step % job_config.training.gradient_accumulation_steps == 0:
-                optimizers.step()
-                lr_schedulers.step()
+            optimizers.step()
+            lr_schedulers.step()
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
