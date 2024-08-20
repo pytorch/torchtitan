@@ -1453,7 +1453,6 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
         cfg.dataset.eos_token,
         datasets=datasets,
         weights=weights,
-        verbose=(rank == 0),
     )
     # Wrap above dataset in packing logic to form constant-length lines.
     data = BufferDataset(
