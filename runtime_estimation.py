@@ -70,7 +70,7 @@ def estimate_runtime(job_config: JobConfig):
             pred.flatten(0, 1), labels.flatten(0, 1)
         )
 
-    with FakeTensorMode():
+    with FakeTensorMode() if job_config.runtime_estimation.estimate_mode_type != "actual" else contextlib.nullcontext():
         device = torch.device(torch.cuda.current_device())
         model_name = job_config.model.name
 
@@ -92,6 +92,10 @@ def estimate_runtime(job_config: JobConfig):
             model = model_cls.from_model_args(model_config)
         model.train()
 
+        for layer_id, transformer_block in model.layers.named_children():
+            transformer_block = torch.compile(transformer_block, fullgraph=True)
+            model.layers.register_module(layer_id, transformer_block)
+
         # build optimizer after applying parallelisms to the model
         optimizers = build_optimizers([model], job_config)
         logger.info(f"Vocab size: {model_config.vocab_size}")
@@ -110,7 +114,7 @@ def estimate_runtime(job_config: JobConfig):
                 device="cuda",
             ),
         )
-        collect_runtime_stats(model, optimizers.optimizers[0], batch, loss_fn, job_config.runtime_estimation.estimate_mode_type)
+        collect_runtime_stats(model, optimizers.optimizers[0], batch, loss_fn, job_config.runtime_estimation.estimate_mode_type, job_config)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,9 @@ set -ex
 
 # use envs as local overrides for convenience
 # e.g.
-# NGPU=4 ./run_runtime_estimation.sh --runtime_estimation.estimate_mode_type operator-level-cost-model
-# NGPU=4 ./run_runtime_estimation.sh --runtime_estimation.estimate_mode_type operator-level-benchmark
+# ./run_runtime_estimation.sh --runtime_estimation.estimate_mode_type operator-level-cost-model
+# ./run_runtime_estimation.sh --runtime_estimation.estimate_mode_type operator-level-benchmark
+# ./run_runtime_estimation.sh --runtime_estimation.estimate_mode_type actual
 NGPU=${NGPU:-"8"}
 NNODES=${NNODES:-"1"}
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama3_8b.toml"}

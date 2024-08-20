@@ -7,6 +7,7 @@ from .test_model import GPT, GPTConfig, loss_fn
 from torch import nn, optim
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.utils.benchmark import timer
+from torchtitan.profiling import maybe_enable_profiling
 
 
 def collect_runtime_stats(
@@ -15,17 +16,22 @@ def collect_runtime_stats(
     inp_and_target: Tuple[torch.Tensor, torch.Tensor],
     loss_fn: Callable = lambda x, y: sum(x, y),
     estimate_mode_type: str = "operator-level-cost-model",
+    job_config=None,
 ):
     # We just need one actual iteration for estimation
-    warm_up_iters, actual_iters = 1, 1
+    warm_up_iters, actual_iters = 1, 4
     inp, target = inp_and_target
 
     def inner(num_iters: int):
-        for _ in range(num_iters):
-            loss = loss_fn(model(inp), target)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+        with maybe_enable_profiling(
+            job_config, global_step=0
+        ) as torch_profiler:
+            for _ in range(num_iters):
+                loss = loss_fn(model(inp), target)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                torch_profiler.step()
 
     # Initializing optimizer states and warm-up
     inner(warm_up_iters)
