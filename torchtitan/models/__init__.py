@@ -11,7 +11,10 @@ models_config = {
     "llama3": llama3_configs,
 }
 
-model_name_to_cls = {"llama2": Transformer, "llama3": Transformer}
+model_name_to_cls = {
+    "llama2": Transformer,
+    "llama3": Transformer
+}
 
 model_name_to_tokenizer = {
     "llama2": "sentencepiece",
