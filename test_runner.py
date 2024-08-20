@@ -7,6 +7,7 @@
 import argparse
 import logging
 import os
+import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
@@ -59,6 +60,38 @@ def build_test_list():
             "PP looped flexible 1f1b test",
             "pp_looped_flexible_1f1b",
             requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                    "--experimental.pipeline_parallel_schedule zb_v",
+                    "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
+                ],
+            ],
+            "PP fake ZB test with v shaped stages",
+            "pp_zb_v",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                    "--experimental.pipeline_parallel_schedule zb",
+                    "--training.data_parallel_degree 1",
+                    "--model.norm_type rmsnorm",  # fused_rmsnorm crashes with PP
+                ],
+            ],
+            "PP ZB",
+            "pp_zb",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -398,7 +431,11 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
-        raise RuntimeError("Please provide an empty output directory.")
+        if args.output_dir == "./test_out":
+            shutil.rmtree(args.output_dir)
+            os.makedirs(args.output_dir)  # Recreate the directory after removing it
+        else:
+            raise RuntimeError("Please provide an empty output directory.")
     run_tests(args)
 
 

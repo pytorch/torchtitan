@@ -275,7 +275,14 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
+            choices=[
+                "1f1b",
+                "gpipe",
+                "interleaved_1f1b",
+                "flexible_interleaved_1f1b",
+                "zb",
+                "zb_v",
+            ],
             default="1f1b",
             help="""
                 Specify the Pipeline Parallel schedule to use.
@@ -557,6 +564,15 @@ class JobConfig:
                 )
                 logger.exception(f"Error details: {str(e)}")
                 raise e
+
+        if (
+            "experimental" in args_dict
+            and "pipeline_parallel_split_points" in args_dict["experimental"]
+        ):
+            exp = args_dict["experimental"]
+            split_points = exp["pipeline_parallel_split_points"]
+            if isinstance(split_points, str):
+                exp["pipeline_parallel_split_points"] = string_list(split_points)
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)

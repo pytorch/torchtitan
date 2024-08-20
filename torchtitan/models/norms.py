@@ -17,6 +17,7 @@ import triton.language as tl
 from torch.distributed._tensor import Partial, Replicate, Shard
 from torch.distributed._tensor.experimental import local_map
 
+from torchtitan.logging import logger
 
 def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
     """
@@ -110,6 +111,7 @@ class RMSNorm(nn.Module):
             return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
 
         output = _norm(x.float(), eps).type_as(x)
+        logger.info(f"{output=}, {weight=}")
         return output * weight
 
     def forward(self, x: torch.Tensor):

@@ -17,3 +17,4 @@ torchtitan/datasets/**/*.model
 *.log
 error.json
 _remote_module_non_scriptable.py
+test_out/

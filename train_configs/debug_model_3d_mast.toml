@@ -1,0 +1,72 @@
+# torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 debug training"
+use_for_integration_test = true
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+enable_color_printing = true
+enable_tensorboard = true
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "debugmodel"
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+# test tokenizer.model, for debug purpose only
+tokenizer_path = "./test/assets/test_tiktoken.model"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+
+[training]
+batch_size = 8
+seq_len = 2048
+warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+max_norm = 1.0  # grad norm clipping
+steps = 50
+data_parallel_degree = -1
+tensor_parallel_degree = 2
+enable_float8_linear = false
+compile = false
+dataset = "c4"  # supported datasets: c4_mini (45K), c4 (177M)
+
+[experimental]
+# Interleaved 1F1B (looped)
+# pipeline_parallel_degree = 4
+# pipeline_parallel_split_points="layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7"
+# pipeline_parallel_schedule="interleaved_1f1b"
+
+# # 1F1B
+# pipeline_parallel_degree = 2
+# pipeline_parallel_split_points="layers.4"
+# pipeline_parallel_schedule="1f1b"
+
+# # Zero bubble (looped)
+pipeline_parallel_degree = 4
+pipeline_parallel_split_points="layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7"
+pipeline_parallel_schedule="zb"
+
+[checkpoint]
+enable_checkpoint = false
+folder = "/mnt/mffuse/outputs/hhuang/checkpoint"
+interval_type = "steps"
+interval = 500
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = 'none'  # ['none', 'selective', 'full']
+selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy

@@ -12,7 +12,7 @@ from typing import Callable, Union
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from torch.distributed.pipelining import pipeline, PipelineStage, SplitPoint
+from .pipelining import pipeline, PipelineStage, SplitPoint
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
@@ -53,6 +53,7 @@ def pipeline_llama(
 
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
+    logger.info("Applied PP to the model")
     return pp_schedule, models
 
 
@@ -148,6 +149,7 @@ def pipeline_llama_manual(
             input_args=input.chunk(microbatches)[0],
             output_args=output.chunk(microbatches)[0],
             group=pp_mesh.get_group("pp"),
+            # dw_builder=lambda: lambda: print("dummy dw_runner"),
         )
         return stage, model
 
@@ -156,7 +158,12 @@ def pipeline_llama_manual(
 
     stages = []
     models = []
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
+    loop_style = (
+        "v" if job_config.experimental.pipeline_parallel_schedule == "zb_v" else "loop"
+    )
+    for stage_idx in stage_ids_this_rank(
+        pp_rank, pp_size, num_stages, style=loop_style
+    ):
         start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
         stop_layer = splits[stage_idx] if stage_idx < num_stages - 1 else None
         stage, model_chunk = _build_stage(
@@ -217,7 +224,12 @@ def pipeline_llama_tracer(
 
     stages = []
     models = []
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
+    loop_style = (
+        "v" if job_config.experimental.pipeline_parallel_schedule == "zb_v" else "loop"
+    )
+    for stage_idx in stage_ids_this_rank(
+        pp_rank, pp_size, num_stages, style=loop_style
+    ):
         models.append(pipe.get_stage_module(stage_idx))
         stages.append(
             pipe.build_stage(
