@@ -116,12 +116,7 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
     Returns global rank 0 in non-pipeline-parallel configs, and returns the global
     rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
     """
-    if parallel_dims.pp_enabled:
-        world_size = parallel_dims.world_size
-        pp_size = parallel_dims.pp
-        metrics_log_rank = (world_size // pp_size) * (pp_size - 1)
-    else:
-        metrics_log_rank = 0
+    metrics_log_rank = 0
 
     return metrics_log_rank
 
@@ -154,3 +149,4 @@ def build_metric_logger(
             log_dir = os.path.join(log_dir, rank_str)
 
     return MetricLogger(log_dir, tag, enable_tb)
+

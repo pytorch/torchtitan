@@ -12,6 +12,10 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
+import torch.nn.functional as F
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -61,8 +65,6 @@ def main(job_config: JobConfig):
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
         dp=job_config.training.data_parallel_degree,
-        tp=job_config.training.tensor_parallel_degree,
-        pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
         dp_type=job_config.training.data_parallel_type,
@@ -82,10 +84,9 @@ def main(job_config: JobConfig):
     else:
         dp_degree, dp_rank = 1, 0
 
-    if parallel_dims.pp_enabled:
-        pp_mesh = world_mesh["pp"]
 
     model_name = job_config.model.name
+    world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -141,27 +142,13 @@ def main(job_config: JobConfig):
         )
 
     # apply parallelisms and initialization
-    if parallel_dims.pp_enabled:
-        # apply PT-D Pipeline Parallel
-        pp_schedule, model_parts = models_pipelining_fns[model_name](
-            model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
-        )
+    # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
+    models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
-        # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-        # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-        # optimizer, and checkpointing
-        for m in model_parts:
-            # apply SPMD-style PT-D techniques
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            m.to_empty(device="cuda")
-    else:
-        # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
-
-        # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-        model.to_empty(device=init_device)
-        model_parts = [model]
+    # move sharded model to CPU/GPU and initialize weights via DTensor
+    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+    model.to_empty(device=init_device)
+    model_parts = [model]
 
     for mod in model_parts:
         # skip traced modules since we do not define init_weights in the traced module
@@ -203,12 +190,6 @@ def main(job_config: JobConfig):
 
     checkpoint_loaded = checkpoint.load()
 
-    if parallel_dims.pp_enabled and not checkpoint_loaded:
-        # TODO: fix this by allowing each rank to set their own seed
-        logger.warning(
-            "Pipeline Parallelism is being used without a seed checkpoint. "
-            "All the substages will be initialized with random weights with same RNG state which can affect convergence."
-        )
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
@@ -267,37 +248,13 @@ def main(job_config: JobConfig):
             input_ids = input_ids.cuda()
             labels = labels.cuda()
             optimizers.zero_grad()
-
-            if parallel_dims.pp_enabled:
-                # Pipeline Parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
-
-                with train_context():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
-                    else:
-                        pp_schedule.step()
-
-                # accumulate losses across pipeline microbatches
-                loss = (
-                    torch.mean(torch.stack(losses))
-                    if is_last_stage
-                    else torch.Tensor([-1.0])
-                )
-            else:
-                # Non-PP forward / backward
-                with train_context():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
-
-            # clip gradients
+            with train_context():
+                pred = model(input_ids)
+                loss = loss_fn(pred, labels)
+                # pred.shape=(bs, seq_len, vocab_size)
+                # need to free to before bwd to avoid peaking memory
+                del pred
+                loss.backward()
             for m in model_parts:
                 torch.nn.utils.clip_grad_norm_(
                     m.parameters(), job_config.training.max_norm, foreach=True
