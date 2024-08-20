@@ -24,7 +24,7 @@ def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
 
     Args:
         norm_type (str): The type of normalization layer to build.
-            Supported types: 1. rmsnorm 2. fused_rmsnorm 3. layernorm 4. np_layernorm
+            Supported types: layernorm, np_layernorm, rmsnorm, fused_rmsnorm
         dim (int): The dimension of the normalization layer.
         eps (float, optional): The epsilon value for numerical stability. Defaults to 1e-6.
 
@@ -42,13 +42,6 @@ def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
         return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
     elif norm_type == "rmsnorm":
         return RMSNorm(dim, eps=eps)
-    elif norm_type == "compiled_rmsnorm":
-        import warnings
-
-        warnings.warn(
-            "compiled_rmsnorm is currently experimental and not ready to use yet."
-        )
-        return RMSNorm(dim, eps=eps, compile=True)
     elif norm_type == "fused_rmsnorm":
         return FusedRMSNorm(dim, eps=eps)
     else:
@@ -94,26 +87,17 @@ class RMSNorm(nn.Module):
 
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6, compile: bool = False):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-        self.rmsnorm_fn = (
-            torch.compile(self.compute_rmsnorm, fullgraph=True)
-            if compile
-            else self.compute_rmsnorm
-        )
 
-    @staticmethod
-    def compute_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
-        def _norm(x, eps):
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-
-        output = _norm(x.float(), eps).type_as(x)
-        return output * weight
+    def _norm(self, x: torch.Tensor):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x: torch.Tensor):
-        return self.rmsnorm_fn(x, self.weight, self.eps)
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
 
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)  # type: ignore
