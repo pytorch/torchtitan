@@ -1174,7 +1174,7 @@ class ScalableShardDataset(_WrapperDataset):
                 self.data[-1].rank = self.logicals_owned[i]
                 self.data[-1].local_worldsize = 1
                 self.data[-1].datapath = self.datapath
-                self.data[-1].verbose = self.rank == 0
+                self.data[-1].verbose = self.verbose and self.rank == 0
                 if self.verbose:
                     logging.info(
                         f"Worker {self.rank} assembled logical shard {self.logicals_owned[i]}, {i+1} of {self.n_logicals}"
@@ -1438,7 +1438,7 @@ def build_experimental_data_loader(cfg, rank, world_size, tokenizer: Tokenizer =
         bos_token=None if cfg.dataset.bos_token == -1 else cfg.dataset.bos_token,
         strip_tokens=set(droplist),
         min_length=3,
-        seed=42,
+        seed=42
     )
     # Add rescaling/resharding
     data = ScalableShardDataset(
