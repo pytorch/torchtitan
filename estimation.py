@@ -33,6 +33,15 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
+    # if tp > or pp > 1, we exit
+    if (
+        job_config.training.tensor_parallel_degree > 1
+        or job_config.experimental.pipeline_parallel_degree > 1
+    ):
+        logger.info(
+            "Tensor parallelism and pipeline parallelism are not supported yet."
+        )
+        return
 
     # fake tensor doesn't work with fused rmsnorm
     if (

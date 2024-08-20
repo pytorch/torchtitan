@@ -51,7 +51,8 @@ class ParallelDims:
 
     @property
     def loss_parallel_enabled(self):
-        return False
+        return False # requires tensor parallelism
+
 
     @cached_property
     def model_parallel_size(self):

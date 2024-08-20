@@ -112,6 +112,10 @@ class MetricLogger:
 
 
 def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
+    """
+    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
+    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
+    """
     metrics_log_rank = 0
 
     return metrics_log_rank
@@ -122,9 +126,10 @@ def build_metric_logger(
 ):
     """
     parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
-    In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'.
+    In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'. This is
+    intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
+    parallelism is enabled, without forcing logging from all ranks to capture loss information.
     """
-
     dump_dir = job_config.job.dump_folder
     tb_config = job_config.metrics
     save_tb_folder = tb_config.save_tb_folder
@@ -144,3 +149,4 @@ def build_metric_logger(
             log_dir = os.path.join(log_dir, rank_str)
 
     return MetricLogger(log_dir, tag, enable_tb)
+

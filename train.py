@@ -12,6 +12,10 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
+import torch.nn.functional as F
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -24,6 +28,7 @@ from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
     models_parallelize_fns,
+    models_pipelining_fns,
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
@@ -81,6 +86,7 @@ def main(job_config: JobConfig):
 
 
     model_name = job_config.model.name
+    world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -184,6 +190,7 @@ def main(job_config: JobConfig):
 
     checkpoint_loaded = checkpoint.load()
 
+
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
@@ -241,7 +248,6 @@ def main(job_config: JobConfig):
             input_ids = input_ids.cuda()
             labels = labels.cuda()
             optimizers.zero_grad()
-
             with train_context():
                 pred = model(input_ids)
                 loss = loss_fn(pred, labels)
@@ -249,8 +255,6 @@ def main(job_config: JobConfig):
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
-
-            # clip gradients
             for m in model_parts:
                 torch.nn.utils.clip_grad_norm_(
                     m.parameters(), job_config.training.max_norm, foreach=True
