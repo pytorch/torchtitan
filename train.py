@@ -263,10 +263,11 @@ def main(job_config: JobConfig):
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
-            # optimizer step
             checkpoint.maybe_wait_for_staging()
-            optimizers.step()
-            lr_schedulers.step()
+            # optimizer step
+            if train_state.step % job_config.training.gradient_accumulation_steps == 0:
+                optimizers.step()
+                lr_schedulers.step()
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
