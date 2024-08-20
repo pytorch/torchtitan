@@ -58,9 +58,8 @@ class LearnedPositionalEmbedding(nn.Embedding):
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
-    def forward(self, pos):
-        return super().forward(torch.arange(pos, device=self.device) + self.offset)
-
+    def forward(self, positions):
+        return super().forward(positions + self.offset - 1) # subtract one to offset the indices to 0
 
 
 class Attention(nn.Module):
@@ -256,7 +255,7 @@ class TransformerBlock(nn.Module):
         """
         h = x + self.attention(self.attention_norm(x))
         # add dropout during the training
-        h = F.dropout(h, p=self.dropout_p, trainin=self.training)
+        h = F.dropout(h, p=self.dropout_p, training=self.training)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -347,9 +346,12 @@ class OPT(nn.Module):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        # get batch size and sequence length
+        batch_size, seq_length = tokens.shape
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-        h = h + self.pos_encoder(len(h))
+        positions = torch.cumsum(torch.ones(batch_size, seq_length, device=h.device, dtype=torch.long), dim=1)
+        h = h + self.pos_encoder(positions)
 
         for layer in self.layers.values():
             h = layer(h)
