@@ -32,7 +32,7 @@ llama3_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
     "8B": ModelArgs(
         dim=4096,
-        n_layers=32,
+        n_layers=5,
         n_heads=32,
         n_kv_heads=8,
         ffn_dim_multiplier=1.3,

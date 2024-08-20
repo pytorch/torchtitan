@@ -116,8 +116,7 @@ def estimate_memory(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    with FakeTensorMode() if not job_config.memory_estimation.disable_fake_mode else contextlib.nullcontext():
-
+    with FakeTensorMode():
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
         )

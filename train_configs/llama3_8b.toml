@@ -20,6 +20,7 @@ name = "llama3"
 flavor = "8B"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
+vocab_size = 128256
 
 [optimizer]
 name = "AdamW"
@@ -38,6 +39,13 @@ dataset = "c4"
 
 [experimental]
 pipeline_parallel_degree = 1
+
+
+[runtime_estimation]
+estimate_mode_type = "operator-level-cost-model"
+# estimate_mode_type = "operator-level-benchmark"
+# estimate_mode_type = "actual"
+
 
 [checkpoint]
 enable_checkpoint = false
