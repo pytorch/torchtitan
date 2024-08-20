@@ -1,0 +1,74 @@
+# torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 3B training"
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 10
+enable_tensorboard = true
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "3B"
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+
+[training]
+batch_size = 1
+seq_len = 8192
+warmup_steps = 200  # lr scheduler warm up
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+data_parallel_degree = -1
+tensor_parallel_degree = 1
+compile = false
+dataset = "c4"
+
+[dataset]
+use_experimental_dataloader = true
+data_logical_shards = 768
+bos_token = 128000
+eos_token = 128001
+# dataset_path = "/fsx/datasets/"
+# datasets = "CommonCrawl,C4,Github,Wikipedia,Books,ArXiv,StackExchange"
+# dataset_weights = "67,15,4.5,4.5,4.5,2.5,2"
+# dataset_path = "./torchtitan/datasets/experimental/llama3"
+# datasets = "c4_mini"
+# dataset_weights = "1"
+dataset_path = "/gpfs/dolma_v1_7"
+datasets = "dataset=cc_en_head,dataset=cc_en_middle,dataset=cc_en_tail,dataset=falcon,dataset=starcoder,dataset=c4,dataset=reddit,dataset=pes2o,dataset=arxiv,dataset=stackexchange,dataset=tulu_flan,dataset=cc_news_head,dataset=cc_news_middle,dataset=cc_news_tail,dataset=open,dataset=algebraic,dataset=books,dataset=megawika,dataset=wiki"
+dataset_weights = "1456,1835,1558,1851,450,1500,300,236,114,200,100,62,27,11,51,49,100,55,45"
+num_data_workers = 1
+col_name = "tokens"
+file_type = "arrow"
+
+[experimental]
+pipeline_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval_type = "steps"
+interval = 500
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = 'selective'  # ['none', 'selective', 'full']
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[float8]
+enable_float8_linear = false
