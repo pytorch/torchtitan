@@ -62,8 +62,9 @@ llama3_configs = {
         n_layers=24,
         n_heads=32,
         n_kv_heads=8,
-        ffn_dim_multiplier=1,
+        ffn_dim_multiplier=8.0/3/2.75,
         multiple_of=1024,
         rope_theta=500000,
+        max_seq_len=4096,
     )
 }
