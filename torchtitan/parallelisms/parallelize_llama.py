@@ -416,12 +416,6 @@ def apply_tp(
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
-        if not job_config.training.compile:
-            logger.warning(
-                "Async TP requires compilation...auto enabling compile = True for this job to resolve."
-            )
-            job_config.training.compile = True
-
     logger.info(
         f"Applied {'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
