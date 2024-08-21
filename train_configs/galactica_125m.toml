@@ -23,6 +23,9 @@ name = "opt"
 flavor = "125M"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
+init_weights = false
+load_weights_path = "facebook/galactica-125m"
+weights_source = "huggingface"
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
 [optimizer]

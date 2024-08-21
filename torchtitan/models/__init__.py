@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.models.llama import llama2_configs, llama3_configs, Transformer
-from torchtitan.models.opt import opt_configs, OPT
+from torchtitan.models.opt import opt_configs, OPT, load_opt_weights
 
 models_config = {
     "llama2": llama2_configs,
@@ -23,4 +23,8 @@ model_name_to_tokenizer = {
     "llama2": "sentencepiece",
     "llama3": "tiktoken",
     "opt": "tiktoken"
+}
+
+model_name_to_weights_loading_fns = {
+    "opt": load_opt_weights
 }

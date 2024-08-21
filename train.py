@@ -24,7 +24,12 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.models import (
+    model_name_to_cls,
+    model_name_to_weights_loading_fns,
+    model_name_to_tokenizer,
+    models_config
+)
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
     models_parallelize_fns,
@@ -87,6 +92,7 @@ def main(job_config: JobConfig):
 
     model_name = job_config.model.name
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
+    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -116,8 +122,21 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    with torch.device("meta"):
-        model = model_cls.from_model_args(model_config)
+    # with torch.device("meta"):
+    model = model_cls.from_model_args(model_config)
+
+    # load the model on rank 0 only, then FSDP will distribute the weights
+    if job_config.model.init_weights:
+        if dp_rank == 0:
+            # model.to_empty(device=init_device)
+            model.init_weights()
+    else:
+        if dp_rank == 0:
+            # model.to_empty(device=init_device)
+            model_name_to_weights_loading_fns[model_name](
+                model, weights_path=job_config.model.load_weights_path,
+                source=job_config.model.weights_source
+            )
 
     # a no-op hander if float8 is not enabled
     # float8_handler = Float8Handler(job_config, parallel_dims)
@@ -147,15 +166,15 @@ def main(job_config: JobConfig):
     models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
-    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-    model.to_empty(device=init_device)
+    model.to(device=init_device)
     model_parts = [model]
 
     for mod in model_parts:
         # skip traced modules since we do not define init_weights in the traced module
         if isinstance(mod, GraphModule):
             continue
-        mod.init_weights()
+        # if job_config.model.init_weights:
+        #     mod.init_weights()
         mod.train()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()

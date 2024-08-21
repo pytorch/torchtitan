@@ -8,8 +8,9 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.models.opt.model import ModelArgs, OPT
+from torchtitan.models.opt.utils import load_opt_weights
 
-__all__ = ["OPT"]
+__all__ = ["OPT", "load_opt_weights"]
 
 opt_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=8),
