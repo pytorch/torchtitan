@@ -11,6 +11,7 @@ import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
+<<<<<<< HEAD
 try:
     from torchdata.stateful_dataloader import StatefulDataLoader
 except ImportError as e:
@@ -18,17 +19,28 @@ except ImportError as e:
         "Please install the latest torchdata nightly to use StatefulDataloader via:"
         "pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly"
     ) from e
+=======
+from torchdata.stateful_dataloader import StatefulDataLoader
+>>>>>>> main
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
+<<<<<<< HEAD
 from datasets import load_dataset
+=======
+from datasets import Dataset, load_dataset
+>>>>>>> main
 from datasets.distributed import split_dataset_by_node
 
 # map from dataset name to a local directory, or
 # a dataset repository on the HF hub
 _supported_datasets = {
+<<<<<<< HEAD
     "c4_mini": "torchtitan/datasets/c4_mini",
+=======
+    "c4_test": "test/assets/c4_test",
+>>>>>>> main
     "c4": "allenai/c4",
 }
 
@@ -48,8 +60,13 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
+<<<<<<< HEAD
     We currently support the c4 dataset and a subset of it:
     c4_mini (45K training entries)
+=======
+    We currently support the c4 dataset, and a subset of it for testing purposes:
+    c4_test (2K training entries)
+>>>>>>> main
     c4 (177M training entries - this dataset is streamed due to the size)
 
     >> c4 (EN) <<:
@@ -83,12 +100,20 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             if dataset_path:
                 logger.warning(
                     f"Dataset {dataset_name} is not tested or verfied. "
+<<<<<<< HEAD
                     f"Recommended datasets are: {list(_supported_datasets.keys())}."
+=======
+                    f"Recommended datasets are: {list(_supported_datasets.keys())}"
+>>>>>>> main
                 )
             else:
                 raise ValueError(
                     f"Dataset {dataset_name} is not supported. "
+<<<<<<< HEAD
                     f"Supported datasets are: {list(_supported_datasets.keys())}."
+=======
+                    f"Supported datasets are: {list(_supported_datasets.keys())}"
+>>>>>>> main
                 )
 
         if not dataset_path:
@@ -102,7 +127,11 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         else:
             ds = load_dataset(dataset_path, split="train")
 
+<<<<<<< HEAD
         # TODO: support shuffling and checkpointing
+=======
+        # TODO: support shuffling
+>>>>>>> main
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
         self._tokenizer = tokenizer
@@ -132,20 +161,29 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     yield input, label
 
             if not self.infinite:
+<<<<<<< HEAD
                 logger.warning(f"Dataset {self.dataset_name} has run out of data.")
+=======
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+>>>>>>> main
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
+<<<<<<< HEAD
                 logger.warning(
                     f"Dataset {self.dataset_name} is being re-looped. "
                     "Loss related metrics might be misleading."
                 )
+=======
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+>>>>>>> main
 
     def _get_data_iter(self):
         if self._sample_idx == 0:
             return iter(self._data)
 
+<<<<<<< HEAD
         # Skip samples
         if isinstance(self._data, IterableDataset):
             it = iter(self._data)
@@ -157,6 +195,12 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # As skipping to the end throws an error in case of map-style dataset, return an empty iterator
         if self._sample_idx == len(self._data):
             return iter([])
+=======
+        # As skipping to the end throws an error in case of map-style dataset, return an empty iterator
+        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
+            return iter([])
+
+>>>>>>> main
         return iter(self._data.skip(self._sample_idx))
 
     def load_state_dict(self, state_dict):
@@ -182,13 +226,21 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
         return {self._rank_id: pickle.dumps(super().state_dict())}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+<<<<<<< HEAD
         # State being empty is valid, don't log a warning
+=======
+        # State being empty is valid
+>>>>>>> main
         if not state_dict:
             return
 
         if self._rank_id not in state_dict:
             logger.warning(
+<<<<<<< HEAD
                 f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}."
+=======
+                f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}"
+>>>>>>> main
             )
             return
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))

@@ -106,7 +106,11 @@ fully_shard(model)
 for tensor in itertools.chain(model.parameters(), model.buffers()):
     assert tensor.device == torch.device("meta")
 # Allocate buffers and sharded parameters on GPU
+<<<<<<< HEAD
 model.to_empty("cuda")
+=======
+model.to_empty(device="cuda")
+>>>>>>> main
 # Run user-defined initializers
 model.init_weights() # or `model.apply(init_weights)`
 ```

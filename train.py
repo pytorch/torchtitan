@@ -183,6 +183,49 @@ def main(job_config: JobConfig):
     optimizers = build_optimizers(model_parts, job_config)
     lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
+    # apply parallelisms and initialization
+    if parallel_dims.pp_enabled:
+        # apply PT-D Pipeline Parallel
+        pp_schedule, model_parts = models_pipelining_fns[model_name](
+            model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
+        )
+
+        pp_split_mode = job_config.experimental.pipeline_parallel_split_mode
+
+        # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+        # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+        # optimizer, and checkpointing
+        for m in model_parts:
+            # apply SPMD-style PT-D techniques
+            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+            m.to_empty(device="cuda")
+            # skip traced modules since we do not define init_weights in the traced module
+            if pp_split_mode == "manual":
+                m.init_weights()
+            m.train()
+    else:
+        # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
+        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+
+        # move sharded model to CPU/GPU and initialize weights via DTensor
+        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        model.to_empty(device=init_device)
+        model.init_weights()
+        model.train()
+
+        model_parts = [model]
+
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
+
+    # build optimizer after applying parallelisms to the model
+    optimizers = build_optimizers(model_parts, job_config)
+    lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
+
     train_state = TrainState()
 
     # train loop
@@ -398,6 +441,8 @@ def main(job_config: JobConfig):
             # signals the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
+            if memory_profiler:
+                memory_profiler.step()
 
             if memory_profiler:
                 memory_profiler.step()
