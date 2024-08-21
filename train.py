@@ -72,9 +72,7 @@ def main(job_config: JobConfig):
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor)
-    logger.info(
-        f"Peak FLOPS we use for MFU: {gpu_peak_flops} "
-    )
+    logger.info(f"Peak FLOPS we use for MFU: {gpu_peak_flops} ")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
