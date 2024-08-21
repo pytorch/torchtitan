@@ -37,7 +37,7 @@ class Float8Handler:
             return
         if not _is_sm89_or_later():
             logger.warning(
-                "Failed to swap to Float8Linear because only SM89 or later is available",
+                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
             )
             return
         try:
