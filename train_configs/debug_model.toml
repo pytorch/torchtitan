@@ -24,6 +24,7 @@ flavor = "debugmodel"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
+init_weights = true
 
 [optimizer]
 name = "AdamW"
