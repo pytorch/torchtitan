@@ -12,10 +12,6 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
-import torch.nn.functional as F
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -26,11 +22,7 @@ from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.parallelisms import (
-    models_parallelize_fns,
-    models_pipelining_fns,
-    ParallelDims,
-)
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
 
@@ -83,7 +75,6 @@ def main(job_config: JobConfig):
         dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
     else:
         dp_degree, dp_rank = 1, 0
-
 
     model_name = job_config.model.name
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -190,7 +181,6 @@ def main(job_config: JobConfig):
 
     checkpoint_loaded = checkpoint.load()
 
-
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
@@ -249,7 +239,6 @@ def main(job_config: JobConfig):
                 input_ids = input_ids.cuda()
                 labels = labels.cuda()
                 data_loading_times.append(time.perf_counter() - data_load_start)
-
 
                 with train_context():
                     pred = model(input_ids)
