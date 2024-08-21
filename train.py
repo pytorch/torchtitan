@@ -223,8 +223,8 @@ def main(job_config: JobConfig):
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
-        f"with local batch size {job_config.training.batch_size}, "
-        f"global batch size {job_config.training.batch_size * dp_degree}, "
+        f"with local batch size {job_config.training.batch_size * job_config.training.gradient_accumulation_steps}, "
+        f"global batch size {job_config.training.batch_size * job_config.training.gradient_accumulation_steps * dp_degree}, "
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
         f"(warmup {job_config.training.warmup_steps})"
