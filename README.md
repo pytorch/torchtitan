@@ -22,8 +22,10 @@ Our guiding principles when building `torchtitan`:
 
 You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
 * [train.py](https://github.com/pytorch/torchtitan/blob/main/train.py) - the main training loop and high-level setup code
-* [torchtitan/parallelisms/parallelize_llama.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data / Tensor / Pipeline Parallelisms to the model
+* [torchtitan/parallelisms/parallelize_llama.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model	* [torchtitan/parallelisms/parallelize_llama.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data / Tensor / Pipeline Parallelisms to the model
+* [torchtitan/parallelisms/pipeline_llama.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/checkpoint.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
+* [torchtitan/float8.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/float8.py) - utils for applying Float8 techniques
 * [torchtitan/models/llama/model.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py) - the Llama model definition (shared for Llama2 and Llama3 variants)
 
 ## Pre-Release Updates:
@@ -41,6 +43,7 @@ Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes
 6. Learning rate scheduler, meta init, Optional Fused RMSNorm
 7. All options easily configured via [toml files](train_configs/)
 8. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning
+9. [Float8 support](docs/float8.md)
 
 We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 
@@ -48,11 +51,10 @@ We report our [Performance](docs/performance.md) verified on 64 A100 GPUs
 ### Coming soon
 
 1. Async checkpointing
-2. FP8 support
-3. Context Parallel
-4. 3D Pipeline Parallel
-5. `torch.compile` support
-6. Scalable data loading solution
+2. Context Parallel
+3. 3D Pipeline Parallel
+4. `torch.compile` support
+5. Scalable data loading solution
 
 
 ## Installation
