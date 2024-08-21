@@ -148,10 +148,11 @@ def get_peak_flops(gpu_memory_monitor: GPUMemoryMonitor) -> int:
             return 1979e12
         elif "PCIe" in device_name:
             return 756e12
-        # Sometimes, the device name is just "NVIDIA H100", we need
-        # to check the memory size to determine the peak flops.
-        # H100 NVL
-        elif device_mem >= 95:
+        # Sometimes, the device name is just literally "NVIDIA H100", so
+        # we won't hit the two conditions before; we then need
+        # to check the memory size of the device to determine the peak flops.
+        # H100 NVL has 94 GiB memory, source: https://www.nvidia.com/en-us/data-center/h100/
+        elif device_mem >= 94:
             return 835e12
         else:  # for H100 SXM
             return 989e12

@@ -2,9 +2,25 @@ To demonstrate the effectiveness of PyTorch distributed training techniques used
 We report infra metrics achieved by [FSDP2](fsdp.md) (1D parallelism) under various configurations, and loss curves for both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel) training.
 
 
+## Llama 3.1 performance numbers
+
+Below are the WPS (word per second, or more accurately, token per second) and MFU (model FLOPS utilization) results which torchtitan achieves on the 405B model released in [LLaMa 3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1). The way we compute WPS and MFU can be found in `train.py`. Because the model now is larger, we run on 128 H100 GPUs to test both performance and loss curves. Below is the performance result of 405B model with optimizations we have developed. We do see OOM for 1D even with batch size = 1, so we only tested the 2D case.
+
+| Model size | Batch size | Activation checkpointing | WPS | MFU | Optimizations |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| 405B | 2 | full | 118 | 37.1% | None
+| 405B | 2 | full | 177 | 27.77% | Float8
+| 405B | 2 | full | 185 | 29.03% | Float8 + Async TP
+
+Here, we use local batch size 2 (global batch size = local batch size 2 * number of FSDP ranks 16 = 32).
+
+Next, we show the loss curves, all models are trained 3000 steps on the [C4 dataset](https://huggingface.co/datasets/allenai/c4), with global batch size 32. We have to use full AC to save memory usage. The results are shown in the picture (a TensorBoard screenshot) below.
+
+![image](../assets/images/llama3_1_405B_loss_curves.png)
+
 ## Llama 3 performance numbers
 
-Below are the WPS (word per second, or more accurately, token per second) and MFU (model FLOPS utilization) results which torchtitan achieves on Llama 3 models with FSDP2 on 64 A100 (80GB) GPUs. The way we compute WPS and MFU can be found in `train.py`.
+Below are the WPS and MFU results which torchtitan achieves on Llama 3 models with FSDP2 on 64 A100 (80GB) GPUs.
 
 | Model size | Batch size | Activation checkpointing | WPS | MFU |
 | ----- | ----- | ----- | ----- | ----- |
@@ -14,25 +30,10 @@ Below are the WPS (word per second, or more accurately, token per second) and MF
 
 We use local batch size 1 (global batch size = local batch size 1 * number of FSDP ranks 64 = 64), because it mimics the small local batch size in large scaled training, and moreoever allows us to compare 1D (FSDP) and 2D (FSDP + TP) training under the same global batch size on both 8B and 70B Llama 3 models, without the out-of-memory (OOM) issue.
 
-Next we show the loss curves for Llama 3 8B and Llama 3 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All four models are trained 3000 steps on the [C4 dataset](https://huggingface.co/datasets/allenai/c4), with global batch size 64. In terms of activation checkpointing (AC) configs, the Llama 3 8B training jobs use selective op AC, whereas the Llama 3 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below.
+Next we show the loss curves for Llama 3 8B and Llama 3 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All four models are trained the same as mentioned above with global batch size 64. In terms of activation checkpointing (AC) configs, the Llama 3 8B training jobs use selective op AC, whereas the Llama 3 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below.
 
 ![image](../assets/images/llama3_loss_curves.png)
 
-
-## Llama 3.1 performance numbers
-
-We did a performance measurement on the 405B model released in [LLaMa 3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1). Because the model now is larger, we run on 128 H100 GPUs to test both performance and loss curves. Below is the performance result of 405B model with optimizations we have developed. We do see OOM for 1D even with batch size = 1, so we only tested the 2D case.
-
-
-| Model size | Batch size | Activation checkpointing | WPS | MFU | optimizations |
-| ----- | ----- | ----- | ----- | ----- | ----- |
-| 405B | 2 | full | 118 | 37.1% | None
-| 405B | 2 | full | 177 | 27.77% | FP8
-| 405B | 2 | full | 185 | 29.03% | FP8 + async TP
-
-And the loss curves are shown below:
-
-![image](../assets/images/llama3_1_405B_loss_curves.png)
 
 ## Llama 2 performance numbers
 
