@@ -19,6 +19,21 @@ Next we show the loss curves for Llama 3 8B and Llama 3 70B training with both 1
 ![image](../assets/images/llama3_loss_curves.png)
 
 
+## Llama 3.1 performance numbers
+
+We did a performance measurement on the 405B model released in [LLaMa 3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1). Because the model now is larger, we run on 128 H100 GPUs to test both performance and loss curves. Below is the performance result of 405B model with optimizations we have developed. We do see OOM for 1D even with batch size = 1, so we only tested the 2D case.
+
+
+| Model size | Batch size | Activation checkpointing | WPS | MFU | optimizations |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| 405B | 2 | full | 118 | 37.1% | None
+| 405B | 2 | full | 177 | 27.77% | FP8
+| 405B | 2 | full | 185 | 29.03% | FP8 + async TP
+
+And the loss curves are shown below:
+
+![image](../assets/images/llama3_1_405B_loss_curves.png)
+
 ## Llama 2 performance numbers
 
 Below are the WPS and MFU results which torchtitan achieves on Llama 2 models with FSDP2 on 64 A100 (80GB) GPUs.

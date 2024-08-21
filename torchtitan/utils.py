@@ -15,6 +15,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.logging import logger
+from torchtitan.metrics import GPUMemoryMonitor
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
@@ -134,7 +135,9 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
-def get_peak_flops(device_name: str) -> int:
+def get_peak_flops(gpu_memory_monitor: GPUMemoryMonitor) -> int:
+    device_name = gpu_memory_monitor.device_name
+    device_mem = int(gpu_memory_monitor.device_capacity_gib)
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
@@ -145,7 +148,12 @@ def get_peak_flops(device_name: str) -> int:
             return 1979e12
         elif "PCIe" in device_name:
             return 756e12
-        else:  # for SXM and other variants
+        # Sometimes, the device name is just "NVIDIA H100", we need
+        # to check the memory size to determine the peak flops.
+        # H100 NVL
+        elif device_mem >= 95:
+            return 835e12
+        else:  # for H100 SXM
             return 989e12
     else:  # for other GPU types, assume A100
         return 312e12
