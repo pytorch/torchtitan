@@ -247,10 +247,10 @@ def main(job_config: JobConfig):
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
-                for m in model_parts:
-                    torch.nn.utils.clip_grad_norm_(
-                        m.parameters(), job_config.training.max_norm, foreach=True
-                    )
+            for m in model_parts:
+                torch.nn.utils.clip_grad_norm_(
+                    m.parameters(), job_config.training.max_norm, foreach=True
+                )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
