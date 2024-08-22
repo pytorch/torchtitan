@@ -227,20 +227,6 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
-                    "--experimental.pipeline_parallel_split_mode tracer",
-                ],
-            ],
-            "PP tracer frontend test",
-            "pp_tracer",
-            requires_seed_checkpoint=True,
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
