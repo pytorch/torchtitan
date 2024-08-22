@@ -36,7 +36,7 @@ def pipeline_llama(
     model_config: ModelArgs,
     loss_fn: Callable[..., torch.Tensor],
 ):
-    stages, models = pipeline_llama_manual(
+    stages, models = pipeline_llama_manual_split(
         model, pp_mesh, parallel_dims, job_config, device, model_config
     )
 
@@ -62,7 +62,7 @@ def _mixed_precision_dtype(
     return TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else default
 
 
-def pipeline_llama_manual(
+def pipeline_llama_manual_split(
     whole_model: nn.Module,
     pp_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
