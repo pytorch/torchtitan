@@ -35,9 +35,7 @@ class ParallelDims:
     def build_mesh(self, device_type):
         dims = []
         names = []
-        for d, name in zip(
-            [self.dp], ["dp"], strict=True
-        ):
+        for d, name in zip([self.dp], ["dp"], strict=True):
             if d > 1:
                 dims.append(d)
                 names.append(name)
@@ -51,8 +49,7 @@ class ParallelDims:
 
     @property
     def loss_parallel_enabled(self):
-        return False # requires tensor parallelism
-
+        return False  # requires tensor parallelism
 
     @cached_property
     def model_parallel_size(self):
