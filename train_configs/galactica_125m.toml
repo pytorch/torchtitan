@@ -2,8 +2,8 @@
 
 [job]
 dump_folder = "./outputs"
-description = "Galactica debug training"
-use_for_integration_test = true
+description = "Galactica training"
+use_for_integration_test = false
 
 [profiling]
 enable_profiling = true
