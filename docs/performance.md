@@ -8,9 +8,9 @@ Below are the WPS (word per second, or more accurately, token per second) and MF
 
 | Model size | Batch size | Activation checkpointing | WPS | MFU | Optimizations |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| 405B | 2 | full | 118 | 37.1%[^1] | None
-| 405B | 2 | full | 177 | 27.77%[^2] | Float8
-| 405B | 2 | full | 185 | 29.03% | Float8 + Async TP
+| 405B | 2 | full | 109 | 29.0%[^1] | None
+| 405B | 2 | full | 177 | 23.46%[^2] | Float8
+| 405B | 2 | full | 185 | 24.52% | Float8 + Async TP
 
 Here, we use local batch size 2 (global batch size = local batch size 2 * number of FSDP ranks 16 = 32).
 
