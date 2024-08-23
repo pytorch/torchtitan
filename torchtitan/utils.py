@@ -136,20 +136,16 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
 def get_peak_flops(device_name: str) -> int:
-    try:
-        # Run the lspci command and capture the output
-        result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
-        # Filter the output for lines containing both "NVIDIA" and "H100"
-        filtered_lines = [
-            line
-            for line in result.stdout.splitlines()
-            if "NVIDIA" in line and "H100" in line
-        ]
-        # Join all filtered lines into a single string
-        combined_output = " ".join(filtered_lines)
-    except Exception as e:
-        logger.warning(f"Error running lspci: {e}, fallback to use device_name")
-        combined_output = None
+    # Run the lspci command and capture the output
+    result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
+    # Filter the output for lines containing both "NVIDIA" and "H100"
+    filtered_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if "NVIDIA" in line and "H100" in line
+    ]
+    # Join all filtered lines into a single string
+    combined_output = " ".join(filtered_lines)
     device_name = combined_output or device_name
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
