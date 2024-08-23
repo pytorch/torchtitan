@@ -137,7 +137,7 @@ def main(job_config: JobConfig):
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1), labels.flatten(0, 1)
+            pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
 
     # apply parallelisms and initialization
@@ -289,7 +289,10 @@ def main(job_config: JobConfig):
                 # Non-PP forward / backward
                 with train_context():
                     pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
+                    if job_config.training.compile:
+                        loss = torch.compile(loss_fn)(pred, labels)
+                    else:
+                        loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
