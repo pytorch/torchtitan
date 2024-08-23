@@ -71,7 +71,7 @@ def main(job_config: JobConfig):
     utils.init_distributed(job_config)
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
-    gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor)
+    gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes

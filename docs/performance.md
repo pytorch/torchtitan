@@ -8,8 +8,8 @@ Below are the WPS (word per second, or more accurately, token per second) and MF
 
 | Model size | Batch size | Activation checkpointing | WPS | MFU | Optimizations |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| 405B | 2 | full | 118 | 37.1% | None
-| 405B | 2 | full | 177 | 27.77% | Float8
+| 405B | 2 | full | 118 | 37.1%[^1] | None
+| 405B | 2 | full | 177 | 27.77%[^2] | Float8
 | 405B | 2 | full | 185 | 29.03% | Float8 + Async TP
 
 Here, we use local batch size 2 (global batch size = local batch size 2 * number of FSDP ranks 16 = 32).
@@ -44,16 +44,20 @@ Below are the WPS and MFU results which torchtitan achieves on Llama 2 models wi
 | 13B | 2 | no | 2162 | 61.1%	|
 | 13B | 2 | selective layer | 1914 | 54.1% |
 | 13B | 2 | selective op | 1904 | 53.8% |
-| 70B | 1[^1] | selective op | 355 | 50.8% |
+| 70B | 1[^3] | selective op | 355 | 50.8% |
 | 70B | 2 | full | 353 | 50.5% |
 
 We primarily use local batch size 2 (global batch size 128) in the experiments, to keep the same number of tokens per training iteration between Llama 2 and Llama 3 (since the default sequence length in Llama 2 is 4096 which is halved compared with Llama 3). In fact, for Llama 2 70B model with full activation checkpointing, the MFU can go up to 54% when local batch size is higher (but before an OOM happens).
 
 Next we show the loss curves for Llama 2 13B and Llama 2 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All four models are trained 3000 steps with global batch size 128.
-In terms of activation checkpointing (AC) configs, the Llama 2 13B training jobs use selective op AC, whereas the Llama 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^2].
+In terms of activation checkpointing (AC) configs, the Llama 2 13B training jobs use selective op AC, whereas the Llama 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^4].
 
 ![image](../assets/images/llama2_loss_curves.png)
 
-[^1]: Since the 70B training with local batch size 2 will cause an OOM error when selective activation checkpointing is used, we report the local batch size 1 case instead.
+[^1]: We used HBM2e based lower TDP SXM H100(95GB) for our test, the actual peak TFLOPs number is between SXM and NVL, and we don't know its exact value. So this MFU number is lower than actual MFU because we use the peak number of SXM directly.
 
-[^2]: One may have noticed that for both 13B and 70B training, 1D parallelism has slightly better convergence than 2D parallelism in the first half of training. We believe this is caused by the stronger shuffling effect introduced by having more FSDP ranks in the 1D parallelism, and the difference in convergence speed should go away after switching to a randomized data loading solution.
+[^2]: Since for Float8, we are not converting all the matmuls to Float8 because our fused attention implementation is not done in Float8, so this number is lower than expected.
+
+[^3]: Since the 70B training with local batch size 2 will cause an OOM error when selective activation checkpointing is used, we report the local batch size 1 case instead.
+
+[^4]: One may have noticed that for both 13B and 70B training, 1D parallelism has slightly better convergence than 2D parallelism in the first half of training. We believe this is caused by the stronger shuffling effect introduced by having more FSDP ranks in the 1D parallelism, and the difference in convergence speed should go away after switching to a randomized data loading solution.

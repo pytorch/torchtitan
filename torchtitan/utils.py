@@ -6,6 +6,7 @@
 
 import gc
 import os
+import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Union
@@ -15,7 +16,6 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.logging import logger
-from torchtitan.metrics import GPUMemoryMonitor
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
@@ -135,9 +135,18 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
-def get_peak_flops(gpu_memory_monitor: GPUMemoryMonitor) -> int:
-    device_name = gpu_memory_monitor.device_name
-    device_mem = int(gpu_memory_monitor.device_capacity_gib)
+def get_peak_flops(device_name: str) -> int:
+    # Run the lspci command and capture the output
+    result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
+    # Filter the output for lines containing both "NVIDIA" and "H100"
+    filtered_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if "NVIDIA" in line and "H100" in line
+    ]
+    # Join all filtered lines into a single string
+    combined_output = " ".join(filtered_lines)
+    device_name = combined_output or device_name
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
@@ -145,16 +154,10 @@ def get_peak_flops(gpu_memory_monitor: GPUMemoryMonitor) -> int:
         # data from https://www.nvidia.com/en-us/data-center/h100/
         # NOTE: Specifications are one-half lower without sparsity.
         if "NVL" in device_name:
-            return 1979e12
+            return 835e12
         elif "PCIe" in device_name:
             return 756e12
-        # Sometimes, the device name is just literally "NVIDIA H100", so
-        # we won't hit the two conditions before; we then need
-        # to check the memory size of the device to determine the peak flops.
-        # H100 NVL has 94 GiB memory, source: https://www.nvidia.com/en-us/data-center/h100/
-        elif device_mem >= 94:
-            return 835e12
-        else:  # for H100 SXM
+        else:  # for H100 SXM and other variants
             return 989e12
     else:  # for other GPU types, assume A100
         return 312e12
