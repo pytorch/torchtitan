@@ -148,7 +148,7 @@ def get_peak_flops(device_name: str) -> int:
         # Join all filtered lines into a single string
         combined_output = " ".join(filtered_lines)
     except Exception as e:
-        logger.warning(f"Error running lspci: {e}")
+        logger.warning(f"Error running lspci: {e}, fallback to use device_name")
         combined_output = None
     device_name = combined_output or device_name
     if "A100" in device_name:
