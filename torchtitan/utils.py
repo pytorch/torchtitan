@@ -146,11 +146,9 @@ def get_peak_flops(device_name: str) -> int:
             if "NVIDIA" in line and "H100" in line
         ]
         # Join all filtered lines into a single string
-        combined_output = " ".join(filtered_lines)
-    except Exception as e:
+        device_name = " ".join(filtered_lines) or device_name
+    except FileNotFoundError as e:
         logger.warning(f"Error running lspci: {e}, fallback to use device_name")
-        combined_output = None
-    device_name = combined_output or device_name
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
