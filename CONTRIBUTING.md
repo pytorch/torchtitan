@@ -72,8 +72,9 @@ torch.backends.cudnn.benchmark = False
   - 2D FSDP + TP – If 1D FSDP does not suffice to make comparisons due to limited scalability. For example, this should be the baseline when experimenting with 3D parallelisms on the Llama 3.1 405B model.
 
 #### Performance
-- Memory and WPS / MFU, which are available from logging, should meet expectations. If necessary, verify the numbers on jobs spanning multiple nodes (e.g. on 64 GPUs). Please reach out to the torchtitan team for help if you are resource-constrained.
-- It is worth noting that performance expectations vary from case to case. For example, there are cases when a technique targeting at memory reduction may cause throughput regression but still be acceptable (e.g. activation checkpointing). Again, it is the contributor's job to justify the feature, whether by achieving hypothetical performance, or by comparing with exisiting well-known implementations, etc.
+- Memory and WPS / MFU, which are available from logging, should meet expectations.
+- It is worth noting that performance expectations vary from case to case. For example, there are cases when a technique targeting memory reduction may cause throughput regression but still be acceptable (e.g. activation checkpointing). Again, it is the contributor's job to justify the feature, whether by achieving hypothetical performance, or by comparing with existing well-known implementations, etc.
+- If necessary, verify the numbers on jobs spanning multiple nodes (e.g. on 64 GPUs). Please reach out to the `torchtitan` team for help if you are resource-constrained.
 - When appropriate, one should show profile traces and/or memory snapshots to prove the effectiveness.
 
 ### Best practices
