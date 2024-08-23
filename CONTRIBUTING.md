@@ -68,8 +68,8 @@ torch.backends.cudnn.benchmark = False
 ```
 - If a change is expected to impact computation results, loss convergence should be verified via end-to-end training on representable datasets (e.g. Llama3 models on the C4 dataset). One can refer to the example jobs reported in [performance.md](docs/performance.md) on what configs and how many steps to run.
 - The resulted loss curve should be compared with a verified baseline.
-  - 1D FSDP – Preferred, whose effectiveness can be proved by comparing with 1D DDP and single-GPU training.
-  - 2D FSDP + TP – If 1D FSDP does not suffice to make comparisons due to limited scalability. For example, this should be the baseline when experimenting with 3D parallelisms on the Llama 3.1 405B model.
+  - 1D FSDP – Preferred, whose effectiveness can be proven by comparing with 1D DDP and single-GPU training.
+  - 2D FSDP + TP can be used as the baseline when 1D FSDP does not suffice to make comparisons due to limited scalability. For example, this should be the baseline when experimenting with 3D parallelisms on the Llama 3.1 405B model.
 
 #### Performance
 - Memory and WPS / MFU, which are available from logging, should meet expectations.
