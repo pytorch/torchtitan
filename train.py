@@ -72,6 +72,7 @@ def main(job_config: JobConfig):
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -146,8 +147,6 @@ def main(job_config: JobConfig):
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
 
-        pp_split_mode = job_config.experimental.pipeline_parallel_split_mode
-
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
         # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
         # optimizer, and checkpointing
@@ -155,9 +154,7 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device="cuda")
-            # skip traced modules since we do not define init_weights in the traced module
-            if pp_split_mode == "manual":
-                m.init_weights()
+            m.init_weights()
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -205,11 +202,6 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
-        if pp_split_mode == "tracer":
-            raise RuntimeError(
-                "Pipeline parallelism with tracer mode is not supported without a seed checkpoint."
-            )
-
         # TODO: fix this by allowing each rank to set their own seed
         logger.warning(
             "Pipeline Parallelism is being used without a seed checkpoint. "
