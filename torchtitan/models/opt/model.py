@@ -172,20 +172,24 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        dropout_p: float
     ):
         super().__init__()
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.dropout_p = dropout_p
 
         # use bias for ffn
         self.w1 = nn.Linear(dim, hidden_dim, bias=True)
         self.w2 = nn.Linear(hidden_dim, dim, bias=True)
 
     def forward(self, x):
-        # use GELU activation function
-        return self.w2(F.gelu(self.w1(x)))
+        # GELU activation function
+        x = self.w2(F.gelu(self.w1(x)))
+        x = F.dropout(x, p=self.dropout_p, training=self.training)
+        return x
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=init_std)
@@ -222,6 +226,7 @@ class TransformerBlock(nn.Module):
             hidden_dim=4 * model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            dropout_p=model_args.dropout_p
         )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
@@ -253,9 +258,11 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x))
+        # attention
+        h = self.attention(self.attention_norm(x))
         # add dropout during the training
-        h = F.dropout(h, p=self.dropout_p, training=self.training)
+        h = x + F.dropout(h, p=self.dropout_p, training=self.training)
+        # pointwise ffn
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
