@@ -149,4 +149,3 @@ def build_metric_logger(
             log_dir = os.path.join(log_dir, rank_str)
 
     return MetricLogger(log_dir, tag, enable_tb)
-
