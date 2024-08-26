@@ -1,7 +1,7 @@
 # torchtitan Config.toml
 
 [job]
-dump_folder = "./outputs"
+dump_folder = "/nfs/dgx/raid/chem/titan_outputs"
 description = "Galactica training"
 use_for_integration_test = false
 
@@ -23,9 +23,6 @@ name = "opt"
 flavor = "125M"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-init_weights = false
-load_weights_path = "facebook/galactica-125m"
-weights_source = "huggingface"
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
 [optimizer]
@@ -48,8 +45,11 @@ pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+create_seed_checkpoint = true
+load_folder = "facebook/galactica-125m"
+weights_source = "huggingface"
+save_folder = "facebook/galactica-125m"
 interval_type = "steps"
 interval = 5
 model_weights_only = false
