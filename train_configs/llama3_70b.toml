@@ -12,8 +12,8 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
-save_tb_folder = "tb"
+enable_aim = true
+save_aim_folder = "aim"
 
 [model]
 name = "llama3"

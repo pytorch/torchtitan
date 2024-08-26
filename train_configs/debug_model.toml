@@ -15,8 +15,8 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = true
-save_tb_folder = "tb"
+enable_aim = true
+save_aim_folder = "aim"
 
 [model]
 name = "llama3"
