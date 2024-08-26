@@ -192,6 +192,9 @@ def main(job_config: JobConfig):
 
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
+    args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
+    job_config_dict = job_config._args_to_two_level_dict(args)
+    metric_logger.log_hparams(job_config_dict)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
