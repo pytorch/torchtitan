@@ -48,6 +48,8 @@ class TrainState(Stateful):
     step: int = 0
     global_avg_losses: List[float] = field(default_factory=list)
     global_max_losses: List[float] = field(default_factory=list)
+    global_avg_perplexities: List[float] = field(default_factory=list)
+    global_max_perplexities: List[float] = field(default_factory=list)
     log_steps: List[int] = field(default_factory=list)
 
     def state_dict(self) -> Dict[str, Any]:

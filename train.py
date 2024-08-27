@@ -283,19 +283,31 @@ def main(job_config: JobConfig):
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
+
+                perplexities = [2 ** loss.item() for loss in losses_since_last_log]
+
                 avg_loss, max_loss = sum(losses) / len(losses), max(losses)
+                avg_perplexity, max_perplexity = sum(perplexities) / len(perplexities), max(perplexities)
+
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
                         utils.dist_mean(avg_loss, dp_mesh),
                         utils.dist_max(max_loss, dp_mesh),
                     )
+                    global_avg_perplexity, global_max_perplexity = (
+                        utils.dist_mean(avg_perplexity, dp_mesh),
+                        utils.dist_max(max_perplexity, dp_mesh),
+                    )
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
+                    global_avg_perplexity, global_max_perplexity = avg_perplexity, max_perplexity
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
                 train_state.global_avg_losses.append(global_avg_loss)
                 train_state.global_max_losses.append(global_max_loss)
+                train_state.global_avg_perplexities.append(global_avg_perplexity)
+                train_state.global_max_perplexities.append(global_max_perplexity)
 
                 time_delta = time.perf_counter() - time_last_log
 
@@ -317,6 +329,8 @@ def main(job_config: JobConfig):
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
+                    "loss_metrics/global_avg_perplexity": global_avg_perplexity,
+                    "loss_metrics/global_max_perplexity": global_max_perplexity,
                     "wps": wps,
                     "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
