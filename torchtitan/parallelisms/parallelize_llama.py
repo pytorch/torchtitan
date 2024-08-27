@@ -14,22 +14,13 @@ import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._composable.replicate import replicate
-from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
 )
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import check_strided_sharding_enabled
 
 
 def parallelize_llama(
@@ -45,7 +36,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -196,7 +186,9 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    fully_shard(model, **fsdp_config, reshard_after_forward=True) # in torch titan, this was "not pp_enabled"
+    fully_shard(
+        model, **fsdp_config, reshard_after_forward=True
+    )  # in torch titan, this was "not pp_enabled"
 
     logger.info("Applied FSDP to the model")
 

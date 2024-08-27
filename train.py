@@ -12,10 +12,6 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
-import torch.nn.functional as F
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -24,13 +20,14 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtitan.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.parallelisms import (
-    models_parallelize_fns,
-    models_pipelining_fns,
-    ParallelDims,
+from torchtitan.models import (
+    model_name_to_cls,
+    model_name_to_weights_loading_fns,
+    model_name_to_tokenizer,
+    models_config
 )
+from torchtitan.optimizer import build_lr_schedulers, build_optimizers
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
 
@@ -84,9 +81,9 @@ def main(job_config: JobConfig):
     else:
         dp_degree, dp_rank = 1, 0
 
-
     model_name = job_config.model.name
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
+    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
 
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
@@ -112,11 +109,23 @@ def main(job_config: JobConfig):
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
+    model_config.vocab_size = 50000
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
+
+    # load the model on rank 0 only, then FSDP will distribute the weights
+    if job_config.checkpoint.create_seed_checkpoint:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        model.to_empty(device=init_device)
+        model_name_to_weights_loading_fns[model_name](
+            model, weights_path=job_config.checkpoint.load_folder,
+            source=job_config.checkpoint.weights_source
+        )
 
     # a no-op hander if float8 is not enabled
     float8_handler = Float8Handler(job_config, parallel_dims)
@@ -146,7 +155,6 @@ def main(job_config: JobConfig):
     models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
-    init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
     model.to_empty(device=init_device)
     model_parts = [model]
 
@@ -154,7 +162,8 @@ def main(job_config: JobConfig):
         # skip traced modules since we do not define init_weights in the traced module
         if isinstance(mod, GraphModule):
             continue
-        mod.init_weights()
+        if not job_config.checkpoint.create_seed_checkpoint:
+            mod.init_weights()
         mod.train()
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
@@ -189,7 +198,6 @@ def main(job_config: JobConfig):
         return
 
     checkpoint_loaded = checkpoint.load()
-
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
     args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
@@ -226,8 +234,8 @@ def main(job_config: JobConfig):
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
-        f"with local batch size {job_config.training.batch_size}, "
-        f"global batch size {job_config.training.batch_size * dp_degree}, "
+        f"with local batch size {job_config.training.batch_size * job_config.training.gradient_accumulation_steps}, "
+        f"global batch size {job_config.training.batch_size * job_config.training.gradient_accumulation_steps * dp_degree}, "
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
         f"(warmup {job_config.training.warmup_steps})"
@@ -243,21 +251,23 @@ def main(job_config: JobConfig):
 
             # get batch
             data_load_start = time.perf_counter()
-            batch = next(data_iterator)
-            input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
-            data_loading_times.append(time.perf_counter() - data_load_start)
-
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
             optimizers.zero_grad()
-            with train_context():
-                pred = model(input_ids)
-                loss = loss_fn(pred, labels)
-                # pred.shape=(bs, seq_len, vocab_size)
-                # need to free to before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+
+            for _ in range(job_config.training.gradient_accumulation_steps):
+                batch = next(data_iterator)
+                input_ids, labels = batch
+                ntokens_since_last_log += labels.numel()
+                input_ids = input_ids.cuda()
+                labels = labels.cuda()
+                data_loading_times.append(time.perf_counter() - data_load_start)
+
+                with train_context():
+                    pred = model(input_ids)
+                    loss = loss_fn(pred, labels)
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
+                    loss.backward()
             for m in model_parts:
                 torch.nn.utils.clip_grad_norm_(
                     m.parameters(), job_config.training.max_norm, foreach=True
@@ -266,8 +276,8 @@ def main(job_config: JobConfig):
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
-            # optimizer step
             checkpoint.maybe_wait_for_staging()
+            # optimizer step
             optimizers.step()
             lr_schedulers.step()
 

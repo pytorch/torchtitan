@@ -205,6 +205,12 @@ class JobConfig:
             "--training.batch_size", type=int, default=8, help="Batch size"
         )
         self.parser.add_argument(
+            "--training.gradient_accumulation_steps",
+            type=int,
+            default=1,
+            help="Interval in steps for gradient accumulation",
+        )
+        self.parser.add_argument(
             "--training.seq_len", type=int, default=2048, help="Sequence length"
         )
         self.parser.add_argument(
