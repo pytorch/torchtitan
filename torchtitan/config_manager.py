@@ -18,6 +18,8 @@ except ModuleNotFoundError:
 
 from torchtitan.logging import logger
 
+from typing import Optional
+
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
     "float32": torch.float32,
@@ -538,6 +540,13 @@ class JobConfig:
             help="Whether to estimate memory under FakeTensorMode",
             default=False,
             action="store_true",
+        )
+
+        self.parser.add_argument(
+            "--metrics.aim_hash",
+            type=Optional[str],
+            default=None,
+            help="The hash of the aim run to continue with",
         )
 
     def parse_args(self, args_list: list = sys.argv[1:]):

@@ -94,10 +94,13 @@ def build_gpu_memory_monitor():
 
 
 class MetricLogger:
-    def __init__(self, log_dir, save_aim_folder, enable_aim):
+    def __init__(self, hash, log_dir, save_aim_folder, enable_aim):
         self.writer: Optional[AimLogger] = None
         if enable_aim:
-            self.writer = AimLogger(save_aim_folder)
+            if hash is not None:
+                self.writer = AimLogger(save_aim_folder, run_hash=hash)
+            else:
+                self.writer = AimLogger(save_aim_folder)
 
     def log(self, metrics: Dict[str, Any], step: int):
         if self.writer is not None:
@@ -144,6 +147,5 @@ def build_metric_logger(
             f"Metrics logging active. Aim logs will be saved at /{save_aim_folder}"
         )
         enable_aim = torch.distributed.get_rank() == _get_metrics_rank(parallel_dims)
-
-    return MetricLogger(log_dir, save_aim_folder, enable_aim)
+    return MetricLogger(job_config.metrics.aim_hash, log_dir, save_aim_folder, enable_aim)
 

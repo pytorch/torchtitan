@@ -196,7 +196,7 @@ def main(job_config: JobConfig):
     job_config_dict = job_config._args_to_two_level_dict(args)
     metric_logger.log_hparams(job_config_dict)
 
-    # plot losses loaded from checkpoint (if any) to TensorBoard
+    # plot losses loaded from checkpoint (if any) to Aim
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
     #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
     if train_state.step > 0:
