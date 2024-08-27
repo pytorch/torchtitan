@@ -555,6 +555,11 @@ class JobConfig:
             help="The hash of the aim run to continue with",
         )
 
+        self.parser.add_argument(
+            "--metrics.aim_experiment_name",
+            type=Optional[str],
+            default=None,
+        )
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list
 
