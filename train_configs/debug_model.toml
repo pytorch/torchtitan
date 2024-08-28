@@ -15,10 +15,10 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = true
-save_aim_folder = "aim"
-aim_hash = "1d56ec7bed87438684a8da6b"
-aim_experiment_name = "hello"
+# enable_aim = true
+# save_aim_folder = "aim"
+#aim_hash = "1d56ec7bed87438684a8da6b"
+#aim_experiment_name = "hello"
 
 [model]
 name = "llama3"
