@@ -17,8 +17,8 @@ log_freq = 1
 enable_color_printing = true
 enable_aim = true
 save_aim_folder = "aim"
-aim_hash = "c6b4d8b340f74287b82ef928"
-aim_experiment_name = "hello"
+#aim_hash = "c6b4d8b340f74287b82ef928"
+#aim_experiment_name = "hello"
 
 [model]
 name = "llama3"

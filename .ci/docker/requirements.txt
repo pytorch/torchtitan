@@ -6,3 +6,4 @@ sentencepiece
 tiktoken
 blobfile
 tabulate
+transformers
