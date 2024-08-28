@@ -93,15 +93,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    @staticmethod
-    def compute_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
-        def _norm(x, eps):
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-
-        output = _norm(x.float(), eps).type_as(x)
-        logger.info(f"{output=}, {weight=}")
-        return output * weight
-
+    def _norm(self, x: torch.Tensor):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        
     def forward(self, x: torch.Tensor):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
