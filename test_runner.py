@@ -251,7 +251,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
-                    "--training.compile"
+                    "--training.compile",
                 ],
             ],
             "PP+DP+TP 3D test with torch.compile",
