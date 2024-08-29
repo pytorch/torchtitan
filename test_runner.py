@@ -246,6 +246,30 @@ def build_test_list():
         ),
         OverrideDefinitions(
             [
+                # [
+                #     "--experimental.pipeline_parallel_degree 2",
+                #     "--experimental.pipeline_parallel_split_points layers.4",
+                #     "--training.data_parallel_degree 2",
+                #     "--training.tensor_parallel_degree 2",
+                #     "--training.compile"
+                # ],
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_split_points layers.4",
+                    "--training.data_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--float8.enable_float8_linear",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                ],
+            ],
+            "PP+DP+TP 3D test with fp8 and torch.compile",
+            "pp_dp_tp_composability",
+            requires_seed_checkpoint=True,
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
