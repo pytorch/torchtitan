@@ -20,8 +20,9 @@ save_tb_folder = "tb"
 
 [model]
 name = "opt"
-flavor = "125M"
-norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+flavor = "1.3B"
+# norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
@@ -30,7 +31,7 @@ name = "AdamW"
 lr = 8e-4
 
 [training]
-batch_size = 20
+batch_size = 10
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
@@ -47,8 +48,8 @@ enable_async_tensor_parallel = false
 [checkpoint]
 enable_checkpoint = true
 create_seed_checkpoint = false
-load_folder = "facebook/galactica-125m"
-save_folder = "yerevann/chemlactica-125m"
+load_folder = "facebook/galactica-1.3b"
+save_folder = "yerevann/chemlactica-1.3b"
 interval_type = "steps"
 interval = 100
 model_weights_only = false

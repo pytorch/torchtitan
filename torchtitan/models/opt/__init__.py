@@ -15,6 +15,6 @@ __all__ = ["OPT", "load_opt_weights"]
 opt_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=8),
     "125M": ModelArgs(dim=768, n_layers=12, n_heads=12),
-    # "1.3B": ModelArgs(dim=2048, n_layers=, n_heads=8),
+    "1.3B": ModelArgs(dim=2048, n_layers=24, n_heads=32),
     # "6.7B": ModelArgs(dim=2048, n_layers=, n_heads=8)
 }
