@@ -23,7 +23,7 @@ name = "opt"
 flavor = "125M"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./test/assets/test_tiktoken.model"
+tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"

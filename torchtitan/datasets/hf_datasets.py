@@ -19,7 +19,7 @@ except ImportError as e:
         "pip3 install --pre torchdata --index-url https://download.pytorch.org/whl/nightly"
     ) from e
 
-from torchtitan.datasets.tokenizer import Tokenizer
+from torchtitan.tokenizers.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
 from datasets import load_dataset
