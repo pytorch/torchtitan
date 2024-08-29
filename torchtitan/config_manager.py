@@ -18,6 +18,8 @@ except ModuleNotFoundError:
 
 from torchtitan.logging import logger
 
+from typing import Optional
+
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
     "float32": torch.float32,
@@ -118,7 +120,7 @@ class JobConfig:
             "--metrics.log_freq",
             type=int,
             default=10,
-            help="How often to log metrics to TensorBoard, in iterations",
+            help="How often to log metrics to aim, in iterations",
         )
         self.parser.add_argument(
             "--metrics.enable_color_printing",
@@ -127,22 +129,22 @@ class JobConfig:
             help="Whether to enable color printing",
         )
         self.parser.add_argument(
-            "--metrics.enable_tensorboard",
+            "--metrics.enable_aim",
             action="store_true",
-            help="Whether to log metrics to TensorBoard",
+            help="Whether to log metrics to aim",
         )
         self.parser.add_argument(
-            "--metrics.save_tb_folder",
+            "--metrics.save_aim_folder",
             type=str,
-            default="tb",
-            help="Folder to dump TensorBoard states",
+            default="aim",
+            help="Folder to dump Aim states",
         )
         self.parser.add_argument(
             "--metrics.rank_0_only",
             default=True,
             action="store_true",
             help="""
-                Whether to save TensorBoard metrics only for rank 0 or for all ranks.
+                Whether to save Aim metrics only for rank 0 or for all ranks.
                 When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
                 which is the only stage that computes loss metrics.
             """,
@@ -546,7 +548,21 @@ class JobConfig:
             action="store_true",
         )
 
+        self.parser.add_argument(
+            "--metrics.aim_hash",
+            type=Optional[str],
+            default=None,
+            help="The hash of the aim run to continue with",
+        )
+
+        self.parser.add_argument(
+            "--metrics.aim_experiment_name",
+            type=Optional[str],
+            default=None,
+        )
     def parse_args(self, args_list: list = sys.argv[1:]):
+        self.args_list = args_list
+
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict

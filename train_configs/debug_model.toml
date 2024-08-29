@@ -15,8 +15,10 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = true
-save_tb_folder = "tb"
+# enable_aim = true
+# save_aim_folder = "aim"
+#aim_hash = "1d56ec7bed87438684a8da6b"
+#aim_experiment_name = "hello"
 
 [model]
 name = "llama3"
@@ -36,7 +38,7 @@ gradient_accumulation_steps = 1
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 30
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = false
@@ -47,8 +49,10 @@ pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+save_folder = "checkpoint"
+load_folder = "checkpoint"
+create_seed_checkpoint = false
 interval_type = "steps"
 interval = 5
 model_weights_only = false
