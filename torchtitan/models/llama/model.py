@@ -322,8 +322,15 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        with torch.profiler.record_function("attention_norm"):
+            attention_norm_result = self.attention_norm(x)
+        with torch.profiler.record_function("attention"):
+            h = x + self.attention(attention_norm_result, freqs_cis)
+        with torch.profiler.record_function("ffn_norm"):
+            h = self.ffn_norm(h)
+        with torch.profiler.record_function("feed_forward"):
+            out = self.feed_forward(h)
+        out = out + h
         return out
 
     def init_weights(self):
@@ -433,7 +440,8 @@ class Transformer(nn.Module):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        with torch.profiler.record_function("tok_embeddings"):
+            h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)

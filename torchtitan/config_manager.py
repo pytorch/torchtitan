@@ -525,6 +525,15 @@ class JobConfig:
             action="store_true",
         )
 
+        # runtime estimation settings
+        self.parser.add_argument(
+            "--runtime_estimation.estimate_mode_type",
+            type=str,
+            choices=["operator-level-cost-model", "operator-level-benchmark", "actual"],
+            help="[operator-level-cost-model, operator-level-benchmark, actual]",
+            default="operator-level-cost-model",
+        )
+
     def parse_args(self, args_list: list = sys.argv[1:]):
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
