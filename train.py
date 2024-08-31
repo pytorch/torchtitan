@@ -246,6 +246,7 @@ def main(job_config: JobConfig):
     ) as torch_profiler, maybe_enable_memory_snapshot(
         job_config, global_step=train_state.step
     ) as memory_profiler:
+        logger.debug("Got into profiling context")
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             gc_handler.run(train_state.step)
@@ -253,6 +254,7 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = time.perf_counter()
             optimizers.zero_grad()
+            logger.debug("step")
 
             for _ in range(job_config.training.gradient_accumulation_steps):
                 batch = next(data_iterator)
@@ -263,6 +265,7 @@ def main(job_config: JobConfig):
                 data_loading_times.append(time.perf_counter() - data_load_start)
 
                 with train_context():
+                    logger.debug("enter context")
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
