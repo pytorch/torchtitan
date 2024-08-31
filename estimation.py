@@ -25,7 +25,7 @@ from train import get_train_context
 
 
 def estimate_memory(job_config: JobConfig):
-    init_logger()
+    init_logger(job_config.logging.log_level)
     logger.info("Estimating memory usage...")
     gc.disable()
     gc.collect(1)

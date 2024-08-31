@@ -16,7 +16,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtitan.logging import logger
+from torchtitan.logging import logger, validate_log_level
 
 from typing import Optional
 
@@ -25,7 +25,6 @@ TORCH_DTYPE_MAP = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
 }
-
 
 def string_list(raw_arg):
     return raw_arg.split(",")
@@ -560,6 +559,12 @@ class JobConfig:
             type=Optional[str],
             default=None,
         )
+        self.parser.add_argument(
+            "--logging.log_level",
+            type=test_fail_val,
+            help="Set the log level, INFO by default"
+        )
+
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list
 
@@ -603,6 +608,7 @@ class JobConfig:
         assert self.model.name
         assert self.model.flavor
         assert self.model.tokenizer_path
+        validate_log_level(self.logging.log_level)
 
     def parse_args_from_command_line(
         self, args_list

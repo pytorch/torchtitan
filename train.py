@@ -50,7 +50,7 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
-    init_logger()
+    init_logger(job_config.logging.log_level)
     logger.info(f"Starting job: {job_config.job.description}")
 
     # used for colorful printing
