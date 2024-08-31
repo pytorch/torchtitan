@@ -11,14 +11,15 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
 NGPU=${NGPU:-"2"}
-LOG_RANK=${LOG_RANK:-0}
+LOG_RANK=0,1
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
+MAX_RESTARTS=5
 
 overrides=""
 if [ $# -ne 0 ]; then
     overrides="$*"
 fi
 
-torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --max-restarts ${MAX_RESTARTS} --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-train.py --job.config_file ${CONFIG_FILE} $overrides
+train.py --job.config_file ${CONFIG_FILE} $overrides  
