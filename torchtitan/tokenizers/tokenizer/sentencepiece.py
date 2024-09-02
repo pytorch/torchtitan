@@ -10,7 +10,7 @@ from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
-from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
+from torchtitan.tokenizers.tokenizer.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
 

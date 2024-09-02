@@ -33,7 +33,7 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "tensorboard",
+    "aim",
 ]
 
 [tool.setuptools.dynamic]

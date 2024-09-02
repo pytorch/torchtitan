@@ -16,7 +16,8 @@ from torch.fx import GraphModule
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_hf_data_loader, build_tokenizer
+from torchtitan.datasets import build_hf_data_loader
+from torchtitan.tokenizers.tokenizer import build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
@@ -201,17 +202,9 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
-
-    # plot losses loaded from checkpoint (if any) to TensorBoard
-    # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
-    #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
-    if train_state.step > 0:
-        for idx, step in enumerate(train_state.log_steps):
-            metrics = {
-                "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
-                "loss_metrics/global_max_loss": train_state.global_max_losses[idx],
-            }
-            metric_logger.log(metrics, step=step)
+    args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
+    job_config_dict = job_config._args_to_two_level_dict(args)
+    metric_logger.log_hparams(job_config_dict)
 
     data_iterator = iter(data_loader)
 
@@ -291,19 +284,31 @@ def main(job_config: JobConfig):
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
+
+                perplexities = [2 ** loss.item() for loss in losses_since_last_log]
+
                 avg_loss, max_loss = sum(losses) / len(losses), max(losses)
+                avg_perplexity, max_perplexity = sum(perplexities) / len(perplexities), max(perplexities)
+
                 if parallel_dims.dp_enabled:
                     global_avg_loss, global_max_loss = (
                         utils.dist_mean(avg_loss, dp_mesh),
                         utils.dist_max(max_loss, dp_mesh),
                     )
+                    global_avg_perplexity, global_max_perplexity = (
+                        utils.dist_mean(avg_perplexity, dp_mesh),
+                        utils.dist_max(max_perplexity, dp_mesh),
+                    )
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss
+                    global_avg_perplexity, global_max_perplexity = avg_perplexity, max_perplexity
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
                 train_state.global_avg_losses.append(global_avg_loss)
                 train_state.global_max_losses.append(global_max_loss)
+                train_state.global_avg_perplexities.append(global_avg_perplexity)
+                train_state.global_max_perplexities.append(global_max_perplexity)
 
                 time_delta = time.perf_counter() - time_last_log
 
@@ -325,6 +330,8 @@ def main(job_config: JobConfig):
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
+                    "loss_metrics/global_avg_perplexity": global_avg_perplexity,
+                    "loss_metrics/global_max_perplexity": global_max_perplexity,
                     "wps": wps,
                     "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,

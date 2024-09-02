@@ -39,7 +39,7 @@ Currently we showcase pre-training **Llama 3 and Llama 2** LLMs of various sizes
 3. Selective layer and operator activation checkpointing
 4. Distributed checkpointing
 5. 2 datasets pre-configured (45K - 144M)
-6. GPU usage, MFU, tokens per second and more displayed via TensorBoard
+6. GPU usage, MFU, tokens per second and more displayed via Aim
 6. Learning rate scheduler, meta init, Optional Fused RMSNorm
 7. All options easily configured via [toml files](train_configs/)
 8. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine tuning
@@ -75,11 +75,8 @@ Once you have confirmed access, you can run the following command to download th
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
-# llama3 or 3.1 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
-
-# llama2 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
+# chemlactica-125m
+python torchtitan/tokenizers/download_tokenizer.py --repo_id yerevann/chemlactica-125m
 ```
 
 ### Start a training run
@@ -88,25 +85,6 @@ Llama 3 8B model locally on 8 GPUs
 ```bash
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
-
-
-## TensorBoard
-
-To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
-
-1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a .toml file or from CLI).
-
-2. Set up SSH tunneling, by running the following from local CLI
-```
-ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
-```
-
-3. Inside the SSH tunnel that logged into the remote server, go to the torchtitan repo, and start the TensorBoard backend
-```
-tensorboard --logdir=./outputs/tb
-```
-
-4. In the local web browser, go to the URL it provides OR to http://localhost:6006/.
 
 
 ## Multi-Node Training

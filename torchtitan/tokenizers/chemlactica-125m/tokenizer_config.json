@@ -1,0 +1,790 @@
+{
+  "added_tokens_decoder": {
+    "0": {
+      "content": "<s>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "1": {
+      "content": "<pad>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2": {
+      "content": "</s>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "3": {
+      "content": "<unk>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "4": {
+      "content": "[START_REF]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "5": {
+      "content": "[END_REF]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "6": {
+      "content": "[IMAGE]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "7": {
+      "content": "<fragments>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "8": {
+      "content": "</fragments>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "9": {
+      "content": "<work>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "10": {
+      "content": "</work>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "11": {
+      "content": "[START_SUP]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "12": {
+      "content": "[END_SUP]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "13": {
+      "content": "[START_SUB]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "14": {
+      "content": "[END_SUB]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "15": {
+      "content": "[START_DNA]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "16": {
+      "content": "[END_DNA]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "17": {
+      "content": "[START_AMINO]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "18": {
+      "content": "[END_AMINO]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "19": {
+      "content": "[START_SMILES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "20": {
+      "content": "[END_SMILES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "21": {
+      "content": "[START_I_SMILES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "22": {
+      "content": "[END_I_SMILES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50000": {
+      "content": "[SYNONYM]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50001": {
+      "content": "[RELATED]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50002": {
+      "content": "[SIMILAR]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50003": {
+      "content": "[PROPERTY]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50004": {
+      "content": "[SAS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50005": {
+      "content": "[WEIGHT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50006": {
+      "content": "[TPSA]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50007": {
+      "content": "[CLOGP]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50008": {
+      "content": "[QED]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50009": {
+      "content": "[NUMHDONORS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50010": {
+      "content": "[NUMHACCEPTORS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50011": {
+      "content": "[NUMHETEROATOMS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50012": {
+      "content": "[NUMROTATABLEBONDS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50013": {
+      "content": "[NOCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50014": {
+      "content": "[NHOHCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50015": {
+      "content": "[RINGCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50016": {
+      "content": "[HEAVYATOMCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50017": {
+      "content": "[FRACTIONCSP3]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50018": {
+      "content": "[NUMAROMATICRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50019": {
+      "content": "[NUMSATURATEDRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50020": {
+      "content": "[NUMAROMATICHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50021": {
+      "content": "[NUMAROMATICCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50022": {
+      "content": "[NUMSATURATEDHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50023": {
+      "content": "[NUMSATURATEDCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50024": {
+      "content": "[NUMALIPHATICRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50025": {
+      "content": "[NUMALIPHATICHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50026": {
+      "content": "[NUMALIPHATICCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50027": {
+      "content": "[IUPAC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50028": {
+      "content": "[VAR_NAME]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50029": {
+      "content": "[VAR_DESC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50030": {
+      "content": "[VAR_VAL]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50031": {
+      "content": "[ASSAY_NAME]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50032": {
+      "content": "[ASSAY_DESC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50033": {
+      "content": "[/SYNONYM]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50034": {
+      "content": "[/RELATED]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50035": {
+      "content": "[/SIMILAR]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50036": {
+      "content": "[/PROPERTY]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50037": {
+      "content": "[/SAS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50038": {
+      "content": "[/WEIGHT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50039": {
+      "content": "[/TPSA]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50040": {
+      "content": "[/CLOGP]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50041": {
+      "content": "[/QED]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50042": {
+      "content": "[/NUMHDONORS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50043": {
+      "content": "[/NUMHACCEPTORS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50044": {
+      "content": "[/NUMHETEROATOMS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50045": {
+      "content": "[/NUMROTATABLEBONDS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50046": {
+      "content": "[/NOCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50047": {
+      "content": "[/NHOHCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50048": {
+      "content": "[/RINGCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50049": {
+      "content": "[/HEAVYATOMCOUNT]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50050": {
+      "content": "[/FRACTIONCSP3]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50051": {
+      "content": "[/NUMAROMATICRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50052": {
+      "content": "[/NUMSATURATEDRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50053": {
+      "content": "[/NUMAROMATICHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50054": {
+      "content": "[/NUMAROMATICCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50055": {
+      "content": "[/NUMSATURATEDHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50056": {
+      "content": "[/NUMSATURATEDCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50057": {
+      "content": "[/NUMALIPHATICRINGS]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50058": {
+      "content": "[/NUMALIPHATICHETEROCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50059": {
+      "content": "[/NUMALIPHATICCARBOCYCLES]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50060": {
+      "content": "[/IUPAC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50061": {
+      "content": "[/VAR_NAME]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50062": {
+      "content": "[/VAR_DESC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50063": {
+      "content": "[/VAR_VAL]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50064": {
+      "content": "[/ASSAY_NAME]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "50065": {
+      "content": "[/ASSAY_DESC]",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "additional_special_tokens": [
+    "[SYNONYM]",
+    "[RELATED]",
+    "[SIMILAR]",
+    "[PROPERTY]",
+    "[SAS]",
+    "[WEIGHT]",
+    "[TPSA]",
+    "[CLOGP]",
+    "[QED]",
+    "[NUMHDONORS]",
+    "[NUMHACCEPTORS]",
+    "[NUMHETEROATOMS]",
+    "[NUMROTATABLEBONDS]",
+    "[NOCOUNT]",
+    "[NHOHCOUNT]",
+    "[RINGCOUNT]",
+    "[HEAVYATOMCOUNT]",
+    "[FRACTIONCSP3]",
+    "[NUMAROMATICRINGS]",
+    "[NUMSATURATEDRINGS]",
+    "[NUMAROMATICHETEROCYCLES]",
+    "[NUMAROMATICCARBOCYCLES]",
+    "[NUMSATURATEDHETEROCYCLES]",
+    "[NUMSATURATEDCARBOCYCLES]",
+    "[NUMALIPHATICRINGS]",
+    "[NUMALIPHATICHETEROCYCLES]",
+    "[NUMALIPHATICCARBOCYCLES]",
+    "[IUPAC]",
+    "[VAR_NAME]",
+    "[VAR_DESC]",
+    "[VAR_VAL]",
+    "[ASSAY_NAME]",
+    "[ASSAY_DESC]",
+    "[/SYNONYM]",
+    "[/RELATED]",
+    "[/SIMILAR]",
+    "[/PROPERTY]",
+    "[/SAS]",
+    "[/WEIGHT]",
+    "[/TPSA]",
+    "[/CLOGP]",
+    "[/QED]",
+    "[/NUMHDONORS]",
+    "[/NUMHACCEPTORS]",
+    "[/NUMHETEROATOMS]",
+    "[/NUMROTATABLEBONDS]",
+    "[/NOCOUNT]",
+    "[/NHOHCOUNT]",
+    "[/RINGCOUNT]",
+    "[/HEAVYATOMCOUNT]",
+    "[/FRACTIONCSP3]",
+    "[/NUMAROMATICRINGS]",
+    "[/NUMSATURATEDRINGS]",
+    "[/NUMAROMATICHETEROCYCLES]",
+    "[/NUMAROMATICCARBOCYCLES]",
+    "[/NUMSATURATEDHETEROCYCLES]",
+    "[/NUMSATURATEDCARBOCYCLES]",
+    "[/NUMALIPHATICRINGS]",
+    "[/NUMALIPHATICHETEROCYCLES]",
+    "[/NUMALIPHATICCARBOCYCLES]",
+    "[/IUPAC]",
+    "[/VAR_NAME]",
+    "[/VAR_DESC]",
+    "[/VAR_VAL]",
+    "[/ASSAY_NAME]",
+    "[/ASSAY_DESC]"
+  ],
+  "bos_token": "<s>",
+  "clean_up_tokenization_spaces": true,
+  "eos_token": "</s>",
+  "model_max_length": 1000000000000000019884624838656,
+  "pad_token": "<pad>",
+  "tokenizer_class": "PreTrainedTokenizerFast"
+}
