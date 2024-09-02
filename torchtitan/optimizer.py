@@ -139,6 +139,9 @@ def build_lr_schedulers(optimizers, job_config: JobConfig) -> LambdaLR:
         def step(self):
             for schedulers in self.schedulers:
                 schedulers.step()
+        @property 
+        def last_lr(self):
+            return self.schedulers[0].get_last_lr()[0]
 
     return SchedulersContainer(
         [_build_lr_scheduler(optimizer) for optimizer in optimizers]

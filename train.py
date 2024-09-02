@@ -271,7 +271,6 @@ def main(job_config: JobConfig):
             # optimizer step
             optimizers.step()
             lr_schedulers.step()
-            lr = lr_schedulers.schedulers[0].get_last_lr()[0]
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -354,7 +353,7 @@ def main(job_config: JobConfig):
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%  "
-                    f"{color.red}lr: {lr:.2f}{color.reset}"
+                    f"{color.red}lr: {lr_schedulers.last_lr:.2f}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
