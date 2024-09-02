@@ -205,17 +205,6 @@ def main(job_config: JobConfig):
     job_config_dict = job_config._args_to_two_level_dict(args)
     metric_logger.log_hparams(job_config_dict)
 
-    # plot losses loaded from checkpoint (if any) to Aim
-    # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
-    #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
-    if train_state.step > 0:
-        for idx, step in enumerate(train_state.log_steps):
-            metrics = {
-                "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
-                "loss_metrics/global_max_loss": train_state.global_max_losses[idx],
-            }
-            metric_logger.log(metrics, step=step)
-
     data_iterator = iter(data_loader)
 
     train_context = get_train_context(

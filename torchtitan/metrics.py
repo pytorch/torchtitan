@@ -116,17 +116,6 @@ class MetricLogger:
         if self.writer is not None:
             self.writer.experiment['hparams'] = config
 
-
-def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
-    """
-    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
-    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
-    """
-    metrics_log_rank = 0
-
-    return metrics_log_rank
-
-
 def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims
 ):
@@ -148,6 +137,6 @@ def build_metric_logger(
         logger.info(
             f"Metrics logging active. Aim logs will be saved at /{save_aim_folder}"
         )
-        enable_aim = torch.distributed.get_rank() == _get_metrics_rank(parallel_dims)
+        enable_aim = torch.distributed.get_rank() == 0
     return MetricLogger(job_config.metrics.aim_hash, job_config.metrics.aim_experiment_name, log_dir, save_aim_folder, enable_aim)
 
