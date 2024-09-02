@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+import math
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
@@ -56,6 +57,21 @@ def build_optimizers(model_parts, job_config: JobConfig):
     return OptimizersContainer([_build_optimizer(model) for model in model_parts])
 
 
+import math
+
+def linear_warmup(warmup_steps: int, current_step: int) -> float:
+    """Computes the linear warmup scaling factor."""
+    return float((current_step + 1) / (warmup_steps + 1))
+
+def linear_decay(decay_steps: int, current_step: int) -> float:
+    """Computes the linear decay scaling factor."""
+    return 1 - float(current_step / decay_steps)
+
+def cosine_decay(decay_steps: int, current_step: int) -> float:
+    """Computes the cosine decay scaling factor."""
+    current_step = min(current_step, decay_steps)
+    return 0.5 * (1 + math.cos(math.pi * current_step / decay_steps))
+
 def linear_warmup_linear_decay(
     warmup_steps: int, decay_steps: int, current_step: int
 ) -> float:
@@ -65,17 +81,24 @@ def linear_warmup_linear_decay(
     create the desired schedule.
     """
     if current_step < warmup_steps:
-        # linear warmup
-        # 0-indexed step, hence + 1 adjustments
-        current_step += 1
-        curr_adjustment = float(current_step / (warmup_steps + 1))
-
+        linear_warmup(warmup_steps,current_step)
     else:
+        linear_decay()
         # linear decay
         normalized_step = decay_steps - (current_step - warmup_steps)
         curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
 
     return curr_adjustment
+
+def linear_warmup_then_cosine_decay(
+    warmup_steps: int, decay_steps: int, current_step: int
+) -> float:
+    if current_step < warmup_steps:
+        return linear_warmup(warmup_steps, current_step)
+    else:
+        adjusted_step = current_step - warmup_steps
+        return cosine_decay(decay_steps, adjusted_step)
+
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):

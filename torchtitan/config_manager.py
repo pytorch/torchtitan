@@ -181,6 +181,9 @@ class JobConfig:
             "--optimizer.name", type=str, default="AdamW", help="Optimizer to use"
         )
         self.parser.add_argument(
+            "--optimizer.schedule", type=str, default="Linear", help="Optimization schedule to use"
+        )
+        self.parser.add_argument(
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
