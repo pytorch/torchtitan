@@ -223,6 +223,19 @@ class JobConfig:
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
         )
         self.parser.add_argument(
+                "--training.decay_steps",
+                type=Optional[int],
+                default=None,
+                help="Steps for lr scheduler decay, default is decay starts immediately after warmup",
+        )
+        self.parser.add_argument(
+                "--training.decay_type",
+                type=str,
+                default="linear",
+                choices = ["linear","cosine"],
+                help="Steps for lr scheduler decay type, defaults to linear",
+        )
+        self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,
