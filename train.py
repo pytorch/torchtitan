@@ -11,7 +11,6 @@ from datetime import timedelta
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.fx import GraphModule
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -73,6 +72,7 @@ def main(job_config: JobConfig):
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -154,6 +154,8 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device="cuda")
+            m.init_weights()
+            m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
@@ -161,14 +163,10 @@ def main(job_config: JobConfig):
         # move sharded model to CPU/GPU and initialize weights via DTensor
         init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-        model_parts = [model]
+        model.init_weights()
+        model.train()
 
-    for mod in model_parts:
-        # skip traced modules since we do not define init_weights in the traced module
-        if isinstance(mod, GraphModule):
-            continue
-        mod.init_weights()
-        mod.train()
+        model_parts = [model]
 
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
@@ -204,11 +202,6 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
-        if job_config.experimental.pipeline_parallel_split_mode == "tracer":
-            raise RuntimeError(
-                "Pipeline parallelism with tracer mode is not supported without a seed checkpoint."
-            )
-
         # TODO: fix this by allowing each rank to set their own seed
         logger.warning(
             "Pipeline Parallelism is being used without a seed checkpoint. "
