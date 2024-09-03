@@ -530,7 +530,7 @@ class JobConfig:
         self.parser.add_argument(
             "--comm.trace_buf_size",
             type=int,
-            default=20000,
+            default=0,
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
         )
 
