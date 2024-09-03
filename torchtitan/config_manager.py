@@ -252,7 +252,7 @@ class JobConfig:
             method used is HSDP (Hybrid Sharded Data Parallelism).  Otherwise, the
             parallelism method used is FSDP (Fully Sharded Data Parallelism).
 
-            -1 means leftover ranks will be used (After DP_REPLICATED/SP/PP). Note that
+            -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
             only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
             can be negative.
             1 means disabled.""",
