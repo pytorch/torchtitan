@@ -561,7 +561,9 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--logging.log_level",
-            type=test_fail_val,
+            default = "INFO",
+            choices=["INFO", "DEBUG", "WARNING", "ERROR", "CRITICAL"],
+            type=str,
             help="Set the log level, INFO by default"
         )
 
