@@ -44,8 +44,5 @@ class LogLevel(Enum):
                                              f"Choose from {', '.join([lvl.name for lvl in cls])}.")
 
 def validate_log_level(value):
-    try:
-        return LogLevel.from_string(value)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
+    return LogLevel.from_string(value)
 
