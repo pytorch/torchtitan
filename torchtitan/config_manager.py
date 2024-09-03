@@ -165,7 +165,7 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, compiled_rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -224,16 +224,38 @@ class JobConfig:
             help="How many train steps to run",
         )
         self.parser.add_argument(
-            "--training.data_parallel_degree",
+            "--training.data_parallel_replicate_degree",
             type=int,
-            nargs="+",
             default=-1,
             help="""
-                Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP).
-                1 means disabled. If HSDP is used, there should be 2 integers. The first
-                one means the replicate degree and the second one means the shard degree.
-                -1 is not supported in HSDP case.
-            """,
+            The `data_parallel_replicate_degree` argument specifies the degree of
+            data parallelism for weight replication. When this value is greater
+            than 1, weights will be replicated across `data_parallel_replicate_degree`
+            ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
+            parallelism method used is DDP (Distributed Data Parallelism).
+
+            -1 means leftover ranks will be used (After DP_SHARD/SP/PP). Note that only
+            one of `data_parallel_replicate_degree` and `data_parallel_shard_degree` can
+            be negative.
+            1 means disabled.""",
+        )
+        self.parser.add_argument(
+            "--training.data_parallel_shard_degree",
+            type=int,
+            default=-1,
+            help="""
+            The `data_parallel_shard_degree` argument specifies the degree of data
+            parallelism for weight sharding. When this value is greater than 1, weights
+            will be sharded across `data_parallel_shard_degree` ranks. If
+            `data_parallel_replicate_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism).  Otherwise, the
+            parallelism method used is FSDP (Fully Sharded Data Parallelism).
+
+            -1 means leftover ranks will be used (After DP_REPLICATED/SP/PP). Note that
+            only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
+            can be negative.
+            1 means disabled.""",
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",
@@ -276,7 +298,7 @@ class JobConfig:
                 the third containing layers.2 and all the remaining layers.
 
                 Note: fully-automated splitting may be enabled in the future,
-                but currently the split points must be specified manually for both manual and tracer.""",
+                but currently the split points must be specified manually.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
@@ -292,21 +314,6 @@ class JobConfig:
                 and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_mode",
-            type=str,
-            choices=["manual", "tracer"],
-            default="manual",
-            help="""
-                Specify the split method (e.g. the Pipeline Parallelism Front End)
-
-                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
-                implementation manually, and then wrap it in a PipelineStage.
-
-                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
-                split via the provided split points, unflattened into an nn.Module,
-                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
-        )
-        self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",
             type=int,
             default=None,
@@ -317,12 +324,6 @@ class JobConfig:
 
                 The default value will be the number of pipeline stages, if unspecified.
             """,
-        )
-        self.parser.add_argument(
-            "--training.data_parallel_type",
-            type=str,
-            default="fsdp",
-            help="Data parallelism type. TorchTitan currently supports FSDP, HSDP, and DDP.",
         )
         self.parser.add_argument(
             "--experimental.enable_compiled_autograd",
@@ -608,8 +609,6 @@ class JobConfig:
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
-            elif isinstance(val, list):
-                aux_parser.add_argument("--" + arg, type=type(val[0]), nargs="+")
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
 
