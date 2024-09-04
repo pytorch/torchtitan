@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
 
-from torchtitan import utils
+from torchtitan.utils import common_utils as utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader
@@ -94,6 +94,7 @@ def main(job_config: JobConfig):
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
+        job_config.training.data_processing_style,
         tokenizer,
         job_config.training.batch_size,
         job_config.training.seq_len,
@@ -110,7 +111,7 @@ def main(job_config: JobConfig):
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
     model_config.vocab_size = tokenizer.n_words
-    model_config.vocab_size = 50000
+    model_config.vocab_size = 50072
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")

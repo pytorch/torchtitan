@@ -202,6 +202,13 @@ class JobConfig:
                 loaded from this path instead of downloaded.""",
         )
         self.parser.add_argument(
+            "--training.data_processing_style",
+            choices=["chemlactica_style"],
+            default="chemlactica_style",
+            help="""
+                Specifies the method for processing data prior to tokenization.""",
+        )
+        self.parser.add_argument(
             "--training.batch_size", type=int, default=8, help="Batch size"
         )
         self.parser.add_argument(

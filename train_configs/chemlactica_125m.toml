@@ -40,7 +40,8 @@ steps = 10
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = false
-dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+data_process_style="chemlactica_style"
 
 [experimental]
 pipeline_parallel_degree = 1

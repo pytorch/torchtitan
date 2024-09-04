@@ -7,6 +7,8 @@
 import pickle
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -21,6 +23,7 @@ except ImportError as e:
 
 from torchtitan.tokenizers.tokenizer import Tokenizer
 from torchtitan.logging import logger
+from torchtitan.utils.dataset_utils import chemlactica_style_data_processing
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -30,6 +33,11 @@ from datasets.distributed import split_dataset_by_node
 _supported_datasets = {
     "c4_test": "test/assets/c4_test",
     "c4": "allenai/c4",
+    "chemlactica_train_mini": "test/assets/chemlactica_train_mini"
+}
+
+_supported_data_processing_styles = {
+    "chemlactica_style": chemlactica_style_data_processing
 }
 
 
@@ -41,6 +49,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dataset_path (Optional[str]):
             Path to the dataset in the file system. If provided, data will be loaded
             from this path instead of downloaded.
+        data_processing_style (str): name of the data process style    
         tokenizer (Tokenizer):
             Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         seq_len (int): max sequence length
@@ -62,7 +71,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
     }
 
     Example use (c4):
-    >>> ds = HuggingFaceDataset(dataset_name="c4", dataset_path=None, tokenizer=tokenizer)
+    >>> ds = HuggingFaceDataset(dataset_name="c4", dataset_path=None, data_processing_style="chemlactica_style", tokenizer=tokenizer)
     >>> for batch in Dataloader(ds, batch_size=8):
             print(f"Batch size: {len(batch)}")
         Batch size: 8
@@ -72,6 +81,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: Optional[str],
+        data_processing_style: str,
         tokenizer: Tokenizer,
         seq_len: int = 2048,
         world_size: int = 1,
@@ -102,9 +112,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         else:
             ds = load_dataset(dataset_path, split="train")
 
+        try:
+            data_processing_fn = _supported_data_processing_styles[data_processing_style]
+        except KeyError as e:
+            raise ValueError(f"Unsupported data processing style: {data_processing_style}")
+
         # TODO: support shuffling and checkpointing
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
+        self.data_processing_fn = data_processing_fn
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
@@ -113,12 +129,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._sample_idx = 0
         self._all_tokens: List[int] = []
 
+        # random number generator
+        self.rng = np.random.default_rng()
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
         while True:
-            for sample in self._get_data_iter():
-                sample_text = sample["text"]
+            for sample_json in self._get_data_iter():
+                sample_text = self.data_processing_fn(sample_json, self.rng)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
                 self._sample_idx += 1
@@ -194,6 +213,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
 def build_hf_data_loader(
     dataset_name: str,
     dataset_path: Optional[str],
+    data_processing_style: str,
     tokenizer: Tokenizer,
     batch_size: int,
     seq_len: int,
@@ -202,7 +222,7 @@ def build_hf_data_loader(
     infinite: bool = True,
 ):
     hf_ds = HuggingFaceDataset(
-        dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
+        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite
     )
 
     return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
