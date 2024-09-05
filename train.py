@@ -113,10 +113,7 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    # NOTE(lty): the current torch_spmd prototype doesn't compose with meta init
-    # so we init on CPU, apply parallelism, and then move to GPU
-    # with torch.device("meta"):
-    with torch.device("cpu"):
+    with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
     # a no-op hander if float8 is not enabled
@@ -169,13 +166,15 @@ def main(job_config: JobConfig):
         )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
-        # init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
-        # model.to_empty(device=init_device)
-        # model.init_weights()
+        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        model.to_empty(device=init_device)
 
-        # NOTE(lty): move from CPU to GPU after applying FSDP2/torch_spmd parallelisms
-        # The original code related to meta init is commented out above
-        model.to("cuda")
+        # context needed by meta-init with torch_spmd
+        from torch_spmd.data_parallel import disable_data_parallel
+
+        with disable_data_parallel() if job_config.experimental.torch_spmd else contextlib.nullcontext():
+            model.init_weights()
+
         model.train()
 
         model_parts = [model]

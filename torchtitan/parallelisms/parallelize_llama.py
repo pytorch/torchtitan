@@ -40,8 +40,14 @@ def torch_spmd_parallelize(
 ):
     assert not parallel_dims.pp_enabled, "PP not supported by torch_spmd yet"
     assert not parallel_dims.tp_enabled, "TP not supported by torch_spmd yet"
+
+    torch._inductor.config.simplefsdp.enable_reorder = True
+    torch._inductor.config.simplefsdp.enable_bucket = True
+
     ac_config = job_config.activation_checkpoint
-    assert ac_config.mode == "none", "AC not supported by torch_spmd yet"
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
+        logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
     if parallel_dims.dp_enabled:
         from torch_spmd.data_parallel import data_parallel, MixedPrecisionPolicy
@@ -51,13 +57,19 @@ def torch_spmd_parallelize(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
         dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-        model = data_parallel(model, dp_mesh, mode="fully_shard", mp_policy=mp_policy)
+
+        model = data_parallel(
+            model,
+            dp_mesh,
+            mode="fully_shard",
+            ac_mode=ac_config.mode,
+            mp_policy=mp_policy,
+        )
         logger.info("Applied Simple FSDP to the model")
 
     if job_config.training.compile:
-        torch._dynamo.config.inline_inbuilt_nn_modules = True
-        logger.info("Compiling with torch.compile")
         model = torch.compile(model, fullgraph=True)
+        logger.info("Compiling with torch.compile")
 
     return model
 
