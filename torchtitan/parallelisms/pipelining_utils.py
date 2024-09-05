@@ -13,7 +13,10 @@ from .pipelining import (
     ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
-from .pipelining.schedules import PipelineScheduleMulti
+from .pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.logging import logger
 
 PARALLELISM_DIR = pathlib.Path(__file__).parent.resolve()
