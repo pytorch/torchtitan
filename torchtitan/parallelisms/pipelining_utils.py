@@ -11,6 +11,10 @@ from torch.distributed.pipelining import (
     ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.logging import logger
 
 
