@@ -12,7 +12,7 @@ from typing import Callable, Union
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from .pipelining import pipeline, PipelineStage, SplitPoint
+from .pipelining import PipelineStage
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
@@ -36,20 +36,9 @@ def pipeline_llama(
     model_config: ModelArgs,
     loss_fn: Callable[..., torch.Tensor],
 ):
-    split_mode = job_config.experimental.pipeline_parallel_split_mode
-    valid_split_modes = ("manual", "tracer")
-    if split_mode not in valid_split_modes:
-        raise ValueError(
-            f"Invalid split mode: {split_mode}. Valid split modes: {valid_split_modes}"
-        )
-    if split_mode == "manual":
-        stages, models = pipeline_llama_manual(
-            model, pp_mesh, parallel_dims, job_config, device, model_config
-        )
-    elif split_mode == "tracer":
-        stages, models = pipeline_llama_tracer(
-            model, pp_mesh, parallel_dims, job_config, device, model_config
-        )
+    stages, models = pipeline_llama_manual_split(
+        model, pp_mesh, parallel_dims, job_config, device, model_config
+    )
 
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
@@ -74,7 +63,7 @@ def _mixed_precision_dtype(
     return TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else default
 
 
-def pipeline_llama_manual(
+def pipeline_llama_manual_split(
     whole_model: nn.Module,
     pp_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
@@ -179,63 +168,4 @@ def pipeline_llama_manual(
         )
         stages.append(stage)
         models.append(model_chunk)
-    return stages, models
-
-
-def pipeline_llama_tracer(
-    model: nn.Module,
-    pp_mesh: DeviceMesh,
-    parallel_dims: ParallelDims,
-    job_config: JobConfig,
-    device: DeviceType,
-    model_config: ModelArgs,
-):
-    if job_config.model.norm_type == "fused_rmsnorm":
-        # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr
-        # invocation stride in strict mode from `if dy.stride(-1) != 1:` in
-        # fused_rmsnorm
-        raise NotImplementedError(
-            "fused_rmsnorm is not compatible with Pipeline Tracer yet. "
-            "Please use rmsnorm or layernorm."
-        )
-    if _mixed_precision_dtype(job_config, parallel_dims) != torch.float32:
-        raise NotImplementedError(
-            "Pipeline tracer does not work with FSDP mixed precision yet. "
-            "To work around, set mixed_precision_param to float32."
-        )
-
-    pp_rank = pp_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
-    microbatches = (
-        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
-    )
-    (input,) = _llama_trace_input(job_config, model_config, device=device)
-    stage_idx = pp_rank
-    split_spec = {
-        layer_name: SplitPoint.BEGINNING
-        for layer_name in job_config.experimental.pipeline_parallel_split_points
-    }
-    num_stages = len(split_spec) + 1
-    pipe = pipeline(
-        model,
-        mb_args=(input.chunk(microbatches)[0],),
-        split_spec=split_spec,
-    )
-
-    stages = []
-    models = []
-    loop_style = (
-        "v" if job_config.experimental.pipeline_parallel_schedule == "zb_v" else "loop"
-    )
-    for stage_idx in stage_ids_this_rank(
-        pp_rank, pp_size, num_stages, style=loop_style
-    ):
-        models.append(pipe.get_stage_module(stage_idx))
-        stages.append(
-            pipe.build_stage(
-                stage_idx,
-                device=device,
-                group=pp_mesh.get_group(),
-            )
-        )
     return stages, models

@@ -51,6 +51,18 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     if n_microbatches is None:
         n_microbatches = job_config.experimental.pipeline_parallel_degree
 
+    # Validation that the stages are compatible with the schedule
+    if isinstance(schedule_class, PipelineScheduleSingle):
+        if len(stages) != 1:
+            raise ValueError(
+                f"PipelineScheduleSingle requires exactly one stage, got {len(stages)}"
+            )
+    elif isinstance(schedule_class, PipelineScheduleMulti):
+        if len(stages) < 2:
+            raise ValueError(
+                f"PipelineScheduleMulti requires at least two stages, got {len(stages)}"
+            )
+
     if job_config.experimental.pipeline_parallel_schedule == "zb_v":
         # TODO: hardcoded and only used for V-shaped zero bubble
         stage_index_to_group_rank = {

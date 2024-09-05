@@ -680,13 +680,21 @@ class _PipelineStageBase(ABC):
                 if isinstance(bwd_kwargs["stage_output"], torch.Tensor):
                     bwd_kwargs["stage_output"] = (bwd_kwargs["stage_output"],)
 
+                # if self.stage_index == 0:
+                #     for inp in bwd_kwargs["input_values"]:
+                #         if not inp.requires_grad:
+                #             inp.requires_grad_(True)
+
+                # for inp in bwd_kwargs["input_values"]:
+                #     print(inp.requires_grad)
+
                 grads_input, param_groups = self.backward_maybe_with_nosync(
                     "input", bwd_kwargs
                 )
 
                 # TODO: we dont need to save this, add to dw_runner?
                 self.backward_state[bwd_chunk_id] = (
-                    input_values,
+                    bwd_kwargs["input_values"],
                     param_groups,
                     bwd_kwargs["stage_output"],
                     bwd_kwargs["output_grads"],

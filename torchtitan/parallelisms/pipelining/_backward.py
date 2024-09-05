@@ -148,6 +148,7 @@ def stage_backward_input(
     """
     compute the gradients for only the stage inputs with respect to the stage outputs
     """
+
     stage_output_grad_fns: List[Node] = list(
         filter(None, map(_get_grad_fn_or_grad_acc, stage_outputs))
     )
