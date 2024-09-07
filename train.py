@@ -45,36 +45,6 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
     return context
 
 
-class TokenChunkedCrossEntropyLoss(torch.nn.Module):
-    def __init__(self, num_chunks: int = 16, ignore_index: int = -100):
-        super(TokenChunkedCrossEntropyLoss, self).__init__()
-        self.num_chunks = num_chunks
-        self.ignore_index = ignore_index
-        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(
-            reduction="sum", ignore_index=self.ignore_index
-        )
-
-    @torch.compile()
-    def _compute_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor):
-        return self.cross_entropy_loss(logits.float(), labels)
-
-    def forward(self, logits: List[torch.Tensor], labels: torch.Tensor):
-        """
-        Args:
-            logits (List[torch.Tensor]): List of chunked logits of length
-                ``self.num_chunks``, where each chunk has shape
-                (batch_size, num_tokens / num_chunks, vocab_size).
-            labels (torch.Tensor): Ground truth labels of shape (batch_size, num_tokens).
-        """
-        total_elements = (labels != self.ignore_index).sum()
-        labels = [target_chunk.reshape(-1) for target_chunk in labels.chunk(self.num_chunks, dim=1)] 
-        logits = [logit_chunk.reshape(-1, logit_chunk.size(-1)) for logit_chunk in logits]
-        total_loss = 0.0
-        for logits_chunk, labels_chunk in zip(logits, labels):
-            total_loss += self._compute_cross_entropy(logits_chunk, labels_chunk)
-        return total_loss / total_elements
-
-
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
@@ -103,6 +73,7 @@ def main(job_config: JobConfig):
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -163,7 +134,6 @@ def main(job_config: JobConfig):
         f"{color.blue}Model {model_name} {job_config.model.flavor} "
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
-    token_chunked_cross_entropy_loss = TokenChunkedCrossEntropyLoss()
 
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
@@ -184,8 +154,6 @@ def main(job_config: JobConfig):
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
 
-        pp_split_mode = job_config.experimental.pipeline_parallel_split_mode
-
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
         # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
         # optimizer, and checkpointing
@@ -193,9 +161,7 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device="cuda")
-            # skip traced modules since we do not define init_weights in the traced module
-            if pp_split_mode == "manual":
-                m.init_weights()
+            m.init_weights()
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -243,11 +209,6 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
-        if pp_split_mode == "tracer":
-            raise RuntimeError(
-                "Pipeline parallelism with tracer mode is not supported without a seed checkpoint."
-            )
-
         # TODO: fix this by allowing each rank to set their own seed
         logger.warning(
             "Pipeline Parallelism is being used without a seed checkpoint. "
@@ -334,11 +295,7 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
+                    loss = model(input_ids, labels)
                     loss.backward()
 
             # clip gradients
