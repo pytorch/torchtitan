@@ -152,10 +152,11 @@ class ChunkedCE(torch.autograd.Function):
         chunks = max(_input.shape[0] // CHUNK_SIZE, 1)
 
         def accumulate_chunk(input_chunk, target_chunk):
-            (chunk_grad_input, chunk_grad_weight), chunk_loss = (
-                torch.func.grad_and_value(compute_loss, argnums=(0, 1))(
-                    input_chunk, weight, target_chunk
-                )
+            (
+                chunk_grad_input,
+                chunk_grad_weight,
+            ), chunk_loss = torch.func.grad_and_value(compute_loss, argnums=(0, 1))(
+                input_chunk, weight, target_chunk
             )
             grad_weight.add_(chunk_grad_weight)
             loss_acc.add_(chunk_loss)
@@ -166,7 +167,7 @@ class ChunkedCE(torch.autograd.Function):
 
         input_chunks = torch.chunk(_input, chunks=chunks, dim=0)
         target_chunks = torch.chunk(target, chunks=chunks, dim=0)
-        for input_chunk, target_chunk in zip(input_chunks, target_chunks, strict=True):
+        for input_chunk, target_chunk in zip(input_chunks, target_chunks):
             grad_inputs.append(accumulate_chunk(input_chunk, target_chunk))
 
         ctx.save_for_backward(

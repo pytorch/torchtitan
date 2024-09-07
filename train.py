@@ -8,7 +8,6 @@ import contextlib
 import os
 import time
 from datetime import timedelta
-from typing import List
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
