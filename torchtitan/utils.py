@@ -6,6 +6,7 @@
 
 import gc
 import os
+import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Union
@@ -135,6 +136,19 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
 def get_peak_flops(device_name: str) -> int:
+    try:
+        # Run the lspci command and capture the output
+        result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
+        # Filter the output for lines containing both "NVIDIA" and "H100"
+        filtered_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if "NVIDIA" in line and "H100" in line
+        ]
+        # Join all filtered lines into a single string
+        device_name = " ".join(filtered_lines) or device_name
+    except FileNotFoundError as e:
+        logger.warning(f"Error running lspci: {e}, fallback to use device_name")
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
@@ -142,10 +156,10 @@ def get_peak_flops(device_name: str) -> int:
         # data from https://www.nvidia.com/en-us/data-center/h100/
         # NOTE: Specifications are one-half lower without sparsity.
         if "NVL" in device_name:
-            return 1979e12
+            return 835e12
         elif "PCIe" in device_name:
             return 756e12
-        else:  # for SXM and other variants
+        else:  # for H100 SXM and other variants
             return 989e12
     else:  # for other GPU types, assume A100
         return 312e12

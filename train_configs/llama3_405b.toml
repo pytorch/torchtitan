@@ -33,12 +33,12 @@ max_norm = 1.0  # grad norm clipping
 steps = 3000
 data_parallel_degree = -1
 tensor_parallel_degree = 8  # 8-way TP
-enable_float8_linear = false
-compile = false
+compile = true
 dataset = "c4"
 
 [experimental]
 pipeline_parallel_degree = 1
+enable_async_tensor_parallel = true
 
 [checkpoint]
 enable_checkpoint = false
@@ -51,3 +51,8 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = 'full' # ['none', 'selective', 'full']
+
+[float8]
+enable_float8_linear = true
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
