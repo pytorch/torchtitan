@@ -166,7 +166,7 @@ class ChunkedCE(torch.autograd.Function):
 
         input_chunks = torch.chunk(_input, chunks=chunks, dim=0)
         target_chunks = torch.chunk(target, chunks=chunks, dim=0)
-        for input_chunk, target_chunk in zip(input_chunks, target_chunks):
+        for input_chunk, target_chunk in zip(input_chunks, target_chunks, strict=True):
             grad_inputs.append(accumulate_chunk(input_chunk, target_chunk))
 
         ctx.save_for_backward(
