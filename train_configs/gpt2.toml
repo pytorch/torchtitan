@@ -6,9 +6,9 @@ dump_folder = "./outputs"
 description = "GPT-2 training"
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 10
+profile_freq = 50
 
 [metrics]
 log_freq = 10
@@ -27,11 +27,11 @@ lr = 3e-4
 fused = true
 
 [training]
-batch_size = 16
+batch_size = 32
 seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 100
+steps = 50
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = true

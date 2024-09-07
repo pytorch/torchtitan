@@ -127,6 +127,61 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+class ChunkedCE(torch.autograd.Function):
+    """
+    Credit: https://github.com/Chillee
+    """
+
+    @staticmethod
+    def forward(ctx, _input, weight, target, compiled=True):
+        CHUNK_SIZE = 8192
+        inp_shape = _input.shape
+        _input = _input.view(-1, _input.shape[-1])
+        target = target.view(-1)
+
+        def compute_loss(input_chunk, weight, target):
+            logits = torch.mm(input_chunk, weight.t())
+            logits = logits.float()
+            loss = torch.nn.functional.cross_entropy(logits, target)
+            return loss
+
+        grad_weight = torch.zeros_like(weight)
+        grad_inputs = []
+        loss_acc = torch.zeros((), device=_input.device)
+
+        chunks = max(_input.shape[0] // CHUNK_SIZE, 1)
+
+        def accumulate_chunk(input_chunk, target_chunk):
+            (
+                chunk_grad_input,
+                chunk_grad_weight,
+            ), chunk_loss = torch.func.grad_and_value(compute_loss, argnums=(0, 1))(
+                input_chunk, weight, target_chunk
+            )
+            grad_weight.add_(chunk_grad_weight)
+            loss_acc.add_(chunk_loss)
+            return chunk_grad_input
+
+        if compiled:
+            accumulate_chunk = torch.compile(accumulate_chunk)
+
+        input_chunks = torch.chunk(_input, chunks=chunks, dim=0)
+        target_chunks = torch.chunk(target, chunks=chunks, dim=0)
+        for input_chunk, target_chunk in zip(input_chunks, target_chunks):
+            grad_inputs.append(accumulate_chunk(input_chunk, target_chunk))
+
+        ctx.save_for_backward(
+            (torch.cat(grad_inputs, dim=0) / chunks).view(inp_shape),
+            grad_weight / chunks,
+        )
+        return loss_acc / chunks
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (grad_input, grad_weight) = ctx.saved_tensors
+        return (grad_input, grad_weight, None, None)
+
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -421,7 +476,7 @@ class Transformer(nn.Module):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, labels: torch.Tensor):
         """
         Perform a forward pass through the Transformer model.
 
@@ -439,8 +494,9 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
-        return output
+        if not self.output:
+            return h
+        return ChunkedCE.apply(h, self.output.weight, labels)
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
