@@ -17,6 +17,3 @@ torchtitan/datasets/**/*.model
 *.log
 error.json
 _remote_module_non_scriptable.py
-
-# torch compile debug related
-torch_compile_debug/*
