@@ -6,13 +6,14 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
+enable_color_printing = false
+enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
@@ -33,11 +34,12 @@ max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
-compile = false
+compile = true
 dataset = "c4"
 
 [experimental]
 pipeline_parallel_degree = 1
+torch_spmd = true
 
 [checkpoint]
 enable_checkpoint = false
@@ -49,7 +51,7 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

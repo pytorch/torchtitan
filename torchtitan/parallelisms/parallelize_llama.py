@@ -29,7 +29,55 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import check_strided_sharding_enabled
+
+
+# NOTE(lty): experimental for the PT-D 24 research internship project
+def torch_spmd_parallelize(
+    model: nn.Module,
+    world_mesh: DeviceMesh,
+    parallel_dims: ParallelDims,
+    job_config: JobConfig,
+):
+    torch._inductor.config.simplefsdp.enable_reorder = True
+    torch._inductor.config.simplefsdp.enable_bucket = True
+
+    if parallel_dims.tp_enabled:
+        apply_tp(
+            model,
+            world_mesh["tp"],
+            loss_parallel=parallel_dims.loss_parallel_enabled,
+            enable_float8=job_config.float8.enable_float8_linear,
+            enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
+        )
+
+    ac_config = job_config.activation_checkpoint
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
+        logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+    if parallel_dims.dp_enabled:
+        from torch_spmd.data_parallel import data_parallel, MixedPrecisionPolicy
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+        )
+        dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
+
+        model = data_parallel(
+            model,
+            dp_mesh,
+            mode="fully_shard",
+            ac_mode=ac_config.mode,
+            mp_policy=mp_policy,
+        )
+        logger.info("Applied Simple FSDP to the model")
+
+    if job_config.training.compile:
+        model = torch.compile(model, fullgraph=True)
+        logger.info("Compiling with torch.compile")
+
+    return model
 
 
 def parallelize_llama(
@@ -45,6 +93,9 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    # NOTE(lty): experimental for the PT-D 24 research internship project
+    if job_config.experimental.torch_spmd:
+        return torch_spmd_parallelize(model, world_mesh, parallel_dims, job_config)
 
     if parallel_dims.tp_enabled:
         if (
@@ -300,11 +351,12 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
+    # TODO(lty): the check below requires the latest PyTorch nightly; remove for now
     # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
     # that users won't use a nightly build which is older than 20240809 by then.
-    if tp_enabled:
-        # check if strided sharding is enabled, which is necessary for 2D/3D DCP
-        check_strided_sharding_enabled()
+    # if tp_enabled:
+    #     # check if strided sharding is enabled, which is necessary for 2D/3D DCP
+    #     check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:

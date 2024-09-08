@@ -12,6 +12,9 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
+# context needed by meta-init with torch_spmd
+from torch_spmd.data_parallel import disable_data_parallel
+
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
@@ -154,16 +157,20 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device="cuda")
-            m.init_weights()
+            with disable_data_parallel() if job_config.experimental.torch_spmd else contextlib.nullcontext():
+                m.init_weights()
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+        model = models_parallelize_fns[model_name](
+            model, world_mesh, parallel_dims, job_config
+        )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-        model.init_weights()
+        with disable_data_parallel() if job_config.experimental.torch_spmd else contextlib.nullcontext():
+            model.init_weights()
         model.train()
 
         model_parts = [model]
