@@ -38,11 +38,17 @@ def torch_spmd_parallelize(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    assert not parallel_dims.pp_enabled, "PP not supported by torch_spmd yet"
-    assert not parallel_dims.tp_enabled, "TP not supported by torch_spmd yet"
-
     torch._inductor.config.simplefsdp.enable_reorder = True
     torch._inductor.config.simplefsdp.enable_bucket = True
+
+    if parallel_dims.tp_enabled:
+        apply_tp(
+            model,
+            world_mesh["tp"],
+            loss_parallel=parallel_dims.loss_parallel_enabled,
+            enable_float8=job_config.float8.enable_float8_linear,
+            enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
+        )
 
     ac_config = job_config.activation_checkpoint
     if ac_config.mode != "none":
