@@ -21,7 +21,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "debugmodel"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./test/assets/test_tiktoken.model"
 
@@ -41,7 +41,8 @@ compile = true
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
 [experimental]
-pipeline_parallel_degree = 1
+# pipeline_parallel_degree = 2
+# pipeline_parallel_split_points = ["layers.4"]
 enable_async_tensor_parallel = false
 torch_spmd = true
 

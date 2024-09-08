@@ -165,7 +165,7 @@ class JobConfig:
             "--model.norm_type",
             type=str,
             default="rmsnorm",
-            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, compiled_rmsnorm, fused_rmsnorm]",
+            help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]",
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
@@ -278,7 +278,7 @@ class JobConfig:
                 the third containing layers.2 and all the remaining layers.
 
                 Note: fully-automated splitting may be enabled in the future,
-                but currently the split points must be specified manually for both manual and tracer.""",
+                but currently the split points must be specified manually.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
@@ -292,21 +292,6 @@ class JobConfig:
 
                 Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
                 and split_points = number of stages - 1""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_mode",
-            type=str,
-            choices=["manual", "tracer"],
-            default="manual",
-            help="""
-                Specify the split method (e.g. the Pipeline Parallelism Front End)
-
-                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
-                implementation manually, and then wrap it in a PipelineStage.
-
-                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
-                split via the provided split points, unflattened into an nn.Module,
-                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",

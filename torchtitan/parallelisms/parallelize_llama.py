@@ -114,14 +114,14 @@ def parallelize_llama(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    # # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    # if job_config.training.compile:
-    #     if job_config.model.norm_type == "fused_rmsnorm":
-    #         raise NotImplementedError(
-    #             "fused_rmsnorm is not compatible with torch.compile yet. "
-    #             "Please use rmsnorm or layernorm."
-    #         )
-    #     apply_compile(model)
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if job_config.training.compile:
+        if job_config.model.norm_type == "fused_rmsnorm":
+            raise NotImplementedError(
+                "fused_rmsnorm is not compatible with torch.compile yet. "
+                "Please use rmsnorm or layernorm."
+            )
+        apply_compile(model)
 
     if parallel_dims.dp_enabled:
         if parallel_dims.dp_type == "fsdp":
@@ -135,6 +135,7 @@ def parallelize_llama(
                 reduce_dtype=TORCH_DTYPE_MAP[
                     job_config.training.mixed_precision_reduce
                 ],
+                tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
             )
         else:
@@ -146,17 +147,6 @@ def parallelize_llama(
                 enable_compile=job_config.training.compile,
                 enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
             )
-
-    # turn on whole-model compile after FSDP
-    if job_config.training.compile:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm is not compatible with torch.compile yet. "
-                "Please use rmsnorm or layernorm."
-            )
-        model = apply_compile(model)
-
-    return model
 
 
 def apply_tp(
@@ -336,20 +326,15 @@ def apply_ac(model: nn.Module, ac_config):
 
 
 def apply_compile(model: nn.Module):
-    # """
-    # Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    # repeated structure. Alternatively one can compile the whole model (after applying DP).
-    # """
-    # for layer_id, transformer_block in model.layers.named_children():
-    #     transformer_block = torch.compile(transformer_block, fullgraph=True)
-    #     model.layers.register_module(layer_id, transformer_block)
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
+    for layer_id, transformer_block in model.layers.named_children():
+        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        model.layers.register_module(layer_id, transformer_block)
 
-    # logger.info("Compiling each TransformerBlock with torch.compile")
-
-    model = torch.compile(model)
-    logger.info("Compiling the whole model with torch.compile")
-
-    return model
+    logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def apply_fsdp(
@@ -357,6 +342,7 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    tp_enabled: bool,
     pp_enabled: bool,
 ):
     """
@@ -364,6 +350,13 @@ def apply_fsdp(
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+
+    # TODO(lty): the check below requires the latest PyTorch nightly; remove for now
+    # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
+    # that users won't use a nightly build which is older than 20240809 by then.
+    # if tp_enabled:
+    #     # check if strided sharding is enabled, which is necessary for 2D/3D DCP
+    #     check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:
@@ -380,18 +373,6 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
-
-    if pp_enabled:
-        # TODO
-        # This PR https://github.com/pytorch/pytorch/pull/129519 added a safety check to avoid using 2D/3D DCP since
-        # without strided sharding, DCP can not safely support resharding for 2D/3D.  However, for PP to work, even
-        # without resharding, we load a seed-checkpoint and need to disable the safety mechanism.  This hack should be
-        # removed after strided sharding is landed in DCP.
-        for module in model.modules():
-            assert len(module._load_state_dict_pre_hooks) <= 1
-            module._load_state_dict_pre_hooks.clear()
-            assert len(module._state_dict_pre_hooks) <= 1
-            module._state_dict_pre_hooks.clear()
 
     logger.info("Applied FSDP to the model")
 

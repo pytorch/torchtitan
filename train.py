@@ -12,6 +12,9 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
+# context needed by meta-init with torch_spmd
+from torch_spmd.data_parallel import disable_data_parallel
+
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
@@ -72,6 +75,7 @@ def main(job_config: JobConfig):
     # initialize GPU memory monitor and get peak flops for MFU calculation
     gpu_memory_monitor = build_gpu_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
@@ -152,12 +156,9 @@ def main(job_config: JobConfig):
         for m in model_parts:
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-
-            # In PP, we cannot call init_weights directly because some layers are missing.
-            # In the future, we may make init_weights handle missing layers, but also have
-            # to consider RNG seed propagation. For now, we rely on a seed checkpoint to
-            # initialize the model.
             m.to_empty(device="cuda")
+            with disable_data_parallel() if job_config.experimental.torch_spmd else contextlib.nullcontext():
+                m.init_weights()
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -168,13 +169,8 @@ def main(job_config: JobConfig):
         # move sharded model to CPU/GPU and initialize weights via DTensor
         init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-
-        # context needed by meta-init with torch_spmd
-        from torch_spmd.data_parallel import disable_data_parallel
-
         with disable_data_parallel() if job_config.experimental.torch_spmd else contextlib.nullcontext():
             model.init_weights()
-
         model.train()
 
         model_parts = [model]
@@ -213,9 +209,10 @@ def main(job_config: JobConfig):
     checkpoint_loaded = checkpoint.load()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
-        raise RuntimeError(
-            "Pipeline Parallelism requires meta-initialization and loading seed checkpoint. "
-            "Please run `./create_seed_checkpoint.sh` and rerun training with `--checkpoint.enable_checkpoint`"
+        # TODO: fix this by allowing each rank to set their own seed
+        logger.warning(
+            "Pipeline Parallelism is being used without a seed checkpoint. "
+            "All the substages will be initialized with random weights with same RNG state which can affect convergence."
         )
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
