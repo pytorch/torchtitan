@@ -31,6 +31,9 @@ class ParallelDims:
             self.pp,
         )
         assert (
+            dp_replicate >= -1 and dp_shard >= -1 and dp_replicate * dp_shard != 0
+        ), "dp_replicate and dp_shard must -1 or >=1."
+        assert (
             dp_replicate != -1 or dp_shard != -1
         ), "Only one of dp_replicate, dp_shard can be -1"
 

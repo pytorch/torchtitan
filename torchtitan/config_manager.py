@@ -226,7 +226,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.data_parallel_replicate_degree",
             type=int,
-            default=-1,
+            default=1,
             help="""
             The `data_parallel_replicate_degree` argument specifies the degree of
             data parallelism for weight replication. When this value is greater
