@@ -133,8 +133,8 @@ class SaveDone:
     pass
 
 
-def checkpoint_mp(recv, send):
-    init_logger()
+def checkpoint_mp(recv, send,log_level):
+    init_logger(log_level)
     os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
     os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
@@ -268,6 +268,7 @@ class CheckpointManager:
                 args=(
                     self.mp_queue_send,
                     self.mp_queue_recv,
+                    job_config.logging.log_level
                 ),
                 daemon=True,
             )
@@ -471,7 +472,7 @@ class CheckpointManager:
         begin = time.monotonic()
         dcp.load(
             states,
-            checkpoint_id=self._create_checkpoint_id(step, self.load_folder),
+            checkpoint_id=self._create_checkpoint_id(step, self.load_folder)
         )
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."

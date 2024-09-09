@@ -6,15 +6,18 @@
 
 import logging
 import os
+from enum import Enum
+import argparse
 
 
 logger = logging.getLogger()
 
 
-def init_logger():
-    logger.setLevel(logging.INFO)
+
+def init_logger(log_level):
+    logger.setLevel(log_level)
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(log_level)
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
@@ -23,3 +26,23 @@ def init_logger():
 
     # suppress verbose torch.profiler logging
     os.environ["KINETO_LOG_LEVEL"] = "5"
+
+
+class LogLevel(Enum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+    @classmethod
+    def from_string(cls, value: str):
+        try:
+            return cls[value.upper()]
+        except KeyError:
+            raise argparse.ArgumentTypeError(f"Invalid log level: '{value}'. "
+                                             f"Choose from {', '.join([lvl.name for lvl in cls])}.")
+
+def validate_log_level(value):
+    return LogLevel.from_string(value)
+

@@ -11,6 +11,7 @@ dist/*
 data
 out
 wandb
+aim
 
 torchtitan/datasets/**/*.model
 

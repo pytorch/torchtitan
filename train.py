@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.fx import GraphModule
 
-from torchtitan import utils
+from torchtitan.utils import common_utils as utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader
@@ -50,7 +50,7 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
-    init_logger()
+    init_logger(job_config.logging.log_level)
     logger.info(f"Starting job: {job_config.job.description}")
 
     # used for colorful printing
@@ -94,6 +94,7 @@ def main(job_config: JobConfig):
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
+        job_config.training.data_processing_style,
         tokenizer,
         job_config.training.batch_size,
         job_config.training.seq_len,
@@ -109,8 +110,7 @@ def main(job_config: JobConfig):
     # 2. vocab size from tokenizer
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = tokenizer.n_words
-    model_config.vocab_size = 50000
+    model_config.vocab_size = tokenizer.padded_n_words
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
@@ -125,7 +125,8 @@ def main(job_config: JobConfig):
         model.to_empty(device=init_device)
         model_name_to_weights_loading_fns[model_name](
             model, weights_path=job_config.checkpoint.load_folder,
-            source=job_config.checkpoint.weights_source
+            source=job_config.checkpoint.weights_source,
+            token_embedding_size=model_config.vocab_size
         )
 
     # a no-op hander if float8 is not enabled
@@ -236,6 +237,7 @@ def main(job_config: JobConfig):
     ) as torch_profiler, maybe_enable_memory_snapshot(
         job_config, global_step=train_state.step
     ) as memory_profiler:
+        logger.debug("Got into profiling context")
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             gc_handler.run(train_state.step)
@@ -243,6 +245,7 @@ def main(job_config: JobConfig):
             # get batch
             data_load_start = time.perf_counter()
             optimizers.zero_grad()
+            logger.debug("step")
 
             for _ in range(job_config.training.gradient_accumulation_steps):
                 batch = next(data_iterator)
@@ -253,6 +256,7 @@ def main(job_config: JobConfig):
                 data_loading_times.append(time.perf_counter() - data_load_start)
 
                 with train_context():
+                    logger.debug("enter context")
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
