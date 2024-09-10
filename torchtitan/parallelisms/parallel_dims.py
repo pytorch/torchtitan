@@ -30,20 +30,14 @@ class ParallelDims:
             self.tp,
             self.pp,
         )
-        assert (
-            dp_replicate >= -1 and dp_shard >= -1 and dp_replicate * dp_shard != 0
-        ), "dp_replicate and dp_shard must -1 or >=1."
-        assert (
-            dp_replicate != -1 or dp_shard != -1
-        ), "Only one of dp_replicate, dp_shard can be -1"
+        for d in (dp_replicate, tp, pp):
+            assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
+        assert dp_shard == -1 or dp_replicate >= 1, " dp_shard must -1 or >=1."
 
         dp = dp_replicate * dp_shard
         if dp < 0:
             dp = self.world_size // (tp * pp)
-            if dp_replicate == -1:
-                self.dp_replicate = dp_replicate = dp // dp_shard
-            if dp_shard == -1:
-                self.dp_shard = dp_shard = dp // dp_replicate
+            self.dp_shard = dp_shard = dp // dp_replicate
 
         assert dp_replicate >= 1
         assert dp_shard >= 1
