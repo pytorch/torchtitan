@@ -23,7 +23,8 @@ from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import (
     model_name_to_cls,
-    model_name_to_weights_loading_fns,
+    model_name_to_weights_download_fns,
+    model_name_to_weights_export_fns,
     model_name_to_tokenizer,
     models_config
 )
@@ -118,14 +119,14 @@ def main(job_config: JobConfig):
         model = model_cls.from_model_args(model_config)
 
     # load the model on rank 0 only, then FSDP will distribute the weights
-    if job_config.checkpoint.create_seed_checkpoint:
+    if job_config.model_download_export.to_titan:
         assert (
             world_size == 1
         ), "Must create seed-checkpoint using one gpu, to disable sharding"
         model.to_empty(device=init_device)
-        model_name_to_weights_loading_fns[model_name](
+        model_name_to_weights_download_fns[model_name](
             model, weights_path=job_config.checkpoint.load_folder,
-            source=job_config.checkpoint.weights_source,
+            source=job_config.model_download_export.weights_source,
             token_embedding_size=model_config.vocab_size
         )
 
@@ -157,7 +158,7 @@ def main(job_config: JobConfig):
     models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
-    if not job_config.checkpoint.create_seed_checkpoint:
+    if not job_config.model_download_export.to_titan:
         model.to_empty(device=init_device)
     model_parts = [model]
 
@@ -165,7 +166,7 @@ def main(job_config: JobConfig):
         # skip traced modules since we do not define init_weights in the traced module
         if isinstance(mod, GraphModule):
             continue
-        if not job_config.checkpoint.create_seed_checkpoint:
+        if not job_config.model_download_export.to_titan:
             mod.init_weights()
         mod.train()
 
@@ -192,15 +193,27 @@ def main(job_config: JobConfig):
         job_config=job_config,
     )
 
-    if job_config.checkpoint.create_seed_checkpoint:
+    if job_config.model_download_export.to_titan:
         assert (
             world_size == 1
         ), "Must create seed-checkpoint using one gpu, to disable sharding"
         checkpoint.save(curr_step=0, force=True)
-        logger.info("Created seed checkpoint")
+        logger.info("Created titan checkpoint")
         return
 
     checkpoint_loaded = checkpoint.load()
+
+    if job_config.model_download_export.to_hf:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        model_name_to_weights_export_fns[model_name](
+            model,
+            save_dir=os.path.join(job_config.job.dump_folder, job_config.checkpoint.save_folder),
+            token_embedding_size=model_config.vocab_size
+        )
+        logger.info("Created huggingface checkpoint")
+        return
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
     args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)

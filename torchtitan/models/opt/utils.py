@@ -44,7 +44,7 @@ def get_hf_opt_state_dict_keys_mapping(num_layers: int):
     return keys_mapping
 
 
-def load_opt_weights(model: OPT, weights_path: str, source: str, token_embedding_size: int):
+def download_opt_weights(model: OPT, weights_path: str, source: str, token_embedding_size: int):
     """
         write docs
     """
@@ -60,3 +60,26 @@ def load_opt_weights(model: OPT, weights_path: str, source: str, token_embedding
         model.load_state_dict(corrected_state_dict)
     else:
         raise NotImplemented
+
+
+def map_n_layers_to_model_name(n_layers):
+    return {
+        12: "facebook/galactica-125m",
+        24: "facebook/galactica-1.3b",
+    }[n_layers]
+
+
+def export_opt_weights(model: OPT, save_dir: str, token_embedding_size: int):
+    """
+        write docs
+    """
+    hf_model = OPTForCausalLM.from_pretrained(map_n_layers_to_model_name(model.n_layers))
+    hf_model.resize_token_embeddings(new_num_tokens=token_embedding_size)
+    keys_mapping = get_hf_opt_state_dict_keys_mapping(model.n_layers)
+    state_dict = model.state_dict()
+    corrected_state_dict = {}
+    for key, value in keys_mapping.items():
+        corrected_state_dict[value] = state_dict[key]
+    
+    hf_model.load_state_dict(corrected_state_dict)
+    hf_model.save_pretrained(save_dir)
