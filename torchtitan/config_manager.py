@@ -180,6 +180,9 @@ class JobConfig:
             "--optimizer.name", type=str, default="AdamW", help="Optimizer to use"
         )
         self.parser.add_argument(
+            "--optimizer.schedule", type=str, default="Linear", help="Optimization schedule to use"
+        )
+        self.parser.add_argument(
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
@@ -224,6 +227,19 @@ class JobConfig:
             type=int,
             default=200,
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
+        )
+        self.parser.add_argument(
+                "--training.decay_steps",
+                type=Optional[int],
+                default=None,
+                help="Steps for lr scheduler decay, default is decay starts immediately after warmup",
+        )
+        self.parser.add_argument(
+                "--training.decay_type",
+                type=str,
+                default="linear",
+                choices = ["linear","cosine"],
+                help="Steps for lr scheduler decay type, defaults to linear",
         )
         self.parser.add_argument(
             "--training.max_norm",

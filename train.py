@@ -230,6 +230,7 @@ def main(job_config: JobConfig):
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
         f"(warmup {job_config.training.warmup_steps})"
+        f"(decay {job_config.training.decay_steps})"
     )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
@@ -355,7 +356,8 @@ def main(job_config: JobConfig):
                     f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
-                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                    f"{color.magenta}mfu: {mfu:.2f}%  "
+                    f"{color.red}lr: {lr_schedulers.last_lr:.2f}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
