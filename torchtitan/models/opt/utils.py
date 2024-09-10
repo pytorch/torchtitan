@@ -44,12 +44,13 @@ def get_hf_opt_state_dict_keys_mapping(num_layers: int):
     return keys_mapping
 
 
-def load_opt_weights(model: OPT, weights_path: str, source: str):
+def load_opt_weights(model: OPT, weights_path: str, source: str, token_embedding_size: int):
     """
         write docs
     """
     if source == "huggingface":
         hf_model = OPTForCausalLM.from_pretrained(weights_path)
+        hf_model.resize_token_embeddings(new_num_tokens=token_embedding_size)
         keys_mapping = get_hf_opt_state_dict_keys_mapping(model.n_layers)
         hf_state_dict = hf_model.state_dict()
         corrected_state_dict = {}

@@ -472,7 +472,7 @@ class CheckpointManager:
         begin = time.monotonic()
         dcp.load(
             states,
-            checkpoint_id=self._create_checkpoint_id(step, self.load_folder),
+            checkpoint_id=self._create_checkpoint_id(step, self.load_folder)
         )
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."

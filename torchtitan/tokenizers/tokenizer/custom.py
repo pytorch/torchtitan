@@ -23,13 +23,16 @@ class CustomTokenizer:
 
         # Load a tokenizer
         self.model = AutoTokenizer.from_pretrained(tokenizer_path)
+        # the padding is done for efficiency reasons,
+        # when the token embedding size if a nice number (ege is divisible by to many times), the code runs more efficiently
+        self.pad_to_multiple_of = 8
 
         # Set config
         self.model.add_bos_token = False
         self.model.padding_side = "right"
 
         # BOS / EOS token IDs
-        self._n_words: int = self.model.vocab_size
+        self._n_words: int = len(self.model)
         self.bos_id: int = self.model.bos_token_id
         self.eos_id: int = self.model.eos_token_id
         self.pad_id: int = self.model.pad_token_id
@@ -72,3 +75,7 @@ class CustomTokenizer:
     @property
     def n_words(self) -> int:
         return self._n_words
+
+    @property
+    def padded_n_words(self):
+        return self._n_words + self.pad_to_multiple_of - self._n_words % self.pad_to_multiple_of

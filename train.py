@@ -110,8 +110,7 @@ def main(job_config: JobConfig):
     # 2. vocab size from tokenizer
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = tokenizer.n_words
-    model_config.vocab_size = 50072
+    model_config.vocab_size = tokenizer.padded_n_words
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
@@ -126,7 +125,8 @@ def main(job_config: JobConfig):
         model.to_empty(device=init_device)
         model_name_to_weights_loading_fns[model_name](
             model, weights_path=job_config.checkpoint.load_folder,
-            source=job_config.checkpoint.weights_source
+            source=job_config.checkpoint.weights_source,
+            token_embedding_size=model_config.vocab_size
         )
 
     # a no-op hander if float8 is not enabled
@@ -157,7 +157,8 @@ def main(job_config: JobConfig):
     models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
-    model.to_empty(device=init_device)
+    if not job_config.checkpoint.create_seed_checkpoint:
+        model.to_empty(device=init_device)
     model_parts = [model]
 
     for mod in model_parts:
