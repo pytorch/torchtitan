@@ -32,7 +32,7 @@ class ParallelDims:
         )
         for d in (dp_replicate, tp, pp):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-        assert dp_shard == -1 or dp_replicate >= 1, " dp_shard must -1 or >=1."
+        assert dp_shard == -1 or dp_shard >= 1, " dp_shard must -1 or >=1."
 
         dp = dp_replicate * dp_shard
         if dp < 0:

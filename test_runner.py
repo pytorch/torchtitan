@@ -286,7 +286,7 @@ def build_test_list():
             [
                 [
                     "--training.data_parallel_shard_degree=1",
-                    "--training.data_parallel_replicate_degree=-1",
+                    "--training.data_parallel_replicate_degree=4",
                 ]
             ],
             "DDP",
@@ -297,7 +297,7 @@ def build_test_list():
             [
                 [
                     "--training.data_parallel_shard_degree=2",
-                    "--training.data_parallel_replicate_degree=-1",
+                    "--training.data_parallel_replicate_degree=2",
                 ]
             ],
             "HSDP",
