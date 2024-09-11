@@ -127,7 +127,7 @@ def build_metric_logger(
     """
     dump_dir = job_config.job.dump_folder
     aim_config = job_config.metrics
-    save_aim_folder = aim_config.save_aim_folder
+    save_aim_folder = os.path.join(job_config.job.dump_folder, aim_config.save_aim_folder)
     # since we don't have run id, use current minute as the identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
     log_dir = os.path.join(dump_dir, datetime_str)
