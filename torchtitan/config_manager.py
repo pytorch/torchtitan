@@ -474,6 +474,30 @@ class JobConfig:
             """,
         )
 
+        # model download and export configs
+        self.parser.add_argument(
+            "--model_download_export.to_titan",
+            action="store_true",
+            help="""
+                Loads a model from external source and saves torchtitan compatable format.
+            """,
+        )
+        self.parser.add_argument(
+            "--model_download_export.weight_source",
+            type=str,
+            default="huggingface",
+            help="""
+                Loads a model from external source and saves torchtitan compatable format.
+            """,
+        )
+        self.parser.add_argument(
+            "--model_download_export.to_hf",
+            action="store_true",
+            help="""
+                Saves the model as a huggingface model.
+            """,
+        )
+
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
