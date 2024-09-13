@@ -360,7 +360,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.seed",
             type=int,
-            default=2024,
+            default=None,
             help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
         )
         # checkpointing configs

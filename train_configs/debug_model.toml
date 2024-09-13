@@ -30,7 +30,6 @@ name = "AdamW"
 lr = 8e-4
 
 [training]
-seed = 1  # use 1 avoid determinism
 batch_size = 8
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
