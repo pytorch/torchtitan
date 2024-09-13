@@ -255,8 +255,11 @@ def build_hf_data_loader(
     special_mode = None,
     context = "train",
 ):
-    store_identifier = f"rankstore_{context}_{dataset_name}"
-    data_completion_store = create_fresh_file_store(store_identifier,world_size)
+    if not infinite:
+        store_identifier = f"rankstore_{context}_{dataset_name}"
+        data_completion_store = create_fresh_file_store(store_identifier,world_size)
+    else:
+        data_completion_store = None
 
     hf_ds = HuggingFaceDataset(
         dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite, special_mode,store = data_completion_store
