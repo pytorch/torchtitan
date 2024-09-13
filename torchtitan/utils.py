@@ -15,6 +15,7 @@ import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
+from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 
 
@@ -34,6 +35,24 @@ def _warn_overwrite_env(env, val):
             f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
         )
     os.environ[env] = val
+
+
+def set_determinism(job_config: JobConfig) -> None:
+    """
+    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
+    Use 1 to avoid determinism
+    """
+    if job_config.training.seed == 1:
+        return
+    # CPU determinism
+    torch.manual_seed(job_config.training.seed)
+    # GPU determinism
+    torch.cuda.manual_seed_all(job_config.training.seed)
+    # set deterministic cudnn algorithms
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # set Python seed
+    os.environ["PYTHONHASHSEED"] = str(job_config.training.seed)
 
 
 def set_pg_timeouts(timeout, world_mesh):

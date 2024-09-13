@@ -56,6 +56,10 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    # set determinisism, use seed == 1 to skip random seed setting
+    utils.set_determinism(job_config)
+    logger.info(f"Using seed: {job_config.training.seed}")
+
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
