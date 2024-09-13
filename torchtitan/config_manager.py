@@ -613,6 +613,20 @@ class JobConfig:
             type=str,
             help="Set the log level, INFO by default"
         )
+        self.parser.add_argument(
+            "--dataloader.num_workers",
+            default = 0,
+            type=int,
+            help="""Set the number of dataloader workers PER RANK, default is 0. 1 is non-blocking.
+            More than 1 may lead to issues with data splitting / duplication"""
+        )
+        self.parser.add_argument(
+            "--dataloader.pin_memory",
+            default = False,
+            type=bool,
+            help= "Whether or not to pin dataloader memory"
+        )
+
 
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list

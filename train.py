@@ -101,6 +101,8 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
+        pin_memory = job_config.dataloader.pin_memory,
+        num_workers = job_config.dataloader.num_workers
     )
 
     # build model (using meta init)

@@ -188,7 +188,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
 
-    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
+    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int, pin_memory: bool, num_workers: int):
         super().__init__(hf_ds, batch_size)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
@@ -220,9 +220,11 @@ def build_hf_data_loader(
     world_size,
     rank,
     infinite: bool = True,
+    pin_memory: bool = False,
+    num_workers: int = 0
 ):
     hf_ds = HuggingFaceDataset(
         dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite
     )
 
-    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
+    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers)
