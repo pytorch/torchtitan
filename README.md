@@ -31,19 +31,19 @@ You may want to see how the model is defined or how parallelism techniques are a
 ### Key features available
 
 1. [FSDP2](docs/fsdp.md) with per param sharding
-2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including async TP)
+2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
 3. Selective layer and operator activation checkpointing
 4. Distributed checkpointing (including async checkpointing)
 5. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
 6. Loss, GPU memory, tokens-per-second, and MFU displayed and logged via [TensorBoard](#tensorboard)
 7. Learning rate scheduler, meta-init, optional Fused RMSNorm
-8. [Float8](docs/float8.md) support
+8. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
 9. `torch.compile` support
 10. DDP and HSDP
 11. All options easily configured via [toml files](train_configs/)
 12. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 
-We report our [Performance](docs/performance.md) verified on 64/128 GPUs
+We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
 
 
 ### Coming soon
