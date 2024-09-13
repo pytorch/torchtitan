@@ -102,7 +102,8 @@ def main(job_config: JobConfig):
         dp_degree,
         dp_rank,
         pin_memory = job_config.dataloader.pin_memory,
-        num_workers = job_config.dataloader.num_workers
+        num_workers = job_config.dataloader.num_workers,
+        special_mode = job_config.dataloader.special_mode,
     )
 
     # build model (using meta init)

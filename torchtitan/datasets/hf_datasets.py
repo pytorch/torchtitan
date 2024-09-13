@@ -87,6 +87,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         world_size: int = 1,
         rank: int = 0,
         infinite: bool = False,
+        special_mode = None,
     ) -> None:
         # allow user to pass in a (local or HF hub) path to use unsupported datasets
         if dataset_name not in _supported_datasets:
@@ -132,10 +133,19 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # random number generator
         self.rng = np.random.default_rng()
 
+        # debugging dataloader yielding
+        self.special_mode = str(special_mode)
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
         while True:
+            if self.special_mode == "yield_tensor":
+                logger.info("yielding tensor")
+                yield random_tensor, random_tensor
+                random_tensor = torch.randint(low=1, high=2, size=(self.seq_len,))
+                continue
+
             for sample_json in self._get_data_iter():
                 sample_text = self.data_processing_fn(sample_json, self.rng)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
@@ -221,10 +231,11 @@ def build_hf_data_loader(
     rank,
     infinite: bool = True,
     pin_memory: bool = False,
-    num_workers: int = 0
+    num_workers: int = 0,
+    special_mode = None,
 ):
     hf_ds = HuggingFaceDataset(
-        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite
+        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite, special_mode
     )
 
     return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers)

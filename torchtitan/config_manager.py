@@ -627,6 +627,15 @@ class JobConfig:
             help= "Whether or not to pin dataloader memory"
         )
 
+        self.parser.add_argument(
+            "--dataloader.special_mode",
+            default = None,
+            choices = ["yield_tensor"],
+            type=str,
+            help= "Enable a special dataloading mode, useful for debugging"
+        )
+
+
 
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list
