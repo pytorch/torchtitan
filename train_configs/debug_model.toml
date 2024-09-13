@@ -60,4 +60,4 @@ mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
-enable_float8_linear = true
+enable_float8_linear = false
