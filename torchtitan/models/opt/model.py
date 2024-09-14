@@ -307,8 +307,8 @@ class OPT(nn.Module):
         self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
+        self.output = lambda x: F.linear(x, self.tok_embeddings.weight)
 
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
     def init_weights(self):
@@ -323,24 +323,22 @@ class OPT(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
+        final_out_std = self.model_args.dim**-0.5
+        cutoff_factor = 3
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            nn.init.trunc_normal_(
+                self.tok_embeddings.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
         nn.init.normal_(self.pos_encoder.weight)
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
 
     def forward(self, tokens: torch.Tensor):
         """
@@ -364,8 +362,7 @@ class OPT(nn.Module):
             h = layer(h)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
-        return output
+        return self.output(h)
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
