@@ -1,12 +1,12 @@
 # torchtitan Config.toml
 
 [job]
-dump_folder = "./outputs"
-description = "Llama 3 debug training"
-use_for_integration_test = true
+dump_folder = "/nfs/dgx/raid/chem/titan_outputs"
+description = "Galactica training"
+use_for_integration_test = false
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -15,34 +15,34 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-# enable_aim = true
-# save_aim_folder = "aim"
-#aim_hash = "1d56ec7bed87438684a8da6b"
-#aim_experiment_name = "hello"
+enable_aim = false
+save_aim_folder = "aim"
 
 [model]
-name = "llama3"
-flavor = "debugmodel"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
+name = "opt"
+flavor = "1.3B"
+norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
+# tokenizer_path = "./test/assets/test_tiktoken.model"
 tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
-init_weights = true
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 1.0e-4
 
 [training]
-batch_size = 1
-gradient_accumulation_steps = 1
+batch_size = 20
+gradient_accumulation_steps = 3
 seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 30
+steps = 10000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = true
-dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+# dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
+# dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
 
 [experimental]
@@ -51,14 +51,18 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-save_folder = "checkpoint"
-load_folder = "checkpoint"
-create_seed_checkpoint = false
+load_folder = "facebook/galactica-1.3b"
+save_folder = "facebook/galactica-1.3b"
 interval_type = "steps"
-interval = 5
+interval = 1000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[model_download_export]
+to_titan = true
+weights_source = "huggingface"
+# to_hf = true
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']

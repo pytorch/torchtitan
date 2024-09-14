@@ -7,9 +7,12 @@
 # copied and adjusted from https://github.com/facebookresearch/llama/blob/main/llama/tokenizer.py
 
 from typing import List
+import os
 
 from torchtitan.logging import logger
 from transformers import AutoTokenizer
+
+os.environ["TOKENIZER_PARALLELISM"] = "true"
 
 
 class CustomTokenizer:

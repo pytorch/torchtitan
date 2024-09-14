@@ -19,13 +19,14 @@ def load_jsonl_line(jsonl_line):
 
 def chemlactica_style_data_processing(sample_json, rng):
     try:
+        sample_json = json.loads(sample_json["text"])
         compound = delete_empty_tags(sample_json)
         sample_json = generate_formatted_string(
             compound, rng
         )
     except Exception as e:
         print(e)
-        sample_json = {}
+        sample_json = ""
     return sample_json
 
 

@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = false
+enable_aim = true
 save_aim_folder = "aim"
 #aim_hash = "c6b4d8b340f74287b82ef928"
 #aim_experiment_name = "hello"
@@ -41,7 +41,8 @@ data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = false
 # dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
-dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+# dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
 
 [experimental]

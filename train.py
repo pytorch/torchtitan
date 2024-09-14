@@ -7,6 +7,7 @@
 import contextlib
 import os
 import time
+import logging
 from datetime import timedelta
 
 import torch
@@ -31,6 +32,9 @@ from torchtitan.models import (
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
+
+
+logging.getLogger('datasets.iterable_dataset').setLevel(20)
 
 
 def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
