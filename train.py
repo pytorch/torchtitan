@@ -361,6 +361,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_max_perplexity": global_max_perplexity,
                     "wps": wps,
                     "mfu(%)": mfu,
+                    "lr": lr_schedulers.last_lr,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -380,7 +381,7 @@ def main(job_config: JobConfig):
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%  "
-                    f"{color.red}lr: {lr_schedulers.last_lr:.2f}{color.reset}"
+                    f"{color.red}lr: {lr_schedulers.last_lr:.3e}{color.reset}"
                 )
 
                 losses_since_last_log.clear()
