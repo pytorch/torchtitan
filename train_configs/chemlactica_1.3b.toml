@@ -31,8 +31,8 @@ name = "AdamW"
 lr = 1.0e-4
 
 [training]
-batch_size = 20
-gradient_accumulation_steps = 6
+batch_size = 13
+gradient_accumulation_steps = 10
 seq_len = 2048
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
@@ -60,7 +60,7 @@ export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

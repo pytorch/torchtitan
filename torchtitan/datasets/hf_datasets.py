@@ -117,6 +117,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             ds = load_dataset(dataset_path, split="train")
         else:
             dataset_files = glob.glob(os.path.join(dataset_path, "*.jsonl"))
+            logger.info(dataset_files)
             ds = load_dataset("text", data_files=dataset_files, split="train", streaming=True)
 
         try:
@@ -197,7 +198,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     """
 
     def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
-        super().__init__(hf_ds, batch_size, num_workers=1)
+        super().__init__(hf_ds, batch_size, num_workers=2)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
 
