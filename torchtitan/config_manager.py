@@ -392,12 +392,20 @@ class JobConfig:
             help="Whether to enable checkpoint",
         )
         self.parser.add_argument(
-            "--checkpoint.folder",
+            "--checkpoint.load_folder",
             type=str,
-            default="checkpoint",
+            default="",
+            help="""
+                The folder to load the checkpoints.
+                When enable_checkpoint is set to true, checkpoints will loaded from {--job.dump_folder}/{--checkpoint.load_folder}.
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.save_folder",
+            type=str,
             help="""
                 The folder to store the checkpoints.
-                When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
+                When enable_checkpoint is set to true, checkpoints will saved to {--job.dump_folder}/{--checkpoint.save_folder}.
             """,
         )
         self.parser.add_argument(

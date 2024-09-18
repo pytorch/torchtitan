@@ -116,6 +116,12 @@ class MetricLogger:
         if self.writer is not None:
             self.writer.experiment['hparams'] = config
 
+    @property
+    def experiment_hash(self):
+        if self.writer is None:
+            return "default"
+        return self.writer._run.hash
+
 def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims
 ):
