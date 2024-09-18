@@ -34,9 +34,6 @@ from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
 
-logging.getLogger('datasets.iterable_dataset').setLevel(20)
-
-
 def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
     @contextlib.contextmanager
     def context():

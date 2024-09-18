@@ -32,7 +32,7 @@ name = "AdamW"
 lr = 1.4e-3
 
 [training]
-batch_size = 16
+batch_size = 20
 gradient_accumulation_steps = 8
 seq_len = 2048
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
