@@ -180,6 +180,9 @@ class JobConfig:
             "--optimizer.name", type=str, default="AdamW", help="Optimizer to use"
         )
         self.parser.add_argument(
+            "--optimizer.schedule", type=str, default="Linear", help="Optimization schedule to use"
+        )
+        self.parser.add_argument(
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
@@ -224,6 +227,19 @@ class JobConfig:
             type=int,
             default=200,
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
+        )
+        self.parser.add_argument(
+                "--training.decay_steps",
+                type=Optional[int],
+                default=None,
+                help="Steps for lr scheduler decay, default is decay starts immediately after warmup",
+        )
+        self.parser.add_argument(
+                "--training.decay_type",
+                type=str,
+                default="linear",
+                choices = ["linear","cosine"],
+                help="Steps for lr scheduler decay type, defaults to linear",
         )
         self.parser.add_argument(
             "--training.max_norm",
@@ -597,6 +613,29 @@ class JobConfig:
             type=str,
             help="Set the log level, INFO by default"
         )
+        self.parser.add_argument(
+            "--dataloader.num_workers",
+            default = 0,
+            type=int,
+            help="""Set the number of dataloader workers PER RANK, default is 0. 1 is non-blocking.
+            More than 1 may lead to issues with data splitting / duplication"""
+        )
+        self.parser.add_argument(
+            "--dataloader.pin_memory",
+            default = False,
+            type=bool,
+            help= "Whether or not to pin dataloader memory"
+        )
+
+        self.parser.add_argument(
+            "--dataloader.special_mode",
+            default = None,
+            choices = ["yield_tensor"],
+            type=str,
+            help= "Enable a special dataloading mode, useful for debugging"
+        )
+
+
 
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list

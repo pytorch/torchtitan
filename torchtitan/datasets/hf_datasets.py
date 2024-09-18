@@ -26,7 +26,7 @@ except ImportError as e:
 
 from torchtitan.tokenizers.tokenizer import Tokenizer
 from torchtitan.logging import logger
-from torchtitan.utils.dataset_utils import chemlactica_style_data_processing
+from torchtitan.utils.dataset_utils import chemlactica_style_data_processing,create_fresh_file_store
 
 from datasets import load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -91,6 +91,8 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         world_size: int = 1,
         rank: int = 0,
         infinite: bool = False,
+        special_mode = None,
+        store = None,
     ) -> None:
         # allow user to pass in a (local or HF hub) path to use unsupported datasets
         if dataset_name not in _supported_datasets:
@@ -131,6 +133,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
+        self.rank = rank
+        self.world_size = world_size
+
+        # for non sync communication between ranks
+        if not self.infinite and store:
+            self.store = store
+        else:
+            self.store = None
+    
 
         # variables for checkpointing
         self._sample_idx = 0
@@ -139,11 +150,28 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # random number generator
         self.rng = np.random.default_rng()
 
+        # debugging dataloader yielding
+        self.special_mode = str(special_mode)
+
+    def _some_rank_finished(self) -> bool:
+        if not self.infinite and self.store.num_keys() > 1: # one key used for coordination, more than one means one of the ranks exhausted data
+            return True
+        else:
+            return False
+
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
 
         while True:
+            if self.special_mode == "yield_tensor":
+                logger.info("yielding tensor")
+                yield random_tensor, random_tensor
+                random_tensor = torch.randint(low=1, high=2, size=(self.seq_len,))
+                continue
+
             for sample_json in self._get_data_iter():
+                if self._some_rank_finished():
+                    break
                 sample_text = self.data_processing_fn(sample_json, self.rng)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
@@ -158,7 +186,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     yield input, label
 
             if not self.infinite:
+                self.store.set(str(self.rank),"Done")
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                self.store.wait([str(k) for k in range(self.world_size)]) # making sure all ranks get to this point
                 break
             else:
                 # Reset offset for the next iteration
@@ -194,9 +224,8 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     """
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
-
-    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
-        super().__init__(hf_ds, batch_size, num_workers=2)
+    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int, pin_memory: bool, num_workers: int):
+        super().__init__(hf_ds, batch_size, num_workers)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
 
@@ -227,9 +256,19 @@ def build_hf_data_loader(
     world_size,
     rank,
     infinite: bool = True,
+    pin_memory: bool = False,
+    num_workers: int = 2,
+    special_mode = None,
+    context = "train",
 ):
+    if not infinite:
+        store_identifier = f"rankstore_{context}_{dataset_name}"
+        data_completion_store = create_fresh_file_store(store_identifier,world_size)
+    else:
+        data_completion_store = None
+
     hf_ds = HuggingFaceDataset(
-        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite
+        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite, special_mode,store = data_completion_store
     )
 
-    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
+    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers)
