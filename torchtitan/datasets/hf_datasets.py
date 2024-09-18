@@ -117,9 +117,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             ds = load_dataset(dataset_path, split="train")
         else:
             dataset_files = glob.glob(os.path.join(dataset_path, "*.jsonl"))
-            logger.info(dataset_files)
             ds = load_dataset("text", data_files=dataset_files, split="train", streaming=True)
-
         try:
             data_processing_fn = _supported_data_processing_styles[data_processing_style]
         except KeyError as e:
