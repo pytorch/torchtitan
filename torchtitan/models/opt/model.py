@@ -362,7 +362,8 @@ class OPT(nn.Module):
             h = layer(h)
 
         h = self.norm(h) if self.norm else h
-        return self.output(h)
+        output = self.output(h).float() if self.output else h
+        return output
 
     @classmethod
     def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
