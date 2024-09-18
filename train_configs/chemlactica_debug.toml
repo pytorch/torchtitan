@@ -46,6 +46,9 @@ dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M
 # dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
 
+[dataloader]
+num_workers = 1
+
 [experimental]
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
