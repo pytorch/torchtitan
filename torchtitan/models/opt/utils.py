@@ -73,7 +73,7 @@ def export_opt_weights(model: OPT, save_dir: str, token_embedding_size: int):
     """
         write docs
     """
-    hf_model = OPTForCausalLM.from_pretrained(map_n_layers_to_model_name(model.n_layers))
+    hf_model = OPTForCausalLM.from_pretrained(map_n_layers_to_model_name(model.n_layers), tie_word_embeddings=False)
     hf_model.resize_token_embeddings(new_num_tokens=token_embedding_size)
     keys_mapping = get_hf_opt_state_dict_keys_mapping(model.n_layers)
     state_dict = model.state_dict()

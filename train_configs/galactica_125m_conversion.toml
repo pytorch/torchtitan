@@ -51,9 +51,12 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-load_folder = "facebook/galactica-125m"
-save_folder = "facebook/galactica-125m"
-# save_folder = "hf/facebook/galactica-125m"
+# use for hf to titan
+# load_folder = "facebook/galactica-125m"
+# save_folder = "facebook/galactica-125m"
+# use for titan to hf
+load_folder = "yerevann/chemlactica-125m"
+save_folder = "hf/yerevann/chemlactica-125m"
 interval_type = "steps"
 interval = 5
 model_weights_only = false
@@ -61,9 +64,9 @@ export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [model_download_export]
-to_titan = true
-weights_source = "huggingface"
-# to_hf = true
+# to_titan = true
+# weights_source = "huggingface"
+to_hf = true
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']

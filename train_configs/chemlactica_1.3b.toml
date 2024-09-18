@@ -32,7 +32,7 @@ lr = 1.0e-4
 
 [training]
 batch_size = 13
-gradient_accumulation_steps = 10
+gradient_accumulation_steps = 9
 seq_len = 2048
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
