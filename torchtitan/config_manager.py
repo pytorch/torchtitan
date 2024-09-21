@@ -651,13 +651,13 @@ class JobConfig:
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict
-        args_dict = self._args_to_two_level_dict(args)
+        self.args_dict = self._args_to_two_level_dict(args)
         if config_file is not None:
             try:
                 with open(config_file, "rb") as f:
                     for k, v in tomllib.load(f).items():
                         # to prevent overwrite of non-specified keys
-                        args_dict[k] |= v
+                        self.args_dict[k] |= v
             except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
                 logger.exception(
                     f"Error while loading the configuration file: {config_file}"
@@ -669,9 +669,9 @@ class JobConfig:
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
         for section, section_args in cmd_args_dict.items():
             for k, v in section_args.items():
-                args_dict[section][k] = v
+                self.args_dict[section][k] = v
 
-        for k, v in args_dict.items():
+        for k, v in self.args_dict.items():
             class_type = type(k.title(), (), v)
             setattr(self, k, class_type())
         self._validate_config()

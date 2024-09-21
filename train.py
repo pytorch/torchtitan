@@ -188,9 +188,7 @@ def main(job_config: JobConfig):
     train_state = TrainState()
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
-    args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
-    job_config_dict = job_config._args_to_two_level_dict(args)
-    metric_logger.log_hparams(job_config_dict)
+    metric_logger.log_hparams(job_config.args_dict)
 
     # load initial checkpoint
     checkpoint = CheckpointManager(
