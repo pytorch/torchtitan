@@ -82,12 +82,14 @@ def delete_empty_tags(compound_json):
     return compound_json
 
 
-def generate_formatted_string(compound_json, rng):
+def generate_formatted_string(compound_json, rng, representation_type = "SMILES"):
     key_value_pairs = []
     key = "SMILES"
     value = compound_json.get(key, "")
-    value = encode(value)
-    print(value)
+    
+    if representation_type == "SAFE":
+        value = encode(value)
+
     if rng.integers(2) == 0:
         if value:
             key_value_pairs.append(format_key_value(key, value, rng))

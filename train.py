@@ -91,6 +91,7 @@ def main(job_config: JobConfig):
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
     # build dataloader
+    representation_type = job_config.training.representation_type
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -100,6 +101,7 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
+        representation_type
     )
 
     # build model (using meta init)
