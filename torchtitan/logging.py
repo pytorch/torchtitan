@@ -27,6 +27,9 @@ def init_logger(log_level):
     # suppress verbose torch.profiler logging
     os.environ["KINETO_LOG_LEVEL"] = "5"
 
+    # enable dataloading logging for logging the type of dataloading used
+    enable_dataloader_logging(log_level)
+
 
 class LogLevel(Enum):
     DEBUG = "DEBUG"
@@ -46,3 +49,6 @@ class LogLevel(Enum):
 def validate_log_level(value):
     return LogLevel.from_string(value)
 
+
+def enable_dataloader_logging(log_level):
+    logging.getLogger('datasets.iterable_dataset').setLevel(log_level)

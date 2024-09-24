@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = false
+enable_aim = true
 save_aim_folder = "aim"
 #aim_hash = "c6b4d8b340f74287b82ef928"
 #aim_experiment_name = "hello"
@@ -29,19 +29,21 @@ tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 1.4e-3
 
 [training]
-batch_size = 1
+batch_size = 20
+gradient_accumulation_steps = 8
 seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 50
+steps = 18000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
-compile = false
+compile = true
 # dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
-dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+# dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
 
 [experimental]
@@ -54,13 +56,13 @@ create_seed_checkpoint = false
 load_folder = "facebook/galactica-125m"
 save_folder = "yerevann/chemlactica-125m"
 interval_type = "steps"
-interval = 100
+interval = 2000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

@@ -24,10 +24,9 @@ class ModelArgs:
     n_heads: int = 12
     n_kv_heads: Optional[int] = None
     vocab_size: int = -1  # defined later by tokenizer
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    multiple_of: int = 256
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
-    rope_theta: float = 10000
     dropout_p: float = 0.1
 
     max_batch_size: int = 32
@@ -35,7 +34,7 @@ class ModelArgs:
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "layersnorm"
+    norm_type: str = "layernorm_bias"
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:

@@ -7,6 +7,7 @@
 import contextlib
 import os
 import time
+import logging
 from datetime import timedelta
 
 import torch
@@ -186,6 +187,9 @@ def main(job_config: JobConfig):
 
     train_state = TrainState()
 
+    metric_logger = build_metric_logger(job_config, parallel_dims)
+    metric_logger.log_hparams(job_config.args_dict)
+
     # load initial checkpoint
     checkpoint = CheckpointManager(
         dataloader=data_loader,
@@ -194,6 +198,7 @@ def main(job_config: JobConfig):
         lr_schedulers=lr_schedulers.schedulers,
         states={"train_state": train_state},
         job_config=job_config,
+        experiment_hash=metric_logger.experiment_hash
     )
 
     if job_config.model_download_export.to_titan:
@@ -217,11 +222,6 @@ def main(job_config: JobConfig):
         )
         logger.info("Created huggingface checkpoint")
         return
-
-    metric_logger = build_metric_logger(job_config, parallel_dims)
-    args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
-    job_config_dict = job_config._args_to_two_level_dict(args)
-    metric_logger.log_hparams(job_config_dict)
 
     data_iterator = iter(data_loader)
 
@@ -284,12 +284,14 @@ def main(job_config: JobConfig):
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
+                
+                for m in model_parts:
+                    torch.nn.utils.clip_grad_norm_(
+                        m.parameters(), job_config.training.max_norm, foreach=True
+                    )
+                    
             if force_finish_train:
                 break
-            for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
-                )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)

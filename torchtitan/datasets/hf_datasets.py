@@ -6,6 +6,9 @@
 
 import pickle
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+import glob
+import os
 
 import numpy as np
 
@@ -33,7 +36,8 @@ from datasets.distributed import split_dataset_by_node
 _supported_datasets = {
     "c4_test": "test/assets/c4_test",
     "c4": "allenai/c4",
-    "chemlactica_train_mini": "test/assets/chemlactica_train_mini"
+    "chemlactica_train_mini": "test/assets/chemlactica_train_mini",
+    "chemlactica_train": "/nfs/dgx/raid/chem/data/rdkit_computed_rel+form/train_rdkit_computed_rel+form"
 }
 
 _supported_data_processing_styles = {
@@ -111,13 +115,16 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             # c4 is huge, and requires both streaming and language selection
             # (we default to en)
             ds = load_dataset(dataset_path, name="en", split="train", streaming=True)
-        else:
+        elif dataset_name == "c4_test":
             ds = load_dataset(dataset_path, split="train")
-
+        else:
+            dataset_files = glob.glob(os.path.join(dataset_path, "*.jsonl"))
+            ds = load_dataset("text", data_files=dataset_files, split="train", streaming=True)
         try:
             data_processing_fn = _supported_data_processing_styles[data_processing_style]
         except KeyError as e:
             raise ValueError(f"Unsupported data processing style: {data_processing_style}")
+        # data_processing_fn = lambda x, e: str(x)
 
         # TODO: support shuffling and checkpointing
         self.dataset_name = dataset_name
@@ -217,9 +224,8 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     """
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
-
     def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int, pin_memory: bool, num_workers: int):
-        super().__init__(hf_ds, batch_size)
+        super().__init__(hf_ds, batch_size, num_workers=num_workers)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
 
@@ -251,7 +257,7 @@ def build_hf_data_loader(
     rank,
     infinite: bool = True,
     pin_memory: bool = False,
-    num_workers: int = 0,
+    num_workers: int = 2,
     special_mode = None,
     context = "train",
 ):

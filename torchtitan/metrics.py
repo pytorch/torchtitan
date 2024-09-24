@@ -116,6 +116,12 @@ class MetricLogger:
         if self.writer is not None:
             self.writer.experiment['hparams'] = config
 
+    @property
+    def experiment_hash(self):
+        if self.writer is None:
+            return "default"
+        return self.writer._run.hash
+
 def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims
 ):
@@ -127,7 +133,7 @@ def build_metric_logger(
     """
     dump_dir = job_config.job.dump_folder
     aim_config = job_config.metrics
-    save_aim_folder = aim_config.save_aim_folder
+    save_aim_folder = os.path.join(job_config.job.dump_folder, aim_config.save_aim_folder)
     # since we don't have run id, use current minute as the identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
     log_dir = os.path.join(dump_dir, datetime_str)

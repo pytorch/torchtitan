@@ -15,31 +15,35 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = true
-save_tb_folder = "tb"
+enable_aim = true
+save_aim_folder = "aim"
 
 [model]
 name = "opt"
 flavor = "1.3B"
-# norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
-norm_type = "rmsnorm"
+norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./test/assets/test_tiktoken.model"
+# tokenizer_path = "./test/assets/test_tiktoken.model"
+tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 1.0e-4
 
 [training]
-batch_size = 10
+batch_size = 13
+gradient_accumulation_steps = 9
 seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 50
+steps = 18000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
-compile = false
-dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
+compile = true
+# dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
+# dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+dataset = "chemlactica_train"
+data_process_style="chemlactica_style"
 
 [experimental]
 pipeline_parallel_degree = 1
@@ -47,17 +51,16 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-create_seed_checkpoint = false
 load_folder = "facebook/galactica-1.3b"
 save_folder = "yerevann/chemlactica-1.3b"
 interval_type = "steps"
-interval = 100
+interval = 2000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

@@ -15,35 +15,39 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = false
+enable_aim = true
 save_aim_folder = "aim"
 #aim_hash = "c6b4d8b340f74287b82ef928"
 #aim_experiment_name = "hello"
 
 [model]
 name = "opt"
-flavor = "125M"
+flavor = "debugmodel"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-# tokenizer_path = "./test/assets/test_tiktoken.model"
 tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 1.4e-3
 
 [training]
-batch_size = 8
+batch_size = 1
+gradient_accumulation_steps = 1
 seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 50
 data_parallel_degree = -1
 tensor_parallel_degree = 1
-compile = false
-# dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+compile = true
+# dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+# dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
+
+[dataloader]
+num_workers = 1
 
 [experimental]
 pipeline_parallel_degree = 1
@@ -51,25 +55,17 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-# use for hf to titan
+create_seed_checkpoint = false
 # load_folder = "facebook/galactica-125m"
-# save_folder = "facebook/galactica-125m"
-# use for titan to hf
-load_folder = "yerevann/chemlactica-125m"
-save_folder = "hf/yerevann/chemlactica-125m"
+save_folder = "yerevann/chemlactica-125m"
 interval_type = "steps"
-interval = 5
+interval = 2000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
-[model_download_export]
-# to_titan = true
-# weights_source = "huggingface"
-to_hf = true
-
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

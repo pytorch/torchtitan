@@ -171,6 +171,7 @@ class CheckpointManager:
         lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         states: Dict[str, Any],
         job_config: JobConfig,
+        experiment_hash: str,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
@@ -235,7 +236,7 @@ class CheckpointManager:
             for idx, lr_scheduler in enumerate(lr_schedulers):
                 self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
-        self.save_folder = os.path.join(job_config.job.dump_folder, ckpt_config.save_folder)
+        self.save_folder = os.path.join(job_config.job.dump_folder, os.path.join(ckpt_config.save_folder, experiment_hash))
         self.load_folder = os.path.join(job_config.job.dump_folder, ckpt_config.load_folder)
         self.interval_type = (
             IntervalType.SECONDS
