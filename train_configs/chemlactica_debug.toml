@@ -22,7 +22,7 @@ save_aim_folder = "aim"
 
 [model]
 name = "opt"
-flavor = "125M"
+flavor = "debugmodel"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
@@ -32,19 +32,22 @@ name = "AdamW"
 lr = 1.4e-3
 
 [training]
-batch_size = 20
-gradient_accumulation_steps = 8
+batch_size = 1
+gradient_accumulation_steps = 1
 seq_len = 2048
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 18000
+steps = 50
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = true
 # dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
-# dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
-dataset = "chemlactica_train"
+dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+# dataset = "chemlactica_train"
 data_process_style="chemlactica_style"
+
+[dataloader]
+num_workers = 1
 
 [experimental]
 pipeline_parallel_degree = 1
@@ -53,7 +56,7 @@ enable_async_tensor_parallel = false
 [checkpoint]
 enable_checkpoint = true
 create_seed_checkpoint = false
-load_folder = "facebook/galactica-125m"
+# load_folder = "facebook/galactica-125m"
 save_folder = "yerevann/chemlactica-125m"
 interval_type = "steps"
 interval = 2000

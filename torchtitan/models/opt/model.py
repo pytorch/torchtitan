@@ -24,10 +24,9 @@ class ModelArgs:
     n_heads: int = 12
     n_kv_heads: Optional[int] = None
     vocab_size: int = -1  # defined later by tokenizer
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    multiple_of: int = 256
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
-    rope_theta: float = 10000
     dropout_p: float = 0.1
 
     max_batch_size: int = 32
@@ -35,7 +34,7 @@ class ModelArgs:
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "layersnorm"
+    norm_type: str = "layernorm_bias"
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -307,8 +306,8 @@ class OPT(nn.Module):
         self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
+        self.output = lambda x: F.linear(x, self.tok_embeddings.weight)
 
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
     def init_weights(self):
@@ -323,24 +322,22 @@ class OPT(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
+        final_out_std = self.model_args.dim**-0.5
+        cutoff_factor = 3
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            nn.init.trunc_normal_(
+                self.tok_embeddings.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
         nn.init.normal_(self.pos_encoder.weight)
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
 
     def forward(self, tokens: torch.Tensor):
         """

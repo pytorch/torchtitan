@@ -7,6 +7,7 @@
 import contextlib
 import os
 import time
+import logging
 from datetime import timedelta
 
 import torch
@@ -23,7 +24,8 @@ from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
 from torchtitan.models import (
     model_name_to_cls,
-    model_name_to_weights_loading_fns,
+    model_name_to_weights_download_fns,
+    model_name_to_weights_export_fns,
     model_name_to_tokenizer,
     models_config
 )
@@ -101,7 +103,10 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
         dp_degree,
         dp_rank,
-        representation_type
+        representation_type,
+        pin_memory = job_config.dataloader.pin_memory,
+        num_workers = job_config.dataloader.num_workers,
+        special_mode = job_config.dataloader.special_mode,
     )
 
     # build model (using meta init)
@@ -112,8 +117,7 @@ def main(job_config: JobConfig):
     # 2. vocab size from tokenizer
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = tokenizer.n_words
-    model_config.vocab_size = 50072
+    model_config.vocab_size = tokenizer.padded_n_words
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
@@ -121,14 +125,15 @@ def main(job_config: JobConfig):
         model = model_cls.from_model_args(model_config)
 
     # load the model on rank 0 only, then FSDP will distribute the weights
-    if job_config.checkpoint.create_seed_checkpoint:
+    if job_config.model_download_export.to_titan:
         assert (
             world_size == 1
         ), "Must create seed-checkpoint using one gpu, to disable sharding"
         model.to_empty(device=init_device)
-        model_name_to_weights_loading_fns[model_name](
+        model_name_to_weights_download_fns[model_name](
             model, weights_path=job_config.checkpoint.load_folder,
-            source=job_config.checkpoint.weights_source
+            source=job_config.model_download_export.weights_source,
+            token_embedding_size=model_config.vocab_size
         )
 
     # a no-op hander if float8 is not enabled
@@ -159,14 +164,15 @@ def main(job_config: JobConfig):
     models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
-    model.to_empty(device=init_device)
+    if not job_config.model_download_export.to_titan:
+        model.to_empty(device=init_device)
     model_parts = [model]
 
     for mod in model_parts:
         # skip traced modules since we do not define init_weights in the traced module
         if isinstance(mod, GraphModule):
             continue
-        if not job_config.checkpoint.create_seed_checkpoint:
+        if not job_config.model_download_export.to_titan:
             mod.init_weights()
         mod.train()
 
@@ -183,6 +189,9 @@ def main(job_config: JobConfig):
 
     train_state = TrainState()
 
+    metric_logger = build_metric_logger(job_config, parallel_dims)
+    metric_logger.log_hparams(job_config.args_dict)
+
     # load initial checkpoint
     checkpoint = CheckpointManager(
         dataloader=data_loader,
@@ -191,22 +200,30 @@ def main(job_config: JobConfig):
         lr_schedulers=lr_schedulers.schedulers,
         states={"train_state": train_state},
         job_config=job_config,
+        experiment_hash=metric_logger.experiment_hash
     )
 
-    if job_config.checkpoint.create_seed_checkpoint:
+    if job_config.model_download_export.to_titan:
         assert (
             world_size == 1
         ), "Must create seed-checkpoint using one gpu, to disable sharding"
         checkpoint.save(curr_step=0, force=True)
-        logger.info("Created seed checkpoint")
+        logger.info("Created titan checkpoint")
         return
 
     checkpoint_loaded = checkpoint.load()
 
-    metric_logger = build_metric_logger(job_config, parallel_dims)
-    args, cmd_args = job_config.parse_args_from_command_line(job_config.args_list)
-    job_config_dict = job_config._args_to_two_level_dict(args)
-    metric_logger.log_hparams(job_config_dict)
+    if job_config.model_download_export.to_hf:
+        assert (
+            world_size == 1
+        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        model_name_to_weights_export_fns[model_name](
+            model,
+            save_dir=os.path.join(job_config.job.dump_folder, job_config.checkpoint.save_folder),
+            token_embedding_size=model_config.vocab_size
+        )
+        logger.info("Created huggingface checkpoint")
+        return
 
     data_iterator = iter(data_loader)
 
@@ -232,7 +249,9 @@ def main(job_config: JobConfig):
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
         f"(warmup {job_config.training.warmup_steps})"
+        f"(decay {job_config.training.decay_steps})"
     )
+    force_finish_train = False
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -249,7 +268,10 @@ def main(job_config: JobConfig):
             logger.debug("step")
 
             for _ in range(job_config.training.gradient_accumulation_steps):
-                batch = next(data_iterator)
+                batch = next(data_iterator,None)
+                if not batch:
+                    force_finish_train = True
+                    break
                 input_ids, labels = batch
                 ntokens_since_last_log += labels.numel()
                 input_ids = input_ids.cuda()
@@ -264,10 +286,14 @@ def main(job_config: JobConfig):
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
-            for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
-                )
+                
+                for m in model_parts:
+                    torch.nn.utils.clip_grad_norm_(
+                        m.parameters(), job_config.training.max_norm, foreach=True
+                    )
+                    
+            if force_finish_train:
+                break
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
@@ -339,6 +365,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_max_perplexity": global_max_perplexity,
                     "wps": wps,
                     "mfu(%)": mfu,
+                    "lr": lr_schedulers.last_lr,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -357,7 +384,8 @@ def main(job_config: JobConfig):
                     f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
-                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                    f"{color.magenta}mfu: {mfu:.2f}%  "
+                    f"{color.red}lr: {lr_schedulers.last_lr:.3e}{color.reset}"
                 )
 
                 losses_since_last_log.clear()

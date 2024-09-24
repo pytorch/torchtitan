@@ -15,29 +15,28 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = true
+enable_aim = false
 save_aim_folder = "aim"
-#aim_hash = "c6b4d8b340f74287b82ef928"
-#aim_experiment_name = "hello"
 
 [model]
 name = "opt"
-flavor = "125M"
+flavor = "1.3B"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
+# tokenizer_path = "./test/assets/test_tiktoken.model"
 tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"
-lr = 1.4e-3
+lr = 1.0e-4
 
 [training]
 batch_size = 20
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 3
 seq_len = 2048
 warmup_steps = 500  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 18000
+steps = 10000
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = true
@@ -52,17 +51,21 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-create_seed_checkpoint = false
-load_folder = "facebook/galactica-125m"
-save_folder = "yerevann/chemlactica-125m"
+load_folder = "facebook/galactica-1.3b"
+save_folder = "facebook/galactica-1.3b"
 interval_type = "steps"
-interval = 2000
+interval = 1000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
 
+[model_download_export]
+to_titan = true
+weights_source = "huggingface"
+# to_hf = true
+
 [activation_checkpoint]
-mode = 'none'  # ['none', 'selective', 'full']
+mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]

@@ -6,7 +6,7 @@ description = "Galactica training"
 use_for_integration_test = false
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_aim = true
+enable_aim = false
 save_aim_folder = "aim"
 #aim_hash = "c6b4d8b340f74287b82ef928"
 #aim_experiment_name = "hello"
@@ -25,7 +25,8 @@ name = "opt"
 flavor = "125M"
 norm_type = "layernorm_bias"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./test/assets/test_tiktoken.model"
+# tokenizer_path = "./test/assets/test_tiktoken.model"
+tokenizer_path = "./torchtitan/tokenizers/chemlactica-125m"
 
 [optimizer]
 name = "AdamW"
@@ -40,7 +41,9 @@ steps = 10
 data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = false
-dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+# dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+dataset = "chemlactica_train_mini"  # supported datasets: c4_test (2K), c4 (177M), chemlactica_train_mini (4K)
+data_process_style="chemlactica_style"
 
 [experimental]
 pipeline_parallel_degree = 1
@@ -48,15 +51,22 @@ enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = true
-create_seed_checkpoint = true
-load_folder = "facebook/galactica-125m"
-weights_source = "huggingface"
-save_folder = "facebook/galactica-125m"
+# use for hf to titan
+# load_folder = "facebook/galactica-125m"
+# save_folder = "facebook/galactica-125m"
+# use for titan to hf
+load_folder = "yerevann/chemlactica-125m"
+save_folder = "hf/yerevann/chemlactica-125m"
 interval_type = "steps"
 interval = 5
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "async_with_pinned_mem"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[model_download_export]
+# to_titan = true
+# weights_source = "huggingface"
+to_hf = true
 
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']

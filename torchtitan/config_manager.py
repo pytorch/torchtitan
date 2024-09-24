@@ -180,6 +180,9 @@ class JobConfig:
             "--optimizer.name", type=str, default="AdamW", help="Optimizer to use"
         )
         self.parser.add_argument(
+            "--optimizer.schedule", type=str, default="Linear", help="Optimization schedule to use"
+        )
+        self.parser.add_argument(
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
@@ -224,6 +227,19 @@ class JobConfig:
             type=int,
             default=200,
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
+        )
+        self.parser.add_argument(
+                "--training.decay_steps",
+                type=Optional[int],
+                default=None,
+                help="Steps for lr scheduler decay, default is decay starts immediately after warmup",
+        )
+        self.parser.add_argument(
+                "--training.decay_type",
+                type=str,
+                default="linear",
+                choices = ["linear","cosine"],
+                help="Steps for lr scheduler decay type, defaults to linear",
         )
         self.parser.add_argument(
             "--training.max_norm",
@@ -381,12 +397,20 @@ class JobConfig:
             help="Whether to enable checkpoint",
         )
         self.parser.add_argument(
-            "--checkpoint.folder",
+            "--checkpoint.load_folder",
             type=str,
-            default="checkpoint",
+            default="",
+            help="""
+                The folder to load the checkpoints.
+                When enable_checkpoint is set to true, checkpoints will loaded from {--job.dump_folder}/{--checkpoint.load_folder}.
+            """,
+        )
+        self.parser.add_argument(
+            "--checkpoint.save_folder",
+            type=str,
             help="""
                 The folder to store the checkpoints.
-                When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
+                When enable_checkpoint is set to true, checkpoints will saved to {--job.dump_folder}/{--checkpoint.save_folder}.
             """,
         )
         self.parser.add_argument(
@@ -460,6 +484,30 @@ class JobConfig:
             help="""
                 Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
                 0 is the default value.
+            """,
+        )
+
+        # model download and export configs
+        self.parser.add_argument(
+            "--model_download_export.to_titan",
+            action="store_true",
+            help="""
+                Loads a model from external source and saves torchtitan compatable format.
+            """,
+        )
+        self.parser.add_argument(
+            "--model_download_export.weight_source",
+            type=str,
+            default="huggingface",
+            help="""
+                Loads a model from external source and saves torchtitan compatable format.
+            """,
+        )
+        self.parser.add_argument(
+            "--model_download_export.to_hf",
+            action="store_true",
+            help="""
+                Saves the model as a huggingface model.
             """,
         )
 
@@ -578,6 +626,29 @@ class JobConfig:
             type=str,
             help="Set the log level, INFO by default"
         )
+        self.parser.add_argument(
+            "--dataloader.num_workers",
+            default = 0,
+            type=int,
+            help="""Set the number of dataloader workers PER RANK, default is 0. 1 is non-blocking.
+            More than 1 may lead to issues with data splitting / duplication"""
+        )
+        self.parser.add_argument(
+            "--dataloader.pin_memory",
+            default = False,
+            type=bool,
+            help= "Whether or not to pin dataloader memory"
+        )
+
+        self.parser.add_argument(
+            "--dataloader.special_mode",
+            default = None,
+            choices = ["yield_tensor"],
+            type=str,
+            help= "Enable a special dataloading mode, useful for debugging"
+        )
+
+
 
     def parse_args(self, args_list: list = sys.argv[1:]):
         self.args_list = args_list
@@ -585,13 +656,13 @@ class JobConfig:
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict
-        args_dict = self._args_to_two_level_dict(args)
+        self.args_dict = self._args_to_two_level_dict(args)
         if config_file is not None:
             try:
                 with open(config_file, "rb") as f:
                     for k, v in tomllib.load(f).items():
                         # to prevent overwrite of non-specified keys
-                        args_dict[k] |= v
+                        self.args_dict[k] |= v
             except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
                 logger.exception(
                     f"Error while loading the configuration file: {config_file}"
@@ -603,9 +674,9 @@ class JobConfig:
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
         for section, section_args in cmd_args_dict.items():
             for k, v in section_args.items():
-                args_dict[section][k] = v
+                self.args_dict[section][k] = v
 
-        for k, v in args_dict.items():
+        for k, v in self.args_dict.items():
             class_type = type(k.title(), (), v)
             setattr(self, k, class_type())
         self._validate_config()
