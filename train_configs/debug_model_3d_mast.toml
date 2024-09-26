@@ -1,72 +1,74 @@
 # torchtitan Config.toml
-# NOTE: this toml config is a preset for 64 A100 GPUs.
+# NOTE: this toml config is a preset for 128 H100 GPUs.
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 debug training"
-use_for_integration_test = true
+description = "Llama 3 70B training"
 
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 10
-enable_memory_snapshot = false
-save_memory_snapshot_folder = "memory_snapshot"
+profile_freq = 100
 
 [metrics]
-log_freq = 1
-enable_color_printing = true
+log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
-flavor = "debugmodel"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / compiled_rmsnorm / fused_rmsnorm
-# test tokenizer.model, for debug purpose only
-tokenizer_path = "./test/assets/test_tiktoken.model"
+flavor = "70B"
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 8e-5
 
 [training]
-batch_size = 8
-seq_len = 2048
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+batch_size = 4
+seq_len = 8192
+warmup_steps = 600  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 50
+steps = 3000
 data_parallel_degree = -1
-tensor_parallel_degree = 2
-enable_float8_linear = false
-compile = false
-dataset = "c4"  # supported datasets: c4_mini (45K), c4 (177M)
+tensor_parallel_degree = 8  # 8-way TP
+compile = true
+# compile = false
+dataset = "c4"
 
 [experimental]
-# Interleaved 1F1B (looped)
-pipeline_parallel_degree = 4
-pipeline_parallel_split_points="layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7"
-pipeline_parallel_schedule="interleaved_1f1b"
-
-# # 1F1B
-# pipeline_parallel_degree = 2
-# pipeline_parallel_split_points="layers.4"
-# pipeline_parallel_schedule="1f1b"
-
-# # Zero bubble (looped)
+# pipeline_parallel_degree = 1
+# for 70B
 # pipeline_parallel_degree = 4
-# pipeline_parallel_split_points="layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7"
-# pipeline_parallel_schedule="zb"
+# pipeline_parallel_split_points="layers.10,layers.20,layers.30,layers.40,layers.50,layers.60,layers.70"
+# pipeline_parallel_schedule="interleaved_1f1b"
+
+# for 405B
+# pipeline_parallel_degree = 4
+# pipeline_parallel_split_points="layers.16,layers.32,layers.48,layers.64,layers.80,layers.96,layers.112"
+# pipeline_parallel_degree = 8
+# pipeline_parallel_split_points="layers.8,layers.16,layers.24,layers.32,layers.40,layers.48,layers.56,layers.64,layers.72,layers.80,layers.88,layers.96,layers.104,layers.112,layers.120"
+pipeline_parallel_degree = 16
+pipeline_parallel_split_points="layers.4,layers.8,layers.12,layers.16,layers.20,layers.24,layers.28,layers.32,layers.36,layers.40,layers.44,layers.48,layers.52,layers.56,layers.60,layers.64,layers.68,layers.72,layers.76,layers.80,layers.84,layers.88,layers.92,layers.96,layers.100,layers.104,layers.108,layers.112,layers.116,layers.120,layers.124"
+# pipeline_parallel_degree = 32
+# pipeline_parallel_split_points="layers.2,layers.4,layers.6,layers.8,layers.10,layers.12,layers.14,layers.16,layers.18,layers.20,layers.22,layers.24,layers.26,layers.28,layers.30,layers.32,layers.34,layers.36,layers.38,layers.40,layers.42,layers.44,layers.46,layers.48,layers.50,layers.52,layers.54,layers.56,layers.58,layers.60,layers.62,layers.64,layers.66,layers.68,layers.70,layers.72,layers.74,layers.76,layers.78,layers.80,layers.82,layers.84,layers.86,layers.88,layers.90,layers.92,layers.94,layers.96,layers.98,layers.100,layers.102,layers.104,layers.106,layers.108,layers.110,layers.112,layers.114,layers.116,layers.118,layers.120,layers.122,layers.124,layers.126"
+# pipeline_parallel_schedule="interleaved_1f1b"
+# enable_async_tensor_parallel = true
 
 [checkpoint]
 enable_checkpoint = false
-folder = "/mnt/mffuse/outputs/hhuang/checkpoint"
+folder = "checkpoint"
 interval_type = "steps"
 interval = 500
 model_weights_only = false
 export_dtype = "float32"
-async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'none'  # ['none', 'selective', 'full']
-selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+mode = 'none' # ['none', 'selective', 'full']
+
+[float8]
+enable_float8_linear = true
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
