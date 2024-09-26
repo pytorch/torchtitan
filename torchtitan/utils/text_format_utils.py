@@ -1,6 +1,5 @@
 # Adapted from https://github.com/YerevaNN/ChemLactica/blob/main/chemlactica/utils/text_format_utils.py
 # All rights reserved
-from torchtitan.utils.safe import encode
 
 SPECIAL_TAGS = {
     "SMILES": {"start": "[START_SMILES]", "end": "[END_SMILES]"},
@@ -82,19 +81,14 @@ def delete_empty_tags(compound_json):
     return compound_json
 
 
-def generate_formatted_string(compound_json, rng, representation_type = "SMILES"):
+def generate_formatted_string(compound_json, rng):
     key_value_pairs = []
     key = "SMILES"
     value = compound_json.get(key, "")
-    
-    if representation_type == "SAFE":
-        value = encode(value)
-
     if rng.integers(2) == 0:
         if value:
             key_value_pairs.append(format_key_value(key, value, rng))
             del compound_json[key]
-
     keys = list(compound_json.keys())
     rng.shuffle(keys)
 
