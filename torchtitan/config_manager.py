@@ -270,6 +270,11 @@ class JobConfig:
             default=True,
             action="store_true",
             help="Whether to apply loss parallel when sequence parallel is enabled",
+        )        
+        self.parser.add_argument(
+            "--training.representation_type",
+            default="SMILES",
+            help="The representation type of the molecule for training the model.",
         )
         self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",

@@ -87,6 +87,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dataset_path: Optional[str],
         data_processing_style: str,
         tokenizer: Tokenizer,
+        representation_type: str = "SMILES",
         seq_len: int = 2048,
         world_size: int = 1,
         rank: int = 0,
@@ -135,6 +136,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self.infinite = infinite
         self.rank = rank
         self.world_size = world_size
+        self.representation_type = representation_type
 
         # for non sync communication between ranks
         if not self.infinite and store:
@@ -142,7 +144,6 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         else:
             self.store = None
     
-
         # variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: List[int] = []
@@ -172,7 +173,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             for sample_json in self._get_data_iter():
                 if self._some_rank_finished():
                     break
-                sample_text = self.data_processing_fn(sample_json, self.rng)
+                sample_text = self.data_processing_fn(sample_json, self.rng, self.representation_type)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
                 self._sample_idx += 1
@@ -255,6 +256,7 @@ def build_hf_data_loader(
     seq_len: int,
     world_size,
     rank,
+    representation_type,
     infinite: bool = True,
     pin_memory: bool = False,
     num_workers: int = 2,
@@ -268,7 +270,7 @@ def build_hf_data_loader(
         data_completion_store = None
 
     hf_ds = HuggingFaceDataset(
-        dataset_name, dataset_path, data_processing_style, tokenizer, seq_len, world_size, rank, infinite, special_mode,store = data_completion_store
+        dataset_name, dataset_path, data_processing_style, tokenizer, representation_type, seq_len, world_size, rank, infinite, special_mode,store = data_completion_store
     )
 
     return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers)
