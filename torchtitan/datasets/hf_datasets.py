@@ -87,6 +87,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dataset_path: Optional[str],
         data_processing_style: str,
         tokenizer: Tokenizer,
+        representation_type: str = "SMILES",
         seq_len: int = 2048,
         world_size: int = 1,
         rank: int = 0,
@@ -133,6 +134,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
+        self.representation_type = representation_type
         self.rank = rank
         self.world_size = world_size
 
@@ -142,7 +144,6 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         else:
             self.store = None
     
-
         # variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: List[int] = []
@@ -255,6 +256,7 @@ def build_hf_data_loader(
     seq_len: int,
     world_size,
     rank,
+    representation_type,
     infinite: bool = True,
     pin_memory: bool = False,
     num_workers: int = 2,
