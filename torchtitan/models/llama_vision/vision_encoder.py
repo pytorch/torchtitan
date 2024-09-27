@@ -7,17 +7,20 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from typing import List, Optional, Tuple
-from models.types import ModelArgs,
-from models.llama_vision.position_embeddings import TilePositionEmbedding, TokenPositionalEmbedding, TiledTokenPositionalEmbedding
-from torchtitan.modules.feed_forward import FeedForward
-from torchtitan.modules.attention import Attention
-from torchtitan.modules.norms import Fp32LayerNorm
+from torchtitan.models.llama_vision.position_embeddings import (
+    TiledTokenPositionalEmbedding,
+    TilePositionEmbedding,
+    TokenPositionalEmbedding,
+)
 from torchtitan.models.llama_vision.tanh_gate import TanhGate
+from torchtitan.models.types import ModelArgs
+from torchtitan.modules.attention import Attention
+from torchtitan.modules.feed_forward import FeedForward
+from torchtitan.modules.norms import Fp32LayerNorm
 
 
 class Conv2dModule(torch.nn.Module):
@@ -40,6 +43,7 @@ class Conv2dModule(torch.nn.Module):
         stride (default 1): Stride for convolution.
         bias (default False): Use bias in Conv2d.
     """
+
     def __init__(
         self,
         in_channels: int,
@@ -49,7 +53,9 @@ class Conv2dModule(torch.nn.Module):
         bias: Optional[bool] = False,
     ) -> None:
         super().__init__()
-        self._unfold = torch.nn.Unfold(kernel_size=(kernel_size, kernel_size), stride=stride)
+        self._unfold = torch.nn.Unfold(
+            kernel_size=(kernel_size, kernel_size), stride=stride
+        )
         self._linear = torch.nn.Linear(
             in_channels * kernel_size * kernel_size,
             out_channels,
@@ -107,7 +113,7 @@ class LearnableTransformerBlock(nn.Module):
     ):
         super().__init__()
         self.attn = Attention(model_args)
-        self.ln_attn = Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),
+        self.ln_attn = (Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),)
         self.mlp = FeedForward(
             dim=model_args.encoder_embed_dim,
             hidden_dim=4 * model_args.encoder_embed_dim,
@@ -116,7 +122,7 @@ class LearnableTransformerBlock(nn.Module):
             activation=model_args.activation,
             enable_w3=False,
         )
-        self.ln_mlp = Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),
+        self.ln_mlp = (Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),)
 
     def forward(
         self,
@@ -151,13 +157,15 @@ class CLSEmbedding(nn.Module):
         cls_emb = self.weight.broadcast_to(bsz_and_num_imgs, num_tiles, 1, emb_dim)
         return torch.cat([cls_emb, x], dim=2)
 
+
 class Vit(nn.Module):
     """
     Implementation of the ViT architecture (https://arxiv.org/abs/2010.11929),
     with support for tile-cropped images, outputting of hidden layers.
 
-    (credit for the documentation below:
-    `vision_transformer.py <https://github.com/pytorch/torchtune/blob/b4fea322189f16629264ee44826f2ac080e922ec/torchtune/modules/vision_transformer.py>`_).
+    (credit for the documentation below: `vision_transformer.py
+
+    <https://github.com/pytorch/torchtune/blob/b4fea322189f16629264ee44826f2ac080e922ec/torchtune/modules/vision_transformer.py>`_).
 
     ViT is a transformer architecture that takes in images and outputs N embedded tokens that
     represent this image. Each image is divided into **patches** by a convolution.
@@ -308,6 +316,7 @@ class Vit(nn.Module):
         ValueError: If `patch_size` is not greater than 0.
         ValueError: If `len(return_intermediate)` is greater than `num_layers`.
     """
+
     def __init__(
         self,
         model_args: ModelArgs,
@@ -315,7 +324,9 @@ class Vit(nn.Module):
         super().__init__()
         if model_args.patch_size <= 0:
             raise ValueError(f"kernel size of conv {model_args.patch_size} must be > 0")
-        if return_intermediate and (len(model_args.return_intermediate) > model_args.n_layers):
+        if return_intermediate and (
+            len(model_args.return_intermediate) > model_args.n_layers
+        ):
             raise ValueError(
                 f"len(return_intermediate) must be <= num_layers. Got {return_intermediate=} and {num_layers=}"
             )
@@ -333,10 +344,7 @@ class Vit(nn.Module):
         self.ln_post = Fp32LayerNorm(model_args.encoder_embed_dim)
         self.ln_pre = Fp32LayerNorm(model_args.encoder_embed_dim)
         self.transformer_layers = nn.ModuleList(
-            [
-                VitTransformerBlock(model_args)
-                for _ in range(model_args.n_layers)
-            ]
+            [VitTransformerBlock(model_args) for _ in range(model_args.n_layers)]
         )
 
         self.class_embedding = CLSEmbedding(model_args.encoder_embed_dim)
@@ -359,13 +367,15 @@ class Vit(nn.Module):
             self.pre_tile_pos_embed = None
             self.post_tile_pos_embed = None
             self.token_pos_embedding = TiledTokenPositionalEmbedding(
-                max_num_tiles=model_args.max_num_tiles, 
+                max_num_tiles=model_args.max_num_tiles,
                 emb_dim=model_args.encoder_embed_dim,
                 tile_size=model_args.tile_size,
                 patch_size=model_args.patch_size,
             )
 
-    def forward(self, images: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, images: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Processes images and returns the tokens and hidden states.
 
@@ -466,14 +476,14 @@ class LearnableProjection(nn.Module):
         self.transformer_layers = nn.ModuleList(
             [
                 VitTransformerBlock(
-                    model_args,
-                    sa_scale=TanhGate(),
-                    mlp_scale=TanhGate()
+                    model_args, sa_scale=TanhGate(), mlp_scale=TanhGate()
                 )
                 for _ in range(model_args.n_layers)
             ]
         )
-        self.output = nn.Linear(model_args.encoder_embed_dim * (num_hidden_inputs + 1), model_args.dim)
+        self.output = nn.Linear(
+            model_args.encoder_embed_dim * (num_hidden_inputs + 1), model_args.dim
+        )
         self.num_hidden = len(model_args.return_intermediates or [])
 
     def forward(
@@ -525,13 +535,12 @@ class VisionEncoder(nn.Module):
         self.vit = Vit(model_args)
         self.proj = LearnableProjection(model_args)
 
-
     def forward(
         self, images: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Args:
-            images (torch.Tensor): 
+            images (torch.Tensor):
                 Image tensor with shape [bsz x num_imgs x num_tiles x num_channels x width x height].
             aspect_ratio (Optional[torch.Tensor]): Tensor with shape [bsz x num_imgs x 2]. If all
                 images have a single tile, i.e. they were not tile-cropped, it should be None.
