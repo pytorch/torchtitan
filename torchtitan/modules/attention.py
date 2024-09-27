@@ -8,18 +8,11 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.types import ModelArgs
-from torchtitan.modules.attention_utils import (
-    apply_rotary_emb,
-    repeat_kv,
-    reshape_for_broadcast,
-)
+from torchtitan.modules.attention_utils import apply_rotary_emb, repeat_kv
 
 
 class Attention(nn.Module):

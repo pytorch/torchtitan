@@ -8,12 +8,9 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
-import torch.nn.functional as F
-from torch import nn
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

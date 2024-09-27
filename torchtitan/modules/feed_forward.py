@@ -8,10 +8,8 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
-import torch
 import torch.nn.functional as F
 from torch import nn
 

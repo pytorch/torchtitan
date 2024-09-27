@@ -9,10 +9,8 @@
 
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
-import torch
-import torch.nn.functional as F
 from torch import nn
 
 
