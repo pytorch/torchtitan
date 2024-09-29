@@ -14,7 +14,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
@@ -288,8 +288,11 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
+                    with contextlib.nullcontext() if parallel_dims.dp_shard_enabled else torch.autocast(
+                        "cuda", dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+                    ):
+                        pred = model(input_ids)
+                        loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred
