@@ -157,7 +157,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
-                    "--training.data_parallel_degree 1",
+                    "--training.data_parallel_shard_degree 1",
                 ],
             ],
             "PP 1D test 1f1b",
@@ -172,7 +172,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
-                    "--training.data_parallel_degree 1",
+                    "--training.data_parallel_shard_degree 1",
                 ],
             ],
             "PP 1D test gpipe",
@@ -187,7 +187,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1f1b",
-                    "--training.data_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
                 ],
             ],
             "PP+DP 1f1b 2D test",
@@ -201,7 +201,7 @@ def build_test_list():
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule gpipe",
-                    "--training.data_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
                 ],
             ],
             "PP+DP gpipe 2D test",
@@ -227,7 +227,7 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
-                    "--training.data_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
                 [
@@ -235,7 +235,7 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
-                    "--training.data_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
             ],
@@ -249,7 +249,7 @@ def build_test_list():
                 [
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_split_points layers.4",
-                    "--training.data_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                     "--float8.enable_float8_linear",
                     "--float8.enable_fsdp_float8_all_gather",
@@ -302,12 +302,36 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.data_parallel_type ddp",
+                    "--training.data_parallel_shard_degree=1",
+                    "--training.data_parallel_replicate_degree=4",
                 ]
             ],
             "DDP",
             "ddp",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "HSDP",
+            "hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--training.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
