@@ -289,7 +289,10 @@ def main(job_config: JobConfig):
                 # Non-PP forward / backward
                 with train_context():
                     with contextlib.nullcontext() if parallel_dims.dp_shard_enabled else torch.autocast(
-                        "cuda", dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+                        "cuda",
+                        dtype=TORCH_DTYPE_MAP[
+                            job_config.training.mixed_precision_param
+                        ],
                     ):
                         pred = model(input_ids)
                         loss = loss_fn(pred, labels)
