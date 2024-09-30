@@ -469,6 +469,7 @@ class CheckpointManager:
         dcp.load(
             states,
             checkpoint_id=self._create_checkpoint_id(step),
+            planner=dcp.DefaultLoadPlanner(allow_partial_load=True),
         )
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."

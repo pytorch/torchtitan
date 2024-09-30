@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.norms import build_norm
+from torchtitan.logging import logger
 
 
 @dataclass

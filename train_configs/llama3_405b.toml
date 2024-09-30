@@ -6,13 +6,13 @@ dump_folder = "./outputs"
 description = "Llama 3 405B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
@@ -26,11 +26,11 @@ name = "AdamW"
 lr = 8e-5
 
 [training]
-batch_size = 2
+batch_size = 16
 seq_len = 8192
-warmup_steps = 600  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 20  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
-steps = 3000
+steps = 100
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 8  # 8-way TP
@@ -38,8 +38,15 @@ compile = true
 dataset = "c4"
 
 [experimental]
-pipeline_parallel_degree = 1
 enable_async_tensor_parallel = true
+pipeline_parallel_degree = 16
+# pipeline_parallel_split_points=["layers.16","layers.32","layers.48","layers.64","layers.80","layers.96","layers.112"]
+# pipeline_parallel_split_points=["layers.8","layers.16","layers.24","layers.32","layers.40","layers.48","layers.56","layers.64","layers.72","layers.80","layers.88","layers.96","layers.104","layers.112","layers.120"]
+pipeline_parallel_split_points=["layers.4","layers.8","layers.12","layers.16","layers.20","layers.24","layers.28","layers.32","layers.36","layers.40","layers.44","layers.48","layers.52","layers.56","layers.60","layers.64","layers.68","layers.72","layers.76","layers.80","layers.84","layers.88","layers.92","layers.96","layers.100","layers.104","layers.108","layers.112","layers.116","layers.120","layers.124"]
+pipeline_parallel_schedule="zb"
+# pipeline_parallel_split_points=["layers.0","layers.9","layers.18","layers.27","layers.36","layers.45","layers.54","layers.63","layers.72","layers.81","layers.90","layers.99","layers.108","layers.117","output"]
+# pipeline_parallel_split_points=["layers.7","layers.15","layers.23","layers.31","layers.39","layers.47","layers.55","layers.63","layers.71","layers.79","layers.87","layers.95","layers.103","layers.111","layers.119"]
+# pipeline_parallel_split_points=["layers.3","layers.7","layers.11","layers.15","layers.19","layers.23","layers.27","layers.31","layers.35","layers.39","layers.43","layers.47","layers.51","layers.55","layers.59","layers.63","layers.67","layers.71","layers.75","layers.79","layers.83","layers.87","layers.91","layers.95","layers.99","layers.103","layers.107","layers.111","layers.115","layers.119","layers.123"]
 
 [checkpoint]
 enable_checkpoint = false
@@ -51,7 +58,7 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'full' # ['none', 'selective', 'full']
+mode = 'none' # ['none', 'selective', 'full']
 
 [float8]
 enable_float8_linear = true

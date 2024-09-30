@@ -271,13 +271,21 @@ def main(job_config: JobConfig):
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
                 with train_context():
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
+                    if job_config.experimental.pipeline_parallel_schedule == "zb_v":
+                        is_last_stage = pp_mesh.get_local_rank() == 0
+                        if pp_mesh.get_local_rank() == 0:
+                            losses = []
+                            pp_schedule.step(input_ids, target=labels, losses=losses)
+                        else:
+                            pp_schedule.step()
                     else:
-                        pp_schedule.step()
+                        if pp_mesh.get_local_rank() == 0:
+                            pp_schedule.step(input_ids)
+                        elif is_last_stage:
+                            losses = []
+                            pp_schedule.step(target=labels, losses=losses)
+                        else:
+                            pp_schedule.step()
 
                 # accumulate losses across pipeline microbatches
                 loss = (
