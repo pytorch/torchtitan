@@ -415,8 +415,8 @@ class Transformer(nn.Module):
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
             # Need to compute until at least the max token limit for generation
-            # (use 2x max sequence length to be safe)
-            self.model_args.max_seq_len * 2,
+            # Note: removed the 2x relaxing in CP enablement
+            self.model_args.max_seq_len,
             self.model_args.rope_theta,
         )
 

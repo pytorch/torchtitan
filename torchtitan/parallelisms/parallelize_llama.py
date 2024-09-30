@@ -11,6 +11,9 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
+
+from typing import Tuple
+
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed._composable.replicate import replicate
@@ -30,6 +33,14 @@ from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
 from torchtitan.parallelisms.utils import check_strided_sharding_enabled
+
+try:
+    from torch.distributed.tensor.experimental import context_parallel
+except ImportError:
+    print(
+        f"PyTorch version {torch.__version__} does not include the experimental "
+        "Context Parallel API. Please update to a newer version."
+    )
 
 
 def parallelize_llama(
@@ -72,12 +83,17 @@ def parallelize_llama(
             )
         apply_compile(model)
 
-    if parallel_dims.dp_enabled:
+    if parallel_dims.dp_enabled or parallel_dims.cp_enabled:
         if parallel_dims.dp_shard_enabled:
             if parallel_dims.dp_replicate_enabled:
                 dp_mesh = world_mesh["dp_replicate", "dp_shard"]
             else:
                 dp_mesh = world_mesh["dp"]
+
+            if parallel_dims.cp_enabled:
+                dp_dim_names = dp_mesh.mesh_dim_names
+                assert isinstance(dp_dim_names, Tuple)
+                dp_mesh = world_mesh[(*dp_dim_names, "cp")]._flatten()
 
             apply_fsdp(
                 model,
