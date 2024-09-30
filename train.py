@@ -59,12 +59,12 @@ def main(job_config: JobConfig):
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
-        dp=job_config.training.data_parallel_degree,
+        dp_shard=job_config.training.data_parallel_shard_degree,
+        dp_replicate=job_config.training.data_parallel_replicate_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
-        dp_type=job_config.training.data_parallel_type,
     )
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)

@@ -12,7 +12,6 @@ from typing import Callable, Union
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from .pipelining import PipelineStage
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
@@ -22,6 +21,8 @@ from torchtitan.parallelisms.pipelining_utils import (
     build_pipeline_schedule,
     stage_ids_this_rank,
 )
+
+from .pipelining import PipelineStage
 
 
 DeviceType = Union[int, str, torch.device]
@@ -105,9 +106,11 @@ def pipeline_llama_manual_split(
             model.norm = None
             model.output = None
 
-        # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can leave model on meta device longer and
-        # get rid of the input shape hardcoded here. For now, it should not be a big deal since we only materialize the
-        # layers of the model that map to this stage, not the whole model.
+        # Note: these tensors are only here as metadata hints, so pipelining runtime knows what size buffer to allocate.
+        # these tensors should be on meta device, adn the model should also.  It will be allocated on device after
+        # applying all other parallelisms.
+
+        # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can avoid specifying input/output shapes
         mp_dtype = _mixed_precision_dtype(job_config, parallel_dims)
         batch_size = job_config.training.batch_size
         local_seq_len = int(job_config.training.seq_len // parallel_dims.tp)
@@ -118,18 +121,16 @@ def pipeline_llama_manual_split(
             model_config.vocab_size,
         )
         if is_first:
-            (input,) = _llama_trace_input(job_config, model_config, device=device)
+            (input,) = _llama_trace_input(job_config, model_config, device="meta")
         else:
             # later layers (assume all start w/ a transformer layer)
-            input = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
+            input = torch.rand(layers_io_shape, dtype=mp_dtype, device="meta")
 
         if is_last:
-            output = torch.rand(output_layer_shape, dtype=torch.float32, device=device)
+            output = torch.rand(output_layer_shape, dtype=torch.float32, device="meta")
         else:
             # earlier layers (assume all end in a transformer layer)
-            output = torch.rand(layers_io_shape, dtype=mp_dtype, device=device)
-
-        model.to_empty(device=device)
+            output = torch.rand(layers_io_shape, dtype=mp_dtype, device="meta")
         stage = PipelineStage(
             model,
             stage_idx,

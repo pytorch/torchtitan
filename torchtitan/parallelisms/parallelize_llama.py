@@ -73,9 +73,11 @@ def parallelize_llama(
         apply_compile(model)
 
     if parallel_dims.dp_enabled:
-        if parallel_dims.dp_type == "fsdp":
-            dp_mesh = world_mesh["dp"] if world_mesh.ndim > 1 else world_mesh
-            assert dp_mesh.mesh_dim_names == ("dp",), dp_mesh.mesh_dim_names
+        if parallel_dims.dp_shard_enabled:
+            if parallel_dims.dp_replicate_enabled:
+                dp_mesh = world_mesh["dp_replicate", "dp_shard"]
+            else:
+                dp_mesh = world_mesh["dp"]
 
             apply_fsdp(
                 model,
@@ -87,6 +89,10 @@ def parallelize_llama(
                 tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
             )
+            if parallel_dims.dp_replicate_enabled:
+                logger.info("Applied HSDP to the model")
+            else:
+                logger.info("Applied FSDP to the model")
         else:
             if world_mesh.ndim > 1:
                 raise RuntimeError("DDP has not supported > 1D parallelism")
@@ -321,8 +327,6 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
-
-    logger.info("Applied FSDP to the model")
 
 
 def apply_ddp(
