@@ -8,11 +8,10 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+from typing import Tuple
 
 import torch
 import torch.nn as nn
-
-from typing import Tuple
 
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
@@ -33,14 +32,6 @@ from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
 from torchtitan.parallelisms.utils import check_strided_sharding_enabled
-
-try:
-    from torch.distributed.tensor.experimental import context_parallel
-except ImportError:
-    print(
-        f"PyTorch version {torch.__version__} does not include the experimental "
-        "Context Parallel API. Please update to a newer version."
-    )
 
 
 def parallelize_llama(
