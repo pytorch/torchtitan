@@ -8,10 +8,12 @@ description = "Llama 3 8B training"
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 10
+enable_memory_snapshot = true
+save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 10
+log_freq = 1
 enable_tensorboard = true
 save_tb_folder = "tb"
 
@@ -26,19 +28,21 @@ name = "AdamW"
 lr = 3e-4
 
 [training]
-batch_size = 1
-seq_len = 8192
-warmup_steps = 200  # lr scheduler warm up
+batch_size = 8
+seq_len = 1024
+warmup_steps = 10  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 1000
-data_parallel_replicate_degree = 1
-data_parallel_shard_degree = -1
+steps = 50
+data_parallel_degree = -1
 tensor_parallel_degree = 1
 compile = false
 dataset = "c4"
 
 [experimental]
-pipeline_parallel_degree = 1
+pipeline_parallel_degree = 8
+pipeline_parallel_schedule="interleaved_1f1b"
+# pipeline_parallel_schedule="zb"
+pipeline_parallel_split_points=["layers.2","layers.4","layers.6","layers.8","layers.10","layers.12","layers.14","layers.16","layers.18","layers.20","layers.22","layers.24","layers.26","layers.28","layers.30"]
 
 [checkpoint]
 enable_checkpoint = false
@@ -50,8 +54,8 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
-selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+mode = 'full'  # ['none', 'selective', 'full']
+# selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
 enable_float8_linear = false
