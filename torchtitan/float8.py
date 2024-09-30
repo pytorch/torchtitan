@@ -49,8 +49,7 @@ class Float8Handler:
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
-            parallel_dims.dp_enabled
-            and parallel_dims.dp_type == "fsdp"
+            parallel_dims.dp_shard_enabled
             and float8_config.enable_fsdp_float8_all_gather
         )
         scaling_type_input = ScalingType(float8_config.scaling_type_input)
