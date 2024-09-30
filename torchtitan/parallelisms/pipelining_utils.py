@@ -11,6 +11,10 @@ from torch.distributed.pipelining import (
     ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.logging import logger
 
 
@@ -40,6 +44,18 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     n_microbatches = job_config.experimental.pipeline_parallel_microbatches
     if n_microbatches is None:
         n_microbatches = job_config.experimental.pipeline_parallel_degree
+
+    # Validation that the stages are compatible with the schedule
+    if isinstance(schedule_class, PipelineScheduleSingle):
+        if len(stages) != 1:
+            raise ValueError(
+                f"PipelineScheduleSingle requires exactly one stage, got {len(stages)}"
+            )
+    elif isinstance(schedule_class, PipelineScheduleMulti):
+        if len(stages) < 2:
+            raise ValueError(
+                f"PipelineScheduleMulti requires at least two stages, got {len(stages)}"
+            )
 
     return schedule_class(
         stages if looped_schedule else stages[0],
