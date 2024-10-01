@@ -41,10 +41,8 @@ def set_determinism(seed: Optional[int]) -> None:
     Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
     """
     if seed is not None:
-        # CPU determinism
+        # CPU and GPU determinism
         torch.manual_seed(seed)
-        # GPU determinism
-        torch.cuda.manual_seed_all(seed)
         # set deterministic cudnn algorithms
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
