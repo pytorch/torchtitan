@@ -6,34 +6,21 @@
 from typing import Tuple
 
 from torch.distributed.pipelining import (
-    Schedule1F1B,
     ScheduleFlexibleInterleaved1F1B,
-    ScheduleGPipe,
     ScheduleInterleaved1F1B,
 )
+from torch.distributed.pipelining.schedules import get_schedule_class
 from torchtitan.logging import logger
 
 
 def build_pipeline_schedule(job_config, stages, loss_fn):
     looped_schedule = False
 
-    if job_config.experimental.pipeline_parallel_schedule == "1f1b":
-        schedule_class = Schedule1F1B
-    elif job_config.experimental.pipeline_parallel_schedule == "gpipe":
-        schedule_class = ScheduleGPipe
-    elif job_config.experimental.pipeline_parallel_schedule == "interleaved_1f1b":
-        schedule_class = ScheduleInterleaved1F1B
-        looped_schedule = True
-    elif (
+    schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
-        == "flexible_interleaved_1f1b"
-    ):
-        schedule_class = ScheduleFlexibleInterleaved1F1B
+    )
+    if schedule_class in [ScheduleInterleaved1F1B, ScheduleFlexibleInterleaved1F1B]:
         looped_schedule = True
-    else:
-        raise NotImplementedError(
-            f"{job_config.experimental.pipeline_parallel_schedule} is not implemented"
-        )
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
     )
