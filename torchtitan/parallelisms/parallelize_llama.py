@@ -74,41 +74,40 @@ def parallelize_llama(
             )
         apply_compile(model)
 
-    if parallel_dims.dp_enabled or parallel_dims.cp_enabled:
-        if parallel_dims.dp_shard_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mesh = world_mesh["dp_replicate", "dp_shard"]
-            else:
-                dp_mesh = world_mesh["dp"]
-
-            if parallel_dims.cp_enabled:
-                dp_dim_names = dp_mesh.mesh_dim_names
-                assert isinstance(dp_dim_names, Tuple)
-                dp_mesh = world_mesh[(*dp_dim_names, "cp")]._flatten()
-
-            apply_fsdp(
-                model,
-                dp_mesh,
-                param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-                reduce_dtype=TORCH_DTYPE_MAP[
-                    job_config.training.mixed_precision_reduce
-                ],
-                tp_enabled=parallel_dims.tp_enabled,
-                pp_enabled=parallel_dims.pp_enabled,
-            )
-            if parallel_dims.dp_replicate_enabled:
-                logger.info("Applied HSDP to the model")
-            else:
-                logger.info("Applied FSDP to the model")
+    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh = world_mesh["dp_replicate", "dp_shard"]
         else:
-            if world_mesh.ndim > 1:
-                raise RuntimeError("DDP has not supported > 1D parallelism")
-            apply_ddp(
-                model,
-                world_mesh,
-                enable_compile=job_config.training.compile,
-                enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
-            )
+            dp_mesh = world_mesh["dp"]
+
+        if parallel_dims.cp_enabled:
+            dp_dim_names = dp_mesh.mesh_dim_names
+            assert isinstance(dp_dim_names, Tuple)
+            dp_mesh = world_mesh[(*dp_dim_names, "cp")]._flatten()
+
+        apply_fsdp(
+            model,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[
+                job_config.training.mixed_precision_reduce
+            ],
+            tp_enabled=parallel_dims.tp_enabled,
+            pp_enabled=parallel_dims.pp_enabled,
+        )
+        if parallel_dims.dp_replicate_enabled:
+            logger.info("Applied HSDP to the model")
+        else:
+            logger.info("Applied FSDP to the model")
+    elif parallel_dims.dp_replicate_enabled:
+        if world_mesh.ndim > 1:
+            raise RuntimeError("DDP has not supported > 1D parallelism")
+        apply_ddp(
+            model,
+            world_mesh,
+            enable_compile=job_config.training.compile,
+            enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
+        )
 
 
 def apply_tp(
