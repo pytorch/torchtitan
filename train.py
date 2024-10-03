@@ -16,6 +16,7 @@ from functools import partial
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -66,6 +67,11 @@ def get_train_context(
                 )
 
             if cp_mesh is not None:
+                # currently we only support these two SDP backends.
+                # TODO (xilunwu): support cuDNN backend
+                stack.enter_context(
+                    sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
+                )
                 stack.enter_context(
                     context_parallel_ctx(
                         buffers=cp_buffers,
