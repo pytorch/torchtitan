@@ -26,6 +26,7 @@ name = "AdamW"
 lr = 3e-4
 
 [training]
+seed=2020
 batch_size = 1
 seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up

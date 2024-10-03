@@ -386,6 +386,12 @@ class JobConfig:
             help="Checkpointing interval, in steps or seconds depending on --checkpoint.interval_type",
         )
         self.parser.add_argument(
+            "--training.seed",
+            type=int,
+            default=None,
+            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+        )
+        self.parser.add_argument(
             "--checkpoint.model_weights_only",
             action="store_true",
             help="""

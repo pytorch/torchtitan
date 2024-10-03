@@ -9,7 +9,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -81,6 +81,25 @@ TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
 ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
 SKIP_CLEANUP = "3"
+
+
+def set_determinism(seed: Optional[int]) -> None:
+    """
+    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
+    """
+    if seed is not None:
+        # CPU and GPU determinism
+        torch.manual_seed(seed)
+        # set deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        # set Python seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    else:
+        # ensure we turn off deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def init_distributed(job_config):
