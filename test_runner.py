@@ -319,6 +319,29 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.data_parallel_shard_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP",
+            "hsdp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--memory_estimation.enabled",
                 ]
             ],

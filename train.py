@@ -10,7 +10,13 @@ import time
 from datetime import timedelta
 
 import torch
+
+from typing import List, Optional, Set
+from functools import partial
+
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -28,17 +34,52 @@ from torchtitan.parallelisms import (
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 
+try:
+    from torch.distributed.tensor.experimental import context_parallel
+except ImportError:
+    print(
+        f"PyTorch version {torch.__version__} does not include the experimental "
+        "Context Parallel API. Please update to a newer version."
+    )
 
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+
+def get_train_context(
+    enable_loss_parallel: bool,
+    enable_compiled_autograd: bool,
+    cp_mesh: Optional[DeviceMesh] = None,
+):
+    if cp_mesh is not None:
+        context_parallel_ctx = partial(context_parallel, mesh=cp_mesh)
+
     @contextlib.contextmanager
-    def context():
+    def context(
+        cp_buffers: List[torch.Tensor],
+        cp_seq_dims: List[int],
+        cp_no_restore_buffers: Set[torch.Tensor],
+    ):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+
             if enable_compiled_autograd:
                 stack.enter_context(
                     torch._dynamo.utils.maybe_enable_compiled_autograd(True)
                 )
+
+            if cp_mesh is not None:
+                # currently we only support these two SDP backends.
+                # TODO (xilunwu): support cuDNN backend
+                stack.enter_context(
+                    sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
+                )
+                stack.enter_context(
+                    context_parallel_ctx(
+                        buffers=cp_buffers,
+                        buffer_seq_dims=cp_seq_dims,
+                        no_restore_buffers=cp_no_restore_buffers,
+                    )
+                )
+
             yield
 
     return context
@@ -61,6 +102,7 @@ def main(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp_shard=job_config.training.data_parallel_shard_degree,
         dp_replicate=job_config.training.data_parallel_replicate_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
@@ -226,6 +268,7 @@ def main(job_config: JobConfig):
     train_context = get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
+        world_mesh["cp"] if parallel_dims.cp_enabled else None,
     )
 
     # variables used to keep info for metrics logging
@@ -259,18 +302,24 @@ def main(job_config: JobConfig):
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
             input_ids, labels = batch
-            ntokens_since_last_log += labels.numel()
+            ntokens_since_last_log += labels.numel() // parallel_dims.cp
             data_loading_times.append(time.perf_counter() - data_load_start)
 
             input_ids = input_ids.cuda()
             labels = labels.cuda()
             optimizers.zero_grad()
 
+            training_context = train_context(
+                cp_buffers=[input_ids, labels, model.freqs_cis],
+                cp_seq_dims=[1, 1, 0],
+                cp_no_restore_buffers={input_ids, labels},
+            )
+
             if parallel_dims.pp_enabled:
                 # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context():
+                with training_context:
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -287,7 +336,7 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with train_context():
+                with training_context:
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)

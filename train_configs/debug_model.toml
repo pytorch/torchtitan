@@ -42,6 +42,7 @@ compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
 [experimental]
+context_parallel_degree = 1
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
 
