@@ -77,13 +77,18 @@ def parallelize_llama(
     if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
         if parallel_dims.dp_replicate_enabled:
             dp_mesh = world_mesh["dp_replicate", "dp_shard"]
-        else:
+        elif parallel_dims.dp_shard_enabled:
             dp_mesh = world_mesh["dp"]
+        else:
+            dp_mesh = None
 
         if parallel_dims.cp_enabled:
-            dp_dim_names = dp_mesh.mesh_dim_names
-            assert isinstance(dp_dim_names, Tuple)
-            dp_mesh = world_mesh[(*dp_dim_names, "cp")]._flatten()
+            if dp_mesh is None:
+                dp_mesh = world_mesh["cp"]
+            else:
+                dp_dim_names = dp_mesh.mesh_dim_names
+                assert isinstance(dp_dim_names, Tuple)
+                dp_mesh = world_mesh[(*dp_dim_names, "cp")]._flatten()
 
         apply_fsdp(
             model,
