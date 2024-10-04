@@ -333,8 +333,8 @@ class JobConfig:
             choices=["bfloat16", "float32"],
             help="""
                 torch dtype to use for parameters when applying mixed precision.
-                When data_parallel_degree > 1, this changes FSDP's `param_dtype`.
-                When data_parallel_degree == 1, this enables AMP autocast.
+                When data_parallel_shard_degree > 1, this changes FSDP's `param_dtype`.
+                When data_parallel_shard_degree == 1, this enables AMP autocast.
             """,
         )
         self.parser.add_argument(
