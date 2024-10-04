@@ -11,16 +11,15 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
-from torchtitan.models.llama_vision.position_embeddings import (
+from torchtitan.models.llama_multimodal.attention import Attention
+from torchtitan.models.llama_multimodal.feed_forward import FeedForward
+from torchtitan.models.llama_multimodal.norms import Fp32LayerNorm
+from torchtitan.models.llama_multimodal.position_embeddings import (
     TiledTokenPositionalEmbedding,
     TilePositionEmbedding,
     TokenPositionalEmbedding,
 )
-from torchtitan.models.llama_vision.tanh_gate import TanhGate
-from torchtitan.models.types import ModelArgs
-from torchtitan.modules.attention import Attention
-from torchtitan.modules.feed_forward import FeedForward
-from torchtitan.modules.norms import Fp32LayerNorm
+from torchtitan.models.llama_multimodal.tanh_gate import TanhGate
 
 
 class Conv2dModule(torch.nn.Module):
@@ -50,7 +49,7 @@ class Conv2dModule(torch.nn.Module):
         out_channels: int,
         kernel_size: int,
         stride: int,
-        bias: Optional[bool] = False,
+        bias: bool = False,
     ) -> None:
         super().__init__()
         self._unfold = torch.nn.Unfold(
@@ -103,36 +102,6 @@ class VitTransformerBlock(nn.Module):
         x = x.view(bsz * seq_len, emd_dim)
         x = x + self.attn_scale(self.attn(x=self.ln_attn(x), freqs_cis=None))
         x = x + self.mlp_scale(self.mlp(self.ln_mlp(x)))
-        return x.view(bsz, seq_len, emd_dim)
-
-
-class LearnableTransformerBlock(nn.Module):
-    def __init__(
-        self,
-        model_args: ModelArgs,
-    ):
-        super().__init__()
-        self.attn = Attention(model_args)
-        self.ln_attn = (Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),)
-        self.mlp = FeedForward(
-            dim=model_args.encoder_embed_dim,
-            hidden_dim=4 * model_args.encoder_embed_dim,
-            multiple_of=model_args.multiple_of,
-            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-            activation=model_args.activation,
-            enable_w3=False,
-        )
-        self.ln_mlp = (Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5),)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ):
-        bsz, seq_len, emd_dim = x.shape
-        x = x.view(bsz * seq_len, emd_dim)
-        x = x + self.attn(x=self.ln_attn(x), freqs_cis=None)
-        x = x + self.mlp(self.ln_mlp(x))
         return x.view(bsz, seq_len, emd_dim)
 
 

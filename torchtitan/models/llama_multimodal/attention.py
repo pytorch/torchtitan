@@ -11,8 +11,11 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.types import ModelArgs
-from torchtitan.modules.attention_utils import apply_rotary_emb, repeat_kv
+from torchtitan.models.llama_multimodal.attention_utils import (
+    apply_rotary_emb,
+    repeat_kv,
+)
+from torchtitan.models.llama_multimodal.model import ModelArgs
 
 
 class Attention(nn.Module):

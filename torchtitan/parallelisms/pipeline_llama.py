@@ -16,7 +16,7 @@ from torch.distributed.pipelining import PipelineStage
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
-from torchtitan.models.types import ModelArgs
+from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.parallel_dims import ParallelDims
 from torchtitan.parallelisms.pipelining_utils import (
     build_pipeline_schedule,

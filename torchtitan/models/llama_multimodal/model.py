@@ -7,11 +7,9 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from typing import List, Optional
 
-from dataclasses import dataclass
-from typing import Callable, List, Optional
-
-from torch import nn
+import torch.nn as nn
 
 
 @dataclass
@@ -39,7 +37,7 @@ class ModelArgs:
     max_num_tiles: int = 8
     clip_num_layers: int = 16
     learnable_head_num_layers: int = 4
-    activation: Callable = (nn.GELU,)
+    activation: Callable = nn.GELU
     # in_channels (int): The number of image input channels.
     in_channels: int = 3
     # return_intermediates (Optional[List[int]]): The indices of hidden layers to return.
