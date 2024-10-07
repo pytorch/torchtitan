@@ -18,14 +18,15 @@ For parallelisms, we support float8 all-gather for FSDP (optional) and for TP (b
 For scaling strategy, we currently support tensor-wise scaling with dynamic scales, and are actively working on tensor-wise scaling with delayed scales. Row-wise scaling is under exploration.
 
 ## Why Composing Float8 with `torch.distributed`
-As shown below, for float8 for matmul, `torch._scaled_mm` requires both float8 tensor and scales. Scales are calculated from `max(abs)` of a high precision tensor.
+As shown below, for float8 for matmul, `torch._scaled_mm` requires both float8 tensors and their scales. Scales are calculated from `max(abs)` of a high precision tensor.
 ```
 # float32/bfloat16 matmul, `torch.mm(input, weight)`, does not require scales
-# float8 matmul requires scales to ensure values can
-# fit within the representable range
+# float8 matmul requires scales to ensure values to fit within the representable range
 torch._scaled_mm(input_fp8, weight_fp8, scale_a=scale_input, scale_b=scale_weight)
 ```
 
-Without considering distributed, we cast input and weight into float8 inside forward before calling torch._scaled_mm.
+Without considering distributed, we cast input and weight into float8 inside forward before calling `torch._scaled_mm`.
 
-Considering FSDP, we can cast high precision weights (1/N on each rank) into float8, and perform float8 all-gather to save bandwidth. At the beginning of the forward, we already have the unsharded float8 weights. Similarly, we can do float8 all-gather in TP to save bandwidth. The overhead is communicating `max(abs)` across ranks but for llama herd models, we have net wins in training speed.
+For FSDP, we cast high precision weights (1/N on each rank) into float8, and perform float8 all-gather to save bandwidth. At the beginning of the forward, we already have the unsharded float8 weights. The overhead is communicating `max(abs)` across ranks. Float8 all-gather and amax communication can be a net win over float32/bfloat16 all-gather, depending on world size and message size.
+
+For TP, a typical example is row-wise sharded input and column-wise sharded weight. For input, we cast sharded input into float8 and perform float8 all-gather for unsharded input. The overhead is communicating `max(abs)` across ranks. For sharded weights, we communicate `max(abs)` as well. Inside the forward, we perform matmul with float8 input (unsharded) and float8 weight (sharded) with their global `max(abs)`.
