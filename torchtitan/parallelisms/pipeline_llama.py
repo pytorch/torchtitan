@@ -13,6 +13,11 @@ import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
@@ -140,6 +145,30 @@ def pipeline_llama_manual_split(
             group=pp_mesh.get_group("pp"),
         )
         return stage, model
+
+    # if split points are not specified, we split the model into equal chunks based on
+    # the number of pipeline stages.
+    if len(splits) == 0:
+        # we assume num_stages per rank based on the schedule time
+        schedule_class = get_schedule_class(
+            job_config.experimental.pipeline_parallel_schedule
+        )
+        if issubclass(schedule_class, PipelineScheduleSingle):
+            num_stages_per_rank = 1
+        elif issubclass(schedule_class, PipelineScheduleMulti):
+            num_stages_per_rank = 2
+        else:
+            raise ValueError(
+                f"Unsupported pipeline schedule: {job_config.experimental.pipeline_parallel_schedule}"
+            )
+        total_stages = parallel_dims.pp * num_stages_per_rank
+        num_layers = model_config.n_layers
+        if total_stages > num_layers:
+            raise ValueError("Total stages cannot be greater than the number of layers")
+        interval = num_layers // total_stages
+        # Generate split points
+        splits = ["layers." + str(i * interval) for i in range(1, total_stages)]
+        print(splits)
 
     num_stages = len(splits) + 1
     stage_idx = pp_rank
