@@ -299,8 +299,8 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "Interleaved1F1B", "FlexibleInterleaved1F1B"],
-            default="1f1b",
+            choices=["1F1B", "Gpipe", "Interleaved1F1B", "FlexibleInterleaved1F1B"],
+            default="1F1B",
             help="""
                 Specify the Pipeline Parallel schedule to use.
 
@@ -357,7 +357,12 @@ class JobConfig:
             default=50,
             help="Python garbage control scheduling interval, in steps",
         )
-
+        self.parser.add_argument(
+            "--training.seed",
+            type=int,
+            default=None,
+            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+        )
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
