@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 from typing import Tuple
 
-from torch.distributed.pipelining import (
-    ScheduleFlexibleInterleaved1F1B,
-    ScheduleInterleaved1F1B,
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    PipelineScheduleMulti,
 )
-from torch.distributed.pipelining.schedules import get_schedule_class
 from torchtitan.logging import logger
 
 
@@ -19,7 +18,7 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
     )
-    if schedule_class in [ScheduleInterleaved1F1B, ScheduleFlexibleInterleaved1F1B]:
+    if issubclass(schedule_class, PipelineScheduleMulti):
         looped_schedule = True
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"

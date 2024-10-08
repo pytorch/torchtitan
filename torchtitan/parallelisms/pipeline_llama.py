@@ -168,7 +168,6 @@ def pipeline_llama_manual_split(
         interval = num_layers // total_stages
         # Generate split points
         splits = ["layers." + str(i * interval) for i in range(1, total_stages)]
-        print(splits)
 
     num_stages = len(splits) + 1
     stage_idx = pp_rank

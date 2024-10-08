@@ -299,7 +299,6 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1F1B", "Gpipe", "Interleaved1F1B", "FlexibleInterleaved1F1B"],
             default="1F1B",
             help="""
                 Specify the Pipeline Parallel schedule to use.
