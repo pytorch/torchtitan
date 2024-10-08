@@ -357,7 +357,12 @@ class JobConfig:
             default=50,
             help="Python garbage control scheduling interval, in steps",
         )
-
+        self.parser.add_argument(
+            "--training.seed",
+            type=int,
+            default=None,
+            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+        )
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
