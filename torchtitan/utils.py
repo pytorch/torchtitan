@@ -9,7 +9,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -34,6 +34,24 @@ def _warn_overwrite_env(env, val):
             f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
         )
     os.environ[env] = val
+
+
+def set_determinism(seed: Optional[int]) -> None:
+    """
+    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
+    """
+    if seed is not None:
+        # CPU and GPU determinism
+        torch.manual_seed(seed)
+        # set deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        # set Python seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
+    else:
+        # ensure we turn off deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def set_pg_timeouts(timeout, world_mesh):
