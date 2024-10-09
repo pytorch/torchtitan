@@ -299,14 +299,14 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
-            default="1f1b",
+            choices=["1F1B", "GPipe", "Interleaved1F1B", "FlexibleInterleaved1F1B"],
+            default="1F1B",
             help="""
                 Specify the Pipeline Parallel schedule to use.
 
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
                 and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
