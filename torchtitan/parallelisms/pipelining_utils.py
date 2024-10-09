@@ -60,13 +60,10 @@ This may be sub-optimal as the number of layers per stage may be unbalanced."
 
 
 def build_pipeline_schedule(job_config, stages, loss_fn):
-    looped_schedule = False
-
     schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
     )
-    if issubclass(schedule_class, PipelineScheduleMulti):
-        looped_schedule = True
+    looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
     )
