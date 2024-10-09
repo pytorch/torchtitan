@@ -327,6 +327,13 @@ class JobConfig:
             help="Enable CompiledAutograd to compile the backward.",
         )
         self.parser.add_argument(
+            "--experimental.fsdp_sharding_on_largest_dim",
+            action="store_true",
+            help="""
+                sharding on largest dim to reduce padding
+            """,
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
