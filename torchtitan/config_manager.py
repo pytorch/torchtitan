@@ -301,8 +301,8 @@ class JobConfig:
             type=str,
             default="1F1B",
             help="""
-                Specify the Pipeline Parallel schedule to use.
-
+                Specify the Pipeline Parallel schedule to use. The supported schedules are:
+                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
                 The schedule must be compatible with the split points and stages_per_rank.
 
                 Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
