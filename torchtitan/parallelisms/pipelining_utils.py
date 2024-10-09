@@ -9,8 +9,59 @@ from torch.distributed.pipelining import (
     ScheduleFlexibleInterleaved1F1B,
     ScheduleInterleaved1F1B,
 )
-from torch.distributed.pipelining.schedules import get_schedule_class
+
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.logging import logger
+
+
+def generate_split_points(job_config, pp_dim, model_config):
+    schedule_class = get_schedule_class(
+        job_config.experimental.pipeline_parallel_schedule
+    )
+    if issubclass(schedule_class, PipelineScheduleSingle):
+        num_stages_per_rank = 1
+    elif issubclass(schedule_class, PipelineScheduleMulti):
+        # Multi-stage schedules support more than 2 stages per rank, but this is the default if
+        # no pipeline split is specified
+        num_stages_per_rank = 2
+    else:
+        raise ValueError(
+            f"Unsupported pipeline schedule: {job_config.experimental.pipeline_parallel_schedule}"
+        )
+    total_stages = pp_dim * num_stages_per_rank
+    num_layers = model_config.n_layers
+    if total_stages > num_layers:
+        raise ValueError("Total stages cannot be greater than the number of layers")
+
+    base_interval = num_layers // total_stages
+    remainder = num_layers % total_stages
+
+    # Calculate the number of extra layers to add to the middle stages
+    extra_layers = min(remainder, max(0, total_stages - 2))
+
+    splits = []
+    current_layer = 0
+    for i in range(total_stages - 1):
+        if i == 0 or i == total_stages - 2:
+            # First and last stages get the base interval
+            current_layer += base_interval
+        else:
+            # Middle stages get an extra layer if there are any remaining
+            if extra_layers > 0:
+                current_layer += base_interval + 1
+                extra_layers -= 1
+            else:
+                current_layer += base_interval
+        splits.append("layers." + str(current_layer))
+    logger.info(
+        f"No 'pipeline_parallel_split_points' so the generated splits are: {splits} \
+This may be sub-optimal as the number of layers per stage may be unbalanced."
+    )
+    return splits
 
 
 def build_pipeline_schedule(job_config, stages, loss_fn):
