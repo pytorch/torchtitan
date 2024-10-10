@@ -59,6 +59,11 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
     )
+    if schedule_class in [PipelineScheduleSingle, PipelineScheduleMulti]:
+        raise ValueError(
+            f"{schedule_class} is not supported as we do not support custom CSV schedules."
+        )
+
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
