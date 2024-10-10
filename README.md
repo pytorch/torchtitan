@@ -42,6 +42,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 10. DDP and HSDP
 11. All options easily configured via [toml files](train_configs/)
 12. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
+13. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 
 We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
 
