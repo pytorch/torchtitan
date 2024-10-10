@@ -38,16 +38,12 @@ def generate_split_points(job_config, pp_dim, model_config):
         raise ValueError("Total stages cannot be greater than the number of layers")
 
     base_interval = num_layers // total_stages
-    remainder = num_layers % total_stages
-
-    # Calculate the number of extra layers to add to the middle stages
-    extra_layers = min(remainder, max(0, total_stages - 2))
+    extra_layers = num_layers % total_stages
 
     splits = []
     current_layer = 0
     for i in range(total_stages - 1):
-        if i == 0 or i == total_stages - 2:
-            # First and last stages get the base interval
+        if i == 0:
             current_layer += base_interval
         else:
             # Middle stages get an extra layer if there are any remaining
