@@ -141,7 +141,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
                     "--experimental.pipeline_parallel_schedule FlexibleInterleaved1F1B",
                 ],
             ],
@@ -155,7 +154,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
                 ],
@@ -170,7 +168,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 1",
                 ],
@@ -185,7 +182,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 2",
                 ],
@@ -199,7 +195,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 2",
                 ],
@@ -213,7 +208,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.tensor_parallel_degree 2",
                 ],
             ],
@@ -226,7 +220,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
@@ -234,7 +227,6 @@ def build_test_list():
                     "--training.steps 20",
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
@@ -248,7 +240,6 @@ def build_test_list():
             [
                 [
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                     "--training.compile",
@@ -264,7 +255,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
                     "--experimental.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],

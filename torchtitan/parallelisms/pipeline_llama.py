@@ -20,6 +20,7 @@ from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.parallel_dims import ParallelDims
 from torchtitan.parallelisms.pipelining_utils import (
     build_pipeline_schedule,
+    generate_split_points,
     stage_ids_this_rank,
 )
 
@@ -83,7 +84,10 @@ def pipeline_llama_manual_split(
     microbatches = (
         job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
     )
-    splits = job_config.experimental.pipeline_parallel_split_points
+    splits = (
+        job_config.experimental.pipeline_parallel_split_points
+        or generate_split_points(job_config, parallel_dims.pp, model_config)
+    )
 
     def _build_stage(stage_idx, start_layer, stop_layer, is_first=False, is_last=False):
         model = copy.deepcopy(whole_model)
