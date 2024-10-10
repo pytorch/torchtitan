@@ -153,6 +153,19 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
+                ],
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            requires_seed_checkpoint=True,
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
