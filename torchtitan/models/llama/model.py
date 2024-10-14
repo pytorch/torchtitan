@@ -373,7 +373,7 @@ class Transformer(nn.Module):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            "fused_rmsnorm", dim=model_args.dim, eps=model_args.norm_eps
         )
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
@@ -438,7 +438,7 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
+        output = self.output(h) if self.output else h
         return output
 
     @classmethod
