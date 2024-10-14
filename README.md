@@ -21,7 +21,7 @@ Our guiding principles when building `torchtitan`:
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
 
 ### Our torchtitan paper on Arxiv:
-We provide a detailed look into the parallelisms and optimizations available in titan, along with summary advice on when to use various techniques: [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training)](https://arxiv.org/abs/2410.06511)
+We provide a detailed look into the parallelisms and optimizations available in titan, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training)](https://arxiv.org/abs/2410.06511)
 
 ### Dive into the code
 
