@@ -313,19 +313,16 @@ def apply_fsdp(
         check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
-        if pp_enabled:
-            # For PP, do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = False
-        else:
-            # As an optimization, do not reshard after forward for the last
-            # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        reshard_after_forward = False
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+    fully_shard(model.tok_embeddings, **fsdp_config)
+    # Embedding weight is not needed for embedding backward
+    model.tok_embeddings.set_unshard_in_backward(False)
+    fully_shard([model.output, model.norm], **fsdp_config, reshard_after_forward=False)
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
 
