@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 from torchtitan.models.llama.model import ModelArgs
 from torchtitan.parallelisms.parallel_dims import ParallelDims
@@ -44,23 +44,6 @@ def pipeline_llama(
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
     return pp_schedule, models
-
-
-def _llama_trace_input(job_config: JobConfig, model_config: ModelArgs, device="meta"):
-    """Get meta tensors with the right input shapes used for tracing"""
-    tokens_shape = (job_config.training.batch_size, job_config.training.seq_len)
-    tokens = torch.randint(
-        model_config.vocab_size, tokens_shape, dtype=torch.int64, device=device
-    )
-    return (tokens,)
-
-
-def _mixed_precision_dtype(
-    job_config: JobConfig, parallel_dims, default: torch.dtype = torch.float32
-) -> torch.dtype:
-    """Get the mixed precision dtype if FSDP is enabled, otherwise return the default"""
-    mp_arg = job_config.training.mixed_precision_param
-    return TORCH_DTYPE_MAP[mp_arg] if parallel_dims.dp_enabled else default
 
 
 def pipeline_llama_manual_split(
@@ -108,39 +91,11 @@ def pipeline_llama_manual_split(
             model.norm = None
             model.output = None
 
-        # Note: these tensors are only here as metadata hints, so pipelining runtime knows what size buffer to allocate.
-        # these tensors should be on meta device, adn the model should also.  It will be allocated on device after
-        # applying all other parallelisms.
-
-        # TODO(whc) once ManualPipelineStage supports lazy shape inference, we can avoid specifying input/output shapes
-        mp_dtype = _mixed_precision_dtype(job_config, parallel_dims)
-        batch_size = job_config.training.batch_size
-        local_seq_len = int(job_config.training.seq_len // parallel_dims.tp)
-        layers_io_shape = (batch_size, local_seq_len, model_config.dim)
-        output_layer_shape = (
-            batch_size,
-            job_config.training.seq_len,
-            model_config.vocab_size,
-        )
-        if is_first:
-            (input,) = _llama_trace_input(job_config, model_config, device="meta")
-        else:
-            # later layers (assume all start w/ a transformer layer)
-            input = torch.rand(layers_io_shape, dtype=mp_dtype, device="meta")
-
-        if is_last:
-            output = torch.rand(output_layer_shape, dtype=torch.float32, device="meta")
-        else:
-            # earlier layers (assume all end in a transformer layer)
-            output = torch.rand(layers_io_shape, dtype=mp_dtype, device="meta")
-
         stage = PipelineStage(
             model,
             stage_idx,
             num_stages,
             device,
-            input_args=input.chunk(microbatches)[0],
-            output_args=output.chunk(microbatches)[0],
             group=pp_mesh.get_group("pp"),
         )
         return stage, model
