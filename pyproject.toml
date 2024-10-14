@@ -1,0 +1,56 @@
+# ---- All project specifications ---- #
+[project]
+name = "torchtitan"
+description = "A native-PyTorch library for large scale LLM training"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+authors = [
+    { name = "PyTorch Team", email = "packages@pytorch.org" },
+]
+keywords = ["pytorch", "training", "llm"]
+dependencies = [
+    # Hugging Face integrations
+    "datasets>=2.19.0",
+
+    # Tokenization
+    "blobfile",
+    "sentencepiece",
+    "tiktoken",
+
+    # Miscellaneous
+    "tomli>=1.1.0"
+]
+dynamic = ["version"]
+
+[project.urls]
+GitHub = "https://github.com/pytorch/torchtitan"
+Documentation = "https://github.com/pytorch/torchtitan/tree/main/docs"
+Issues = "https://github.com/pytorch/torchtitan/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "tensorboard",
+]
+
+[tool.setuptools.dynamic]
+version = {file = "version.txt"}
+
+
+# ---- Explicit project build information ---- #
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["torchtitan*"]
+
+[tool.setuptools.package-data]
+recipes = ["train_configs/*.toml"]
+
+[tool.pytest.ini_options]
+addopts = ["--showlocals"]  # show local variables in tracebacks

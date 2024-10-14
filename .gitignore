@@ -1,0 +1,19 @@
+__pycache__
+.idea
+.DS_Store
+*.egg-info
+build
+outputs
+dist/*
+
+# data
+data
+out
+wandb
+
+torchtitan/datasets/**/*.model
+
+# temp files
+*.log
+error.json
+_remote_module_non_scriptable.py
