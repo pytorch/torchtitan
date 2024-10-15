@@ -88,6 +88,7 @@ def parallelize_llama(
                 ],
                 tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
+                shard_on_largest_dim=job_config.experimental.fsdp_sharding_on_largest_dim,
             )
             if parallel_dims.dp_replicate_enabled:
                 logger.info("Applied HSDP to the model")
@@ -299,12 +300,29 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     tp_enabled: bool,
     pp_enabled: bool,
+    shard_on_largest_dim: bool,
 ):
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
+
+    def shard_placement_fn(param: nn.Parameter):
+        largest_dim = -1
+        largest_dim_size = -1
+        for dim, dim_size in enumerate(param.shape):
+            if dim_size > largest_dim_size:
+                largest_dim = dim
+                largest_dim_size = dim_size
+        assert largest_dim >= 0, f"{param.shape}"
+        assert largest_dim < param.ndim, f"{largest_dim=} {param.shape}"
+        return Shard(largest_dim)
+
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config = {
+        "mesh": dp_mesh,
+        "mp_policy": mp_policy,
+        "shard_placement_fn": shard_placement_fn if shard_on_largest_dim else None,
+    }
 
     # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
     # that users won't use a nightly build which is older than 20240809 by then.
