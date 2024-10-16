@@ -6,9 +6,9 @@
 
 import pytest
 import torch
-from torchtitan.models.llama_multimodal import ModelArgs, VisionEncoder
 
-from test.test_utils import fixed_init_tensor
+from test.multimodal_model.test_utils import fixed_init_model, fixed_init_tensor
+from torchtitan.models.llama_multimodal import ModelArgs, VisionEncoder
 
 
 @pytest.fixture
@@ -51,6 +51,7 @@ class TestMultimodalModelVisionEncoder:
 
     def test_llama_mm_vision_encoder(self):
         model = VisionEncoder(self.model_args)
+        fixed_init_model(model, min_val=-1, max_val=1)
         # call model
         output = model(self.image, self.aspect_ratio)
 
@@ -64,6 +65,9 @@ class TestMultimodalModelVisionEncoder:
             output.shape == expected_shape
         ), f"Expected shape {expected_shape}, but got {output.shape}"
 
-        # assert torch.allclose(
-        #     output.mean(), torch.tensor(5.28800), atol=1e-3, rtol=1e-3
-        # )
+        # TODO: Need to ensure numerical stability before doing convergence test.
+        # output.mean() = 3.994, we need to debug why it is not close to 5.28800, which is
+        # the test value from the original torch tune test
+        assert torch.allclose(
+            output.mean(), torch.tensor(5.28800), atol=1e-3, rtol=1e-3
+        )
