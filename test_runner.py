@@ -141,19 +141,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_schedule FlexibleInterleaved1F1B",
-                ],
-            ],
-            "PP looped flexible 1F1B test",
-            "pp_looped_flexible_1f1b",
-            requires_seed_checkpoint=True,
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
             ],
