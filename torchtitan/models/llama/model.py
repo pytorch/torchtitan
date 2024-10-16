@@ -391,7 +391,12 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        with torch.device(self.freqs_cis.device):
+        # freqs_cis is not a module parameter, just a plain python class attribute
+        # it's not managed by model.parameters()
+        # thus FSDP2 does not manange it (shard, reshard, cpu offload, move to gpu)
+        # need to come up with a long-term solution
+        # hard code "cuda" device for now
+        with torch.device("cuda"):
             self.freqs_cis = self._precompute_freqs_cis()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
