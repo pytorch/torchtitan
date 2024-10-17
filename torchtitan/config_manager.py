@@ -258,9 +258,9 @@ class JobConfig:
             type=bool,
             default=False,
             help="""
-            The `enable_cpu_offload` argument specifies whether to have offloading policy 
-            for FSDP, offload parameters to CPU when not involved in computation. 
-            If True, then this offloads gradients to CPU as well, meaning that the 
+            The `enable_cpu_offload` argument specifies whether to have offloading policy
+            for FSDP, offload parameters to CPU when not involved in computation.
+            If True, then this offloads gradients to CPU as well, meaning that the
             optimizer step runs on CPU.""",
         )
         self.parser.add_argument(
