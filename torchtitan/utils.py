@@ -118,7 +118,7 @@ def init_distributed(job_config):
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
     backend = "nccl"
-    if job_config.training.offload_policy:
+    if job_config.training.enable_cpu_offload:
         backend = "cuda:nccl,cpu:gloo"
     torch.distributed.init_process_group(
         backend=backend,

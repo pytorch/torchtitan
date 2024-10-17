@@ -92,7 +92,7 @@ def parallelize_llama(
                 ],
                 tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
-                cpu_offload=job_config.training.offload_policy,
+                cpu_offload=job_config.training.enable_cpu_offload,
             )
             if parallel_dims.dp_replicate_enabled:
                 logger.info("Applied HSDP to the model")
