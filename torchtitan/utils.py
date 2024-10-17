@@ -117,8 +117,12 @@ def init_distributed(job_config):
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
+    backend = "nccl"
+    if job_config.training.offload_policy:
+        backend = "cuda:nccl,cpu:gloo"
     torch.distributed.init_process_group(
-        "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
+        backend=backend,
+        timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
     )
 
     # to mitigate the memory issue that collectives using

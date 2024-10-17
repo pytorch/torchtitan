@@ -12,7 +12,11 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed._composable.fsdp import (
+    CPUOffloadPolicy,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -88,6 +92,7 @@ def parallelize_llama(
                 ],
                 tp_enabled=parallel_dims.tp_enabled,
                 pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=job_config.training.offload_policy,
             )
             if parallel_dims.dp_replicate_enabled:
                 logger.info("Applied HSDP to the model")
@@ -299,12 +304,15 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     tp_enabled: bool,
     pp_enabled: bool,
+    cpu_offload: bool = False,
 ):
     """
     Apply data parallelism to the model. FSDP2 is used here.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
     # that users won't use a nightly build which is older than 20240809 by then.
