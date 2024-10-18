@@ -7,9 +7,13 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.models.llama_multimodal.model import ModelArgs, VisionEncoder
+from torchtitan.models.llama_multimodal.model import (
+    ModelArgs,
+    MultimodalDecoder,
+    VisionEncoder,
+)
 
-__all__ = ["VisionEncoder", "ModelArgs"]
+__all__ = ["VisionEncoder", "ModelArgs", "MultimodalDecoder"]
 
 llama3_2_configs = {
     # TODO: add configs for llama3.2
