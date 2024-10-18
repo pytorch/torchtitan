@@ -170,7 +170,12 @@ def main(job_config: JobConfig):
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        init_device = (
+            "cpu"
+            if job_config.checkpoint.create_seed_checkpoint
+            or job_config.training.enable_cpu_offload
+            else "cuda"
+        )
         model.to_empty(device=init_device)
         model.init_weights()
         model.train()
@@ -420,7 +425,12 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
+    torch.cuda.memory._record_memory_history(max_entries=100000)
     config = JobConfig()
     config.parse_args()
     main(config)
     torch.distributed.destroy_process_group()
+    import pickle
+
+    snapshot = torch.cuda.memory._snapshot()
+    pickle.dump(snapshot, open("your_name.pickle", "wb"))
