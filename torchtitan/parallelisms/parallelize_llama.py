@@ -73,7 +73,9 @@ def parallelize_llama(
             )
         apply_compile(model)
 
-    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP, potentially with Context Parallel
+    if (
+        parallel_dims.dp_shard_enabled
+    ):  # apply FSDP or HSDP, potentially with Context Parallel
         dp_mesh_dim_names = (
             ("dp_replicate", "dp_shard")
             if parallel_dims.dp_replicate_enabled
@@ -88,9 +90,7 @@ def parallelize_llama(
             model,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[
-                job_config.training.mixed_precision_reduce
-            ],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             tp_enabled=parallel_dims.tp_enabled,
             pp_enabled=parallel_dims.pp_enabled,
         )

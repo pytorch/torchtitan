@@ -8,15 +8,15 @@ import contextlib
 import os
 import time
 from datetime import timedelta
+from functools import partial
+
+from typing import List, Optional, Set
 
 import torch
 
-from typing import List, Optional, Set
-from functools import partial
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -70,7 +70,9 @@ def get_train_context(
                 # currently we only support these two SDP backends.
                 # TODO (xilunwu): support cuDNN backend
                 stack.enter_context(
-                    sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
+                    sdpa_kernel(
+                        [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+                    )
                 )
                 stack.enter_context(
                     context_parallel_ctx(
