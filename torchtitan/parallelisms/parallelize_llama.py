@@ -8,7 +8,6 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
-from typing import Tuple
 
 import torch
 import torch.nn as nn
