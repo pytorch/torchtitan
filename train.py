@@ -10,6 +10,7 @@ import time
 from datetime import timedelta
 
 import torch
+import torch._inductor.config as inductor_config
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
@@ -142,6 +143,8 @@ def main(job_config: JobConfig):
         f"{color.blue}Model {model_name} {job_config.model.flavor} "
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
+    if job_config.training.compile:
+        inductor_config.coordinate_descent_tuning = True
 
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
