@@ -112,5 +112,5 @@ class ParallelDims:
         return self.tp > 1 and self.enable_loss_parallel
 
     @cached_property
-    def model_parallel_size(self):
-        return self.tp * self.pp
+    def non_data_parallel_size(self):
+        return self.cp * self.tp * self.pp

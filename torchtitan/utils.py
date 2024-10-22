@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import gc
 import os
 import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, Union
+from typing import Generator, List, Optional, Set, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -100,6 +101,55 @@ DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
 ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
 SKIP_CLEANUP = "3"
 
+
+def create_context_parallel_ctx(
+    cp_mesh: DeviceMesh,
+    cp_buffers: List[torch.Tensor],
+    cp_seq_dims: List[int],
+    cp_no_restore_buffers: Set[torch.Tensor],
+):
+    try:
+        from torch.distributed.tensor.experimental import context_parallel
+    except ImportError:
+        print(
+            f"PyTorch version {torch.__version__} does not include the experimental "
+            "Context Parallel API. Please update to a newer version."
+        )
+    
+    return context_parallel(
+        cp_mesh,
+        buffers=cp_buffers,
+        buffer_seq_dims=cp_seq_dims,
+        no_restore_buffers=cp_no_restore_buffers,
+    )
+
+def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+    @contextlib.contextmanager
+    def context(cp_context: Optional[Generator[None, None, None]] = None):
+        with contextlib.ExitStack() as stack:
+            if enable_loss_parallel:
+                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+
+            if enable_compiled_autograd:
+                stack.enter_context(
+                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
+                )
+
+            if cp_context is not None:
+                from torch.nn.attention import sdpa_kernel, SDPBackend
+
+                # currently we only support these two SDP backends.
+                # TODO (xilunwu): support cuDNN backend
+                stack.enter_context(
+                    sdpa_kernel(
+                        [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+                    )
+                )
+                stack.enter_context(cp_context)
+
+            yield
+
+    return context
 
 def init_distributed(job_config):
     # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
