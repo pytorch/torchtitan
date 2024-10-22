@@ -23,7 +23,7 @@ LOG_RANK=0
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
 
 seed_checkpoint="--checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint"
-force_1d="--training.data_parallel_degree 1 --training.tensor_parallel_degree 1 --experimental.pipeline_parallel_degree 1"
+force_1d="--training.data_parallel_shard_degree 1 --training.tensor_parallel_degree 1 --experimental.pipeline_parallel_degree 1"
 overrides=""
 if [ $# -ne 0 ]; then
     overrides="$*"
