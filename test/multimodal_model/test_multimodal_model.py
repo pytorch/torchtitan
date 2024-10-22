@@ -71,10 +71,7 @@ class TestMultimodalModelVisionEncoder:
     def test_llama_mm_vision_encoder(self):
         model = VisionEncoder(self.model_args)
         fixed_init_model(model, min_val=-1, max_val=1)
-        # call model
         output = model(self.image, self.aspect_ratio)
-
-        # assertion
         expected_shape = (
             self.batch_size,
             self.num_imgs * self.num_tiles * (model.vit.patches_per_tile + 1),
@@ -114,13 +111,15 @@ class TestMultimodalModelDecoder:
     def test_llama_mm_decoder(self):
         model = MultimodalDecoder(self.model_args)
         fixed_init_model(model, min_val=-1, max_val=1)
-
-        # call model
         output = model(**self.input)
-
-        # assertion
         expected_shape = (self.batch_size, self.seq_len, self.vocab_size)
-
         assert (
             output.shape == expected_shape
         ), f"Expected shape {expected_shape}, but got {output.shape}"
+
+        # TODO: Need to ensure numerical stability before doing convergence test.
+        # output.mean() = -0.0134, we need to debug why it is not close to -9.47548e-5, which is
+        # the test value from the original torch tune test
+        # assert torch.allclose(
+        #     output.mean(), torch.tensor(-9.47548e-5), atol=1e-3, rtol=1e-3
+        # )

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# Llama 2 is licensed under the LLAMA 2 Community License,
+# Llama 3 is licensed under the LLAMA 3 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
@@ -908,9 +908,6 @@ class Vit(nn.Module):
 class LearnableProjection(nn.Module):
     """Projection transformer to adapt the output of a
     pretrained frozen encoder (CLIP) to a pretrained decoder model.
-
-    Args:
-        model_args (ModelArgs): configs for the model.
     """
 
     def __init__(
@@ -937,17 +934,6 @@ class LearnableProjection(nn.Module):
         x: torch.Tensor,
         hidden_states: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            x (torch.Tensor): input tensor with shape [bsz, num_imgs, num_tiles, num_tokens, encoder_emb_dim]
-            hidden_states (Optional[List[torch.Tensor]]): list of hidden states
-                from the encoder. Each hidden state has the same shape as x.
-
-        Returns:
-            Tensor: output tensor of a sequence of embedings [bsz x seq x decoder_emb_dim]
-                where sequence length is num_imgs * num_tiles * num_tokens
-
-        """
         bsz, imgs, tiles, embeds, dim = x.shape
         bsz, num_imgs, num_tiles, num_tokens, emb_dim = x.shape
 
@@ -1002,18 +988,6 @@ class FeedForwardForDecoder(nn.Module):
     """
     FeedForward module for the decoder. It's different from the one in the encoder.
     This is the component which is orignally used in llama3.
-
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (Optional[float]): Custom multiplier for hidden dimension. Defaults to None.
-
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-
     """
 
     def __init__(
@@ -1046,20 +1020,6 @@ class FeedForwardForDecoder(nn.Module):
 class SelfAttention(nn.Module):
     """
     Multi-head self attention module with rotary position.
-
-    Args:
-        model_args (ModelArgs): Model configuration arguments.
-
-    Attributes:
-        num_kv_heads (int): Number of key and value heads.
-        num_heads (int): Number of query heads.
-        n_rep (int): Number of repetitions for local heads.
-        head_dim (int): Dimension size of each attention head.
-        wq (Linear): Linear transformation for queries.
-        wk (Linear): Linear transformation for keys.
-        wv (Linear): Linear transformation for values.
-        wo (Linear): Linear transformation for output.
-
     """
 
     def __init__(self, model_args: ModelArgs):
@@ -1096,17 +1056,6 @@ class SelfAttention(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
     ):
-        """
-        Forward pass of the attention module.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed frequency tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after attention.
-
-        """
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -1139,20 +1088,6 @@ class SelfAttention(nn.Module):
 class CrossAttention(nn.Module):
     """
     Multi-head cross attention module.
-
-    Args:
-        model_args (ModelArgs): Model configuration arguments.
-
-    Attributes:
-        num_kv_heads (int): Number of key and value heads.
-        num_heads (int): Number of query heads.
-        n_rep (int): Number of repetitions for local heads.
-        head_dim (int): Dimension size of each attention head.
-        wq (Linear): Linear transformation for queries.
-        wk (Linear): Linear transformation for keys.
-        wv (Linear): Linear transformation for values.
-        wo (Linear): Linear transformation for output.
-
     """
 
     def __init__(self, model_args: ModelArgs):
@@ -1192,20 +1127,9 @@ class CrossAttention(nn.Module):
         encoder_input: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ):
-        """
-        Forward pass of the attention module.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            encoder_input (torch.Tensor): Precomputed frequency tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after attention.
-
-        """
         bs, seqlen_x, _ = x.shape
         seqlen_y = encoder_input.shape[1]
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        xq, xk, xv = self.wq(x), self.wk(encoder_input), self.wv(encoder_input)
 
         # Use -1 instead of `num_heads` (or `num_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
