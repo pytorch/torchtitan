@@ -49,7 +49,8 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             # across all ranks. Insert a barrier to make sure all ranks have finished profiling
             # before moving on.
             # TODO: Can we find a cleaner way?
-            torch.distributed.barrier()
+            torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+            torch.cuda.synchronize()
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
@@ -119,7 +120,8 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                 logger.info(
                     f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
                 )
-                torch.distributed.barrier()
+                torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+                torch.cuda.synchronize()
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
         profiler = MemoryProfiler(global_step, config.profiling.profile_freq)
