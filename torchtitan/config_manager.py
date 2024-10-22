@@ -262,7 +262,7 @@ class JobConfig:
         self.parser.add_argument(
             "--training.enable_loss_parallel",
             default=True,
-            action="store_true",
+            action="store_false",
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
