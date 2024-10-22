@@ -471,7 +471,7 @@ class CheckpointManager:
         states = {"model": self.states["model"]} if step == 0 else self.states
         # PyTorch bug: (pytorch/pytorch#138575)
         # dcp.load() replaces the values of stateful elements in `states` with new objects
-        # from loading the checkpointm, in addition to updating the states of the original
+        # from loading the checkpoint, in addition to updating the states of the original
         # objects from `states` in-place. This is a problem because the state_dict no longer
         # refers to the objects being used in the train loop, meaning any future checkpoints
         # will not include updates to these objects (such as updated optimizer states, etc.)
