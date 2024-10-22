@@ -475,7 +475,9 @@ class CheckpointManager:
         # objects from `states` in-place. This is a problem because the state_dict no longer
         # refers to the objects being used in the train loop, meaning any future checkpoints
         # will not include updates to these objects (such as updated optimizer states, etc.)
-        original_stateful_states = {k: v for k, v in states.items() if isinstance(v, Stateful)}
+        original_stateful_states = {
+            k: v for k, v in states.items() if isinstance(v, Stateful)
+        }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
         dcp.load(
