@@ -198,16 +198,14 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_local_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_local_kv_heads, seqlen, head_dim)
 
         # we use casual mask for training
-        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = F.scaled_dot_product_attention(
+            xq, xk, xv, is_causal=True, enable_gqa=self.n_rep > 1
+        )
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
@@ -373,7 +371,7 @@ class Transformer(nn.Module):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            "fused_rmsnorm", dim=model_args.dim, eps=model_args.norm_eps
         )
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
@@ -438,7 +436,7 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
+        output = self.output(h) if self.output else h
         return output
 
     @classmethod
