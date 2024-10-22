@@ -76,16 +76,7 @@ def parallelize_llama(
     if (
         parallel_dims.dp_shard_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_dim_names = (
-            ("dp_replicate", "dp_shard")
-            if parallel_dims.dp_replicate_enabled
-            else ("dp",)
-        )
-        dp_mesh = (
-            world_mesh[(*dp_mesh_dim_names, "cp")]._flatten("dp_cp")
-            if parallel_dims.cp_enabled
-            else world_mesh[dp_mesh_dim_names]
-        )
+        dp_mesh = world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
         apply_fsdp(
             model,
             dp_mesh,
