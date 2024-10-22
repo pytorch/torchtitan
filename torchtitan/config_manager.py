@@ -299,14 +299,13 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
-            default="1f1b",
+            default="1F1B",
             help="""
-                Specify the Pipeline Parallel schedule to use.
-
+                Specify the Pipeline Parallel schedule to use. The supported schedules are:
+                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
                 and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
