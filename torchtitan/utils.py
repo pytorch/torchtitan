@@ -123,6 +123,7 @@ def create_context_parallel_ctx(
         no_restore_buffers=cp_no_restore_buffers,
     )
 
+
 def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
     @contextlib.contextmanager
     def context(cp_context: Optional[Generator[None, None, None]] = None):
@@ -150,6 +151,7 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
             yield
 
     return context
+
 
 def init_distributed(job_config):
     # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
