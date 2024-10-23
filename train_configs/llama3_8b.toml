@@ -38,6 +38,7 @@ compile = false
 dataset = "c4"
 
 [experimental]
+context_parallel_degree = 1
 pipeline_parallel_degree = 1
 
 [checkpoint]

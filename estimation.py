@@ -14,6 +14,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
+from torchtitan import utils
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.float8 import Float8Handler
@@ -21,7 +22,6 @@ from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
-from train import get_train_context
 
 
 def estimate_memory(job_config: JobConfig):
@@ -66,6 +66,7 @@ def estimate_memory(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp_shard=job_config.training.data_parallel_shard_degree,
         dp_replicate=job_config.training.data_parallel_replicate_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
@@ -94,7 +95,7 @@ def estimate_memory(job_config: JobConfig):
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
-    train_context = get_train_context(
+    train_context = utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
