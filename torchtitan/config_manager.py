@@ -335,13 +335,19 @@ class JobConfig:
             help="Enable CompiledAutograd to compile the backward.",
         )
         self.parser.add_argument(
+            "--experimental.context_parallel_degree",
+            type=int,
+            default=1,
+            help="Context parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
             choices=["bfloat16", "float32"],
             help="""
                 torch dtype to use for parameters when applying mixed precision via FSDP.
-                This feature only takes effect when data_parallel_degree > 1
+                This feature only takes effect when data_parallel_shard_degree > 1
             """,
         )
         self.parser.add_argument(
@@ -351,7 +357,7 @@ class JobConfig:
             choices=["float32"],
             help="""
                 torch dtype to use for reductions when applying mixed precision via FSDP.
-                This feature only takes effect when data_parallel_degree > 1
+                This feature only takes effect when data_parallel_shard_degree > 1
             """,
         )
         self.parser.add_argument(

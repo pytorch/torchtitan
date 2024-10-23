@@ -79,7 +79,7 @@ def fully_shard(
 | `optim.state_dict()`: local state dict | `optim.state_dict()`: sharded state dict (no communication) |
 | `summon_full_params()` | use `DTensor` APIs like `full_tensor()` |
 | `FSDP.clip_grad_norm_()` | `nn.utils.clip_grad_norm_()` |
-| `ShardedGradScaler` | not yet supported |
+| `ShardedGradScaler` | `amp.grad_scaler.GradScaler` |
 
 
 ## Meta-Device Initialization

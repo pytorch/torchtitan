@@ -38,6 +38,7 @@ compile = true
 dataset = "c4"
 
 [experimental]
+context_parallel_degree = 1
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = true
 
