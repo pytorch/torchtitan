@@ -7,6 +7,7 @@
 import os
 import time
 from datetime import timedelta
+from itertools import chain
 
 import torch
 
@@ -307,13 +308,12 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            for m in model_parts:
-                clip_grad_norm_(
-                    m.parameters(),
-                    job_config.training.max_norm,
-                    foreach=True,
-                    pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
-                )
+            clip_grad_norm_(
+                chain.from_iterable(m.parameters() for m in model_parts),
+                job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+            )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
