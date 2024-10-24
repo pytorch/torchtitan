@@ -7,7 +7,6 @@
 import os
 import time
 from datetime import timedelta
-from itertools import chain
 
 import torch
 
@@ -309,7 +308,7 @@ def main(job_config: JobConfig):
 
             # clip gradients
             clip_grad_norm_(
-                chain.from_iterable(m.parameters() for m in model_parts),
+                [p for m in model_parts for p in m.parameters()],
                 job_config.training.max_norm,
                 foreach=True,
                 pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
