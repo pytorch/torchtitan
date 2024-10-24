@@ -16,7 +16,7 @@ from torchtitan.logging import init_logger, logger
 
 @torch.inference_mode()
 def convert_llama_weights(input_dir, output_dir):
-    with open(args.input_dir / "params.json", "r") as f:
+    with open(input_dir / "params.json", "r") as f:
         params = json.load(f)
     n_layers = params["n_layers"]
     n_heads = params["n_heads"]
@@ -123,8 +123,8 @@ def convert_llama_weights(input_dir, output_dir):
         for i in range(len(shards)):
             del shards[i]["output.weight"]
 
-    logger.info(f"Writing to DCP at {output_dir}")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Writing to DCP at '{output_dir}'")
+    output_dir.mkdir(parents=True, exist_ok=True)
     storage_writer = DCP.filesystem.FileSystemWriter(output_dir, thread_count=8)
     DCP.save({"model": state_dict}, storage_writer=storage_writer)
 
