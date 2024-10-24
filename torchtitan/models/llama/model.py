@@ -391,7 +391,7 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        self.freqs_cis = self._precompute_freqs_cis().to()
+        self.freqs_cis = self._precompute_freqs_cis()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
