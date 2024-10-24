@@ -1,4 +1,16 @@
-# How to Convert a torchtitan Checkpoint for Use in torchtune
+## How to convert a Llama3 checkpoint for use in torchtitan
+
+If you want to continue training from an existing model checkpoint, the checkpoint must be in the DCP format expected by the checkpoint manager.
+An example script for converting the original Llama3 checkpoints into the expected DCP format can be found in `scripts/convert_llama_to_dcp.py`.
+
+The script expects a path to the original checkpoint files, and a path to an output directory:
+```bash
+python3 scripts/convert_llama_to_dcp.py <input_dir> <output_dir>
+```
+
+
+
+## How to Convert a torchtitan Checkpoint for Use in torchtune
 
 This guide will walk you through the steps required to convert a checkpoint from torchtitan so that it can be loaded into torchtune.
 
