@@ -14,6 +14,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
+from torchtitan.clip_grad_nrom import clip_grad_norm_
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
@@ -307,8 +308,11 @@ def main(job_config: JobConfig):
 
             # clip gradients
             for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
+                clip_grad_norm_(
+                    m.parameters(),
+                    job_config.training.max_norm,
+                    foreach=True,
+                    pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
                 )
 
             # sync float8 amaxes and scales
