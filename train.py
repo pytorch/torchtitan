@@ -111,6 +111,9 @@ def main(job_config: JobConfig):
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
+    if job_config.training.enable_cpu_offload:
+        origin_default_device = torch.get_default_device()
+        torch.set_default_device("cuda")
 
     # a no-op hander if float8 is not enabled
     float8_handler = Float8Handler(job_config, parallel_dims)
@@ -171,6 +174,8 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
+    if job_config.training.enable_cpu_offload:
+        torch.set_default_device(origin_default_device)
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
         f"GPU memory usage for model: "

@@ -367,9 +367,7 @@ class Transformer(nn.Module):
         # initialized by the checkpoint, or we need to add a separate initializer for
         # just the non-persistent buffers that is called after loading checkpoints.
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
-        self.freqs_cis = nn.Parameter(
-            self._precompute_freqs_cis().to(torch.float32), requires_grad=False
-        )
+
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
@@ -393,10 +391,9 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
+        self.freqs_cis = self._precompute_freqs_cis().to()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
-        if self.freqs_cis is not None:
-            nn.init.normal_(self.freqs_cis)
         for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights()
