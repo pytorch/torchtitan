@@ -159,9 +159,15 @@ def main(job_config: JobConfig):
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        init_device = (
+            "cpu"
+            if job_config.checkpoint.create_seed_checkpoint
+            or job_config.training.enable_cpu_offload
+            else "cuda"
+        )
         model.to_empty(device=init_device)
-        model.init_weights()
+        buffer_device = "cuda" if job_config.training.enable_cpu_offload else None
+        model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]
