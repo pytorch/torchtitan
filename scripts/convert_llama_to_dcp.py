@@ -44,9 +44,13 @@ def convert_llama_weights(input_dir, output_dir):
             state_dict[f"layers.{layer}.attention_norm.weight"] = shards[0][
                 f"layers.{layer}.attention_norm.weight"
             ]
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.attention_norm.weight"]
             state_dict[f"layers.{layer}.ffn_norm.weight"] = shards[0][
                 f"layers.{layer}.ffn_norm.weight"
             ]
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.ffn_norm.weight"]
 
             for wn, nh in [
                 ("wq", n_heads_per_shard),
@@ -62,6 +66,8 @@ def convert_llama_weights(input_dir, output_dir):
                     ],
                     dim=0,
                 ).reshape(nh * len(shards) * dims_per_head, dim)
+                for i in range(len(shards)):
+                    del shards[i][f"layers.{layer}.attention.{wn}.weight"]
 
             state_dict[f"layers.{layer}.attention.wo.weight"] = torch.cat(
                 [
@@ -70,6 +76,9 @@ def convert_llama_weights(input_dir, output_dir):
                 ],
                 dim=1,
             )
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.attention.wo.weight"]
+
             state_dict[f"layers.{layer}.feed_forward.w1.weight"] = torch.cat(
                 [
                     shards[i][f"layers.{layer}.feed_forward.w1.weight"]
@@ -77,6 +86,9 @@ def convert_llama_weights(input_dir, output_dir):
                 ],
                 dim=0,
             )
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.feed_forward.w1.weight"]
+
             state_dict[f"layers.{layer}.feed_forward.w2.weight"] = torch.cat(
                 [
                     shards[i][f"layers.{layer}.feed_forward.w2.weight"]
@@ -84,6 +96,9 @@ def convert_llama_weights(input_dir, output_dir):
                 ],
                 dim=1,
             )
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.feed_forward.w2.weight"]
+
             state_dict[f"layers.{layer}.feed_forward.w3.weight"] = torch.cat(
                 [
                     shards[i][f"layers.{layer}.feed_forward.w3.weight"]
@@ -91,14 +106,22 @@ def convert_llama_weights(input_dir, output_dir):
                 ],
                 dim=0,
             )
+            for i in range(len(shards)):
+                del shards[i][f"layers.{layer}.feed_forward.w3.weight"]
 
         state_dict["norm.weight"] = shards[0]["norm.weight"]
+        for i in range(len(shards)):
+            del shards[i]["norm.weight"]
         state_dict["tok_embeddings.weight"] = torch.cat(
             [shards[i]["tok_embeddings.weight"] for i in range(len(shards))], dim=0
         )
+        for i in range(len(shards)):
+            del shards[i]["tok_embeddings.weight"]
         state_dict["output.weight"] = torch.cat(
             [shards[i]["output.weight"] for i in range(len(shards))], dim=0
         )
+        for i in range(len(shards)):
+            del shards[i]["output.weight"]
 
     logger.info(f"Writing to DCP at {output_dir}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
