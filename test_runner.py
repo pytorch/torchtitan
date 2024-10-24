@@ -62,7 +62,7 @@ def build_test_list():
             ],
             "1D compile",
             "1d_compile",
-            ngpu=8,
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
