@@ -57,10 +57,12 @@ def build_test_list():
             [
                 [
                     "--training.compile",
+                    "--training.enable_cpu_offload True",
                 ],
             ],
             "1D compile",
             "1d_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [

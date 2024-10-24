@@ -166,11 +166,8 @@ def main(job_config: JobConfig):
             else "cuda"
         )
         model.to_empty(device=init_device)
-        if not job_config.checkpoint.create_seed_checkpoint:
-            with torch.device("cuda"):
-                model.init_weights()
-        else:
-            model.init_weights()
+        buffer_device = "cuda" if job_config.training.enable_cpu_offload else None
+        model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]

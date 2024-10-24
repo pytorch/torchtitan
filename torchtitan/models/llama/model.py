@@ -379,7 +379,10 @@ class Transformer(nn.Module):
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
-    def init_weights(self):
+    def init_weights(
+        self,
+        buffer_device: Optional[torch.device] = None,
+    ):
         """
         [Note: On ``init_weights`` vs. ``reset_parameters``]
         Modules may define ``reset_parameters`` to initialize parameter values.
@@ -391,7 +394,12 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        self.freqs_cis = self._precompute_freqs_cis()
+        if buffer_device is not None:
+            with torch.device(buffer_device):
+                self.freqs_cis = self._precompute_freqs_cis()
+        else:
+            with torch.device(self.freqs_cis.device):
+                self.freqs_cis = self._precompute_freqs_cis()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
