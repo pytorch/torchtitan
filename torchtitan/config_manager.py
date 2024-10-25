@@ -258,9 +258,7 @@ class JobConfig:
             type=bool,
             default=False,
             help="""
-            The `enable_cpu_offload` argument specifies whether to have offloading policy
-            for FSDP. If True, CPU offload of parameters, gradients, and optimizer states
-            will be supported.""",
+            Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP""",
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",

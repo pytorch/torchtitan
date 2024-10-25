@@ -57,12 +57,10 @@ def build_test_list():
             [
                 [
                     "--training.compile",
-                    "--training.enable_cpu_offload True",
                 ],
             ],
             "1D compile",
             "1d_compile",
-            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -352,6 +350,16 @@ def build_test_list():
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.enable_cpu_offload True",
+                ],
+            ],
+            "Enable CPU Offload",
+            "enable_cpu_offload",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors
