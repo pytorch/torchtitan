@@ -18,15 +18,15 @@ from test.multimodal_model.test_utils import fixed_init_model, fixed_init_tensor
 @pytest.fixture
 def encoder_config():
     return ModelArgs(
-        dim=32,
-        num_layers=2,
-        num_heads=4,
+        encoder_embed_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
         tile_size=49,
         patch_size=9,
         max_num_tiles=4,
         in_channels=3,
         return_intermediates=[0, 1],
-        num_layers_learnable_head=2,
+        num_layers_projection=2,
         decoder_embed_dim=128,
     )
 
@@ -34,13 +34,13 @@ def encoder_config():
 @pytest.fixture
 def decoder_config():
     return ModelArgs(
-        dim=512,
+        decoder_embed_dim=512,
         vocab_size=10000,
         fusion_interval=2,
         num_special_tokens=3,
-        num_layers=6,
-        num_heads=8,
-        num_kv_heads=4,
+        decoder_num_layers=6,
+        decoder_num_heads=8,
+        decoder_num_kv_heads=4,
         max_seq_len=512,
         rope_theta=50000.0,
     )
@@ -94,7 +94,7 @@ class TestMultimodalModelDecoder:
     def setup_class(self, decoder_config):
         self.model_args = decoder_config
         self.batch_size = 1
-        self.dim = self.model_args.dim
+        self.decoder_embed_dim = self.model_args.decoder_embed_dim
         self.vocab_size = self.model_args.vocab_size
         self.seq_len = 128
         self.input = {
@@ -102,7 +102,9 @@ class TestMultimodalModelDecoder:
                 self.batch_size, self.seq_len
             ),
             "encoder_input": fixed_init_tensor(
-                (self.batch_size, self.seq_len, self.dim), min_val=-1, max_val=1
+                (self.batch_size, self.seq_len, self.decoder_embed_dim),
+                min_val=-1,
+                max_val=1,
             ),
             "encoder_mask": None,
         }
