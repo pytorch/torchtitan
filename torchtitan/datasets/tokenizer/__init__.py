@@ -8,14 +8,14 @@ from torchtitan.datasets.tokenizer.sentencepiece import SentencePieceTokenizer
 from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
 
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 
-def create_tokenizer(tokenizer_type: str, tokenizer_path: str) -> Tokenizer:
+def build_tokenizer(tokenizer_type: str, tokenizer_path: str) -> Tokenizer:
     logger.info(f"Building {tokenizer_type} tokenizer locally from {tokenizer_path}")
     if tokenizer_type == "sentencepiece":
         return SentencePieceTokenizer(tokenizer_path)
     elif tokenizer_type == "tiktoken":
         return TikTokenizer(tokenizer_path)
     else:
-        raise ValueError(f"Unknown tokenizer type: {args.type}")
+        raise ValueError(f"Unknown tokenizer type: {tokenizer_type}")

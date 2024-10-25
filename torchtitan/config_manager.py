@@ -16,7 +16,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtitan.logging_utils import logger
+from torchtitan.logging import logger
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
@@ -224,10 +224,34 @@ class JobConfig:
             help="How many train steps to run",
         )
         self.parser.add_argument(
-            "--training.data_parallel_degree",
+            "--training.data_parallel_replicate_degree",
+            type=int,
+            default=1,
+            help="""
+            The `data_parallel_replicate_degree` argument specifies the degree of
+            data parallelism for weight replication. When this value is greater
+            than 1, weights will be replicated across `data_parallel_replicate_degree`
+            ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
+            parallelism method used is DDP (Distributed Data Parallelism).
+            1 means disabled.""",
+        )
+        self.parser.add_argument(
+            "--training.data_parallel_shard_degree",
             type=int,
             default=-1,
-            help="Data Parallelism degree. -1 means leftover ranks will be used (After SP/PP). 1 means disabled.",
+            help="""
+            The `data_parallel_shard_degree` argument specifies the degree of data
+            parallelism for weight sharding. When this value is greater than 1, weights
+            will be sharded across `data_parallel_shard_degree` ranks. If
+            `data_parallel_replicate_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism).  Otherwise, the
+            parallelism method used is FSDP (Fully Sharded Data Parallelism).
+
+            -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
+            only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
+            can be negative.
+            1 means disabled.""",
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",
@@ -270,35 +294,19 @@ class JobConfig:
                 the third containing layers.2 and all the remaining layers.
 
                 Note: fully-automated splitting may be enabled in the future,
-                but currently the split points must be specified manually for both manual and tracer.""",
+                but currently the split points must be specified manually.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b"],
-            default="1f1b",
+            default="1F1B",
             help="""
-                Specify the Pipeline Parallel schedule to use.
-
+                Specify the Pipeline Parallel schedule to use. The supported schedules are:
+                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
                 and split_points = number of stages - 1""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_mode",
-            type=str,
-            choices=["manual", "tracer"],
-            default="manual",
-            help="""
-                Specify the split method (e.g. the Pipeline Parallelism Front End)
-
-                "manual" means each rank will construct an nn.Module with the appropriate layers and .forward
-                implementation manually, and then wrap it in a PipelineStage.
-
-                "tracer" means the full model will be initialized (via meta device) and then traced into a graph,
-                split via the provided split points, unflattened into an nn.Module,
-                and finally wrapped in a PipelineStage.  tracer frontend is currently more experimental.""",
         )
         self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",
@@ -311,6 +319,11 @@ class JobConfig:
 
                 The default value will be the number of pipeline stages, if unspecified.
             """,
+        )
+        self.parser.add_argument(
+            "--experimental.enable_compiled_autograd",
+            action="store_true",
+            help="Enable CompiledAutograd to compile the backward.",
         )
         self.parser.add_argument(
             "--training.mixed_precision_param",
@@ -338,22 +351,17 @@ class JobConfig:
             help="Whether to compile the model",
         )
         self.parser.add_argument(
-            "--training.fp8_linear",
-            action="store_true",
-            help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear` with
-                default settings (dynamic scaling).
-                This feature requires you to install 'float8_experimental' which can be found
-                here: https://github.com/pytorch-labs/float8_experimental
-            """,
-        )
-        self.parser.add_argument(
             "--training.gc_freq",
             type=int,
             default=50,
             help="Python garbage control scheduling interval, in steps",
         )
-
+        self.parser.add_argument(
+            "--training.seed",
+            type=int,
+            default=None,
+            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+        )
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
@@ -442,6 +450,7 @@ class JobConfig:
                 0 is the default value.
             """,
         )
+
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
@@ -457,6 +466,48 @@ class JobConfig:
                 Selective activation checkpointing options ['int', 'op'].
                 'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
             """,
+        )
+
+        # float8 configs
+        self.parser.add_argument(
+            "--float8.enable_float8_linear",
+            action="store_true",
+            help="""
+                If true, swaps `torch.nn.Linear` with `Float8Linear`.
+                This feature requires you to install 'torchao' which can be found
+                here: https://github.com/pytorch/ao
+            """,
+        )
+        self.parser.add_argument(
+            "--float8.enable_fsdp_float8_all_gather",
+            action="store_true",
+            default=False,
+            help="Whether enable float8 all-gather in FSDP",
+        )
+        self.parser.add_argument(
+            "--float8.precompute_float8_dynamic_scale_for_fsdp",
+            action="store_true",
+            default=False,
+            help="Whether precompute float8 scales dynamically for FSDP",
+        )
+        self.parser.add_argument(
+            "--float8.scaling_type_input",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+            choices=["dynamic", "delayed"],
+        )
+        self.parser.add_argument(
+            "--float8.scaling_type_weight",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
+        )
+        self.parser.add_argument(
+            "--float8.scaling_type_grad_output",
+            type=str,
+            default="dynamic",
+            help="float8 scaling for input, dynamic (default) or delayed",
         )
 
         # communications library settings
@@ -532,10 +583,11 @@ class JobConfig:
             args_dict[first_level_key][second_level_key] = v
         return args_dict
 
-    def _validate_config(self) -> bool:
+    def _validate_config(self) -> None:
         # TODO: Add more mandatory validations
-        assert self.model.name and self.model.flavor and self.model.tokenizer_path
-        return True
+        assert self.model.name
+        assert self.model.flavor
+        assert self.model.tokenizer_path
 
     def parse_args_from_command_line(
         self, args_list

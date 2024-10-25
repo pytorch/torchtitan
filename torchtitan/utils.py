@@ -4,27 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import os
+import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
-from torchtitan.logging_utils import logger
-from torchtitan.parallelisms import ParallelDims
+from torchtitan.logging import logger
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh)
+    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).cuda()
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh)
+    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
 
 def _warn_overwrite_env(env, val):
@@ -35,22 +36,22 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
-def get_metrics_rank(world_mesh: DeviceMesh, parallel_dims: ParallelDims) -> int:
+def set_determinism(seed: Optional[int]) -> None:
     """
-    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
-    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
+    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
     """
-    if parallel_dims.pp_enabled:
-        assert (
-            world_mesh.mesh_dim_names[0] == "pp"
-        ), "get_metrics_rank assumes pp is the outer mesh dim"
-        pp_mesh = world_mesh["pp"]
-        pp_size = pp_mesh.size()
-        metrics_log_rank = int((world_mesh.size() // pp_size) * (pp_size - 1))
+    if seed is not None:
+        # CPU and GPU determinism
+        torch.manual_seed(seed)
+        # set deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        # set Python seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
     else:
-        metrics_log_rank = 0
-
-    return metrics_log_rank
+        # ensure we turn off deterministic cudnn algorithms
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def set_pg_timeouts(timeout, world_mesh):
@@ -78,6 +79,19 @@ def set_pg_timeouts(timeout, world_mesh):
     groups.append(None)
     for group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+
+
+# used to avoid stragglers in garbage collection
+class GarbageCollection:
+    def __init__(self, gc_freq=1000):
+        assert gc_freq > 0, "gc_freq must be a positive integer"
+        self.gc_freq = gc_freq
+        gc.disable()
+        gc.collect(1)
+
+    def run(self, step_count):
+        if step_count > 1 and step_count % self.gc_freq == 0:
+            gc.collect(1)
 
 
 TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
@@ -140,6 +154,19 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
 
 # hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
 def get_peak_flops(device_name: str) -> int:
+    try:
+        # Run the lspci command and capture the output
+        result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
+        # Filter the output for lines containing both "NVIDIA" and "H100"
+        filtered_lines = [
+            line
+            for line in result.stdout.splitlines()
+            if "NVIDIA" in line and "H100" in line
+        ]
+        # Join all filtered lines into a single string
+        device_name = " ".join(filtered_lines) or device_name
+    except FileNotFoundError as e:
+        logger.warning(f"Error running lspci: {e}, fallback to use device_name")
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12
@@ -147,10 +174,10 @@ def get_peak_flops(device_name: str) -> int:
         # data from https://www.nvidia.com/en-us/data-center/h100/
         # NOTE: Specifications are one-half lower without sparsity.
         if "NVL" in device_name:
-            return 1979e12
+            return 835e12
         elif "PCIe" in device_name:
             return 756e12
-        else:  # for SXM and other variants
+        else:  # for H100 SXM and other variants
             return 989e12
     else:  # for other GPU types, assume A100
         return 312e12
