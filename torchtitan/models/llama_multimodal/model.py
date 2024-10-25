@@ -4,38 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# Llama 2 is licensed under the LLAMA 2 Community License,
+# Llama 3 is licensed under the LLAMA 3 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.norms import RMSNorm
+
 
 @dataclass
 class ModelArgs:
-    dim: int = 4096
-    num_layers: int = 32
-    num_layers_learnable_head: int = 32
-    decoder_embed_dim: int = 4096  # This is for linear projection to convert the output of encoder to decoder
-    num_heads: int = 32
-    num_kv_heads: Optional[int] = None
-    vocab_size: int = -1  # defined later by tokenizer
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
-
-    max_seq_len: int = 2048
-    # If `True`, then each transformer block init uses its layer ID, and if
-    # `False`, each uses the total number of transformer blocks
-    depth_init: bool = True
-    norm_type: str = "rmsnorm"
-
+    # encoder part
+    encoder_embed_dim: int = 4096
+    encoder_num_layers: int = 32
+    num_layers_projection: int = 32
+    encoder_num_heads: int = 32
+    encoder_num_kv_heads: Optional[int] = None
     patch_size: int = 1
     tile_size: int = 128
     max_num_tiles: int = 8
@@ -48,6 +38,27 @@ class ModelArgs:
     # will return the tokens before they go through the first and fourth layers.
     return_intermediates: Optional[List[int]] = None
     is_causal: bool = True
+
+    # decoder part
+    decoder_embed_dim: int = 4096  # This is for linear projection to convert the output of encoder to decoder
+    fusion_interval: int = 1  # This is the interval of layers that are used for fusion
+    num_special_tokens: int = 2  # This is the number of special tokens in the tokenizer
+    decoder_num_layers: int = 16
+    decoder_num_heads: int = 32
+    decoder_num_kv_heads: Optional[int] = None
+
+    # common part
+    vocab_size: int = -1  # defined later by tokenizer
+    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    ffn_dim_multiplier: Optional[float] = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
+
+    max_seq_len: int = 2048
+    # If `True`, then each transformer block init uses its layer ID, and if
+    # `False`, each uses the total number of transformer blocks
+    depth_init: bool = True
+    norm_type: str = "rmsnorm"
 
 
 class Fp32LayerNorm(nn.LayerNorm):
@@ -73,6 +84,29 @@ class Fp32LayerNorm(nn.LayerNorm):
             self.eps,
         )
         return output.type_as(x)
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+    """
+    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
+
+    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
+    and the end index 'end'. The 'theta' parameter scales the frequencies.
+    The returned tensor contains complex values in complex64 data type.
+
+    Args:
+        dim (int): Dimension of the frequency tensor.
+        end (int): End index for precomputing frequencies.
+        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+
+    Returns:
+        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+    """
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -151,7 +185,7 @@ class Attention(nn.Module):
 
     Attributes:
         num_kv_heads (int): Number of key and value heads.
-        n_heads (int): Number of query heads.
+        num_heads (int): Number of query heads.
         num_rep (int): Number of repetitions for local heads.
         head_dim (int): Dimension size of each attention head.
         wq (Linear): Linear transformation for queries.
@@ -163,26 +197,30 @@ class Attention(nn.Module):
 
     def __init__(self, model_args: ModelArgs):
         super().__init__()
-        self.num_heads = model_args.num_heads
+        self.num_heads = model_args.encoder_num_heads
         self.num_kv_heads = (
-            model_args.num_heads
-            if model_args.num_kv_heads is None
-            else model_args.num_kv_heads
+            model_args.encoder_num_heads
+            if model_args.encoder_num_kv_heads is None
+            else model_args.encoder_num_kv_heads
         )
         self.num_rep = self.num_heads // self.num_kv_heads
-        self.head_dim = model_args.dim // model_args.num_heads
+        self.head_dim = model_args.encoder_embed_dim // model_args.encoder_num_heads
 
         self.wq = nn.Linear(
-            model_args.dim, model_args.num_heads * self.head_dim, bias=False
+            model_args.encoder_embed_dim,
+            model_args.encoder_num_heads * self.head_dim,
+            bias=False,
         )
         self.wk = nn.Linear(
-            model_args.dim, self.num_kv_heads * self.head_dim, bias=False
+            model_args.encoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
         )
         self.wv = nn.Linear(
-            model_args.dim, self.num_kv_heads * self.head_dim, bias=False
+            model_args.encoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
         )
         self.wo = nn.Linear(
-            model_args.num_heads * self.head_dim, model_args.dim, bias=False
+            model_args.encoder_num_heads * self.head_dim,
+            model_args.encoder_embed_dim,
+            bias=False,
         )
         self.is_causal = model_args.is_causal
 
@@ -210,7 +248,7 @@ class Attention(nn.Module):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        # Use -1 instead of `n_heads` (or `num_kv_heads`) to infer the actual
+        # Use -1 instead of `num_heads` (or `num_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
         # after the above linear ops.
         xq = xq.view(bs, seqlen, -1, self.head_dim)
@@ -222,7 +260,7 @@ class Attention(nn.Module):
         ):  # Only used in the self attention layers for text decoder
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # repeat k/v heads if num_kv_heads < n_heads
+        # repeat k/v heads if num_kv_heads < num_heads
         keys = repeat_kv(xk, self.num_rep)  # (bs, seqlen, n_local_heads, head_dim)
         values = repeat_kv(xv, self.num_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
@@ -527,15 +565,15 @@ class VitTransformerBlock(nn.Module):
     ):
         super().__init__()
         self.attn = Attention(model_args)
-        self.ln_attn = Fp32LayerNorm(model_args.dim, eps=1e-5)
+        self.ln_attn = Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5)
         self.mlp = FeedForward(
-            dim=model_args.dim,
-            hidden_dim=4 * model_args.dim,
+            dim=model_args.encoder_embed_dim,
+            hidden_dim=4 * model_args.encoder_embed_dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
             activation=model_args.activation,
         )
-        self.ln_mlp = Fp32LayerNorm(model_args.dim, eps=1e-5)
+        self.ln_mlp = Fp32LayerNorm(model_args.encoder_embed_dim, eps=1e-5)
         self.attn_scale = attn_scale or nn.Identity()
         self.mlp_scale = mlp_scale or nn.Identity()
 
@@ -741,10 +779,11 @@ class Vit(nn.Module):
         if model_args.patch_size <= 0:
             raise ValueError(f"kernel size of conv {model_args.patch_size} must be > 0")
         if model_args.return_intermediates and (
-            len(model_args.return_intermediates) > model_args.num_layers
+            len(model_args.return_intermediates) > model_args.encoder_num_layers
         ):
             raise ValueError(
-                f"len(return_intermediates) must be <= num_layers. Got {return_intermediate=} and {num_layers=}"
+                "len(return_intermediates) must be <= num_layers."
+                f" Got {model_args.return_intermediate=} and {model_args.encoder_num_layers=}"
             )
 
         # For test validation purposes
@@ -755,31 +794,34 @@ class Vit(nn.Module):
 
         self.conv = Conv2dModule(
             in_channels=model_args.in_channels,
-            out_channels=model_args.dim,
+            out_channels=model_args.encoder_embed_dim,
             kernel_size=model_args.patch_size,
             stride=model_args.patch_size,
             bias=False,
         )
 
-        self.ln_post = Fp32LayerNorm(model_args.dim)
-        self.ln_pre = Fp32LayerNorm(model_args.dim)
+        self.ln_post = Fp32LayerNorm(model_args.encoder_embed_dim)
+        self.ln_pre = Fp32LayerNorm(model_args.encoder_embed_dim)
         self.transformer_layers = nn.ModuleList(
-            [VitTransformerBlock(model_args) for _ in range(model_args.num_layers)]
+            [
+                VitTransformerBlock(model_args)
+                for _ in range(model_args.encoder_num_layers)
+            ]
         )
 
-        self.class_embedding = CLSEmbedding(model_args.dim)
+        self.class_embedding = CLSEmbedding(model_args.encoder_embed_dim)
         # pre and post tile position embedding
         if model_args.max_num_tiles > 1:
             self.pre_tile_pos_embed = TilePositionalEmbedding(
                 max_num_tiles=model_args.max_num_tiles,
-                emb_dim=model_args.dim,
+                emb_dim=model_args.encoder_embed_dim,
             )
             self.post_tile_pos_embed = TilePositionalEmbedding(
                 max_num_tiles=model_args.max_num_tiles,
-                emb_dim=model_args.dim,
+                emb_dim=model_args.encoder_embed_dim,
             )
             self.token_pos_embedding = TokenPositionalEmbedding(
-                emb_dim=model_args.dim,
+                emb_dim=model_args.encoder_embed_dim,
                 tile_size=model_args.tile_size,
                 patch_size=model_args.patch_size,
             )
@@ -788,7 +830,7 @@ class Vit(nn.Module):
             self.post_tile_pos_embed = None
             self.token_pos_embedding = TiledTokenPositionalEmbedding(
                 max_num_tiles=model_args.max_num_tiles,
-                emb_dim=model_args.dim,
+                emb_dim=model_args.encoder_embed_dim,
                 tile_size=model_args.tile_size,
                 patch_size=model_args.patch_size,
             )
@@ -878,12 +920,9 @@ class Vit(nn.Module):
         return x, int_x
 
 
-class LearnableProjection(nn.Module):
+class Projection(nn.Module):
     """Projection transformer to adapt the output of a
-    pretrained frozen encoder (CLIP) to a pretrained decoder model.
-
-    Args:
-        model_args (ModelArgs): configs for the model.
+    encoder (CLIP) to the decoder model.
     """
 
     def __init__(
@@ -896,13 +935,14 @@ class LearnableProjection(nn.Module):
                 VitTransformerBlock(
                     model_args, attn_scale=TanhGate(), mlp_scale=TanhGate()
                 )
-                for _ in range(model_args.num_layers_learnable_head)
+                for _ in range(model_args.num_layers_projection)
             ]
         )
 
         self.num_hidden = len(model_args.return_intermediates or [])
         self.output = nn.Linear(
-            model_args.dim * (self.num_hidden + 1), model_args.decoder_embed_dim
+            model_args.encoder_embed_dim * (self.num_hidden + 1),
+            model_args.decoder_embed_dim,
         )
 
     def forward(
@@ -910,18 +950,6 @@ class LearnableProjection(nn.Module):
         x: torch.Tensor,
         hidden_states: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            x (torch.Tensor): input tensor with shape [bsz, num_imgs, num_tiles, num_tokens, encoder_emb_dim]
-            hidden_states (Optional[List[torch.Tensor]]): list of hidden states
-                from the encoder. Each hidden state has the same shape as x.
-
-        Returns:
-            Tensor: output tensor of a sequence of embedings [bsz x seq x decoder_emb_dim]
-                where sequence length is num_imgs * num_tiles * num_tokens
-
-        """
-        bsz, imgs, tiles, embeds, dim = x.shape
         bsz, num_imgs, num_tiles, num_tokens, emb_dim = x.shape
 
         # apply transformer layers
@@ -932,6 +960,7 @@ class LearnableProjection(nn.Module):
 
         # interleave hidden states and cat with x
         if self.num_hidden > 0:
+            assert hidden_states is not None
             hidden_states = torch.stack(hidden_states, dim=-1)
             hidden_states = hidden_states.view(bsz, num_imgs, num_tiles, num_tokens, -1)
             x = torch.cat([x, hidden_states], dim=-1)
@@ -941,9 +970,8 @@ class LearnableProjection(nn.Module):
 
 
 class VisionEncoder(nn.Module):
-    """Vision encoder model for Llama 3.2 Vision. This combines a pretrained
-    vision encoder with a learnable projection. We define two different components
-    so that we can specify the freeze of the vit part during training easily.
+    """Vision encoder model for Llama 3.2 Vision. This combines a vision
+    encoder with a projection. We define two different components.
 
     Args:
         model_args (ModelArgs): configs for the vision encoder.
@@ -952,7 +980,7 @@ class VisionEncoder(nn.Module):
     def __init__(self, model_args: ModelArgs) -> None:
         super().__init__()
         self.vit = Vit(model_args)
-        self.proj = LearnableProjection(model_args)
+        self.proj = Projection(model_args)
 
     def forward(
         self, images: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None
@@ -969,3 +997,470 @@ class VisionEncoder(nn.Module):
                 where sequence length is num_imgs*num_tiles+num_embeds
         """
         return self.proj(*self.vit(images, aspect_ratio))
+
+
+class FeedForwardForDecoder(nn.Module):
+    """
+    FeedForward module for the decoder. It's different from the one in the encoder.
+    This is the component which is orignally used in llama3.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        multiple_of: int,
+        ffn_dim_multiplier: Optional[float],
+    ):
+        super().__init__()
+        hidden_dim = int(2 * hidden_dim / 3)
+        # custom dim factor multiplier
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
+class SelfAttention(nn.Module):
+    """
+    Multi-head self attention module with rotary position.
+    """
+
+    def __init__(self, model_args: ModelArgs):
+        super().__init__()
+        self.num_heads = model_args.decoder_num_heads
+        self.num_kv_heads = (
+            model_args.decoder_num_heads
+            if model_args.decoder_num_kv_heads is None
+            else model_args.decoder_num_kv_heads
+        )
+        self.n_rep = self.num_heads // self.num_kv_heads
+        self.head_dim = model_args.decoder_embed_dim // model_args.decoder_num_heads
+
+        self.wq = nn.Linear(
+            model_args.decoder_embed_dim,
+            model_args.decoder_num_heads * self.head_dim,
+            bias=False,
+        )
+        self.wk = nn.Linear(
+            model_args.decoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.wv = nn.Linear(
+            model_args.decoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.wo = nn.Linear(
+            model_args.decoder_num_heads * self.head_dim,
+            model_args.decoder_embed_dim,
+            bias=False,
+        )
+
+    def init_weights(self, init_std: float):
+        for linear in (self.wq, self.wk, self.wv):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ):
+        bs, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        # Use -1 instead of `num_heads` (or `num_kv_heads`) to infer the actual
+        # local heads from sizes of xq, xk, and xv as TP may have sharded them
+        # after the above linear ops.
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+        # repeat k/v heads if num_kv_heads < num_heads
+        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+
+        # we use casual mask for training
+        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        output = output.view(bs, seqlen, -1)
+        return self.wo(output)
+
+
+class CrossAttention(nn.Module):
+    """
+    Multi-head cross attention module.
+    """
+
+    def __init__(self, model_args: ModelArgs):
+        super().__init__()
+        self.num_heads = model_args.decoder_num_heads
+        self.num_kv_heads = (
+            model_args.decoder_num_heads
+            if model_args.decoder_num_kv_heads is None
+            else model_args.decoder_num_kv_heads
+        )
+        self.n_rep = self.num_heads // self.num_kv_heads
+        self.head_dim = model_args.decoder_embed_dim // model_args.decoder_num_heads
+
+        self.wq = nn.Linear(
+            model_args.decoder_embed_dim,
+            model_args.decoder_num_heads * self.head_dim,
+            bias=False,
+        )
+        self.wk = nn.Linear(
+            model_args.decoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.wv = nn.Linear(
+            model_args.decoder_embed_dim, self.num_kv_heads * self.head_dim, bias=False
+        )
+        self.wo = nn.Linear(
+            model_args.decoder_num_heads * self.head_dim,
+            model_args.decoder_embed_dim,
+            bias=False,
+        )
+        self.q_norm = RMSNorm(dim=self.head_dim, eps=1e-05)
+        self.k_norm = RMSNorm(dim=self.head_dim, eps=1e-05)
+
+    def init_weights(self, init_std: float):
+        for linear in (self.wq, self.wk, self.wv):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        encoder_input: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ):
+        bs, seqlen_x, _ = x.shape
+        seqlen_y = encoder_input.shape[1]
+        xq, xk, xv = self.wq(x), self.wk(encoder_input), self.wv(encoder_input)
+
+        # Use -1 instead of `num_heads` (or `num_kv_heads`) to infer the actual
+        # local heads from sizes of xq, xk, and xv as TP may have sharded them
+        # after the above linear ops.
+        xq = xq.view(bs, seqlen_x, -1, self.head_dim)
+        xk = xk.view(bs, seqlen_y, -1, self.head_dim)
+        xv = xv.view(bs, seqlen_y, -1, self.head_dim)
+
+        # repeat k/v heads if num_kv_heads < num_heads
+        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen_y, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen_y, n_local_heads, head_dim)
+
+        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen_x, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen_y, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen_y, head_dim)
+
+        xq = self.q_norm(xq)
+        xk = self.k_norm(xk)
+
+        # we use casual mask for training
+        output = F.scaled_dot_product_attention(
+            xq, xk, xv, attn_mask=mask, is_causal=False
+        )
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bs, seqlen_x, n_local_heads, head_dim)
+        output = output.view(bs, seqlen_x, -1)
+        return self.wo(output)
+
+
+class DecoderTransformerSelfAttnBlock(nn.Module):
+    def __init__(
+        self,
+        model_args: ModelArgs,
+    ):
+        super().__init__()
+        self.attn = SelfAttention(model_args)
+        self.ln_attn = RMSNorm(dim=model_args.decoder_embed_dim, eps=1e-5)
+        self.mlp = FeedForwardForDecoder(
+            dim=model_args.decoder_embed_dim,
+            hidden_dim=4 * model_args.decoder_embed_dim,
+            multiple_of=model_args.multiple_of,
+            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+        )
+        self.ln_mlp = RMSNorm(dim=model_args.decoder_embed_dim, eps=1e-5)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        **kwargs: Dict,
+    ):
+        bsz, seq_len, emd_dim = x.shape
+        x = x + self.attn(self.ln_attn(x), freqs_cis)
+        x = x + self.mlp(self.ln_mlp(x))
+        return x
+
+
+class DecoderTransformerCrossAttnBlock(nn.Module):
+    def __init__(
+        self,
+        model_args: ModelArgs,
+    ):
+        super().__init__()
+        self.attn = CrossAttention(model_args)
+        self.ln_attn = RMSNorm(dim=model_args.decoder_embed_dim)
+        self.mlp = FeedForward(
+            dim=model_args.decoder_embed_dim,
+            hidden_dim=4 * model_args.decoder_embed_dim,
+            multiple_of=model_args.multiple_of,
+            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+        )
+        self.ln_mlp = RMSNorm(dim=model_args.decoder_embed_dim)
+        self.attn_scale = TanhGate()
+        self.mlp_scale = TanhGate()
+
+    def _skip_mask(self, mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """Some tokens in x may not attend to any encoder inputs
+        due to the cross attention mask (encoder_mask). This results in
+        a full row of the attention matrix being masked out.
+
+        In the example below, the word "the" is masked from every embedding.
+        The False value means a token can't attend to an embedding.
+
+        .. code-block:: text
+
+            |emb||emb||emb|
+        |The| F    F    F
+        |red| T    F    T
+        |car| F    T    T
+
+        This results in no inputs into the softmax layer which causes a NaN.
+        The skip mask is used to mask the outputs of attention and
+        mlp resulting in the token being skipped.
+
+        The above example would result in a skip mask of: [[True], [False], [False]]
+        which specifies which tokens to fully mask out.
+
+        """
+        # no skip_mask if no masking
+        if mask is None:
+            return None
+        # negate mask and convert to boolean mask
+        if mask.dtype == torch.bool:
+            mask = ~mask
+        else:
+            mask = torch.isneginf(mask)
+        # True where all elements in a row are True
+        mask = torch.all(mask, dim=-1, keepdim=True)
+        return mask
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        encoder_input: Optional[torch.Tensor] = None,
+        encoder_mask: Optional[torch.Tensor] = None,
+        **kwargs: Dict,
+    ) -> torch.Tensor:
+        # Skip cross attention when no secondary input as it's primary purpose
+        # is to attend between x and encoder_input.
+        if encoder_input is None:
+            return x
+
+        # A mask of tokens (x) with no encoder_input
+        skip_mask = self._skip_mask(encoder_mask)
+
+        attn_out = self.attn(
+            self.ln_attn(x),
+            encoder_input,
+            mask=encoder_mask,
+        )
+        if skip_mask is not None:
+            attn_out.masked_fill_(skip_mask, 0)
+
+        h = self.attn_scale(attn_out) + x
+        # Norm applied before the feedforward layer
+        mlp_out = self.mlp(self.ln_mlp(h))
+        if skip_mask is not None:
+            mlp_out.masked_fill_(skip_mask, 0)
+
+        # Residual connection; shape: [batch_size, seq_length, embed_dim]
+        out = h + self.mlp_scale(mlp_out)
+
+        return out
+
+
+class FusionLayer(nn.Module):
+    """
+    Deep Fusion model architectures combine pretrained encoder models with pretrained
+    language models by infusing the encoder outputs into the middle layers of the LLM.
+    This allows the language model to interpret the enocder outputs as text and
+    "understand" any modality for which you can train an decoder. To enable the language model
+    to adapt to the encoder outputs, the FusionLayer fuses a new learnable layer to an existing
+    decoder (language model) layer. This additional layer can take the encoder embeddings and
+    learn to combine them with the token embeddings from the decoder.
+    """
+
+    def __init__(
+        self, layer: nn.Module, fusion_layer: nn.Module, fusion_first: bool = True
+    ):
+        super().__init__()
+        self.layer = layer
+        self.fusion_layer = fusion_layer
+
+    def forward(self, x: torch.Tensor, **kwargs: Dict) -> torch.Tensor:
+        x = self.fusion_layer(x, **kwargs)
+        x = self.layer(x, **kwargs)
+        return x
+
+
+class FusionEmbedding(nn.Module):
+    """
+    Fusion embedding supports training additional special tokens while keeping
+    the original embedding frozen. When fusing new models with a language model,
+    there may be some additional tokens needed to support the fused language model. For
+    example, adding a vision encoder might necessitate additional tokens like ``<|image|>``
+    to indicate an images position in text and require learning an embedding for this token.
+    The FusionEmbedding keeps the original embeddings frozen while learning a much smaller
+    second embedding for the additional tokens. During forward this module routes
+    the tokens to the appropriate embedding table.
+    """
+
+    def __init__(self, vocab_size: int, fusion_vocab_size: int, embed_dim: int) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.fusion_embedding = nn.Embedding(fusion_vocab_size, embed_dim)
+        self.dim = embed_dim
+        self.num_embeddings = vocab_size + fusion_vocab_size
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        bsz, seq_len = input.size()
+        vocab_size = self.embedding.num_embeddings
+
+        mask = input < vocab_size
+        # num_tokens = (input < vocab_size).sum()
+        tokens = torch.masked_select(input, mask)
+        # num_fusion_tokens = (input >= vocab_size).sum()
+        fusion_tokens = torch.masked_select(input, ~mask) - vocab_size
+
+        # [batch_size x num_tokens x embed_dim]
+        embeds = self.embedding(tokens)
+        # [batch_size x num_fusion_tokens x embed_dim]
+        fusion_embeds = self.fusion_embedding(fusion_tokens)
+
+        # [batch_size x seq_length x embed_dim]
+        out = torch.empty(
+            bsz,
+            seq_len,
+            self.dim,
+            device=self.embedding.weight.device,
+            dtype=self.embedding.weight.dtype,
+        )
+        mask = mask.unsqueeze(-1).expand(bsz, seq_len, self.dim)
+        out.masked_scatter_(mask, embeds)
+        out.masked_scatter_(~mask, fusion_embeds)
+        return out
+
+
+class MultimodalDecoder(nn.Module):
+    """Decoder multimodal model for Llama 3.2.
+
+    Args:
+        model_args (ModelArgs): configs for the vision encoder.
+    """
+
+    def __init__(self, model_args: ModelArgs):
+        super().__init__()
+
+        # TODO persistent should be set to false, since this buffer can be recomputed.
+        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
+        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
+        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
+        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
+        # initialized by the checkpoint, or we need to add a separate initializer for
+        # just the non-persistent buffers that is called after loading checkpoints.
+        self.register_buffer(
+            "freqs_cis", self._precompute_freqs_cis(model_args), persistent=True
+        )
+
+        self.layers = []
+        for idx in range(1, model_args.decoder_num_layers + 1):
+            # define a llama3-like decoder layer, we don't train this part.
+            decoder_layer = DecoderTransformerSelfAttnBlock(model_args)
+            # cross attention layers, mixing text and vision,
+            # placed every `fusion_interval` layers
+            if idx % model_args.fusion_interval == 0:
+                cross_attn_layer = DecoderTransformerCrossAttnBlock(model_args)
+                fusion_layer = FusionLayer(
+                    layer=decoder_layer, fusion_layer=cross_attn_layer
+                )
+                self.layers.append(fusion_layer)
+            else:
+                self.layers.append(decoder_layer)
+
+        self.tok_embeddings = FusionEmbedding(
+            model_args.vocab_size,
+            model_args.num_special_tokens,
+            model_args.decoder_embed_dim,
+        )
+        self.norm = RMSNorm(model_args.decoder_embed_dim, eps=1e-05)
+        self.output = nn.Linear(
+            model_args.decoder_embed_dim, model_args.vocab_size, bias=False
+        )
+
+    def _precompute_freqs_cis(self, model_args) -> torch.Tensor:
+        return precompute_freqs_cis(
+            model_args.decoder_embed_dim // model_args.decoder_num_heads,
+            # Need to compute until at least the max token limit for generation
+            # (use 2x max sequence length to be safe)
+            model_args.max_seq_len * 2,
+            model_args.rope_theta,
+        )
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        *,
+        encoder_input: Optional[torch.Tensor] = None,
+        encoder_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            tokens (torch.Tensor): input tensor with shape ``[b x s]``
+            encoder_input (Optional[torch.Tensor]): Optional input embeds from the encoder. Shape ``[b x s_e x d_e]``
+            encoder_mask (Optional[torch.Tensor]):  Boolean tensor defining a relational matrix between
+                tokens and encoder embeddings. A True value at position ``i,j`` means token ``i`` can attend
+                to embedding ``j`` in the decoder. Mask has shape ``[b x s x s_e]``. Default is None,
+                but this is required during inference if the model has been setup with any layers
+                which use encoder embeddings and caches have been setup.
+        """
+        # input tensor of shape [b, s]
+        bsz, seq_len = tokens.shape
+
+        # shape: [b, s, d]
+        h = self.tok_embeddings(tokens)
+
+        for layer in self.layers:
+            # shape: [b, s, d]
+            h = layer(
+                h,
+                freqs_cis=self.freqs_cis,
+                encoder_input=encoder_input,
+                encoder_mask=encoder_mask,
+            )
+
+        # shape: [b, s, d]
+        h = self.norm(h)
+        output = self.output(h).float()
+
+        return output
