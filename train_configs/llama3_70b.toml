@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "70B"
-norm_type = "rmsnorm"  # [layernorm, np_layernorm, rmsnorm, fused_rmsnorm]
+norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
 
 [optimizer]
@@ -31,9 +31,9 @@ seq_len = 8192
 warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
 steps = 1000
-data_parallel_degree = -1
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
 tensor_parallel_degree = 8  # 8-way TP
-fp8_linear = false
 compile = false
 dataset = "c4"
 
@@ -51,3 +51,6 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = 'full'
+
+[float8]
+enable_float8_linear = false

@@ -18,18 +18,18 @@ from torch.distributed._tensor import Partial, Replicate, Shard
 from torch.distributed._tensor.experimental import local_map
 
 
-def create_norm(norm_type: str, dim: int, eps: float = 1e-6):
+def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
     """
-    Creates the specified normalization layer based on the norm_type.
+    Builds the specified normalization layer based on the norm_type.
 
     Args:
-        norm_type (str): The type of normalization layer to create.
-            Supported types: 1. rmsnorm 2. fused_rmsnorm 3. layernorm 4. np_layernorm
+        norm_type (str): The type of normalization layer to build.
+            Supported types: layernorm, np_layernorm, rmsnorm, fused_rmsnorm
         dim (int): The dimension of the normalization layer.
         eps (float, optional): The epsilon value for numerical stability. Defaults to 1e-6.
 
     Returns:
-        The created normalization layer.
+        The built normalization layer.
 
     Raises:
         NotImplementedError: If an unknown norm_type is provided.
@@ -284,7 +284,6 @@ class TritonFusedRMSNorm(torch.autograd.Function):
 
         M, N = dy.shape
         dx = torch.empty_like(x)
-        dw = torch.empty_like(weight)
 
         sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
         _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
