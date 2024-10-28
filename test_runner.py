@@ -354,12 +354,13 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--experimental.pipeline_parallel_degree 2",
                     "--training.enable_cpu_offload True",
                 ],
             ],
-            "Enable CPU Offload",
-            "enable_cpu_offload",
-            ngpu=2,
+            "Enable CPU Offload with PP",
+            "enable_cpu_offload+PP",
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors
