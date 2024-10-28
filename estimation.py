@@ -216,5 +216,5 @@ if __name__ == "__main__":
     try:
         estimate_memory(config)
     finally:
-        if torch.distributed.GroupMember.WORLD is not None:
+        if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
