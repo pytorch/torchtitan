@@ -159,7 +159,9 @@ def main(job_config: JobConfig):
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        # init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
+        # TODO: check job_config.cpu_offload = True/False
+        init_device = "cpu"
         model.to_empty(device=init_device)
         model.init_weights()
         model.train()
@@ -306,10 +308,42 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
-                )
+            # need to resolve following error for cpu offload
+            #     File "/data/users/weif/torchtitan/train.py", line 312, in main
+            #     torch.nn.utils.clip_grad_norm_(
+            #     File "/data/users/weif/pytorch/torch/nn/utils/clip_grad.py", line 30, in _no_grad_wrapper
+            #     return func(*args, **kwargs)
+            #     File "/data/users/weif/pytorch/torch/nn/utils/clip_grad.py", line 105, in clip_grad_norm_
+            #     clip_coef = max_norm / (total_norm + 1e-6)
+            #     File "/data/users/weif/pytorch/torch/_tensor.py", line 39, in wrapped
+            #     return f(*args, **kwargs)
+            #     File "/data/users/weif/pytorch/torch/_tensor.py", line 1064, in __rdiv__
+            #     return self.reciprocal() * other
+            #     File "/data/users/weif/pytorch/torch/_compile.py", line 32, in inner
+            #     return disable_fn(*args, **kwargs)
+            #     File "/data/users/weif/pytorch/torch/_dynamo/eval_frame.py", line 629, in _fn
+            #     return fn(*args, **kwargs)
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/_api.py", line 340, in __torch_dispatch__
+            #     return DTensor._op_dispatcher.dispatch(
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/_dispatch.py", line 181, in dispatch
+            #     self.redistribute_local_args(
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/_dispatch.py", line 317, in redistribute_local_args
+            #     resharded_local_tensor = redistribute_local_tensor(
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/_redistribute.py", line 208, in redistribute_local_tensor
+            #     new_local_tensor = partial_spec._reduce_value(
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/_ops/_math_ops.py", line 126, in _reduce_value
+            #     reduced_tensor = super()._reduce_value(tensor, mesh, mesh_dim)
+            #     File "/data/users/weif/pytorch/torch/distributed/tensor/placement_types.py", line 599, in _reduce_value
+            #     return funcol.all_reduce(
+            #     File "/data/users/weif/pytorch/torch/distributed/_functional_collectives.py", line 175, in all_reduce
+            #     tensor = torch.ops._c10d_functional.all_reduce(self, reduceOp.lower(), group_name)
+            #     File "/data/users/weif/pytorch/torch/_ops.py", line 1123, in __call__
+            #     return self._op(*args, **(kwargs or {}))
+            # RuntimeError: No backend type associated with device type cpu
+            # for m in model_parts:
+            #     torch.nn.utils.clip_grad_norm_(
+            #         m.parameters(), job_config.training.max_norm, foreach=True
+            #     )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
