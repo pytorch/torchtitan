@@ -22,7 +22,18 @@ Our guiding principles when building `torchtitan`:
 
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg?style=plastic)](https://arxiv.org/abs/2410.06511)
 
-We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511)
+We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511).
+```
+@misc{torchtitan,
+      title={TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training},
+      author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
+      year={2024},
+      eprint={2410.06511},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2410.06511},
+}
+```
 
 ### Dive into the code
 
@@ -39,7 +50,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 1. [FSDP2](docs/fsdp.md) with per param sharding
 2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
 3. Selective layer and operator activation checkpointing
-4. Distributed checkpointing (including async checkpointing)
+4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
 5. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
 6. Loss, GPU memory, tokens-per-second, and MFU displayed and logged via [TensorBoard](#tensorboard)
 7. Learning rate scheduler, meta-init, optional Fused RMSNorm
@@ -138,7 +149,7 @@ in the SBATCH command section.
 
 
 ## Debugging
-### Troubleshooting Jobs that Timeout
+### Troubleshooting jobs that timeout
 If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
 When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
 To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
