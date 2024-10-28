@@ -174,8 +174,12 @@ def init_distributed(job_config):
     # such as those in tensor parallelism
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
+    backend = "nccl"
+    if job_config.training.enable_cpu_offload:
+        backend = "cuda:nccl,cpu:gloo"
     torch.distributed.init_process_group(
-        "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
+        backend=backend,
+        timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
     )
 
 

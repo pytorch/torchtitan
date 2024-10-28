@@ -351,6 +351,17 @@ def build_test_list():
             "fsdp2_mem_tracker",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.enable_cpu_offload True",
+                ],
+            ],
+            "Enable CPU Offload with PP",
+            "enable_cpu_offload+PP",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 

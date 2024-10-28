@@ -254,6 +254,13 @@ class JobConfig:
             1 means disabled.""",
         )
         self.parser.add_argument(
+            "--training.enable_cpu_offload",
+            type=bool,
+            default=False,
+            help="""
+            Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP""",
+        )
+        self.parser.add_argument(
             "--training.tensor_parallel_degree",
             type=int,
             default=1,
