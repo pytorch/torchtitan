@@ -209,13 +209,6 @@ class CheckpointManager:
             lr_schedulers
         ), "Must pass one lr_scheduler per model part"
 
-        assert len(model_parts) == len(
-            optimizers
-        ), "Must pass one optimizer per model part"
-        assert len(model_parts) == len(
-            lr_schedulers
-        ), "Must pass one lr_scheduler per model part"
-
         self.states = states
 
         self.states.update(
