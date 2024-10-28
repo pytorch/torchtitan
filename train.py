@@ -152,7 +152,6 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device="cuda")
-            m.init_weights()
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -161,7 +160,6 @@ def main(job_config: JobConfig):
         # move sharded model to CPU/GPU and initialize weights via DTensor
         init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-        model.init_weights()
         model.train()
 
         model_parts = [model]
@@ -190,6 +188,8 @@ def main(job_config: JobConfig):
     )
 
     if job_config.checkpoint.create_seed_checkpoint:
+        for m in model_parts:
+            m.init_weights()
         assert (
             world_size == 1
         ), "Must create seed-checkpoint using one gpu, to disable sharding"
@@ -198,6 +198,9 @@ def main(job_config: JobConfig):
         return
 
     checkpoint_loaded = checkpoint.load()
+    if not checkpoint_loaded:
+        for m in model_parts:
+            m.init_weights()
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
         # TODO: fix this by allowing each rank to set their own seed
