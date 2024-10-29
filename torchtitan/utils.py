@@ -67,6 +67,9 @@ def set_pg_timeouts(timeout, world_mesh):
     logger.info(
         f"Synchronizing and adjusting timeout for all ProcessGroups to {timeout}"
     )
+    # Barrier can OOM in high memory pressure settings
+    # since this is a one-time cost, try to avoid it
+    torch.distributed.empty_cache()
     # Ensure that all the ranks have reached the point of setting the new timeout-
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
