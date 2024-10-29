@@ -249,9 +249,7 @@ class JobConfig:
             parallelism method used is FSDP (Fully Sharded Data Parallelism).
 
             -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-            only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
-            can be negative.
-            1 means disabled.""",
+            only `data_parallel_shard_degree` can be negative. 1 means disabled.""",
         )
         self.parser.add_argument(
             "--training.enable_cpu_offload",
