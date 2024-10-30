@@ -12,10 +12,11 @@ import torch
 import torch.distributed.checkpoint as DCP
 
 from torchtitan.logging import init_logger, logger
+from torchtitan.models.llama.model import precompute_freqs_cis
 
 
 @torch.inference_mode()
-def convert_llama_weights(input_dir, output_dir):
+def convert_llama_weights(input_dir, output_dir, max_seq_len: int):
     with open(input_dir / "params.json", "r") as f:
         params = json.load(f)
     n_layers = params["n_layers"]
@@ -123,6 +124,13 @@ def convert_llama_weights(input_dir, output_dir):
         for i in range(len(shards)):
             del shards[i]["output.weight"]
 
+        # NOTE: precompute freqs_cis because must be persisted by default in torchtitan
+        state_dict["freqs_cis"] = precompute_freqs_cis(
+            dims_per_head,
+            max_seq_len,
+            params.get("rope_theta", 500000),
+        )
+
     logger.info(f"Writing to DCP at '{output_dir}'")
     output_dir.mkdir(parents=True, exist_ok=True)
     storage_writer = DCP.filesystem.FileSystemWriter(output_dir, thread_count=8)
@@ -136,6 +144,12 @@ if __name__ == "__main__":
         "input_dir", type=Path, help="Input directory with original Llama weights."
     )
     parser.add_argument("output_dir", type=Path, help="Output directory for DCP.")
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=131072,
+        help="The maximum sequence length of the model.",
+    )
     args = parser.parse_args()
 
-    convert_llama_weights(args.input_dir, args.output_dir)
+    convert_llama_weights(args.input_dir, args.output_dir, max_seq_len=args.max_seq_len)
