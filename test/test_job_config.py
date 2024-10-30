@@ -7,7 +7,7 @@
 import tempfile
 
 import pytest
-import toml
+import tomli_w
 from torchtitan.config_manager import JobConfig
 
 
@@ -77,8 +77,8 @@ class TestJobConfig:
 
         # toml has split points, cmdline does not
         with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "w") as f:
-                toml.dump(
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
                     {
                         "experimental": {
                             "pipeline_parallel_split_points": toml_split_str,
@@ -94,8 +94,8 @@ class TestJobConfig:
 
         # toml has split points, cmdline overrides them
         with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "w") as f:
-                toml.dump(
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
                     {
                         "experimental": {
                             "pipeline_parallel_split_points": toml_split_str,
