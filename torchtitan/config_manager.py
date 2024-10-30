@@ -576,6 +576,19 @@ class JobConfig:
                 logger.exception(f"Error details: {str(e)}")
                 raise e
 
+        # if split-points came from 'args' (from cmd line) it would have already been parsed into a list by that parser
+        if (
+            "experimental" in args_dict
+            and "pipeline_parallel_split_points" in args_dict["experimental"]
+            and isinstance(
+                args_dict["experimental"]["pipeline_parallel_split_points"], str
+            )
+        ):
+            exp = args_dict["experimental"]
+            exp["pipeline_parallel_split_points"] = string_list(
+                exp["pipeline_parallel_split_points"]
+            )
+
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
         for section, section_args in cmd_args_dict.items():
