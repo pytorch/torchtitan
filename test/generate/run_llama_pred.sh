@@ -29,7 +29,7 @@ fi
 torchrun --standalone \
          --nproc_per_node="${NGPU}" \
          --local-ranks-filter="${LOG_RANK}" \
-         test/generate/test_generate_dist.py \
+         test/generate/test_generate.py \
          --config="${CONFIG_FILE}" \
          --checkpoint="${CHECKPOINT_DIR}" \
          --prompt="${PROMPT}" \

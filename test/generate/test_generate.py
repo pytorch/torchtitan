@@ -5,19 +5,30 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import json
+import os
+import sys
 import time
+from pathlib import Path
+
 from typing import Optional
 
 import torch
 import torch.distributed.checkpoint as dcp
 
-from generation import generate
 from torchtitan import utils
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+
+# support running w/o installing as package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
+from generate.generation import generate
 
 
 def example_generate(
@@ -28,6 +39,7 @@ def example_generate(
     device: str = "cuda",
     temperature: float = 1.0,
     max_new_tokens: int = 32,
+    batch_size: int = 1,
     top_k: Optional[int] = None,
     seed: Optional[int] = None,
 ):
@@ -39,64 +51,116 @@ def example_generate(
     config.parse_args([f"--job.config_file={config_path}"])
     config._validate_config()
 
-    # Load tokenizer and model configuration
+    utils.set_determinism(seed)
+
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    model_name = config.model.name
+
+    # Init distributed env
+    if world_size > 1:
+        utils.init_distributed(config)
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=-1,
+            cp=1,
+            tp=world_size,
+            pp=1,
+            world_size=world_size,
+            enable_loss_parallel=False,
+        )
+        # Build world mesh for parallelism
+        world_mesh = parallel_dims.build_mesh(device_type="cuda")
+
+    logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
+
+    # Tokenizer setup
     tokenizer = build_tokenizer(
-        model_name_to_tokenizer[config.model.name], config.model.tokenizer_path
+        model_name_to_tokenizer[model_name], config.model.tokenizer_path
     )
-    model_cls = model_name_to_cls[config.model.name]
-    model_config = models_config[config.model.name][config.model.flavor]
+
+    model_config = models_config[model_name][config.model.flavor]
+    model_config.norm_type = config.model.norm_type
+    model_config.max_seq_len = config.training.seq_len
     model_config.vocab_size = tokenizer.n_words
 
-    # Load model and checkpoint
-    with torch.device(device):
+    model_cls = model_name_to_cls[model_name]
+    init_device = "meta" if world_size > 1 else device
+    with torch.device(init_device):
+        logger.info(f"Init model on init_device: {init_device}")
         model = model_cls.from_model_args(model_config)
 
-    model_param_count = utils.get_num_params(model)
-    logger.info(f"Model Params: {model_param_count:,}")
+    if world_size > 1:
+        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, config)
+
+    # materalize model
+    model.to_empty(device="cuda")
+    model.eval()
 
     state_dict = {"model": model.state_dict()}
 
-    precompute = False
-    if "freqs_cis" in state_dict["model"]:
-        del state_dict["model"]["freqs_cis"]
-        precompute = True
-
+    # Checkpoint Loading
     begin = time.monotonic()
-    logger.info(f"Loading checkpoint at: {checkpoint_path}")
+    logger.info(f"Loading chkpt at: {checkpoint_path}")
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
-    logger.info(
-        f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
+    logger.info(f"Finished loading chkpt in {time.monotonic() - begin:.2f} seconds.")
+
+    # Tokenize prompt and repeat batch_size times
+    input_ids = (
+        (
+            torch.tensor(
+                tokenizer.encode(prompt, bos=True, eos=False), dtype=torch.long
+            )
+            .view(1, -1)
+            .repeat(batch_size, 1)
+        )
+        .cuda()
+        .detach()
     )
 
-    # Precompute frequency if required
-    if precompute:
-        model.freqs_cis = model._precompute_freqs_cis().to(args.device)
-
-    # Encode input prompt and generate response
-    input_ids = torch.tensor(
-        tokenizer.encode(prompt, bos=False, eos=False), dtype=torch.long
-    ).to(device)
-
+    # Inference
     begin = time.monotonic()
-    responses = generate(
+    responses, _ = generate(
         model,
         input_ids,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
         top_k=top_k,
     )
+    end = time.monotonic()
 
-    logger.info(f"Generation completed in {time.monotonic() - begin:.2f} seconds.")
-    logger.info(f"{color.red}Input tokens: {len(input_ids)}{color.reset}")
-    logger.info(
-        f"{color.blue}Output tokens: {len(responses[0])-len(input_ids)}{color.reset}"
-    )
+    prompt_len = input_ids.size(1)  # num tokens
 
-    response = tokenizer.decode(
-        [token.item() for token in responses[0][len(input_ids) :]]
-    )
+    if local_rank == 0:
+        logger.info(f"Generation completed in {end-begin:.2f} seconds.")
 
-    logger.info(f"{color.red}{prompt}{color.blue}{response}")
+        r, b = color.red, color.blue
+
+        output_data = []
+
+        for i, response in enumerate(responses):
+
+            inp_tok = response[:prompt_len].tolist()
+            out_tok = response[prompt_len:].tolist()
+
+            input_text = tokenizer.decode(inp_tok)
+            output_text = tokenizer.decode(out_tok)
+
+            response_data = {
+                "response_idx": i,
+                "input_n_tokens": len(inp_tok),
+                "output_n_tokens": len(out_tok),
+                "input_text": input_text,
+                "output_text": output_text,
+            }
+            output_data.append(response_data)
+
+            logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
+
+        print(json.dumps(output_data, indent=4))
 
 
 if __name__ == "__main__":
@@ -134,9 +198,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--top_k", type=int, help="Prune to select from top_k probabilities. Optional"
     )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for reproducibility"
-    )
+    parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
 
     parser.add_argument(
         "--prompt",
@@ -154,6 +216,10 @@ if __name__ == "__main__":
         device=args.device,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
+        batch_size=args.batch_size,
         top_k=args.top_k,
         seed=args.seed,
     )
+
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
