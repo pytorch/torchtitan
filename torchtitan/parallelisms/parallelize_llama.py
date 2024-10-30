@@ -34,7 +34,6 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import check_strided_sharding_enabled
 
 
 def parallelize_llama(
@@ -329,12 +328,6 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-
-    # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
-    # that users won't use a nightly build which is older than 20240809 by then.
-    if tp_enabled:
-        # check if strided sharding is enabled, which is necessary for 2D/3D DCP
-        check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:
