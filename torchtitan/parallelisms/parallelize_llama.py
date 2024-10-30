@@ -81,21 +81,7 @@ def parallelize_llama(
         parallel_dims.dp_shard_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
 
-        # TODO: instead of flattening the mesh twice, we could've done in a batter way:
-        # dp_mesh = world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
-        # However, this leads to an error in `DeviceMesh.__get_item__` which I believe is
-        # a bug in DeviceMesh. We should fix it and then use the above line.
-        dp_mesh_dim_names = (
-            ("dp_replicate", "dp_shard")
-            if parallel_dims.dp_replicate_enabled
-            else ("dp",)
-        )
-        # note that mesh can only be flattened from the finest-grained mesh dimensions
-        dp_mesh = (
-            world_mesh[(*dp_mesh_dim_names, "cp")]._flatten("dp_cp")
-            if parallel_dims.cp_enabled
-            else world_mesh[dp_mesh_dim_names]
-        )
+        dp_mesh = world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
 
         apply_fsdp(
             model,
