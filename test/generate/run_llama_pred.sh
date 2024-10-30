@@ -21,10 +21,10 @@ if [ $# -ne 0 ]; then
 	overrides="$*"
 fi
 
-# export NCCL_DEBUG=INFO
+# export NCCL_DEBUG=INFO # TRACE
 # export NCCL_DEBUG_SUBSYS=ALL
-# export NCCL_BLOCKING_WAIT=1
-# export NCCL_ASYNC_ERROR_HANDLING=1
+# export TORCH_NCCL_BLOCKING_WAIT=1
+# export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 torchrun --standalone \
          --nproc_per_node="${NGPU}" \

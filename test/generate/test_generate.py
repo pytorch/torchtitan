@@ -21,6 +21,7 @@ from torchtitan import utils
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
+from torchtitan.metrics import build_gpu_memory_monitor
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 
@@ -57,6 +58,7 @@ def example_generate(
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
+    gpu_memory_monitor = build_gpu_memory_monitor()
 
     model_name = config.model.name
 
@@ -108,6 +110,13 @@ def example_generate(
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     logger.info(f"Finished loading chkpt in {time.monotonic() - begin:.2f} seconds.")
 
+    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    logger.info(
+        f"GPU memory usage for model: "
+        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+    )
+
     # Tokenize prompt and repeat batch_size times
     input_ids = (
         (
@@ -120,9 +129,10 @@ def example_generate(
         .cuda()
         .detach()
     )
+    gpu_memory_monitor.reset_peak_stats()
 
-    # Inference
-    begin = time.monotonic()
+    # Run generation
+    t0 = time.monotonic()
     responses, _ = generate(
         model,
         input_ids,
@@ -130,36 +140,57 @@ def example_generate(
         max_new_tokens=max_new_tokens,
         top_k=top_k,
     )
-    end = time.monotonic()
+    t1 = time.monotonic()
+    elapsed_sec = t1 - t0
 
-    prompt_len = input_ids.size(1)  # num tokens
+    # Post process
+    B, T = responses.size()  # B: batch_size, T: total seq length
+    input_n_tokens = input_ids.size(1)
+    generated_n_tokens = T - input_n_tokens  # == max_new_tokens
 
     if local_rank == 0:
-        logger.info(f"Generation completed in {end-begin:.2f} seconds.")
+        logger.info(f"Generation completed in {elapsed_sec:.2f} seconds.")
 
         r, b = color.red, color.blue
 
-        output_data = []
+        output_data = {
+            "metadata": {},
+            "responses": [],
+        }
 
-        for i, response in enumerate(responses):
-
-            inp_tok = response[:prompt_len].tolist()
-            out_tok = response[prompt_len:].tolist()
+        for i, tokens in enumerate(responses):
+            inp_tok = tokens[:input_n_tokens].tolist()
+            out_tok = tokens[input_n_tokens:].tolist()
 
             input_text = tokenizer.decode(inp_tok)
             output_text = tokenizer.decode(out_tok)
 
-            response_data = {
+            _data = {
                 "response_idx": i,
-                "input_n_tokens": len(inp_tok),
-                "output_n_tokens": len(out_tok),
                 "input_text": input_text,
                 "output_text": output_text,
             }
-            output_data.append(response_data)
+            output_data["responses"].append(_data)
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 
+        gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+        output_data["metadata"] = {
+            "generated_n_tokens": generated_n_tokens,
+            "input_n_tokens": input_n_tokens,
+            "generation_time_sec": f"{elapsed_sec:.2f}",
+            "tokens_per_sec": (B * T) / elapsed_sec,
+            "batch_size": B,
+            "seed": seed,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
+            "memory/max_active(%)": gpu_mem_stats.max_active_pct,
+            "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
+            "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
+            "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
+            "memory/num_ooms": gpu_mem_stats.num_ooms,
+            "torch_version": torch.__version__,
+        }
         print(json.dumps(output_data, indent=4))
 
 

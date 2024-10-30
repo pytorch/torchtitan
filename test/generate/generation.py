@@ -23,9 +23,9 @@ def logits_to_probs(
     logits = logits / max(temperature, 1e-5)
 
     if top_k is not None:
-        v, _ = torch.topk(logits, k=min(top_k, logits.size(-1)))  # (k,)
-        pivot = v.select(dim=-1, index=-1).unsqueeze(-1)  # (1,)
-        logits = torch.where(logits < pivot, -float("Inf"), logits)  # (vocab_size, )
+        v, _ = torch.topk(logits, k=min(top_k, logits.size(-1)))
+        pivot = v.select(dim=-1, index=-1).unsqueeze(-1)
+        logits = torch.where(logits < pivot, -float("Inf"), logits)
 
     probs = torch.nn.functional.softmax(logits, dim=-1)
     return probs
@@ -48,27 +48,27 @@ def generate_next_token(
 @torch.no_grad()
 def generate(
     model,
-    prompt: torch.Tensor,
+    input_ids: torch.Tensor,
     *,
     max_new_tokens: int,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-    if prompt.ndim == 1:
-        prompt = prompt.unsqueeze(0)
+    # ensure batch dimension (T,) --> (B, T)
+    if input_ids.ndim == 1:
+        input_ids = input_ids.unsqueeze(0)
 
-    generated_tokens = prompt.clone()
+    generated_tokens = input_ids.clone()
 
     for i in range(max_new_tokens):
-
-        tokens, logits = generate_next_token(
+        next_token, logits = generate_next_token(
             model,
-            x=generated_tokens.clone(),
+            x=generated_tokens,
             temperature=temperature,
             top_k=top_k,
         )
 
-        generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
+        generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
 
     return generated_tokens, logits
