@@ -209,13 +209,6 @@ class CheckpointManager:
             lr_schedulers
         ), "Must pass one lr_scheduler per model part"
 
-        assert len(model_parts) == len(
-            optimizers
-        ), "Must pass one optimizer per model part"
-        assert len(model_parts) == len(
-            lr_schedulers
-        ), "Must pass one lr_scheduler per model part"
-
         self.states = states
 
         self.states.update(
@@ -469,6 +462,15 @@ class CheckpointManager:
 
         # We won't have optimizer states to load, if we are loading a seed checkpoint
         states = {"model": self.states["model"]} if step == 0 else self.states
+        # PyTorch bug: (pytorch/pytorch#138575)
+        # dcp.load() replaces the values of stateful elements in `states` with new objects
+        # from loading the checkpoint, in addition to updating the states of the original
+        # objects from `states` in-place. This is a problem because the state_dict no longer
+        # refers to the objects being used in the train loop, meaning any future checkpoints
+        # will not include updates to these objects (such as updated optimizer states, etc.)
+        original_stateful_states = {
+            k: v for k, v in states.items() if isinstance(v, Stateful)
+        }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
         dcp.load(
@@ -478,6 +480,9 @@ class CheckpointManager:
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
+        # bugfix from above: restore the original stateful objects,
+        # whose states were already updated in-place by dcp.load()
+        states.update(original_stateful_states)
         return True
 
     def _purge_stale_checkpoints(self):

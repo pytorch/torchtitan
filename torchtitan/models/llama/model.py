@@ -379,7 +379,10 @@ class Transformer(nn.Module):
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
-    def init_weights(self):
+    def init_weights(
+        self,
+        buffer_device: Optional[torch.device] = None,
+    ):
         """
         [Note: On ``init_weights`` vs. ``reset_parameters``]
         Modules may define ``reset_parameters`` to initialize parameter values.
@@ -391,7 +394,8 @@ class Transformer(nn.Module):
         ``init_weights``. We only call it in the constructor of this
         ``Transformer`` root module to avoid reinitializing tensors.
         """
-        with torch.device(self.freqs_cis.device):
+        buffer_device = buffer_device or self.freqs_cis.device
+        with torch.device(buffer_device):
             self.freqs_cis = self._precompute_freqs_cis()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
@@ -415,8 +419,9 @@ class Transformer(nn.Module):
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
             # Need to compute until at least the max token limit for generation
-            # (use 2x max sequence length to be safe)
-            self.model_args.max_seq_len * 2,
+            # TODO: explain in docs/composability.md why we removed the 2x
+            # relaxing in our CP enablement PR
+            self.model_args.max_seq_len,
             self.model_args.rope_theta,
         )
 
@@ -438,7 +443,7 @@ class Transformer(nn.Module):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h).float() if self.output else h
+        output = self.output(h) if self.output else h
         return output
 
     @classmethod

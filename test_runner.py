@@ -141,19 +141,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_schedule FlexibleInterleaved1F1B",
-                ],
-            ],
-            "PP looped flexible 1F1B test",
-            "pp_looped_flexible_1f1b",
-            requires_seed_checkpoint=True,
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
             ],
@@ -322,11 +309,57 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.data_parallel_shard_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP",
+            "hsdp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--memory_estimation.enabled",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.enable_cpu_offload True",
+                ],
+            ],
+            "Enable CPU Offload with PP",
+            "enable_cpu_offload+PP",
             ngpu=4,
         ),
     ]
