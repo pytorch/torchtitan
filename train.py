@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import os
 import time
 from datetime import timedelta
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
@@ -27,21 +27,6 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-
-
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
-    @contextlib.contextmanager
-    def context():
-        with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-            if enable_compiled_autograd:
-                stack.enter_context(
-                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
-                )
-            yield
-
-    return context
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -70,6 +55,7 @@ def main(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp_shard=job_config.training.data_parallel_shard_degree,
         dp_replicate=job_config.training.data_parallel_replicate_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
@@ -146,8 +132,22 @@ def main(job_config: JobConfig):
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1), labels.flatten(0, 1)
+            pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
+
+    if job_config.training.compile:
+        loss_fn = torch.compile(loss_fn)
+
+    # move sharded model to CPU/GPU and initialize weights via DTensor
+    if job_config.checkpoint.create_seed_checkpoint:
+        init_device = "cpu"
+        buffer_device = None
+    elif job_config.training.enable_cpu_offload:
+        init_device = "cpu"
+        buffer_device = "cuda"
+    else:
+        init_device = "cuda"
+        buffer_device = None
 
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
@@ -162,17 +162,14 @@ def main(job_config: JobConfig):
         for m in model_parts:
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            m.to_empty(device="cuda")
-            m.init_weights()
+            m.to_empty(device=init_device)
+            m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
-
-        # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-        model.init_weights()
+        model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]
@@ -232,7 +229,7 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
-    train_context = get_train_context(
+    train_context = utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
@@ -275,11 +272,23 @@ def main(job_config: JobConfig):
             labels = labels.cuda()
             optimizers.zero_grad()
 
+            # apply context parallelism if cp is enabled
+            optional_context_parallel_ctx = (
+                utils.create_context_parallel_ctx(
+                    cp_mesh=world_mesh["cp"],
+                    cp_buffers=[input_ids, labels, model.freqs_cis],
+                    cp_seq_dims=[1, 1, 0],
+                    cp_no_restore_buffers={input_ids, labels},
+                )
+                if parallel_dims.cp_enabled
+                else None
+            )
+
             if parallel_dims.pp_enabled:
                 # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context():
+                with train_context(optional_context_parallel_ctx):
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -296,7 +305,7 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with train_context():
+                with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
@@ -348,7 +357,7 @@ def main(job_config: JobConfig):
 
                 # tokens per second, abbr. as wps by convention
                 wps = ntokens_since_last_log / (
-                    time_delta * parallel_dims.model_parallel_size
+                    time_delta * parallel_dims.non_data_parallel_size
                 )
                 # model FLOPS utilization
                 # For its definition and calculation, please refer to the PaLM paper:
