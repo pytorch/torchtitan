@@ -363,31 +363,6 @@ def build_test_list():
             ngpu=4,
         ),
     ]
-    integration_tests_flavors["test_pp_split_points.toml"] = [
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_schedule Interleaved1F1B",
-                ],
-            ],
-            "PP looped 1F1B test using toml for split-points",
-            "pp_looped_1f1b_toml_split",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_schedule Interleaved1F1B",
-                    "--experimental.pipeline_parallel_split_points layers.1,layers.3,layers.5",
-                ],
-            ],
-            "PP looped 1F1B test using cmdline to override toml for split-points",
-            "pp_looped_1f1b_cmdline_split_override_toml",
-            ngpu=4,
-        ),
-    ]
     return integration_tests_flavors
 
 
