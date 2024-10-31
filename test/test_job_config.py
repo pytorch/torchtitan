@@ -7,6 +7,7 @@
 import tempfile
 
 import pytest
+import tomli_w
 from torchtitan.config_manager import JobConfig
 
 
@@ -43,6 +44,77 @@ class TestJobConfig:
             ]
         )
         assert config.job.dump_folder == "/tmp/test_tt/"
+
+    def test_parse_pp_split_points(self):
+
+        toml_splits = ["layers.2", "layers.4", "layers.6"]
+        toml_split_str = ",".join(toml_splits)
+        cmdline_splits = ["layers.1", "layers.3", "layers.5"]
+        cmdline_split_str = ",".join(cmdline_splits)
+        # no split points specified
+        config = JobConfig()
+        config.parse_args(
+            [
+                "--job.config_file",
+                "./train_configs/debug_model.toml",
+            ]
+        )
+        assert config.experimental.pipeline_parallel_split_points == []
+
+        # toml has no split points, but cmdline splits are specified
+        config = JobConfig()
+        config.parse_args(
+            [
+                "--job.config_file",
+                "./train_configs/debug_model.toml",
+                "--experimental.pipeline_parallel_split_points",
+                f"{cmdline_split_str}",
+            ]
+        )
+        assert (
+            config.experimental.pipeline_parallel_split_points == cmdline_splits
+        ), config.experimental.pipeline_parallel_split_points
+
+        # toml has split points, cmdline does not
+        with tempfile.NamedTemporaryFile() as fp:
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
+                    {
+                        "experimental": {
+                            "pipeline_parallel_split_points": toml_split_str,
+                        }
+                    },
+                    f,
+                )
+            config = JobConfig()
+            config.parse_args(["--job.config_file", fp.name])
+            assert (
+                config.experimental.pipeline_parallel_split_points == toml_splits
+            ), config.experimental.pipeline_parallel_split_points
+
+        # toml has split points, cmdline overrides them
+        with tempfile.NamedTemporaryFile() as fp:
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
+                    {
+                        "experimental": {
+                            "pipeline_parallel_split_points": toml_split_str,
+                        }
+                    },
+                    f,
+                )
+            config = JobConfig()
+            config.parse_args(
+                [
+                    "--job.config_file",
+                    fp.name,
+                    "--experimental.pipeline_parallel_split_points",
+                    f"{cmdline_split_str}",
+                ]
+            )
+            assert (
+                config.experimental.pipeline_parallel_split_points == cmdline_splits
+            ), config.experimental.pipeline_parallel_split_points
 
     def test_print_help(self):
         config = JobConfig()
