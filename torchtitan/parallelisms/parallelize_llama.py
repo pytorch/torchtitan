@@ -34,7 +34,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import check_strided_sharding_enabled
+from torchtitan.parallelisms.utils import check_if_feature_in_pytorch
 
 
 def parallelize_llama(
@@ -80,8 +80,31 @@ def parallelize_llama(
     if (
         parallel_dims.dp_shard_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
-
-        dp_mesh = world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
+        try:
+            dp_mesh = (
+                world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
+            )
+        except IndexError:
+            # note: this is a workaround of the above logic for old pytorch version
+            # where https://github.com/pytorch/pytorch/pull/138945 is not included
+            # throw a warning to encourage users to upgrade to a newer pytorch version
+            check_if_feature_in_pytorch(
+                "DeviceMesh flattening over 3D+ meshes",
+                "https://github.com/pytorch/pytorch/pull/138945",
+                "2.6.0.dev20241030",
+            )
+            # TODO: remove this workaround once PyTorch 2.6 is released
+            dp_mesh_dim_names = (
+                ("dp_replicate", "dp_shard")
+                if parallel_dims.dp_replicate_enabled
+                else ("dp",)
+            )
+            # note that mesh can only be flattened from the finest-grained mesh dimensions
+            dp_mesh = (
+                world_mesh[(*dp_mesh_dim_names, "cp")]._flatten("dp_cp")
+                if parallel_dims.cp_enabled
+                else world_mesh[dp_mesh_dim_names]
+            )
 
         apply_fsdp(
             model,
@@ -315,12 +338,6 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-
-    # TODO: remove this check once PyTorch 2.5 is released. We can safely assume
-    # that users won't use a nightly build which is older than 20240809 by then.
-    if tp_enabled:
-        # check if strided sharding is enabled, which is necessary for 2D/3D DCP
-        check_strided_sharding_enabled()
 
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:
