@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -37,12 +37,12 @@ def generate_next_token(
     *,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
 
     logits = model(x)  # (B, T, vocab_size)
     probs = logits_to_probs(logits[:, -1, :], temperature, top_k)
     next_token = multinomial_sample_one(probs)
-    return next_token, probs
+    return next_token
 
 
 @torch.no_grad()
@@ -53,7 +53,7 @@ def generate(
     max_new_tokens: int,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
 
     # ensure batch dimension (T,) --> (B, T)
     if input_ids.ndim == 1:
@@ -61,8 +61,8 @@ def generate(
 
     generated_tokens = input_ids.clone()
 
-    for i in range(max_new_tokens):
-        next_token, logits = generate_next_token(
+    for _ in range(max_new_tokens):
+        next_token = generate_next_token(
             model,
             x=generated_tokens,
             temperature=temperature,
@@ -71,4 +71,4 @@ def generate(
 
         generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
 
-    return generated_tokens, logits
+    return generated_tokens

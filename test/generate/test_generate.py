@@ -15,6 +15,7 @@ from typing import Optional
 
 import torch
 import torch.distributed.checkpoint as dcp
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 
@@ -32,6 +33,7 @@ sys.path.append(str(wd))
 from generate.generation import generate
 
 
+@record
 def example_generate(
     config_path: str,
     checkpoint_path: str,
@@ -53,6 +55,11 @@ def example_generate(
     config._validate_config()
 
     utils.set_determinism(seed)
+
+    if seed is None:
+        logger.info("Deterministic off")
+    else:
+        logger.info(f"Deterministic on. Using seed: {seed}")
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -129,11 +136,12 @@ def example_generate(
         .cuda()
         .detach()
     )
+
     gpu_memory_monitor.reset_peak_stats()
 
     # Run generation
     t0 = time.monotonic()
-    responses, _ = generate(
+    responses = generate(
         model,
         input_ids,
         temperature=temperature,
@@ -178,7 +186,7 @@ def example_generate(
         output_data["metadata"] = {
             "generated_n_tokens": generated_n_tokens,
             "input_n_tokens": input_n_tokens,
-            "generation_time_sec": f"{elapsed_sec:.2f}",
+            "generation_time_sec": elapsed_sec,
             "tokens_per_sec": (B * T) / elapsed_sec,
             "batch_size": B,
             "seed": seed,
@@ -189,6 +197,7 @@ def example_generate(
             "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
             "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
             "memory/num_ooms": gpu_mem_stats.num_ooms,
+            "world_size": world_size,
             "torch_version": torch.__version__,
         }
         print(json.dumps(output_data, indent=4))

@@ -9,7 +9,7 @@ set -ex
 
 # use envs as local overrides for convenience
 # e.g.
-# LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
+# LOG_RANK=0,1 NGPU=4 ./run_llama_pred.sh
 NGPU=${NGPU:-"2"}
 LOG_RANK=${LOG_RANK:-0,1}
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
@@ -21,7 +21,7 @@ if [ $# -ne 0 ]; then
 	overrides="$*"
 fi
 
-# export NCCL_DEBUG=INFO # TRACE
+# export NCCL_DEBUG=TRACE # INFO
 # export NCCL_DEBUG_SUBSYS=ALL
 # export TORCH_NCCL_BLOCKING_WAIT=1
 # export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
