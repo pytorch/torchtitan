@@ -30,7 +30,7 @@ from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from generate.generation import generate
+from generate.generation import apply_torchchat_tp, generate
 
 
 @record
@@ -57,9 +57,9 @@ def example_generate(
     utils.set_determinism(seed)
 
     if seed is None:
-        logger.info("Deterministic off")
+        logger.info("Deterministic sampling off")
     else:
-        logger.info(f"Deterministic on. Using seed: {seed}")
+        logger.info(f"Deterministic sampling on. Using seed: {seed}")
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -103,7 +103,12 @@ def example_generate(
         model = model_cls.from_model_args(model_config)
 
     if world_size > 1:
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, config)
+
+        use_torchchat_tp = False
+        if use_torchchat_tp:
+            apply_torchchat_tp(model, world_mesh["tp"])  # Working
+        else:
+            models_parallelize_fns[model_name](model, world_mesh, parallel_dims, config)
 
     # materalize model
     model.to_empty(device="cuda")
@@ -147,6 +152,7 @@ def example_generate(
         temperature=temperature,
         max_new_tokens=max_new_tokens,
         top_k=top_k,
+        seed=seed,
     )
     t1 = time.monotonic()
     elapsed_sec = t1 - t0
