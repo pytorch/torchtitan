@@ -12,13 +12,13 @@ import torch
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan import utils
+from torchtitan import utils, DEVICE_TYPE, DEVICE_MODULE
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
+from torchtitan.metrics import build_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
@@ -61,16 +61,16 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-    torch.cuda.set_device(device)
+    device = torch.device(f"{DEVICE_TYPE}:{int(os.environ['LOCAL_RANK'])}")
+    DEVICE_MODULE.set_device(device)
     utils.init_distributed(job_config)
     # initialize GPU memory monitor and get peak flops for MFU calculation
-    gpu_memory_monitor = build_gpu_memory_monitor()
-    gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    memory_monitor = build_memory_monitor()
+    gpu_peak_flops = utils.get_peak_flops(memory_monitor.device_name)
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
-    world_mesh = parallel_dims.build_mesh(device_type="cuda")
+    world_mesh = parallel_dims.build_mesh(device_type=DEVICE_TYPE)
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
@@ -144,9 +144,9 @@ def main(job_config: JobConfig):
         buffer_device = None
     elif job_config.training.enable_cpu_offload:
         init_device = "cpu"
-        buffer_device = "cuda"
+        buffer_device = f"{DEVICE_TYPE}"
     else:
-        init_device = "cuda"
+        init_device = f"{DEVICE_TYPE}"
         buffer_device = None
 
     # apply parallelisms and initialization
@@ -174,11 +174,11 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
-    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    device_mem_stats = memory_monitor.get_peak_stats()
     logger.info(
-        f"GPU memory usage for model: "
-        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
-        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+        f"{DEVICE_TYPE.upper} memory usage for model: "
+        f"{device_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({device_mem_stats.max_reserved_pct:.2f}%)"
     )
 
     # build optimizer after applying parallelisms to the model
@@ -239,7 +239,7 @@ def main(job_config: JobConfig):
     ntokens_since_last_log = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
-    gpu_memory_monitor.reset_peak_stats()
+    memory_monitor.reset_peak_stats()
 
     checkpoint.reset()
 
@@ -268,8 +268,8 @@ def main(job_config: JobConfig):
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
+            input_ids = input_ids.to(DEVICE_TYPE)
+            labels = labels.to(DEVICE_TYPE)
             optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
@@ -368,7 +368,7 @@ def main(job_config: JobConfig):
                 time_data_loading = sum(data_loading_times) / len(data_loading_times)
                 time_data_loading_pct = 100 * sum(data_loading_times) / time_delta
 
-                gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+                device_mem_stats = memory_monitor.get_peak_stats()
 
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
@@ -378,20 +378,20 @@ def main(job_config: JobConfig):
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
-                    "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
-                    "memory/max_active(%)": gpu_mem_stats.max_active_pct,
-                    "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
-                    "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
-                    "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
-                    "memory/num_ooms": gpu_mem_stats.num_ooms,
+                    "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+                    "memory/max_active(%)": device_mem_stats.max_active_pct,
+                    "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+                    "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+                    "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+                    "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
-                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
@@ -400,7 +400,7 @@ def main(job_config: JobConfig):
                 ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
-                gpu_memory_monitor.reset_peak_stats()
+                memory_monitor.reset_peak_stats()
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)

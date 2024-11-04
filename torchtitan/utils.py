@@ -16,16 +16,17 @@ import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.device_mesh import DeviceMesh
+from torchtitan import DEVICE_TYPE, DEVICE_MODULE
 from torchtitan.logging import logger
 
 
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(DEVICE_TYPE)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(DEVICE_TYPE)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
 
@@ -71,8 +72,8 @@ def set_pg_timeouts(timeout, world_mesh):
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
-    torch.cuda.synchronize()
+    torch.distributed.barrier(device_ids=[DEVICE_MODULE.current_device()])
+    DEVICE_MODULE.synchronize()
 
     groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
 
