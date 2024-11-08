@@ -131,7 +131,8 @@ def main(job_config: JobConfig):
 
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
-        return torch.nn.functional.cross_entropy(
+        loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
+        return loss_func(
             pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
 
@@ -393,6 +394,7 @@ def main(job_config: JobConfig):
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.red}time: {time_end_to_end:5.2f}  "
                     f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "

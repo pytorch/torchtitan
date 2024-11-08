@@ -162,6 +162,12 @@ class JobConfig:
             help="Which model config to train",
         )
         self.parser.add_argument(
+            "--model.pretrained_path",
+            type=str,
+            default="",
+            help="Pretrained path for the model",
+        )       
+        self.parser.add_argument(
             "--model.norm_type",
             type=str,
             default="rmsnorm",

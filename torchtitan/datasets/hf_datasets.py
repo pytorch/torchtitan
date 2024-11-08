@@ -6,10 +6,15 @@
 
 import pickle
 from typing import Any, Dict, List, Optional
+import yaml
+import json
+import os
+import copy
 
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
+from torch.utils.data.dataloader import default_collate
 
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -160,6 +165,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
         super().__init__(hf_ds, batch_size)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
+        self.collate_fn = custom_collate
 
     def state_dict(self) -> Dict[str, Any]:
         # Store state only for dp rank to avoid replicating the same state across other dimensions
@@ -188,8 +194,143 @@ def build_hf_data_loader(
     rank,
     infinite: bool = True,
 ):
-    hf_ds = HuggingFaceDataset(
+    hf_ds = HuggingFaceDatasetSFT(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
 
     return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
+
+
+def read_yml(dataset_path: str, columns: list):
+    print(f"read dataset config from {dataset_path}")
+    with open(dataset_path, 'r') as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    # create an empty dict with columns as keys
+    data = {col: [] for col in columns} 
+    for file in config['META']:
+        file_path, file_type = file['path'], file['type']
+        file_ext = os.path.splitext(file_path)[-1]
+        if file_ext == ".json":
+            with open(file_path) as f:
+                single_data = json.load(f)
+                # loop over data
+                for i, line in enumerate(single_data):
+                    # update dict
+                    for col in columns:
+                        data[col].append(line[col])
+        elif file_ext == ".jsonl":
+            with open(file_path) as f:
+                for i, line in enumerate(f):
+                    line = json.loads(line)
+                    # update dict
+                    for col in columns:
+                        data[col].append(line[col])
+        else:
+            raise ValueError(f"Unsupported file type: {file_ext}")
+    # convert to hf dataset
+    return Dataset.from_dict(data)
+
+class HuggingFaceDatasetSFT(IterableDataset, Stateful):
+    """PyTorch Representation of the HuggingFace Dataset.
+
+    Args:
+        dataset_name (str): name of the dataset to load
+        dataset_path (str):
+            Path to the dataset in the file system.
+        tokenizer (Tokenizer):
+            Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+        seq_len (int): max sequence length
+        world_size (int): number of data parallel processes participating in training
+        rank (int): rank of the current data parallel process
+        infinite (bool): whether to loop infinitely over the dataset
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset_path: str,
+        tokenizer: Tokenizer,
+        seq_len: int = 2048,
+        world_size: int = 1,
+        rank: int = 0,
+        infinite: bool = False,
+    ) -> None:
+        print(f"read dataset config from {dataset_path}")
+        with open(dataset_path, 'r') as f:
+            self.config = yaml.load(f, Loader=yaml.FullLoader)
+        # read dataset
+        ds = read_yml(dataset_path, ["inputs_pretokenized", "targets_pretokenized"])
+        self.dataset_name = dataset_name
+        self._data = split_dataset_by_node(ds, rank, world_size)
+        # remove samples above seq_len
+        self._data = self._data.filter(lambda x: len(x['inputs_pretokenized'] + x['targets_pretokenized']) <= seq_len)
+        # shuffle
+        #self._data = self._data.shuffle(seed=27)
+        # print number of samples
+        print(f"Number of samples: {len(self._data)}")
+        self._tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.infinite = infinite
+
+        # variables for checkpointing
+        self._sample_idx = 0
+
+    def __iter__(self):
+
+        while True:
+            for sample in self._get_data_iter():
+                answer = sample['targets_pretokenized']
+                input1 = sample['inputs_pretokenized']
+                input2 = input1 + answer
+                input1 = torch.tensor(self._tokenizer.encode(input1, bos=True, eos=False), dtype=torch.int64)
+                input2 = torch.tensor(self._tokenizer.encode(input2, bos=True, eos=False), dtype=torch.int64)
+                # padding
+                padding = self.seq_len - input2.shape[0]
+                input2 = torch.cat((input2, torch.zeros(padding, dtype=torch.int64) - 1))
+                labels = copy.deepcopy(input2)
+                labels[:len(input1)] = -1
+                input2_mask = input2.ge(0)
+                label_mask = labels.ge(0)
+                input2[~input2_mask] = 0
+                labels[~label_mask] = 0
+                self._sample_idx += 1
+                yield input2, labels
+
+            if not self.infinite:
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                break
+            else:
+                # Reset offset for the next iteration
+                self._sample_idx = 0
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+
+    def _get_data_iter(self):
+        if self._sample_idx == 0:
+            return iter(self._data)
+
+        # As skipping to the end throws an error in case of map-style dataset, return an empty iterator
+        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
+            return iter([])
+
+        return iter(self._data.skip(self._sample_idx))
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict["sample_idx"]
+
+    def state_dict(self):
+        return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
+
+
+def custom_collate(batch):
+    input, label = default_collate(batch)
+    with torch.no_grad():
+        non_zero_indices = (input != 0).any(dim=0).nonzero(as_tuple=True)[0]
+        if non_zero_indices.numel() == -1: 
+            print(f"[RANK {dist.get_rank()}] nothing to predict in the whole batch!", force=True)
+            print(rej_inputs.cpu().tolist(), force=True)
+            pos = 2
+        else:
+            pos = non_zero_indices.max().item()
+        input = input[:, :pos+1]
+        label = label[:, :pos+1]
+    return input, label

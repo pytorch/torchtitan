@@ -174,7 +174,7 @@ class CheckpointManager:
         self.enable_checkpoint = ckpt_config.enable_checkpoint
         self.keep_latest_k = ckpt_config.keep_latest_k
 
-        if not self.enable_checkpoint:
+        if not self.enable_checkpoint and not job_config.model.pretrained_path:
             return
         """
         Note: Pipeline Parallelism and Virtual Stages
@@ -440,6 +440,25 @@ class CheckpointManager:
             # self.my_thread = threading.Thread(target=func).start()
             sync_func()
             self.staging = False
+
+    def load_pretrained(self, path) -> bool:
+        states = {"model": self.states["model"]}
+        original_stateful_states = {
+            k: v for k, v in states.items() if isinstance(v, Stateful)
+        }
+        logger.info(f"Loading the pretrained model at {path}.")
+        begin = time.monotonic()
+        dcp.load(
+            states,
+            checkpoint_id=path,
+        )
+        logger.info(
+            f"Finished loading the pretrained model in {time.monotonic() - begin:.2f} seconds."
+        )
+        # bugfix from above: restore the original stateful objects,
+        # whose states were already updated in-place by dcp.load()
+        states.update(original_stateful_states)
+        return True  
 
     def load(self, step: int = -1) -> bool:
         if not self.enable_checkpoint:
