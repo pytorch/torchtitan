@@ -20,6 +20,6 @@ if [ $# -ne 0 ]; then
 fi
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+srun -p llm_s -n 1 -N 1 --ntasks-per-node=1 --gpus-per-task=8 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 train.py --job.config_file ${CONFIG_FILE} $overrides
