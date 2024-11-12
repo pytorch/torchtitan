@@ -39,7 +39,6 @@ def example_generate(
     checkpoint_path: str,
     prompt: str,
     *,
-    device: str = "cuda",
     temperature: float = 1.0,
     max_new_tokens: int = 32,
     batch_size: int = 1,
@@ -103,7 +102,6 @@ def example_generate(
         model = model_cls.from_model_args(model_config)
 
     if world_size > 1:
-
         use_torchchat_tp = False
         if use_torchchat_tp:
             apply_torchchat_tp(model, world_mesh["tp"])  # Working
@@ -209,6 +207,28 @@ def example_generate(
         print(json.dumps(output_data, indent=4))
 
 
+def load_prompt(prompt):
+    prompt_path = Path(prompt)
+
+    if prompt_path.exists():
+        if prompt_path.is_file():
+            try:
+                content = prompt_path.read_text()
+                if content:  # Ensure the file is not empty
+                    return content
+                print("Error: Prompt file is empty.")
+            except IOError as e:
+                print(f"Error: Unable to read file '{prompt_path}'. {e}")
+        else:
+            print(f"Error: Path '{prompt}' is not a file.")
+    # If not empty, streat as a string
+    elif prompt:
+        return prompt
+
+    print("Error: Provided prompt is empty or file does not exist")
+    sys.exit(1)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test generation")
     parser.add_argument(
@@ -219,12 +239,6 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Checkpoint path to load (required)",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to load model on. Default is 'cuda'",
     )
     parser.add_argument(
         "--temperature",
@@ -250,16 +264,16 @@ if __name__ == "__main__":
         "--prompt",
         type=str,
         default="Hello! How are",
-        help="Input prompt for generation",
+        help="Input prompt for generation, either as a string or a path to a .txt file",
     )
 
     args = parser.parse_args()
+    prompt_text = load_prompt(args.prompt)
 
     example_generate(
         config_path=args.config,
         checkpoint_path=args.checkpoint,
-        prompt=args.prompt,
-        device=args.device,
+        prompt=prompt_text,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.batch_size,
