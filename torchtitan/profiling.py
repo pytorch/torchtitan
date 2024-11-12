@@ -63,6 +63,8 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             ],
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
+            with_stack=True,
+            with_modules=True,
             record_shapes=True,
         ) as torch_profiler:
             torch_profiler.step_num = global_step
