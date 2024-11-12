@@ -22,12 +22,12 @@ tokenizer_path = "/mnt/petrelfs/share_data/caizheng/tokenizer.model"
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 1e-4
 
 [training]
 batch_size = 8
 seq_len = 2048
-warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 10  # lr scheduler warm up, 0.01 of the train steps
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_replicate_degree = 1
