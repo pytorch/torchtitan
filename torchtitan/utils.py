@@ -6,6 +6,7 @@
 
 import contextlib
 import gc
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -315,9 +316,13 @@ def clip_grad_norm_(
             placements=[Replicate()] * total_norm.device_mesh.ndim
         ).to_local()
 
-        total_norm **= norm_type
-        dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-        total_norm **= 1.0 / norm_type
+        # TODO: cleanup maybe using DTensor
+        if math.isinf(norm_type):
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
+        else:
+            total_norm **= norm_type
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+            total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
