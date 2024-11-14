@@ -303,9 +303,9 @@ def clip_grad_norm_(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-
+    grads = [p.grad for p in parameters if p.grad is not None]
     total_norm = torch.nn.utils.get_total_norm(
-        parameters, norm_type, error_if_nonfinite, foreach
+        grads, norm_type, error_if_nonfinite, foreach
     )
 
     if pp_mesh is not None and isinstance(total_norm, DTensor):
