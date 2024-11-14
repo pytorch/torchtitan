@@ -14,7 +14,6 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
-from torchtitan.clip_grad_nrom import clip_grad_norm_
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
@@ -28,6 +27,7 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
+from torchtitan.utils import clip_grad_norm_
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
