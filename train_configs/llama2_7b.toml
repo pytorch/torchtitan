@@ -17,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama2"
 flavor = "7B"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
+norm_type = "fused_rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 tokenizer_path = "/mnt/petrelfs/share_data/yanhang/tokenizes/v13.model"
 
 [optimizer]

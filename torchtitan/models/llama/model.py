@@ -266,8 +266,6 @@ class FeedForward(nn.Module):
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-        # print(f"wwwwwwwwwwwwwwww ffn_dim_multiplier={ffn_dim_multiplier}, hidden_dim={hidden_dim}", flush=True)
         
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -315,7 +313,7 @@ class TransformerBlock(nn.Module):
         )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
-
+        
         self.attention_norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
