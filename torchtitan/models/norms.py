@@ -16,8 +16,7 @@ import triton.language as tl
 
 from torch.distributed._tensor import Partial, Replicate, Shard
 from torch.distributed._tensor.experimental import local_map
-
-from torchtitan import DEVICE_MODULE
+from torchtitan.utils import device_module, device_type
 
 
 def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
@@ -287,7 +286,7 @@ class TritonFusedRMSNorm(torch.autograd.Function):
         M, N = dy.shape
         dx = torch.empty_like(x)
 
-        sm_count = DEVICE_MODULE.get_device_properties(x.device).multi_processor_count
+        sm_count = device_module.get_device_properties(x.device).multi_processor_count
         _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
 
         max_size = 65536 // x.element_size()
