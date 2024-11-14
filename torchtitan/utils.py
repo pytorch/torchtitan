@@ -308,13 +308,16 @@ def clip_grad_norm_(
         grads, norm_type, error_if_nonfinite, foreach
     )
 
-    if pp_mesh is not None and isinstance(total_norm, DTensor):
-        # if total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`
-        # we can simply reduce the DTensor to get the total norm in this tensor's process group
-        # and then convert it to a local tensor
-        total_norm = total_norm.redistribute(
-            placements=[Replicate()] * total_norm.device_mesh.ndim
-        ).to_local()
+    if pp_mesh is not None:
+        if isinstance(total_norm, DTensor):
+            # will reach here if PP + other parallelism is used. If only using PP, total_norm will be a local tensor
+
+            # if total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`
+            # we can simply reduce the DTensor to get the total norm in this tensor's process group
+            # and then convert it to a local tensor
+            total_norm = total_norm.redistribute(
+                placements=[Replicate()] * total_norm.device_mesh.ndim
+            ).to_local()
 
         # TODO: cleanup maybe using DTensor
         if math.isinf(norm_type):
