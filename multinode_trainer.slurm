@@ -10,7 +10,7 @@ MASTER_PORT=29500
 NNODES=$SLURM_NNODES
 
 LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama2_70b.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama2_7b.toml"}
 
 torchrun --nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $SLURM_PROCID --master_addr $MASTER_ADDR --master_port $MASTER_PORT \
 --rdzv_backend c10d --rdzv_id 101 --rdzv_endpoint "$head_node_ip:29500" --local-ranks-filter $LOG_RANK \

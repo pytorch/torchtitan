@@ -145,7 +145,7 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: ModelArgs):
+    def __init__(self, model_args: ModelArgs, enable_qkv_fusion=True):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -156,17 +156,26 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
-        )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.enable_qkv_fusion = enable_qkv_fusion
+        if self.enable_qkv_fusion:
+            self.wqkv = nn.Linear(model_args.dim, (model_args.n_heads + 2 * self.n_kv_heads) * self.head_dim, bias=False)
+        else:
+            self.wq = nn.Linear(
+                model_args.dim, model_args.n_heads * self.head_dim, bias=False
+            )
+            self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
+            self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
+
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
     def init_weights(self, init_std: float):
-        for linear in (self.wq, self.wk, self.wv):
+        if self.enable_qkv_fusion:
+            checked_name = (self.wqkv,)
+        else:
+            checked_name = (self.wq, self.wk, self.wv)
+        for linear in checked_name:
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
@@ -187,7 +196,19 @@ class Attention(nn.Module):
 
         """
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        if self.enable_qkv_fusion:
+            xqkv = self.wqkv(x)
+            xq, xk, xv = torch.split(
+                xqkv,
+                [
+                    self.n_heads * self.head_dim,      # q dimension
+                    self.n_kv_heads * self.head_dim,   # k dimension  
+                    self.n_kv_heads * self.head_dim    # v dimension
+                ],
+                dim=-1
+            )
+        else:
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
@@ -246,6 +267,8 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        # print(f"wwwwwwwwwwwwwwww ffn_dim_multiplier={ffn_dim_multiplier}, hidden_dim={hidden_dim}", flush=True)
+        
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)

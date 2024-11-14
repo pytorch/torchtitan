@@ -6,9 +6,12 @@
 
 import os
 import time
+import numpy as np
+
 from datetime import timedelta
 
 import torch
+from torch.utils.data import Dataset, DataLoader
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -27,6 +30,46 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
+
+
+class RandomDataset(Dataset):
+    """
+    RandomDataset for generating random dataset.
+
+    Args:
+        num_samples (int): The number of samples to generate.
+        max_len (int): The maximum length of each sample.
+
+    """
+
+    def __init__(self, num_samples, max_len, dp_rank, fixed_seqlen) -> None:
+        super().__init__()
+        rng = np.random.RandomState(1999+dp_rank)
+        max_num = rng.randint(1, 30, size=(num_samples,))
+        rep_num = rng.randint(10, 200, size=(num_samples,))
+        data = []
+        lengths = []
+        for n, r in zip(max_num, rep_num):
+            d = list(range(n)) * r
+            if fixed_seqlen:
+                while len(d) < max_len:
+                    r *= 2
+                    d = list(range(n)) * r
+
+            d = [n, r] + d
+            d = d[:max_len]
+            data.append(d)
+            lengths.append(len(d))
+        self.data = data
+        self.max_len = max_len
+        self.lengths = np.array(lengths, dtype=int)
+
+    def __getitem__(self, index):
+        d = self.data[index]
+        return torch.tensor(d[:-1], dtype=torch.int64), torch.tensor(d[1:], dtype=torch.int64)
+
+    def __len__(self):
+        return len(self.data)
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -86,7 +129,6 @@ def main(job_config: JobConfig):
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
 
-    # build dataloader
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
         job_config.training.dataset_path,
@@ -96,6 +138,19 @@ def main(job_config: JobConfig):
         dp_degree,
         dp_rank,
     )
+
+    # train_ds = RandomDataset(
+    #     num_samples=1024 * max(dp_degree, 1),
+    #     max_len=job_config.training.seq_len + 1,
+    #     dp_rank=dp_rank,
+    #     fixed_seqlen=True,
+    # )
+    # data_loader = DataLoader(
+    #     dataset=train_ds,
+    #     batch_size=job_config.training.batch_size,
+    #     num_workers=0,
+    #     pin_memory=True,
+    # )
 
     # build model (using meta init)
     model_cls = model_name_to_cls[model_name]
@@ -265,6 +320,8 @@ def main(job_config: JobConfig):
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
             input_ids, labels = batch
+            # print(f"show data input_ids={input_ids.dtype}, labels={labels.dtype}", flush=True)
+            # import pdb;pdb.set_trace()
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
