@@ -31,7 +31,14 @@ llama2_configs = {
         n_heads=64,
         n_kv_heads=8,
         ffn_dim_multiplier=1.3,
-        multiple_of=4096,
+        multiple_of=512,
+    ),
+    "20B": ModelArgs(
+        dim=6144,
+        n_layers=48,
+        n_heads=48,
+        n_kv_heads=8,
+        multiple_of=256,
     ),
 }
 

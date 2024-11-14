@@ -229,6 +229,9 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
+    if torch.distributed.get_rank()==0:
+        print(f"show model={model_parts}", flush=True)
+
     gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
     logger.info(
         f"GPU memory usage for model: "
