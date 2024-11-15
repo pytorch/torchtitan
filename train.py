@@ -318,6 +318,8 @@ def main(job_config: JobConfig):
         while train_state.step < job_config.training.steps:
             train_state.step += 1
             gc_handler.run(train_state.step)
+            
+            # torch.cuda.memory._record_memory_history()
 
             # get batch
             data_load_start = time.perf_counter()
@@ -479,6 +481,8 @@ def main(job_config: JobConfig):
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
                     world_mesh=world_mesh,
                 )
+            
+            # torch.cuda.memory._dump_snapshot(f"./outputs/memory_trace/my_snapshot_step{train_state.step}_rank{torch.distributed.get_rank()}.pickle")
 
     if torch.distributed.get_rank() == 0:
         logger.info("Sleeping 2 seconds for other ranks to complete")
