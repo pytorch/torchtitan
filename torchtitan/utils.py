@@ -18,7 +18,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 from torchtitan.logging import logger
 
 
@@ -315,9 +315,7 @@ def clip_grad_norm_(
             # if total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`
             # we can simply reduce the DTensor to get the total norm in this tensor's process group
             # and then convert it to a local tensor
-            total_norm = total_norm.redistribute(
-                placements=[Replicate()] * total_norm.device_mesh.ndim
-            ).to_local()
+            total_norm = total_norm.full_tensor()
 
         # TODO: cleanup maybe using DTensor
         if math.isinf(norm_type):
