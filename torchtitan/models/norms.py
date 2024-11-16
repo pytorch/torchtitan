@@ -16,7 +16,7 @@ import triton.language as tl
 
 from torch.distributed._tensor import Partial, Replicate, Shard
 from torch.distributed._tensor.experimental import local_map
-from torchtitan.utils import device_module, device_type
+from torchtitan.utils import device_module
 
 
 def build_norm(norm_type: str, dim: int, eps: float = 1e-6):
