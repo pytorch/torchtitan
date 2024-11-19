@@ -311,8 +311,19 @@ class JobConfig:
                 The schedule must be compatible with the split points and stages_per_rank.
 
                 Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
-                and split_points = number of stages - 1""",
+                and split_points = number of stages - 1
+                """,
         )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_schedule_csv",
+            type=str,
+            default="",
+            help="""
+                Specify the path to the pipeline parallel schedule csv file to use. The pipeline_parallel_schedule argument must be either 
+                PipelineScheduleSingle or PipelineScheduleMulti.
+            """,
+        )
+
         self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",
             type=int,
