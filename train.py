@@ -145,7 +145,7 @@ def main(job_config: JobConfig):
         buffer_device = None
     elif job_config.training.enable_cpu_offload:
         init_device = "cpu"
-        buffer_device = f"{device_type}"
+        buffer_device = device_type
     else:
         init_device = f"{device_type}"
         buffer_device = None
