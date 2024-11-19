@@ -7,7 +7,8 @@
 
 from torchtitan.parallelisms.parallel_dims import ParallelDims
 from torchtitan.parallelisms.parallelize_llama import parallelize_llama
-from torchtitan.parallelisms.pipeline_llama import pipeline_llama
+
+# from torchtitan.parallelisms.pipeline_llama import pipeline_llama
 
 
 __all__ = [
@@ -21,6 +22,6 @@ models_parallelize_fns = {
     "llama3": parallelize_llama,
 }
 models_pipelining_fns = {
-    "llama2": pipeline_llama,
-    "llama3": pipeline_llama,
+    # "llama2": pipeline_llama,
+    # "llama3": pipeline_llama,
 }

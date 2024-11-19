@@ -6,14 +6,15 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
-enable_tensorboard = true
+log_freq = 1
+enable_tensorboard = false
 save_tb_folder = "tb"
+enable_color_printing = true
 
 [model]
 name = "llama3"
@@ -26,19 +27,18 @@ name = "AdamW"
 lr = 3e-4
 
 [training]
-batch_size = 1
+batch_size = 2
 seq_len = 8192
-warmup_steps = 200  # lr scheduler warm up
+warmup_steps = 2  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 10
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
-compile = false
+compile = true
 dataset = "c4"
 
 [experimental]
-context_parallel_degree = 1
 pipeline_parallel_degree = 1
 
 [checkpoint]
@@ -55,4 +55,6 @@ mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
-enable_float8_linear = false
+enable_float8_linear = true
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
