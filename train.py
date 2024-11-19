@@ -147,7 +147,7 @@ def main(job_config: JobConfig):
         init_device = "cpu"
         buffer_device = device_type
     else:
-        init_device = f"{device_type}"
+        init_device = device_type
         buffer_device = None
 
     # apply parallelisms and initialization
