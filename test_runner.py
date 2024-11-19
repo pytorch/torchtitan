@@ -266,6 +266,21 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule PipelineScheduleMulti",
+                    "--experimental.pipeline_parallel_schedule_csv ./test/assets/custom_schedule.csv",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                ],
+            ],
+            "PP with custom pipeline schedule loaded from CSV file",
+            "pp_custom_csv",
+            requires_seed_checkpoint=True,
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--optimizer.name Adam --optimizer.fused",
                     "--optimizer.name AdamW --optimizer.fused",
                 ]
