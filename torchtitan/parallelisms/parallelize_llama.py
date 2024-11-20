@@ -132,6 +132,17 @@ def parallelize_llama(
             enable_compile=job_config.training.compile,
             enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
         )
+    elif parallel_dims.cp_enabled:  # CP is enabled without DP
+        apply_fsdp(
+            model,
+            world_mesh["cp"],
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            tp_enabled=parallel_dims.tp_enabled,
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=job_config.training.enable_cpu_offload,
+        )
+        
 
 
 def apply_tp(
