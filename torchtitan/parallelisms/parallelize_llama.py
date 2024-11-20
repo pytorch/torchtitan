@@ -142,7 +142,6 @@ def parallelize_llama(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
         )
-        
 
 
 def apply_tp(
