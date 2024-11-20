@@ -107,15 +107,18 @@ def create_context_parallel_ctx(
     cp_buffers: List[torch.Tensor],
     cp_seq_dims: List[int],
     cp_no_restore_buffers: Set[torch.Tensor],
+    cp_rotate_method: str,
 ):
     try:
         from torch.distributed.tensor.experimental import context_parallel
+        from torch.distributed.tensor.experimental._attention import set_rotate_method
     except ImportError:
         print(
             f"PyTorch version {torch.__version__} does not include the experimental "
             "Context Parallel API. Please update to a newer version."
         )
 
+    set_rotate_method(cp_rotate_method)
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
