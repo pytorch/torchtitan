@@ -78,7 +78,7 @@ class ParallelDims:
         if self.cp > 1:
             if self.dp_replicate > 1 and self.dp_shard > 1:  # HSDP
                 mesh["dp_replicate", "dp_shard", "cp"]._flatten(mesh_dim_name="dp_cp")
-            elif self.dp_replicate > 1 or self.dp_shard > 1:  # FSDP or DDP
+            elif self.dp_shard > 1:  # FSDP
                 mesh["dp", "cp"]._flatten(mesh_dim_name="dp_cp")
 
         return mesh
