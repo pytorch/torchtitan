@@ -16,8 +16,8 @@ from typing import Generator, Iterable, List, Optional, Set, Union
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
-from torch._utils import _get_available_device_type, _get_device_module
 from torch import distributed as dist
+from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torchtitan.logging import logger

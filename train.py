@@ -27,7 +27,7 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-from torchtitan.utils import device_module, device_type, clip_grad_norm_
+from torchtitan.utils import clip_grad_norm_, device_module, device_type
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
