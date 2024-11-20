@@ -297,6 +297,16 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--experimental.context_parallel_degree=4",
+                ]
+            ],
+            "CP",
+            "cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.data_parallel_shard_degree=2",
                     "--training.data_parallel_replicate_degree=2",
                     "--training.tensor_parallel_degree=2",
