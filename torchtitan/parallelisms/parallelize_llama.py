@@ -153,6 +153,7 @@ def apply_tp(
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
+                use_local_output=False,
             ),
             "norm": SequenceParallel(),
             "output": ColwiseParallel(
@@ -201,14 +202,18 @@ def apply_tp(
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
             "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+            "attention.wo": rowwise_parallel(
+                output_layouts=Shard(1), use_local_output=False
+            ),
             "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
             "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+            "feed_forward.w2": rowwise_parallel(
+                output_layouts=Shard(1), use_local_output=False
+            ),
             "feed_forward.w3": colwise_parallel(),
         }
 
