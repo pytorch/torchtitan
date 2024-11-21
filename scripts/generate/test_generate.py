@@ -26,13 +26,14 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan import utils
+from torchtitan.utils import device_module, device_type
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_gpu_memory_monitor
+from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.parallelisms import ParallelDims
 
 # support running w/o installing as package
 wd = Path(__file__).parent.parent.resolve()
@@ -41,10 +42,7 @@ sys.path.append(str(wd))
 from generate._generation import generate
 
 
-def apply_torchchat_tp(model: nn.Module, tp_mesh: DeviceMesh):
-    # As implemented in torchchat
-    # https://github.com/pytorch/torchchat/blob/main/torchchat/model.py#L679
-
+def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
     parallelize_module(
         model,
         tp_mesh,
@@ -106,9 +104,9 @@ def test_generate(
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
-    gpu_memory_monitor = build_gpu_memory_monitor()
+    device = torch.device(f"{device_type}:{local_rank}")
+    device_module.set_device(device)
+    device_memory_monitor = build_device_memory_monitor()
 
     model_name = config.model.name
 
@@ -143,16 +141,13 @@ def test_generate(
             enable_loss_parallel=False,
         )
         # Build world mesh for parallelism
-        world_mesh = parallel_dims.build_mesh(device_type="cuda")
+        world_mesh = parallel_dims.build_mesh(device_type=device_type)
 
-        use_torchchat_tp = True
-        if use_torchchat_tp:
-            apply_torchchat_tp(model, world_mesh["tp"])  # Working
-        else:
-            models_parallelize_fns[model_name](model, world_mesh, parallel_dims, config)
+        # apply_tp (with Sequence Parallel) on unevenly sharded sequences would require https://github.com/pytorch/torchtitan/pull/686
+        apply_tp_minus_sp(model, world_mesh["tp"])
 
     # materalize model
-    model.to_empty(device="cuda")
+    model.to_empty(device=device_type)
     model.eval()
 
     state_dict = {"model": model.state_dict()}
@@ -163,11 +158,11 @@ def test_generate(
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     logger.info(f"Finished loading chkpt in {time.monotonic() - begin:.2f} seconds.")
 
-    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
-        f"GPU memory usage for model: "
-        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
-        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+        f"{device_type.upper()} memory usage for model: "
+        f"{device_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({device_mem_stats.max_reserved_pct:.2f}%)"
     )
 
     # Tokenize prompt and repeat batch_size times
@@ -179,11 +174,9 @@ def test_generate(
             .view(1, -1)
             .repeat(batch_size, 1)
         )
-        .cuda()
-        .detach()
-    )
+    ).to(device_type)
 
-    gpu_memory_monitor.reset_peak_stats()
+    device_memory_monitor.reset_peak_stats()
 
     # Run generation
     t0 = time.monotonic()
@@ -229,7 +222,7 @@ def test_generate(
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 
-        gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+        device_mem_stats = device_memory_monitor.get_peak_stats()
         output_data["metadata"] = {
             "generated_n_tokens": generated_n_tokens,
             "input_n_tokens": input_n_tokens,
@@ -238,12 +231,12 @@ def test_generate(
             "batch_size": B,
             "seed": seed,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
-            "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
-            "memory/max_active(%)": gpu_mem_stats.max_active_pct,
-            "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
-            "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
-            "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
-            "memory/num_ooms": gpu_mem_stats.num_ooms,
+            "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+            "memory/max_active(%)": device_mem_stats.max_active_pct,
+            "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+            "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+            "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+            "memory/num_ooms": device_mem_stats.num_ooms,
             "world_size": world_size,
             "torch_version": torch.__version__,
         }
