@@ -14,10 +14,12 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
+from torchtitan.utils import device_module, device_type
 
-# named tuple for passing GPU memory stats for logging
-GPUMemStats = namedtuple(
-    "GPUMemStats",
+
+# named tuple for passing device memory stats for logging
+DeviceMemStats = namedtuple(
+    "DeviceMemStats",
     [
         "max_active_gib",
         "max_active_pct",
@@ -29,18 +31,18 @@ GPUMemStats = namedtuple(
 )
 
 
-class GPUMemoryMonitor:
-    def __init__(self, device: str = "cuda:0"):
+class DeviceMemoryMonitor:
+    def __init__(self, device: str = f"{device_type}:0"):
         self.device = torch.device(device)  # device object
-        self.device_name = torch.cuda.get_device_name(self.device)
-        self.device_index = torch.cuda.current_device()
-        self.device_capacity = torch.cuda.get_device_properties(
+        self.device_name = device_module.get_device_name(self.device)
+        self.device_index = device_module.current_device()
+        self.device_capacity = device_module.get_device_properties(
             self.device
         ).total_memory
         self.device_capacity_gib = self._to_gib(self.device_capacity)
 
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.empty_cache()
+        device_module.reset_peak_memory_stats()
+        device_module.empty_cache()
 
     def _to_gib(self, memory_in_bytes):
         # NOTE: GiB (gibibyte) is 1024, vs GB is 1000
@@ -52,25 +54,27 @@ class GPUMemoryMonitor:
         return 100 * memory / self.device_capacity
 
     def get_peak_stats(self):
-        cuda_info = torch.cuda.memory_stats(self.device)
+        device_info = device_module.memory_stats(self.device)
 
-        max_active = cuda_info["active_bytes.all.peak"]
+        max_active = device_info["active_bytes.all.peak"]
         max_active_gib = self._to_gib(max_active)
         max_active_pct = self._to_pct(max_active)
 
-        max_reserved = cuda_info["reserved_bytes.all.peak"]
+        max_reserved = device_info["reserved_bytes.all.peak"]
         max_reserved_gib = self._to_gib(max_reserved)
         max_reserved_pct = self._to_pct(max_reserved)
 
-        num_retries = cuda_info["num_alloc_retries"]
-        num_ooms = cuda_info["num_ooms"]
+        num_retries = device_info["num_alloc_retries"]
+        num_ooms = device_info["num_ooms"]
 
         if num_retries > 0:
-            logger.warning(f"{num_retries} CUDA memory allocation retries.")
+            logger.warning(
+                f"{num_retries} {device_type.upper} memory allocation retries."
+            )
         if num_ooms > 0:
-            logger.warning(f"{num_ooms} CUDA OOM errors thrown.")
+            logger.warning(f"{num_ooms} {device_type.upper} OOM errors thrown.")
 
-        return GPUMemStats(
+        return DeviceMemStats(
             max_active_gib,
             max_active_pct,
             max_reserved_gib,
@@ -80,17 +84,17 @@ class GPUMemoryMonitor:
         )
 
     def reset_peak_stats(self):
-        torch.cuda.reset_peak_memory_stats()
+        device_module.reset_peak_memory_stats()
 
 
-def build_gpu_memory_monitor():
-    gpu_memory_monitor = GPUMemoryMonitor("cuda")
+def build_device_memory_monitor():
+    device_memory_monitor = DeviceMemoryMonitor(device_type)
     logger.info(
-        f"GPU capacity: {gpu_memory_monitor.device_name} ({gpu_memory_monitor.device_index}) "
-        f"with {gpu_memory_monitor.device_capacity_gib:.2f}GiB memory"
+        f"{device_type.upper} capacity: {device_memory_monitor.device_name} ({device_memory_monitor.device_index}) "
+        f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
 
-    return gpu_memory_monitor
+    return device_memory_monitor
 
 
 class MetricLogger:
