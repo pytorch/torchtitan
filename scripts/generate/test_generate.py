@@ -15,7 +15,15 @@ from typing import Optional
 
 import torch
 import torch.distributed.checkpoint as dcp
+import torch.nn as nn
+from torch.distributed import DeviceMesh
+from torch.distributed._tensor import Replicate
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+    RowwiseParallel,
+)
 
 from torchtitan import utils
 
@@ -30,11 +38,42 @@ from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from generate.generation import apply_torchchat_tp, generate
+from generate._generation import generate
+
+
+def apply_torchchat_tp(model: nn.Module, tp_mesh: DeviceMesh):
+    # As implemented in torchchat
+    # https://github.com/pytorch/torchchat/blob/main/torchchat/model.py#L679
+
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": RowwiseParallel(input_layouts=Replicate()),
+            "output": ColwiseParallel(output_layouts=Replicate()),
+        },
+    )
+
+    for layer_id, transformer_block in model.layers.items():
+        layer_plan = {
+            "attention.wq": ColwiseParallel(),
+            "attention.wk": ColwiseParallel(),
+            "attention.wv": ColwiseParallel(),
+            "attention.wo": RowwiseParallel(),
+            "feed_forward.w1": ColwiseParallel(),
+            "feed_forward.w2": RowwiseParallel(),
+            "feed_forward.w3": ColwiseParallel(),
+        }
+
+        parallelize_module(
+            module=transformer_block,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_plan,
+        )
 
 
 @record
-def example_generate(
+def test_generate(
     config_path: str,
     checkpoint_path: str,
     prompt: str,
@@ -53,6 +92,11 @@ def example_generate(
     config.parse_args([f"--job.config_file={config_path}"])
     config._validate_config()
 
+    if len(args.prompt) == 0:
+        logger.warning(
+            "The input prompt is empty, model will respond from a empty sequence."
+        )
+
     utils.set_determinism(seed)
 
     if seed is None:
@@ -67,21 +111,6 @@ def example_generate(
     gpu_memory_monitor = build_gpu_memory_monitor()
 
     model_name = config.model.name
-
-    # Init distributed env
-    if world_size > 1:
-        utils.init_distributed(config)
-        parallel_dims = ParallelDims(
-            dp_replicate=1,
-            dp_shard=-1,
-            cp=1,
-            tp=world_size,
-            pp=1,
-            world_size=world_size,
-            enable_loss_parallel=False,
-        )
-        # Build world mesh for parallelism
-        world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
@@ -101,8 +130,22 @@ def example_generate(
         logger.info(f"Init model on init_device: {init_device}")
         model = model_cls.from_model_args(model_config)
 
+    # Init distributed env
     if world_size > 1:
-        use_torchchat_tp = False
+        utils.init_distributed(config)
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=-1,
+            cp=1,
+            tp=world_size,
+            pp=1,
+            world_size=world_size,
+            enable_loss_parallel=False,
+        )
+        # Build world mesh for parallelism
+        world_mesh = parallel_dims.build_mesh(device_type="cuda")
+
+        use_torchchat_tp = True
         if use_torchchat_tp:
             apply_torchchat_tp(model, world_mesh["tp"])  # Working
         else:
@@ -204,29 +247,9 @@ def example_generate(
             "world_size": world_size,
             "torch_version": torch.__version__,
         }
-        print(json.dumps(output_data, indent=4))
 
-
-def load_prompt(prompt):
-    prompt_path = Path(prompt)
-
-    if prompt_path.exists():
-        if prompt_path.is_file():
-            try:
-                content = prompt_path.read_text()
-                if content:  # Ensure the file is not empty
-                    return content
-                print("Error: Prompt file is empty.")
-            except IOError as e:
-                print(f"Error: Unable to read file '{prompt_path}'. {e}")
-        else:
-            print(f"Error: Path '{prompt}' is not a file.")
-    # If not empty, streat as a string
-    elif prompt:
-        return prompt
-
-    print("Error: Provided prompt is empty or file does not exist")
-    sys.exit(1)
+        if args.out:
+            print(json.dumps(output_data, indent=4))
 
 
 if __name__ == "__main__":
@@ -260,20 +283,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
 
+    parser.add_argument("--prompt", type=str, help="Input prompt")
+
     parser.add_argument(
-        "--prompt",
-        type=str,
-        default="Hello! How are",
-        help="Input prompt for generation, either as a string or a path to a .txt file",
+        "--out",
+        action="store_true",
+        default=False,
+        help="If specified, prints the report to stdout. Defaults to no output.",
     )
 
     args = parser.parse_args()
-    prompt_text = load_prompt(args.prompt)
 
-    example_generate(
+    test_generate(
         config_path=args.config,
         checkpoint_path=args.checkpoint,
-        prompt=prompt_text,
+        prompt=args.prompt,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.batch_size,

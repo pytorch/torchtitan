@@ -7,45 +7,6 @@
 from typing import Optional
 
 import torch
-import torch.nn as nn
-from torch.distributed import DeviceMesh
-from torch.distributed._tensor import Replicate
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    RowwiseParallel,
-)
-
-
-def apply_torchchat_tp(model: nn.Module, tp_mesh: DeviceMesh):
-    # As implemented in torchchat
-    # https://github.com/pytorch/torchchat/blob/main/torchchat/model.py#L679
-
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(input_layouts=Replicate()),
-            "output": ColwiseParallel(output_layouts=Replicate()),
-        },
-    )
-
-    for layer_id, transformer_block in model.layers.items():
-        layer_plan = {
-            "attention.wq": ColwiseParallel(),
-            "attention.wk": ColwiseParallel(),
-            "attention.wv": ColwiseParallel(),
-            "attention.wo": RowwiseParallel(),
-            "feed_forward.w1": ColwiseParallel(),
-            "feed_forward.w2": RowwiseParallel(),
-            "feed_forward.w3": ColwiseParallel(),
-        }
-
-        parallelize_module(
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
 
 
 def multinomial_sample_one(
