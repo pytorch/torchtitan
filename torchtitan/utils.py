@@ -52,6 +52,34 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
+def manual_seed(
+    parallel_dims, world_mesh: DeviceMesh, seed: Optional[int], device: torch.device
+) -> None:
+    """
+    Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
+    seeds across PP groups (if applicable).
+
+    TODO: Link to documentation for DTensor RNG setup? Or explain more here?
+
+    Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
+    and DTensor manages its own RNG tracker, but we could extend to support both if needed.
+    """
+    # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
+    # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
+    if seed is None:
+        # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
+        # seeds for unique SPMD groups
+        seed = torch.get_rng_state()[:8].view(torch.uint64).item()
+        seed_tensor = torch.tensor(seed, device=device, dtype=torch.int64)
+        torch.distributed.broadcast(seed_tensor, src=0)
+        seed = seed_tensor.item()
+
+    if parallel_dims.pp_enabled:
+        seed += parallel_dims.pp_rank
+
+    torch.distributed.tensor._random.manual_seed(seed)
+
+
 def set_determinism(seed: Optional[int]) -> None:
     """
     Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
