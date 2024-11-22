@@ -81,6 +81,7 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
+    utils.manual_seed(parallel_dims, world_mesh, job_config.training.seed)
     model_name = job_config.model.name
 
     # build tokenizer
@@ -206,14 +207,7 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint_loaded = checkpoint.load()
-
-    if parallel_dims.pp_enabled and not checkpoint_loaded:
-        # TODO: fix this by allowing each rank to set their own seed
-        logger.warning(
-            "Pipeline Parallelism is being used without a seed checkpoint. "
-            "All the substages will be initialized with random weights with same RNG state which can affect convergence."
-        )
+    checkpoint.load()
 
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
