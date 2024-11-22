@@ -50,7 +50,7 @@ def set_determinism(seed: Optional[int]) -> None:
         os.environ["PYTHONHASHSEED"] = str(seed)
         torch.use_deterministic_algorithms(True)
         # env var for deterministic CuBLAS
-        # https://github.com/pytorch/pytorch/blob/18525e185e211b3eab44c67a688e5df8396f6f97/torch/__init__.py#L1300
+        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     else:
         # ensure we turn off deterministic cudnn algorithms
