@@ -249,9 +249,14 @@ class JobConfig:
             parallelism method used is FSDP (Fully Sharded Data Parallelism).
 
             -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-            only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
-            can be negative.
-            1 means disabled.""",
+            only `data_parallel_shard_degree` can be negative. 1 means disabled.""",
+        )
+        self.parser.add_argument(
+            "--training.enable_cpu_offload",
+            type=bool,
+            default=False,
+            help="""
+            Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP""",
         )
         self.parser.add_argument(
             "--training.tensor_parallel_degree",
@@ -299,14 +304,13 @@ class JobConfig:
         self.parser.add_argument(
             "--experimental.pipeline_parallel_schedule",
             type=str,
-            choices=["1f1b", "gpipe", "interleaved_1f1b", "flexible_interleaved_1f1b"],
-            default="1f1b",
+            default="1F1B",
             help="""
-                Specify the Pipeline Parallel schedule to use.
-
+                Specify the Pipeline Parallel schedule to use. The supported schedules are:
+                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
                 The schedule must be compatible with the split points and stages_per_rank.
 
-                Looped schedules (e.g. interleaved_1f1b) require specifying pipeline_paralle_degree = number of ranks,
+                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
                 and split_points = number of stages - 1""",
         )
         self.parser.add_argument(
@@ -327,13 +331,19 @@ class JobConfig:
             help="Enable CompiledAutograd to compile the backward.",
         )
         self.parser.add_argument(
+            "--experimental.context_parallel_degree",
+            type=int,
+            default=1,
+            help="Context parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
             choices=["bfloat16", "float32"],
             help="""
                 torch dtype to use for parameters when applying mixed precision via FSDP.
-                This feature only takes effect when data_parallel_degree > 1
+                This feature only takes effect when data_parallel_shard_degree > 1
             """,
         )
         self.parser.add_argument(
@@ -343,7 +353,7 @@ class JobConfig:
             choices=["float32"],
             help="""
                 torch dtype to use for reductions when applying mixed precision via FSDP.
-                This feature only takes effect when data_parallel_degree > 1
+                This feature only takes effect when data_parallel_shard_degree > 1
             """,
         )
         self.parser.add_argument(
@@ -565,6 +575,19 @@ class JobConfig:
                 )
                 logger.exception(f"Error details: {str(e)}")
                 raise e
+
+        # if split-points came from 'args' (from cmd line) it would have already been parsed into a list by that parser
+        if (
+            "experimental" in args_dict
+            and "pipeline_parallel_split_points" in args_dict["experimental"]
+            and isinstance(
+                args_dict["experimental"]["pipeline_parallel_split_points"], str
+            )
+        ):
+            exp = args_dict["experimental"]
+            exp["pipeline_parallel_split_points"] = string_list(
+                exp["pipeline_parallel_split_points"]
+            )
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)

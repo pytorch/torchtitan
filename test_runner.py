@@ -141,12 +141,11 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
-                    "--experimental.pipeline_parallel_schedule flexible_interleaved_1f1b",
+                    "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
             ],
-            "PP looped flexible 1f1b test",
-            "pp_looped_flexible_1f1b",
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
             requires_seed_checkpoint=True,
             ngpu=4,
         ),
@@ -155,12 +154,11 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--experimental.pipeline_parallel_schedule 1f1b",
+                    "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
                 ],
             ],
-            "PP 1D test 1f1b",
+            "PP 1D test 1F1B",
             "pp_1f1b",
             requires_seed_checkpoint=True,
             ngpu=2,
@@ -170,12 +168,11 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--experimental.pipeline_parallel_schedule gpipe",
+                    "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 1",
                 ],
             ],
-            "PP 1D test gpipe",
+            "PP 1D test GPipe",
             "pp_gpipe",
             requires_seed_checkpoint=True,
             ngpu=2,
@@ -185,12 +182,11 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--experimental.pipeline_parallel_schedule 1f1b",
+                    "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 2",
                 ],
             ],
-            "PP+DP 1f1b 2D test",
+            "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
             requires_seed_checkpoint=True,
         ),
@@ -199,12 +195,11 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
-                    "--experimental.pipeline_parallel_schedule gpipe",
+                    "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 2",
                 ],
             ],
-            "PP+DP gpipe 2D test",
+            "PP+DP GPipe 2D test",
             "pp_dp_gpipe",
             requires_seed_checkpoint=True,
         ),
@@ -213,7 +208,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.tensor_parallel_degree 2",
                 ],
             ],
@@ -226,7 +220,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
@@ -234,7 +227,6 @@ def build_test_list():
                     "--training.steps 20",
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
@@ -248,7 +240,6 @@ def build_test_list():
             [
                 [
                     "--experimental.pipeline_parallel_degree 2",
-                    "--experimental.pipeline_parallel_split_points layers.4",
                     "--training.data_parallel_shard_degree 2",
                     "--training.tensor_parallel_degree 2",
                     "--training.compile",
@@ -264,11 +255,10 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
-                    "--experimental.pipeline_parallel_split_points layers.1,layers.2,layers.3,layers.4,layers.5,layers.6,layers.7",
-                    "--experimental.pipeline_parallel_schedule interleaved_1f1b",
+                    "--experimental.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
-            "PP looped 1f1b test",
+            "PP looped 1F1B test",
             "pp_looped_1f1b",
             requires_seed_checkpoint=True,
             ngpu=4,
@@ -319,11 +309,57 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.data_parallel_shard_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP",
+            "hsdp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--memory_estimation.enabled",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.enable_cpu_offload True",
+                ],
+            ],
+            "Enable CPU Offload with PP",
+            "enable_cpu_offload+PP",
             ngpu=4,
         ),
     ]

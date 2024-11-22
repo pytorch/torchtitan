@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import os
 import time
 from datetime import timedelta
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
@@ -18,7 +18,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_gpu_memory_monitor, build_metric_logger
+from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
@@ -27,21 +27,7 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-
-
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
-    @contextlib.contextmanager
-    def context():
-        with contextlib.ExitStack() as stack:
-            if enable_loss_parallel:
-                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-            if enable_compiled_autograd:
-                stack.enter_context(
-                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
-                )
-            yield
-
-    return context
+from torchtitan.utils import clip_grad_norm_, device_module, device_type
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -70,21 +56,22 @@ def main(job_config: JobConfig):
     parallel_dims = ParallelDims(
         dp_shard=job_config.training.data_parallel_shard_degree,
         dp_replicate=job_config.training.data_parallel_replicate_degree,
+        cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
-    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-    torch.cuda.set_device(device)
+    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    device_module.set_device(device)
     utils.init_distributed(job_config)
-    # initialize GPU memory monitor and get peak flops for MFU calculation
-    gpu_memory_monitor = build_gpu_memory_monitor()
-    gpu_peak_flops = utils.get_peak_flops(gpu_memory_monitor.device_name)
+    # initialize device memory monitor and get peak flops for MFU calculation
+    device_memory_monitor = build_device_memory_monitor()
+    gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
-    world_mesh = parallel_dims.build_mesh(device_type="cuda")
+    world_mesh = parallel_dims.build_mesh(device_type=device_type)
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
@@ -146,8 +133,22 @@ def main(job_config: JobConfig):
     # loss function to be shared by Pipeline Parallel and SPMD training
     def loss_fn(pred, labels):
         return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1), labels.flatten(0, 1)
+            pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
+
+    if job_config.training.compile:
+        loss_fn = torch.compile(loss_fn)
+
+    # move sharded model to CPU/GPU and initialize weights via DTensor
+    if job_config.checkpoint.create_seed_checkpoint:
+        init_device = "cpu"
+        buffer_device = None
+    elif job_config.training.enable_cpu_offload:
+        init_device = "cpu"
+        buffer_device = device_type
+    else:
+        init_device = device_type
+        buffer_device = None
 
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
@@ -162,26 +163,23 @@ def main(job_config: JobConfig):
         for m in model_parts:
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            m.to_empty(device="cuda")
-            m.init_weights()
+            m.to_empty(device=init_device)
+            m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
-
-        # move sharded model to CPU/GPU and initialize weights via DTensor
-        init_device = "cpu" if job_config.checkpoint.create_seed_checkpoint else "cuda"
         model.to_empty(device=init_device)
-        model.init_weights()
+        model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]
 
-    gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+    device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
-        f"GPU memory usage for model: "
-        f"{gpu_mem_stats.max_reserved_gib:.2f}GiB"
-        f"({gpu_mem_stats.max_reserved_pct:.2f}%)"
+        f"{device_type.upper} memory usage for model: "
+        f"{device_mem_stats.max_reserved_gib:.2f}GiB"
+        f"({device_mem_stats.max_reserved_pct:.2f}%)"
     )
 
     # build optimizer after applying parallelisms to the model
@@ -232,7 +230,7 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(data_loader)
 
-    train_context = get_train_context(
+    train_context = utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
@@ -242,7 +240,7 @@ def main(job_config: JobConfig):
     ntokens_since_last_log = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
-    gpu_memory_monitor.reset_peak_stats()
+    device_memory_monitor.reset_peak_stats()
 
     checkpoint.reset()
 
@@ -271,15 +269,27 @@ def main(job_config: JobConfig):
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
 
-            input_ids = input_ids.cuda()
-            labels = labels.cuda()
+            input_ids = input_ids.to(device_type)
+            labels = labels.to(device_type)
             optimizers.zero_grad()
+
+            # apply context parallelism if cp is enabled
+            optional_context_parallel_ctx = (
+                utils.create_context_parallel_ctx(
+                    cp_mesh=world_mesh["cp"],
+                    cp_buffers=[input_ids, labels, model.freqs_cis],
+                    cp_seq_dims=[1, 1, 0],
+                    cp_no_restore_buffers={input_ids, labels},
+                )
+                if parallel_dims.cp_enabled
+                else None
+            )
 
             if parallel_dims.pp_enabled:
                 # Pipeline Parallel forward / backward inside step() call
                 is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
 
-                with train_context():
+                with train_context(optional_context_parallel_ctx):
                     if pp_mesh.get_local_rank() == 0:
                         pp_schedule.step(input_ids)
                     elif is_last_stage:
@@ -296,7 +306,7 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
-                with train_context():
+                with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
@@ -305,10 +315,12 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            for m in model_parts:
-                torch.nn.utils.clip_grad_norm_(
-                    m.parameters(), job_config.training.max_norm, foreach=True
-                )
+            clip_grad_norm_(
+                [p for m in model_parts for p in m.parameters()],
+                job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+            )
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
@@ -348,7 +360,7 @@ def main(job_config: JobConfig):
 
                 # tokens per second, abbr. as wps by convention
                 wps = ntokens_since_last_log / (
-                    time_delta * parallel_dims.model_parallel_size
+                    time_delta * parallel_dims.non_data_parallel_size
                 )
                 # model FLOPS utilization
                 # For its definition and calculation, please refer to the PaLM paper:
@@ -359,7 +371,7 @@ def main(job_config: JobConfig):
                 time_data_loading = sum(data_loading_times) / len(data_loading_times)
                 time_data_loading_pct = 100 * sum(data_loading_times) / time_delta
 
-                gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
+                device_mem_stats = device_memory_monitor.get_peak_stats()
 
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
@@ -369,20 +381,20 @@ def main(job_config: JobConfig):
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
-                    "memory/max_active(GiB)": gpu_mem_stats.max_active_gib,
-                    "memory/max_active(%)": gpu_mem_stats.max_active_pct,
-                    "memory/max_reserved(GiB)": gpu_mem_stats.max_reserved_gib,
-                    "memory/max_reserved(%)": gpu_mem_stats.max_reserved_pct,
-                    "memory/num_alloc_retries": gpu_mem_stats.num_alloc_retries,
-                    "memory/num_ooms": gpu_mem_stats.num_ooms,
+                    "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+                    "memory/max_active(%)": device_mem_stats.max_active_pct,
+                    "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+                    "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+                    "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+                    "memory/num_ooms": device_mem_stats.num_ooms,
                 }
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
-                    f"{color.yellow}memory: {gpu_mem_stats.max_reserved_gib:5.2f}GiB"
-                    f"({gpu_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}wps: {round(wps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
@@ -391,7 +403,7 @@ def main(job_config: JobConfig):
                 ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
-                gpu_memory_monitor.reset_peak_stats()
+                device_memory_monitor.reset_peak_stats()
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)

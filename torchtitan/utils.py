@@ -4,27 +4,43 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import gc
+import math
 import os
 import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, Union
+from typing import Generator, Iterable, List, Optional, Set, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+from torch import distributed as dist
+from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torchtitan.logging import logger
 
 
+def get_device_info():
+    device_type = _get_available_device_type()
+    if device_type is None:
+        device_type = "cuda"  # default device_type: cuda
+    device_module = _get_device_module(device_type)  # default device_module:torch.cuda
+    return device_type, device_module
+
+
+device_type, device_module = get_device_info()
+
+
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
 
@@ -62,10 +78,10 @@ def set_pg_timeouts(timeout, world_mesh):
     """
     Sets the timeout for all PGs in the provided mesh, and the default (world) group.
 
-    Note: synchronizes via a barrier, before changing the timeouts. This is important, becuase
+    Note: synchronizes via a barrier, before changing the timeouts. This is important, because
     otherwise you may face a race where the slow rank has not reached the timeout reduction point
     yet due to slow operations permitted under the old timeout value, but other faster ranks may
-    start issueing collectives under the new shorter timeout and then immediately timeout.
+    start issuing collectives under the new shorter timeout and then immediately timeout.
     """
     logger.info(
         f"Synchronizing and adjusting timeout for all ProcessGroups to {timeout}"
@@ -74,8 +90,8 @@ def set_pg_timeouts(timeout, world_mesh):
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    torch.distributed.barrier()
-    torch.cuda.synchronize()
+    torch.distributed.barrier(device_ids=[device_module.current_device()])
+    device_module.synchronize()
 
     groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
 
@@ -105,6 +121,57 @@ ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
 SKIP_CLEANUP = "3"
 
 
+def create_context_parallel_ctx(
+    cp_mesh: DeviceMesh,
+    cp_buffers: List[torch.Tensor],
+    cp_seq_dims: List[int],
+    cp_no_restore_buffers: Set[torch.Tensor],
+):
+    try:
+        from torch.distributed.tensor.experimental import context_parallel
+    except ImportError:
+        print(
+            f"PyTorch version {torch.__version__} does not include the experimental "
+            "Context Parallel API. Please update to a newer version."
+        )
+
+    return context_parallel(
+        cp_mesh,
+        buffers=cp_buffers,
+        buffer_seq_dims=cp_seq_dims,
+        no_restore_buffers=cp_no_restore_buffers,
+    )
+
+
+def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+    @contextlib.contextmanager
+    def context(cp_context: Optional[Generator[None, None, None]] = None):
+        with contextlib.ExitStack() as stack:
+            if enable_loss_parallel:
+                stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+
+            if enable_compiled_autograd:
+                stack.enter_context(
+                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
+                )
+
+            if cp_context is not None:
+                from torch.nn.attention import sdpa_kernel, SDPBackend
+
+                # currently we only support these two SDP backends.
+                # TODO (xilunwu): support cuDNN backend
+                stack.enter_context(
+                    sdpa_kernel(
+                        [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+                    )
+                )
+                stack.enter_context(cp_context)
+
+            yield
+
+    return context
+
+
 def init_distributed(job_config):
     # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
     # to get flight recorder dumps. See https://github.com/pytorch/pytorch/issues/121055
@@ -121,14 +188,18 @@ def init_distributed(job_config):
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
-    torch.distributed.init_process_group(
-        "nccl", timeout=timedelta(seconds=job_config.comm.init_timeout_seconds)
-    )
-
     # to mitigate the memory issue that collectives using
     # async_op=True hold memory longer than they should
     # such as those in tensor parallelism
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+
+    backend = "nccl"
+    if job_config.training.enable_cpu_offload:
+        backend = "cuda:nccl,cpu:gloo"
+    torch.distributed.init_process_group(
+        backend=backend,
+        timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
+    )
 
 
 def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
@@ -156,7 +227,7 @@ def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
     return flop_per_token
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100 and H100 GPU
+# hardcoded BF16 type peak flops for NVIDIA A100, H100, and H200 GPU
 def get_peak_flops(device_name: str) -> int:
     try:
         # Run the lspci command and capture the output
@@ -183,7 +254,11 @@ def get_peak_flops(device_name: str) -> int:
             return 756e12
         else:  # for H100 SXM and other variants
             return 989e12
+    elif "H200" in device_name:
+        # data from https://www.nvidia.com/en-us/data-center/h200/
+        return 989e12
     else:  # for other GPU types, assume A100
+        logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
 
 
@@ -211,3 +286,64 @@ class NoColor:
     cyan = ""
     white = ""
     reset = ""
+
+
+@torch.no_grad()
+def clip_grad_norm_(
+    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    max_norm: float,
+    norm_type: float = 2.0,
+    error_if_nonfinite: bool = False,
+    foreach: Optional[bool] = None,
+    pp_mesh: Optional[DeviceMesh] = None,
+) -> torch.Tensor:
+    """
+    Clip the gradient norm of an iterable of parameters.
+
+    Gradient norm clipping requires computing the gradient norm over the entire model.
+    `torch.nn.utils.clip_grad_norm_` only computes gradient norm along DP/FSDP/TP dimensions.
+    We need to manually reduce the gradient norm across PP stages.
+    See https://github.com/pytorch/torchtitan/issues/596 for details.
+
+    Args:
+        parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
+        max_norm (float): max norm of the gradients
+        norm_type (float): type of the used p-norm. Can be ``'inf'`` for
+            infinity norm.
+        error_if_nonfinite (bool): if True, an error is thrown if the total
+            norm of the gradients from :attr:`parameters` is ``nan``,
+            ``inf``, or ``-inf``. Default: False (will switch to True in the future)
+        foreach (bool): use the faster foreach-based implementation.
+            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
+            fall back to the slow implementation for other device types.
+            Default: ``None``
+        pp_mesh: pipeline parallel device mesh. If not None, will reduce gradient norm across PP stages.
+
+    Returns:
+        Total norm of the parameter gradients (viewed as a single vector).
+
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    total_norm = torch.nn.utils.get_total_norm(
+        grads, norm_type, error_if_nonfinite, foreach
+    )
+
+    if pp_mesh is not None:
+        if isinstance(total_norm, DTensor):
+            # will reach here if PP + other parallelism is used. If only using PP, total_norm will be a local tensor
+
+            # if total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`
+            # we can simply reduce the DTensor to get the total norm in this tensor's process group
+            # and then convert it to a local tensor
+            total_norm = total_norm.full_tensor()
+
+        # TODO: cleanup maybe using DTensor
+        if math.isinf(norm_type):
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
+        else:
+            total_norm **= norm_type
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+            total_norm **= 1.0 / norm_type
+
+    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    return total_norm

@@ -3,7 +3,7 @@
 
 # torchtitan
 
-`torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1**, **Llama 3**, and **Llama 2** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend latest PyTorch nightly.
+`torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1**, **Llama 3**, and **Llama 2** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
 
 `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
@@ -17,6 +17,23 @@ Our guiding principles when building `torchtitan`:
 ### Intro video - learn more about torchtitan in under 4 mins:
 
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
+
+### Our torchtitan paper on arXiv
+
+[![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg?style=plastic)](https://arxiv.org/abs/2410.06511)
+
+We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511).
+```
+@misc{torchtitan,
+      title={TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training},
+      author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
+      year={2024},
+      eprint={2410.06511},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2410.06511},
+}
+```
 
 ### Dive into the code
 
@@ -33,7 +50,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 1. [FSDP2](docs/fsdp.md) with per param sharding
 2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
 3. Selective layer and operator activation checkpointing
-4. Distributed checkpointing (including async checkpointing)
+4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
 5. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
 6. Loss, GPU memory, tokens-per-second, and MFU displayed and logged via [TensorBoard](#tensorboard)
 7. Learning rate scheduler, meta-init, optional Fused RMSNorm
@@ -42,6 +59,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 10. DDP and HSDP
 11. All options easily configured via [toml files](train_configs/)
 12. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
+13. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 
 We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
 
@@ -128,6 +146,14 @@ If your gpu count per node is not 8, adjust:
 ```#SBATCH --gpus-per-task```
 
 in the SBATCH command section.
+
+
+## Debugging
+### Troubleshooting jobs that timeout
+If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
+When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
+To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
+
 
 ## License
 

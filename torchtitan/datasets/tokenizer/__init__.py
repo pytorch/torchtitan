@@ -18,4 +18,4 @@ def build_tokenizer(tokenizer_type: str, tokenizer_path: str) -> Tokenizer:
     elif tokenizer_type == "tiktoken":
         return TikTokenizer(tokenizer_path)
     else:
-        raise ValueError(f"Unknown tokenizer type: {args.type}")
+        raise ValueError(f"Unknown tokenizer type: {tokenizer_type}")
