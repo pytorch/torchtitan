@@ -81,7 +81,7 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
-    utils.manual_seed(parallel_dims, world_mesh, job_config.training.seed)
+    utils.manual_seed(parallel_dims, world_mesh, job_config.training.seed, device)
     model_name = job_config.model.name
 
     # build tokenizer

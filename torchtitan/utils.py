@@ -52,7 +52,9 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
-def manual_seed(parallel_dims, world_mesh: DeviceMesh, seed: Optional[int]) -> None:
+def manual_seed(
+    parallel_dims, world_mesh: DeviceMesh, seed: Optional[int], device: torch.device
+) -> None:
     """
     Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
     seeds across PP groups (if applicable).
@@ -68,6 +70,9 @@ def manual_seed(parallel_dims, world_mesh: DeviceMesh, seed: Optional[int]) -> N
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups
         seed = torch.get_rng_state()[:8].view(torch.uint64).item()
+        seed_tensor = torch.tensor(seed, device=device, dtype=torch.int64)
+        torch.distributed.broadcast(seed_tensor, src=0)
+        seed = seed_tensor.item()
 
     if parallel_dims.pp_enabled:
         seed += parallel_dims.pp_rank
