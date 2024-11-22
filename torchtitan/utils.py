@@ -80,22 +80,24 @@ def manual_seed(
     torch.distributed.tensor._random.manual_seed(seed)
 
 
-def set_determinism(seed: Optional[int]) -> None:
+def set_determinism(deterministic: bool, seed: Optional[int] = None) -> None:
     """
     Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
     """
+
     if seed is not None:
         # CPU and GPU determinism
         torch.manual_seed(seed)
         # set deterministic cudnn algorithms
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
         # set Python seed
         os.environ["PYTHONHASHSEED"] = str(seed)
-    else:
-        # ensure we turn off deterministic cudnn algorithms
-        torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = True
+
+    if deterministic:
+        logger.info(
+            f"Deterministic training enabled (expect perf degradation). Using seed: {seed}"
+        )
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
 
 
 def set_pg_timeouts(timeout, world_mesh):
