@@ -43,7 +43,7 @@ def main(job_config: JobConfig):
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
     # Enable deterministic mode (mainly for debugging, expect perf loss)
-    utils.set_determinism(job_config.training.deterministic, job_config.training.seed)
+    utils.set_determinism(job_config.training.deterministic)
 
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])

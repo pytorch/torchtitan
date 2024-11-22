@@ -66,7 +66,13 @@ def manual_seed(
     """
     # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
     # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
-    if seed is None:
+
+    if seed is not None:
+        # CPU and GPU determinism
+        torch.manual_seed(seed)
+        # set Python seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
+    else:
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups
         seed = torch.get_rng_state()[:8].view(torch.uint64).item()
@@ -80,17 +86,10 @@ def manual_seed(
     torch.distributed.tensor._random.manual_seed(seed)
 
 
-def set_determinism(deterministic: bool, seed: Optional[int] = None) -> None:
+def set_determinism(deterministic: bool) -> None:
     """
-    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
+    Set Determinism flags for increased reproducibility with loss of performance.
     """
-
-    if seed is not None:
-        # CPU and GPU determinism
-        torch.manual_seed(seed)
-        # set deterministic cudnn algorithms
-        # set Python seed
-        os.environ["PYTHONHASHSEED"] = str(seed)
 
     if deterministic:
         logger.info(
