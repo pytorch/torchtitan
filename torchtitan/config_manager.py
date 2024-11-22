@@ -371,7 +371,13 @@ class JobConfig:
             "--training.seed",
             type=int,
             default=None,
-            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+            help="Choose the base RNG seed used for training",
+        )
+        self.parser.add_argument(
+            "--training.deterministic",
+            type=bool,
+            default=False,
+            help="Use deterministic algorithms wherever possible, may be slower",
         )
         # checkpointing configs
         self.parser.add_argument(
