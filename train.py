@@ -73,11 +73,12 @@ def main(job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
 
     # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
-    utils.manual_seed(
-        parallel_dims,
-        job_config.training.seed,
-        device,
-        job_config.training.deterministic,
+    utils.set_determinism(
+        spmd_mesh=world_mesh["dp", "tp"],
+        device=device,
+        pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+        seed=job_config.training.seed,
+        deterministic=job_config.training.deterministic,
     )
     model_name = job_config.model.name
 

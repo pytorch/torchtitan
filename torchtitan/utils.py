@@ -53,7 +53,11 @@ def _warn_overwrite_env(env, val):
 
 
 def set_determinism(
-    parallel_dims, seed: Optional[int], device: torch.device, deterministic: bool
+    spmd_mesh: DeviceMesh,
+    device: torch.device,
+    pp_mesh: Optional[DeviceMesh],
+    seed: Optional[int] = None,
+    deterministic: bool = False,
 ) -> None:
     """
     Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
@@ -76,15 +80,18 @@ def set_determinism(
     else:
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups
-        seed = torch.get_rng_state()[:8].view(torch.uint64).item()
-        seed_tensor = torch.tensor(seed, device=device, dtype=torch.uint64)
+        seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
-        seed = seed_tensor.item()
+        seed = seed_tensor.view(torch.uint64).item()
 
-    if parallel_dims.pp_enabled:
-        seed += parallel_dims.pp_rank
+    if pp_mesh:
+        seed += pp_mesh.get_local_rank()
+        seed %= 2**64 - 1
 
-    torch.distributed.tensor._random.manual_seed(seed)
+    logger.debug(
+        f"Rank {pp_mesh.get_local_rank()}, {spmd_mesh.get_rank()} using seed: {seed}"
+    )
+    torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
 
     if deterministic:
         logger.info(
