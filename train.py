@@ -42,15 +42,6 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
-    # set determinisism, use seed == None to skip deterministic training
-    utils.set_determinism(job_config.training.seed)
-    if job_config.training.seed is None:
-        logger.info("Deterministic training off")
-    else:
-        logger.info(
-            f"Deterministic training on. Using seed: {job_config.training.seed}"
-        )
-
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -81,7 +72,13 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
-    utils.manual_seed(parallel_dims, world_mesh, job_config.training.seed, device)
+    # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
+    utils.manual_seed(
+        parallel_dims,
+        job_config.training.seed,
+        device,
+        job_config.training.deterministic,
+    )
     model_name = job_config.model.name
 
     # build tokenizer
