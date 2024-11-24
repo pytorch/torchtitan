@@ -364,7 +364,7 @@ def build_test_list():
             ],
             "FSDP2 Memory Tracking and Estimation",
             "fsdp2_mem_tracker",
-            ngpu=4,
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -409,7 +409,10 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         if test_name == "fsdp2_mem_tracker":
-            cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_memory_estimation.sh"
+            cmd = (
+                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                "./scripts/estimate/run_memory_estimation.sh"
+            )
         cmd += " " + dump_folder_arg
         cmd += " " + model_flavor_arg
         if override_arg:
