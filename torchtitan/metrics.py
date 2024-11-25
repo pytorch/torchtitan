@@ -16,6 +16,13 @@ from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.utils import device_module, device_type
 
+# Optional wandb import
+try:
+    import wandb
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -98,11 +105,27 @@ def build_device_memory_monitor():
 
 
 class MetricLogger:
-    def __init__(self, log_dir, tag, enable_tb):
+    def __init__(self, log_dir, tag, enable_tb, enable_wandb=False, wandb_config=None):
         self.tag = tag
         self.writer: Optional[SummaryWriter] = None
+        self.use_wandb = enable_wandb and WANDB_AVAILABLE
+
         if enable_tb:
             self.writer = SummaryWriter(log_dir, max_queue=1000)
+
+            # If wandb is enabled, set up tensorboard sync
+            if self.use_wandb:
+                wandb.tensorboard.patch(root_logdir=os.path.dirname(log_dir))
+
+        # Initialize wandb if enabled and not already initialized
+        if self.use_wandb and wandb.run is None:
+            project_name = wandb_config.get("project", "torchtitan")
+            wandb.init(
+                project=project_name,
+                config=wandb_config,
+                sync_tensorboard=enable_tb,
+                dir=log_dir,
+            )
 
     def log(self, metrics: Dict[str, Any], step: int):
         if self.writer is not None:
@@ -110,9 +133,32 @@ class MetricLogger:
                 tag = k if self.tag is None else f"{self.tag}/{k}"
                 self.writer.add_scalar(tag, v, step)
 
+        if self.use_wandb:
+            # Transform metrics to include tag if present
+            wandb_metrics = {}
+            for k, v in metrics.items():
+                tag = k if self.tag is None else f"{self.tag}/{k}"
+                wandb_metrics[tag] = v
+            wandb_metrics["step"] = step
+            wandb.log(wandb_metrics)
+
+    def log_memory_stats(self, memory_stats: DeviceMemStats, step: int):
+        """Log device memory statistics"""
+        metrics = {
+            "memory/max_active_GiB": memory_stats.max_active_gib,
+            "memory/max_active_pct": memory_stats.max_active_pct,
+            "memory/max_reserved_GiB": memory_stats.max_reserved_gib,
+            "memory/max_reserved_pct": memory_stats.max_reserved_pct,
+            "memory/num_alloc_retries": memory_stats.num_alloc_retries,
+            "memory/num_ooms": memory_stats.num_ooms,
+        }
+        self.log(metrics, step)
+
     def close(self):
         if self.writer is not None:
             self.writer.close()
+        if self.use_wandb and wandb.run is not None:
+            wandb.finish()
 
 
 def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
@@ -134,27 +180,47 @@ def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ):
     """
-    parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
-    In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'. This is
-    intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
-    parallelism is enabled, without forcing logging from all ranks to capture loss information.
+    Builds a metric logger that can log to both TensorBoard and W&B (if enabled).
+    W&B support is optional and controlled via the metrics config.
+
+    Args:
+        job_config: Configuration object containing metrics settings
+        parallel_dims: Parallel dimensions configuration
+        tag: Optional tag to prefix all metrics
+
+    Returns:
+        MetricLogger instance configured based on the provided settings
     """
     dump_dir = job_config.job.dump_folder
     tb_config = job_config.metrics
     save_tb_folder = tb_config.save_tb_folder
-    # since we don't have run id, use current minute as the identifier
     datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
     log_dir = os.path.join(dump_dir, save_tb_folder, datetime_str)
 
     enable_tb = tb_config.enable_tensorboard
+    enable_wandb = getattr(tb_config, "enable_wandb", False)
+    wandb_config = getattr(tb_config, "wandb_config", None)
+
     if enable_tb:
         logger.info(
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
         if tb_config.rank_0_only:
-            enable_tb = torch.distributed.get_rank() == _get_metrics_rank(parallel_dims)
+            metrics_rank = _get_metrics_rank(parallel_dims)
+            enable_tb = torch.distributed.get_rank() == metrics_rank
+            enable_wandb = enable_wandb and (
+                torch.distributed.get_rank() == metrics_rank
+            )
         else:
             rank_str = f"rank_{torch.distributed.get_rank()}"
             log_dir = os.path.join(log_dir, rank_str)
 
-    return MetricLogger(log_dir, tag, enable_tb)
+    if enable_wandb and not WANDB_AVAILABLE:
+        logger.warning(
+            "W&B logging requested but wandb package is not installed. Continuing without W&B logging."
+        )
+        enable_wandb = False
+    elif enable_wandb:
+        logger.info("W&B logging enabled")
+
+    return MetricLogger(log_dir, tag, enable_tb, enable_wandb, wandb_config)

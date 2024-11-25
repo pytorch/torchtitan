@@ -76,7 +76,7 @@ We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121 # or cu118
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121 --force-reinstall # or cu118
 ```
 
 ### Downloading a tokenizer
@@ -88,11 +88,11 @@ Once you have confirmed access, you can run the following command to download th
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
-# Llama 3 or 3.1 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
+# Llama 3.1 tokenizer.model
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
 
-# Llama 2 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
+# Llama 3.2 tokenizer.model
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-3.2-3B --hf_token=...
 ```
 
 ### Start a training run
