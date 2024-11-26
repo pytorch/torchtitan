@@ -69,7 +69,7 @@ def set_pg_timeouts(timeout, world_mesh):
     )
     # Barrier can OOM in high memory pressure settings
     # since this is a one-time cost, try to avoid it
-    torch.distributed.empty_cache()
+    device_module.empty_cache()
     # Ensure that all the ranks have reached the point of setting the new timeout-
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
