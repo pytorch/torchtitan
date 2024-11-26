@@ -249,9 +249,7 @@ class JobConfig:
             parallelism method used is FSDP (Fully Sharded Data Parallelism).
 
             -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-            only one of `data_parallel_replicate_degree` and `data_parallel_shard_degree`
-            can be negative.
-            1 means disabled.""",
+            only `data_parallel_shard_degree` can be negative. 1 means disabled.""",
         )
         self.parser.add_argument(
             "--training.enable_cpu_offload",
@@ -313,8 +311,20 @@ class JobConfig:
                 The schedule must be compatible with the split points and stages_per_rank.
 
                 Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
-                and split_points = number of stages - 1""",
+                and split_points = number of stages - 1
+                """,
         )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_schedule_csv",
+            type=str,
+            default="",
+            help="""
+                Specify the path to the pipeline parallel schedule csv file to use.
+                The pipeline_parallel_schedule argument must be either
+                PipelineScheduleSingle or PipelineScheduleMulti.
+            """,
+        )
+
         self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",
             type=int,
@@ -577,6 +587,19 @@ class JobConfig:
                 )
                 logger.exception(f"Error details: {str(e)}")
                 raise e
+
+        # if split-points came from 'args' (from cmd line) it would have already been parsed into a list by that parser
+        if (
+            "experimental" in args_dict
+            and "pipeline_parallel_split_points" in args_dict["experimental"]
+            and isinstance(
+                args_dict["experimental"]["pipeline_parallel_split_points"], str
+            )
+        ):
+            exp = args_dict["experimental"]
+            exp["pipeline_parallel_split_points"] = string_list(
+                exp["pipeline_parallel_split_points"]
+            )
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
