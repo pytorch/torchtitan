@@ -5,11 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 import torch
+
+from tensorboard.backend.event_processing import event_accumulator
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
@@ -93,9 +95,32 @@ def build_gpu_memory_monitor():
     return gpu_memory_monitor
 
 
+class MetricRetriever:
+
+    def __init__(self, log_dir: str):
+        self.log_dir = log_dir
+
+    def get_metrics(self) -> Dict[int, Dict[str, Any]]:
+        # Initialize an EventAccumulator to read the event files
+        ea = event_accumulator.EventAccumulator(self.log_dir)
+        ea.Reload()  # Load the event files
+        # Extract scalar data
+        metrics = {}
+        for tag in ea.Tags()["scalars"]:
+            events = ea.Scalars(tag)
+            for event in events:
+                step = event.step
+                if step not in metrics:
+                    metrics[step] = {}
+                metrics[step][tag] = event.value
+        return metrics
+
+
 class MetricLogger:
     def __init__(self, log_dir, tag, enable_tb):
         self.tag = tag
+        self.log_dir = log_dir
+        print(f"!!!! Tensorboard log dir: {self.log_dir}")
         self.writer: Optional[SummaryWriter] = None
         if enable_tb:
             self.writer = SummaryWriter(log_dir, max_queue=1000)
@@ -111,14 +136,15 @@ class MetricLogger:
             self.writer.close()
 
 
-def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
+def _get_metrics_rank(job_config: JobConfig) -> int:
     """
     Returns global rank 0 in non-pipeline-parallel configs, and returns the global
     rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
     """
-    if parallel_dims.pp_enabled:
-        world_size = parallel_dims.world_size
-        pp_size = parallel_dims.pp
+    pp_size = job_config.experimental.pipeline_parallel_degree
+    pp_enabled = pp_size > 1
+    if pp_enabled:
+        world_size = int(os.environ["WORLD_SIZE"])
         metrics_log_rank = (world_size // pp_size) * (pp_size - 1)
     else:
         metrics_log_rank = 0
@@ -126,9 +152,7 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
     return metrics_log_rank
 
 
-def build_metric_logger(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
-):
+def build_metric_logger(job_config: JobConfig, tag: Optional[str] = None):
     """
     parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
     In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'. This is
@@ -138,9 +162,13 @@ def build_metric_logger(
     dump_dir = job_config.job.dump_folder
     tb_config = job_config.metrics
     save_tb_folder = tb_config.save_tb_folder
-    # since we don't have run id, use current minute as the identifier
-    datetime_str = datetime.now().strftime("%Y%m%d-%H%M")
-    log_dir = os.path.join(dump_dir, save_tb_folder, datetime_str)
+    # if we don't have run id, use current minute as the identifier
+    run_id_folder = (
+        datetime.now().strftime("%Y%m%d-%H%M")
+        if not tb_config.run_id_folder
+        else tb_config.run_id_folder
+    )
+    log_dir = os.path.join(dump_dir, save_tb_folder, run_id_folder)
 
     enable_tb = tb_config.enable_tensorboard
     if enable_tb:
@@ -148,7 +176,7 @@ def build_metric_logger(
             f"Metrics logging active. Tensorboard logs will be saved at {log_dir}"
         )
         if tb_config.rank_0_only:
-            enable_tb = torch.distributed.get_rank() == _get_metrics_rank(parallel_dims)
+            enable_tb = torch.distributed.get_rank() == _get_metrics_rank(job_config)
         else:
             rank_str = f"rank_{torch.distributed.get_rank()}"
             log_dir = os.path.join(log_dir, rank_str)

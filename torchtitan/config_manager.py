@@ -147,6 +147,12 @@ class JobConfig:
                 which is the only stage that computes loss metrics.
             """,
         )
+        self.parser.add_argument(
+            "--metrics.run_id_folder",
+            type=str,
+            default="",
+            help="Subfolder to store TensorBoard runs. This is used to identify metrics between runs.",
+        )
 
         # model configs
         self.parser.add_argument(

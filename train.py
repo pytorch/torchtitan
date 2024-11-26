@@ -214,7 +214,7 @@ def main(job_config: JobConfig):
             "All the substages will be initialized with random weights with same RNG state which can affect convergence."
         )
 
-    metric_logger = build_metric_logger(job_config, parallel_dims)
+    metric_logger = build_metric_logger(job_config)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
