@@ -10,7 +10,9 @@ import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Dict, Sequence
+
+from torchtitan.metrics import MetricRetriever
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -362,6 +364,26 @@ def build_test_list():
             "enable_cpu_offload+PP",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
+                    "--metrics.enable_tensorboard",
+                ],
+                [
+                    "--training.data_parallel_shard_degree 4",
+                    "--metrics.enable_tensorboard",
+                ],
+                [
+                    "--training.tensor_parallel_degree 4",
+                    "--metrics.enable_tensorboard",
+                ],
+            ],
+            "example",
+            "my_example",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
@@ -376,10 +398,55 @@ def _run_cmd(cmd):
     )
 
 
+def print_metrics(
+    metrics: Dict[str, Dict[int, Dict[str, Any]]],
+    run_id_to_args: Dict[str, Sequence[str]],
+    filter_keys=[
+        "wps",
+        "mfu(%)",
+        "memory/max_active(GiB)",
+        "memory/max_active(%)",
+        "memory/max_reserved(%)",
+        "loss_metrics/global_avg_loss",
+        "loss_metrics/global_max_loss",
+    ],
+) -> None:
+    for run_id, args in run_id_to_args.items():
+        print(f"Run ID: {run_id}, args: {args}")
+
+    for run_id, all_step_metrics in metrics.items():
+        if all_step_metrics:
+            last_step = next(reversed(all_step_metrics))
+            last_step_metrics = all_step_metrics[last_step]
+            # Print the column headers
+            if filter_keys:
+                filtered_keys = [key for key in filter_keys if key in last_step_metrics]
+            else:
+                filtered_keys = list(last_step_metrics.keys())
+
+            max_key_length = max(len(key) for key in filtered_keys)
+            # Add an empty header for the run_id column
+            header_row = " | ".join(
+                [" " * 10] + [f"{key.ljust(max_key_length)}" for key in filtered_keys]
+            )
+            print(header_row)
+            print("-" * len(header_row))
+            # Print the run_id and the values
+            value_row = " | ".join(
+                [f"{run_id:10}"]
+                + [
+                    f"{str(last_step_metrics[key]).ljust(max_key_length)}"
+                    for key in filtered_keys
+                ]
+            )
+            print(value_row)
+
+
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_dir = f"{output_dir}/{test_name}"
+    dump_folder_arg = f"--job.dump_folder {dump_dir}"
     model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -391,12 +458,18 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         result = _run_cmd(cmd)
         logger.info(result.stdout)
 
-    for override_arg in test_flavor.override_args:
+    # Store all metrics here
+    metrics: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    run_id_to_args: Dict[str, Sequence[str]] = {}
+    for run_id, override_arg in enumerate(test_flavor.override_args):
+        run_id_arg = f"--metrics.run_id_folder {run_id}"
+
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         if test_name == "fsdp2_mem_tracker":
             cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_memory_estimation.sh"
         cmd += " " + dump_folder_arg
         cmd += " " + model_flavor_arg
+        cmd += " " + run_id_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
@@ -408,6 +481,15 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
             raise Exception(
                 f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
             )
+
+        print("=" * 100)
+        print(cmd)
+        log_dir = os.path.join(dump_dir, "tb", str(run_id))
+        print(log_dir)
+        metric_retriever = MetricRetriever(log_dir)
+        metrics[str(run_id)] = metric_retriever.get_metrics()
+        run_id_to_args[str(run_id)] = override_arg
+        print_metrics(metrics, run_id_to_args)
 
 
 def run_tests(args):
@@ -447,6 +529,7 @@ def main():
     )
     parser.add_argument("--ngpu", default=4, type=int)
     args = parser.parse_args()
+    print(args)
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
