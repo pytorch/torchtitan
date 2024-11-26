@@ -236,6 +236,10 @@ _save_list = {
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max(abs(tensor))
+    # torch.ops.aten.abs.default,
+    # torch.ops.aten.max.default,
 }
 
 
