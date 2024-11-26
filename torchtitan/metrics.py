@@ -69,10 +69,10 @@ class DeviceMemoryMonitor:
 
         if num_retries > 0:
             logger.warning(
-                f"{num_retries} {device_type.upper} memory allocation retries."
+                f"{num_retries} {device_type.upper()} memory allocation retries."
             )
         if num_ooms > 0:
-            logger.warning(f"{num_ooms} {device_type.upper} OOM errors thrown.")
+            logger.warning(f"{num_ooms} {device_type.upper()} OOM errors thrown.")
 
         return DeviceMemStats(
             max_active_gib,
@@ -90,7 +90,7 @@ class DeviceMemoryMonitor:
 def build_device_memory_monitor():
     device_memory_monitor = DeviceMemoryMonitor(device_type)
     logger.info(
-        f"{device_type.upper} capacity: {device_memory_monitor.device_name} ({device_memory_monitor.device_index}) "
+        f"{device_type.upper()} capacity: {device_memory_monitor.device_name} ({device_memory_monitor.device_index}) "
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
 
