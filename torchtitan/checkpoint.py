@@ -103,16 +103,28 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+        optim_in_bwd: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        self.optim_in_bwd = optim_in_bwd
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
+        if not self.optim_in_bwd:
+            return {
+                k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()
+            }
+        else:
+            state_dict = {}
+            for optim in self.optim:
+                for sub_opt in optim:
+                    for sd in map(func, self.model, (sub_opt,)):
+                        state_dict.update(sd)
+            return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         func = functools.partial(
@@ -120,7 +132,12 @@ class OptimizerWrapper(Stateful):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(func, self.model, self.optim))
+        if not self.optim_in_bwd:
+            list(map(func, self.model, self.optim))
+        else:
+            for optim in self.optim:
+                for sub_opt in optim:
+                    list(map(func, self.model, (sub_opt,)))
 
 
 class Terminate:
@@ -165,7 +182,9 @@ class CheckpointManager:
         self,
         dataloader: DataLoader,
         model_parts: List[nn.Module],
-        optimizers: List[torch.optim.Optimizer],
+        optimizers: Union[
+            List[torch.optim.Optimizer], list[Dict[str, torch.optim.Optimizer]]
+        ],
         lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -214,7 +233,11 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(model_parts, optimizers),
+                "optimizer": OptimizerWrapper(
+                    model_parts,
+                    optimizers,
+                    job_config.training.enable_optimizer_in_backward,
+                ),
                 "dataloader": dataloader,
             }
         )

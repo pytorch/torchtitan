@@ -271,6 +271,14 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
+            "--training.enable_optimizer_in_backward",
+            default=False,
+            action="store_true",
+            help="""
+            Whether to apply optimizer in the backward. Caution, optimizer_in_backward 
+            cannot compile with gradients clipping.""",
+        )
+        self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
             default=False,
             action="store_true",
