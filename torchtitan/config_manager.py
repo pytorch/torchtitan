@@ -275,7 +275,7 @@ class JobConfig:
             type=bool,
             default=False,
             help="""
-            Whether to apply optimizer in the backward. Caution, optimizer_in_backward 
+            Whether to apply optimizer in the backward. Caution, optimizer_in_backward
             cannot compile with gradients clipping.""",
         )
         self.parser.add_argument(
