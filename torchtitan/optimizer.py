@@ -7,8 +7,11 @@
 import functools
 
 import torch
+from mars_adamw import MarsAdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config_manager import JobConfig
+from triton2_adamw import Triton2AdamW
+from triton_mars_adamw import TritonMarsAdamW
 
 
 # consider split between PP and non-PP
@@ -35,6 +38,16 @@ def build_optimizers(model_parts, job_config: JobConfig):
             optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
         elif name == "AdamW":
             optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+            print("Using AdamW")
+        elif name == "MarsAdamW":
+            optimizer = MarsAdamW(model.parameters(), lr=lr, weight_decay=0.1)
+            print("Using MarsAdamW")
+        elif name == "TritonMarsAdamW":
+            optimizer = TritonMarsAdamW(model.parameters(), lr=lr, weight_decay=0.1)
+            print("Using **Triton** MarsAdamW")
+        elif name == "Triton2AdamW":
+            optimizer = Triton2AdamW(model.parameters(), lr=lr, weight_decay=0.1)
+            print("Using Triton**2** AdamW")
         else:
             raise NotImplementedError(f"Optimizer {name} not added.")
 

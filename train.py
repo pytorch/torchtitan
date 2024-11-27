@@ -329,6 +329,8 @@ def main(job_config: JobConfig):
             checkpoint.maybe_wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
+            logger.info(f"Optimizer step {train_state.step} completed")
+            logger.info(f"{loss=}, {loss.item()=}")
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
