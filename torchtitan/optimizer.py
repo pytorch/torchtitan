@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Dict
 
 import torch
 from torch.optim.lr_scheduler import LambdaLR
