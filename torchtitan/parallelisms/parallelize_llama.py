@@ -238,8 +238,8 @@ _save_list = {
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max(abs(tensor))
-    # torch.ops.aten.abs.default,
-    # torch.ops.aten.max.default,
+    torch.ops.aten.abs.default,
+    torch.ops.aten.max.default,
 }
 
 
