@@ -177,7 +177,7 @@ def main(job_config: JobConfig):
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
-        f"{device_type.upper} memory usage for model: "
+        f"{device_type.upper()} memory usage for model: "
         f"{device_mem_stats.max_reserved_gib:.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%)"
     )
