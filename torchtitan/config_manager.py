@@ -321,7 +321,7 @@ class JobConfig:
             help="""
                 Specify the path to the pipeline parallel schedule csv file to use.
                 The pipeline_parallel_schedule argument must be either
-                PipelineScheduleSingle or PipelineScheduleMulti.
+                PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
             """,
         )
 
