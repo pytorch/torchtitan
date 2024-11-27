@@ -272,8 +272,8 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.enable_optimizer_in_backward",
+            type=bool,
             default=False,
-            action="store_true",
             help="""
             Whether to apply optimizer in the backward. Caution, optimizer_in_backward 
             cannot compile with gradients clipping.""",
