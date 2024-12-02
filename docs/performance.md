@@ -34,26 +34,6 @@ Next we show the loss curves for Llama 3 8B and Llama 3 70B training with both 1
 
 ![image](../assets/images/llama3_loss_curves.png)
 
-
-## Llama 2 performance numbers
-
-Below are the WPS and MFU results which torchtitan achieves on Llama 2 models with FSDP2 on 64 A100 (80GB) GPUs.
-
-| Model size | Batch size | Activation checkpointing | WPS | MFU |
-| ----- | ----- | ----- | ----- | ----- |
-| 13B | 2 | no | 2162 | 61.1%	|
-| 13B | 2 | selective layer | 1914 | 54.1% |
-| 13B | 2 | selective op | 1904 | 53.8% |
-| 70B | 1[^3] | selective op | 355 | 50.8% |
-| 70B | 2 | full | 353 | 50.5% |
-
-We primarily use local batch size 2 (global batch size 128) in the experiments, to keep the same number of tokens per training iteration between Llama 2 and Llama 3 (since the default sequence length in Llama 2 is 4096 which is halved compared with Llama 3). In fact, for Llama 2 70B model with full activation checkpointing, the MFU can go up to 54% when local batch size is higher (but before an OOM happens).
-
-Next we show the loss curves for Llama 2 13B and Llama 2 70B training with both 1D parallelism (FSDP2) and 2D parallelism (FSDP2 + Tensor Parallel). All four models are trained 3000 steps with global batch size 128.
-In terms of activation checkpointing (AC) configs, the Llama 2 13B training jobs use selective op AC, whereas the Llama 70B training jobs use full AC. The results are shown in the picture (a TensorBoard screenshot) below[^4].
-
-![image](../assets/images/llama2_loss_curves.png)
-
 [^1]: We used HBM2e based lower TDP SXM H100(95GB) for our test, the actual peak TFLOPs number is between SXM and NVL, and we don't know its exact value. So this MFU number is lower than actual MFU because we use the peak number of SXM directly.
 
 [^2]: Since for Float8, we are not converting all the matmuls to Float8 because our fused attention implementation is not done in Float8, so this number is lower than expected.
