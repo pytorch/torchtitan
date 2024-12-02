@@ -3,7 +3,7 @@
 
 # torchtitan
 
-`torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1**, **Llama 3**, and **Llama 2** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
+`torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1**, **Llama 3** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
 
 `torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
 
@@ -43,7 +43,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 * [torchtitan/parallelisms/pipeline_llama.py](torchtitan/parallelisms/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
 * [torchtitan/float8.py](torchtitan/float8.py) - utils for applying Float8 techniques
-* [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama model definition (shared for Llama 2 and Llama 3 variants)
+* [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama model definition (shared for Llama 3.1 and Llama 3 variants)
 
 ### Key features available
 
@@ -78,18 +78,15 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu
 
 ### Downloading a tokenizer
 
-`torchtitan` currently supports training Llama 3 (8B, 70B), and Llama 2 (7B, 13B, 70B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
+`torchtitan` currently supports training Llama 3 (8B, 70B, 405B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Meta-Llama-3-8B) repository to ensure you have access to the Llama model weights.
 
-Once you have confirmed access, you can run the following command to download the Llama 3 / Llama 2 tokenizer to your local machine.
+Once you have confirmed access, you can run the following command to download the Llama 3.1 tokenizer to your local machine.
 
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
 # Llama 3 or 3.1 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3-8B --tokenizer_path "original" --hf_token=...
-
-# Llama 2 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Llama-2-13b-hf --hf_token=...
+python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
 ```
 
 ### Start a training run
