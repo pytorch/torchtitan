@@ -47,27 +47,24 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ### Key features available
 
-1. [FSDP2](docs/fsdp.md) with per param sharding
-2. [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
-3. Selective layer and operator activation checkpointing
-4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
-5. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
-6. Loss, GPU memory, tokens-per-second, and MFU displayed and logged via [TensorBoard](#tensorboard)
-7. Learning rate scheduler, meta-init, optional Fused RMSNorm
-8. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
-9. `torch.compile` support
-10. DDP and HSDP
+1. Multi-dimensional composable parallelisms
+   - [FSDP2](docs/fsdp.md) with per-parameter sharding
+   - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
+   - Pipeline Parallel
+   - Context Parallel
+2. Selective layer and operator activation checkpointing
+3. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
+   - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
+4. `torch.compile` support
+5. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
+6. DDP and HSDP
+7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
+8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
+9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [TensorBoard](#tensorboard)
+10. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 11. All options easily configured via [toml files](train_configs/)
-12. [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
-13. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 
 We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
-
-
-### Coming soon
-
-- Pipeline Parallel (and 3D parallellism)
-- Context Parallel
 
 
 ## Installation

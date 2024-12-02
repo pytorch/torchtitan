@@ -58,18 +58,8 @@ It is the contributor’s responsibility to justify the change. The requirements
 
 #### Loss
 
-- If a change does not impact computation results, one should see identical loss before vs. after, with fixed random seeds. An example is activation checkpointing.
-```
-seed = 0
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-```
-- If a change is expected to impact computation results, loss convergence should be verified via end-to-end training on representable datasets (e.g. Llama3 models on the C4 dataset). One can refer to the example jobs reported in [performance.md](docs/performance.md) on what configs and how many steps to run.
-- The resulted loss curve should be compared with a verified baseline.
-  - 1D FSDP – Preferred, whose effectiveness can be proven by comparing with 1D DDP and single-GPU training.
-  - 2D FSDP + TP can be used as the baseline when 1D FSDP does not suffice to make comparisons due to limited scalability. For example, this should be the baseline when experimenting with 3D parallelisms on the Llama 3.1 405B model.
+- If a change does not impact computation results, one should see identical loss before vs. after, with fixed random seeds (`training.seed`) and deterministic algorithms (`training.deterministic`). An example is activation checkpointing.
+- If a change is expected to impact computation results, loss converging should be verified via end-to-end training on representable datasets (e.g. Llama 3 models on the C4 dataset). Please refer to the recommended practices in [converging.md](docs/converging.md).
 
 #### Performance
 - Memory and WPS / MFU, which are available from logging, should meet expectations.
