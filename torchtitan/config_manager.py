@@ -148,6 +148,25 @@ class JobConfig:
             """,
         )
 
+        # WandB configs
+        self.parser.add_argument(
+            "--metrics.enable_wandb",
+            action="store_true",
+            help="Whether to log metrics to Weights & Biases",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_config.project",
+            type=str,
+            default="torchtitan",
+            help="Project name for WandB logging",
+        )
+        self.parser.add_argument(
+            "--metrics.wandb_config.entity",
+            type=str,
+            default=None,
+            help="Team/entity name for WandB logging",
+        )
+
         # model configs
         self.parser.add_argument(
             "--model.name",
@@ -624,6 +643,17 @@ class JobConfig:
         assert self.model.name
         assert self.model.flavor
         assert self.model.tokenizer_path
+
+        # Logging backend validations
+        if hasattr(self.metrics, "enable_tensorboard") and hasattr(
+            self.metrics, "enable_wandb"
+        ):
+            if self.metrics.enable_tensorboard and self.metrics.enable_wandb:
+                logger.warning(
+                    "Both TensorBoard and WandB logging were enabled. Using WandB only."
+                )
+                # Modify the config to disable TensorBoard
+                self.metrics.enable_tensorboard = False
 
     def parse_args_from_command_line(
         self, args_list
