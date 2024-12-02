@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -20,6 +21,7 @@ from torch.distributed._composable.fsdp import (
 )
 from torch.distributed._composable.replicate import replicate
 from torch.distributed._tensor import Replicate, Shard
+from torch.distributed._tools.auto_sac import apply_auto_sac_policies
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -66,7 +68,13 @@ def parallelize_llama(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+        if job_config.activation_checkpoint.mode == "auto":
+            if not apply_auto_sac(model, job_config):
+                logger.info("Auto-SAC failed, falling back to full AC mode.")
+                job_config.activation_checkpoint.mode = "full"
+                apply_ac(model, job_config.activation_checkpoint)
+        else:
+            apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
@@ -312,6 +320,41 @@ def apply_ac(model: nn.Module, ac_config):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+
+def apply_auto_sac(model: nn.Module, job_config: JobConfig) -> bool:
+    if (
+        job_config.training.tensor_parallel_degree > 1
+        or job_config.experimental.pipeline_parallel_degree > 1
+        or job_config.experimental.context_parallel_degree > 1
+        or job_config.training.enable_cpu_offload
+    ):
+        logger.info(
+            "Tensor, Context and Pipeline parallelism or FSDP with CPU Offload option"
+            " are not supported yet with Auto-SAC."
+        )
+        return False
+    est_job_config = deepcopy(job_config)
+    est_job_config.memory_estimation.disable_fake_mode = False
+    est_job_config.memory_estimation.enabled = False
+    est_job_config.sac_estimation.enabled = True
+    est_job_config.training.compile = False
+    est_job_config.experimental.enable_compiled_autograd = False
+    if (
+        est_job_config.model.norm_type == "compiled_rmsnorm"
+        or est_job_config.model.norm_type == "fused_rmsnorm"
+    ):
+        est_job_config.model.norm_type = "rmsnorm"
+    from scripts.estimate.estimation import estimate
+
+    auto_sac_result = estimate(est_job_config)
+    assert auto_sac_result is not None
+    if auto_sac_result.peak_mem == -1:
+        return False
+    apply_auto_sac_policies(
+        model, auto_sac_result.sac_policies, preserve_rng_state=False
+    )
+    return True
 
 
 def apply_compile(model: nn.Module):

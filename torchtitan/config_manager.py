@@ -479,7 +479,7 @@ class JobConfig:
             "--activation_checkpoint.mode",
             type=str,
             default="selective",
-            help="Type of activation checkpointing to use ['none', 'full', 'selective']",
+            help="Type of activation checkpointing to use ['none', 'full', 'selective', 'auto']",
         )
         self.parser.add_argument(
             "--activation_checkpoint.selective_ac_option",
@@ -488,6 +488,25 @@ class JobConfig:
             help="""
                 Selective activation checkpointing options ['int', 'op'].
                 'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
+            """,
+        )
+        self.parser.add_argument(
+            "--activation_checkpoint.auto_sac_budget",
+            type=str,
+            default="65.0",
+            help="""
+                Auto-SAC Memory Budget in GiB.
+                Recommended to set 85 percent of total device memory.
+            """,
+        )
+        self.parser.add_argument(
+            "--activation_checkpoint.auto_sac_algorithm",
+            type=str,
+            default="optimal",
+            choices=["greedy", "optimal"],
+            help="""
+                Algorithm to use for determining SAC policies.
+                `greedy` runs in linear time, while `optimal` solves an ILP.
             """,
         )
 
@@ -566,6 +585,13 @@ class JobConfig:
         self.parser.add_argument(
             "--memory_estimation.disable_fake_mode",
             help="Whether to estimate memory under FakeTensorMode",
+            default=False,
+            action="store_true",
+        )
+
+        self.parser.add_argument(
+            "--sac_estimation.enabled",
+            help="Whether to calculate SAC (Selective Activation Checkpointing) policies",
             default=False,
             action="store_true",
         )
