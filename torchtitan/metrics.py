@@ -105,7 +105,6 @@ def build_device_memory_monitor():
 
 class MetricLogger:
     def __init__(self, log_dir, tag, enable_tb, enable_wandb=False, wandb_config=None):
-        """Initialize metric logger with the configured backend."""
         self.tag = tag
         self.writer: Optional[SummaryWriter] = None
         self.use_wandb = False
@@ -170,15 +169,18 @@ def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ):
     """
-    Builds a metric logger based on the configuration.
-
     Args:
-        job_config: Configuration object containing metrics settings
-        parallel_dims: Parallel dimensions configuration
-        tag: Optional tag to prefix all metrics
+        job_config: Configuration object containing metrics settings.
+        parallel_dims: Used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
+        tag: Optional tag to prefix all metrics.
 
     Returns:
         MetricLogger instance configured based on the provided settings
+
+    parallel_dims is used to determine the rank to log metrics from if 'tb_config.rank_0_only=True'.
+    In that case, `_get_metrics_rank` will be used to calculate which rank acts as 'rank 0'. This is
+    intended to allow logging from the 0th rank within the last pipeline stage group, in case pipeline
+    parallelism is enabled, without forcing logging from all ranks to capture loss information.
     """
     dump_dir = job_config.job.dump_folder
     metrics_config = job_config.metrics
