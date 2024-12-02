@@ -102,25 +102,9 @@ Llama 3 8B model locally on 8 GPUs
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
 
+## Logging
 
-## TensorBoard
-
-To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
-
-1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a .toml file or from CLI).
-
-2. Set up SSH tunneling, by running the following from local CLI
-```
-ssh -L 6006:127.0.0.1:6006 [username]@[hostname]
-```
-
-3. Inside the SSH tunnel that logged into the remote server, go to the torchtitan repo, and start the TensorBoard backend
-```
-tensorboard --logdir=./outputs/tb
-```
-
-4. In the local web browser, go to the URL it provides OR to http://localhost:6006/.
-
+We support logging via both TensorBoard and Weights and Biases, all you need to is enable it in your `toml` file or CLI using `enable_tb` or `enable_wandb` respectively. You can learn more [here](docs/metrics.md)
 
 ## Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.

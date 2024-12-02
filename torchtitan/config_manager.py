@@ -121,15 +121,16 @@ class JobConfig:
             help="How often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
-            "--metrics.enable_color_printing",
-            default=False,
-            action="store_true",
-            help="Whether to enable color printing",
-        )
-        self.parser.add_argument(
             "--metrics.enable_tensorboard",
             action="store_true",
+            default=False,
             help="Whether to log metrics to TensorBoard",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_color_printing",
+            action="store_true",
+            default=True,
+            help="Whether to enable color printing in logs",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
@@ -139,32 +140,19 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--metrics.rank_0_only",
-            default=True,
             action="store_true",
+            default=True,
             help="""
                 Whether to save TensorBoard metrics only for rank 0 or for all ranks.
                 When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
                 which is the only stage that computes loss metrics.
             """,
         )
-
-        # WandB configs
         self.parser.add_argument(
             "--metrics.enable_wandb",
             action="store_true",
+            default=False,
             help="Whether to log metrics to Weights & Biases",
-        )
-        self.parser.add_argument(
-            "--metrics.wandb_config.project",
-            type=str,
-            default="torchtitan",
-            help="Project name for WandB logging",
-        )
-        self.parser.add_argument(
-            "--metrics.wandb_config.entity",
-            type=str,
-            default=None,
-            help="Team/entity name for WandB logging",
         )
 
         # model configs
@@ -643,17 +631,6 @@ class JobConfig:
         assert self.model.name
         assert self.model.flavor
         assert self.model.tokenizer_path
-
-        # Logging backend validations
-        if hasattr(self.metrics, "enable_tensorboard") and hasattr(
-            self.metrics, "enable_wandb"
-        ):
-            if self.metrics.enable_tensorboard and self.metrics.enable_wandb:
-                logger.warning(
-                    "Both TensorBoard and WandB logging were enabled. Using WandB only."
-                )
-                # Modify the config to disable TensorBoard
-                self.metrics.enable_tensorboard = False
 
     def parse_args_from_command_line(
         self, args_list
