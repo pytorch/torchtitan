@@ -7,6 +7,7 @@ import os
 from typing import Tuple
 
 from torch.distributed.pipelining.schedules import (
+    _PipelineScheduleRuntime,
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
@@ -60,14 +61,16 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     pp_schedule_csv = job_config.experimental.pipeline_parallel_schedule_csv
 
     # Validate that pp_schedule_csv is a valid path
-    if pp_schedule_csv and not os.path.isfile(pp_schedule_csv):
-        raise FileNotFoundError(
-            f"The specified path {pp_schedule_csv} does not exist or is not a file."
+    if pp_schedule_csv:
+        if not os.path.isfile(pp_schedule_csv):
+            raise FileNotFoundError(
+                f"The specified path {pp_schedule_csv} does not exist or is not a file."
+            )
+        schedule_class = _PipelineScheduleRuntime
+    else:
+        schedule_class = get_schedule_class(
+            job_config.experimental.pipeline_parallel_schedule
         )
-
-    schedule_class = get_schedule_class(
-        job_config.experimental.pipeline_parallel_schedule
-    )
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     logger.info(
@@ -87,7 +90,8 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
         assert schedule_class in [
             PipelineScheduleSingle,
             PipelineScheduleMulti,
-        ], "Only PipelineScheduleSingle (single stage) and PipelineScheduleMulti (multistage) support csv schedules"
+            _PipelineScheduleRuntime,
+        ], "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), and _PipelineScheduleRuntime support csv schedules"
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
