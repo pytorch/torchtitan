@@ -14,8 +14,6 @@ profile_freq = 100
 log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
-enable_wandb = true
-wandb_config = { project = "torchtitan", entity = "your-team" }
 
 [model]
 name = "llama3"
