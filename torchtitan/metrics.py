@@ -89,7 +89,7 @@ class DeviceMemoryMonitor:
 def build_device_memory_monitor():
     device_memory_monitor = DeviceMemoryMonitor()
     logger.info(
-        f"{device_type.upper()} capacity: {device_memory_monitor.device_name} ({device_memory_monitor.device_index}) "
+        f"{device_type.upper()} capacity: {device_memory_monitor.device_name}"
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
     return device_memory_monitor
@@ -215,7 +215,12 @@ def build_metric_logger(
         try:
             return WandBLogger(base_log_dir, tag)
         except Exception as e:
-            logger.error(f"Failed to create WandB logger: {e}")
+            if "No module named 'wandb'" in str(e):
+                logger.error(
+                    "Failed to create WandB logger: No module named 'wandb'. Please install it using 'pip install wandb'."
+                )
+            else:
+                logger.error(f"Failed to create WandB logger: {e}")
 
     if metrics_config.enable_tensorboard:
         logger.info("Creating TensorBoard logger")
