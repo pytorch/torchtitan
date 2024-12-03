@@ -6,3 +6,5 @@ sentencepiece
 tiktoken
 blobfile
 tabulate
+pwlf
+pulp
