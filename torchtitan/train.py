@@ -316,11 +316,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        self.optimizers.zero_grad()
-
-        # Keep these variables local to shorten the code as these are
-        # the major variables that are used in the training loop.
+    def batch_backward(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         model_parts = self.model_parts
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
@@ -371,6 +367,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
+        return loss
+
+    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+        self.optimizers.zero_grad()
+
+        # Keep these variables local to shorten the code as these are
+        # the major variables that are used in the training loop.
+        model_parts = self.model_parts
+        world_mesh = self.world_mesh
+        parallel_dims = self.parallel_dims
+
+        loss = self.batch_backward(input_dict, labels)
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
