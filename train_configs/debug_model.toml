@@ -45,6 +45,7 @@ dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
+expert_parallel_mode = "dp2ep"
 
 [checkpoint]
 enable_checkpoint = false
@@ -56,7 +57,7 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'selective'  # ['none', 'selective', 'full']
+mode = 'none'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
