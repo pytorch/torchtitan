@@ -167,7 +167,7 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
 
 def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
-) -> Union[BaseLogger, TensorBoardLogger, WandBLogger]:
+) -> BaseLogger:
     """
     Build an appropriate metric logger based on configuration.
     """
