@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
-from torchtitan.utils import device_type
+from torchtitan.utils import device_module, device_type
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -31,17 +31,17 @@ DeviceMemStats = namedtuple(
 
 
 class DeviceMemoryMonitor:
-    def __init__(self):
-        self.device = torch.cuda.current_device()
-        self.device_obj = torch.device(f"cuda:{self.device}")
-        self.device_name = torch.cuda.get_device_name(self.device)
-        self.device_capacity = torch.cuda.get_device_properties(
+    def __init__(self, device: str = f"{device_type}:0"):
+        self.device = torch.device(device)  # device object
+        self.device_name = device_module.get_device_name(self.device)
+        self.device_index = device_module.current_device()
+        self.device_capacity = device_module.get_device_properties(
             self.device
         ).total_memory
         self.device_capacity_gib = self._to_gib(self.device_capacity)
 
-        torch.cuda.reset_peak_memory_stats(self.device)
-        torch.cuda.empty_cache()
+        device_module.reset_peak_memory_stats()
+        device_module.empty_cache()
 
     def _to_gib(self, memory_in_bytes):
         # NOTE: GiB (gibibyte) is 1024, vs GB is 1000
@@ -53,7 +53,7 @@ class DeviceMemoryMonitor:
         return 100 * memory / self.device_capacity
 
     def get_peak_stats(self):
-        device_info = torch.cuda.memory_stats(self.device)
+        device_info = device_module.memory_stats(self.device)
 
         max_active = device_info["active_bytes.all.peak"]
         max_active_gib = self._to_gib(max_active)
@@ -83,7 +83,7 @@ class DeviceMemoryMonitor:
         )
 
     def reset_peak_stats(self):
-        torch.cuda.reset_peak_memory_stats(self.device)
+        device_module.reset_peak_memory_stats()
 
 
 def build_device_memory_monitor():
