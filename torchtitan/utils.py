@@ -88,9 +88,12 @@ def set_determinism(
         seed += pp_mesh.get_local_rank()
         seed %= 2**64 - 1
 
-    logger.debug(
-        f"Rank {pp_mesh.get_local_rank()}, {spmd_mesh.get_rank()} using seed: {seed}"
-    )
+        logger.debug(
+            f"PP rank {pp_mesh.get_local_rank()}, Global rank {spmd_mesh.get_rank()} using seed: {seed}"
+        )
+
+    logger.debug(f"Global Rank {spmd_mesh.get_rank()} using seed: {seed}")
+
     torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
 
     if deterministic:
