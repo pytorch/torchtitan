@@ -60,7 +60,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 6. DDP and HSDP
 7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
 8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
-9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](#logging)
+9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 10. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 11. All options easily configured via [toml files](train_configs/)
 
@@ -98,10 +98,6 @@ Llama 3 8B model locally on 8 GPUs
 ```bash
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
-
-## Logging
-
-We support logging via both TensorBoard and Weights and Biases, all you need to is enable it in your `toml` file or CLI using `enable_tb` or `enable_wandb` respectively. You can learn more [here](docs/metrics.md)
 
 ## Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
