@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
-from torchtitan.utils import device_module, device_type
+from torchtitan.utils import device_type
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
