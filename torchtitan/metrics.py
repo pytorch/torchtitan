@@ -7,7 +7,7 @@
 import os
 from collections import namedtuple
 from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
