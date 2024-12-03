@@ -18,6 +18,9 @@ dependencies = [
     "sentencepiece",
     "tiktoken",
 
+    # Multimodality
+    "torchvision",
+
     # Miscellaneous
     "tomli>=1.1.0"
 ]

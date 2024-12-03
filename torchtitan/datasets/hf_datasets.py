@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import pickle
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
@@ -156,8 +156,14 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
 
-    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
-        super().__init__(hf_ds, batch_size)
+    def __init__(
+        self,
+        dp_rank: int,
+        hf_ds: IterableDataset,
+        batch_size: int,
+        collator_fn: Callable,
+    ):
+        super().__init__(dataset=hf_ds, batch_size=batch_size, collate_fn=collator_fn)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
 
