@@ -32,9 +32,6 @@ DeviceMemStats = namedtuple(
 
 class DeviceMemoryMonitor:
     def __init__(self):
-        """Initialize monitor using the current device context."""
-        # Get the current device from the CUDA context
-        # Otherwise this will OOM in case someone else is running on GPU:0
         self.device = torch.cuda.current_device()
         self.device_obj = torch.device(f"cuda:{self.device}")
         self.device_name = torch.cuda.get_device_name(self.device)
