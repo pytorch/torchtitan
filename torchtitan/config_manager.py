@@ -192,6 +192,11 @@ class Training:
     batch_size: int = 8
     """Batch size"""
 
+    global_batch_size: int | None = None
+    """
+    Global batch size (defaults to `training.batch_size * data-parallel degree`)
+    """
+
     seq_len: int = 2048
     """Sequence length"""
 
