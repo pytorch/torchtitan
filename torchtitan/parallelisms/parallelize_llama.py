@@ -354,22 +354,8 @@ def apply_ep(
                 parallelize_module(
                     module=transformer_block.moe.experts,
                     device_mesh=dp_tp_mesh,
-                    parallelize_plan=ExpertTensorParallel(sp_dim=2),
+                    parallelize_plan=ExpertTensorParallel(),
                 )
-
-                from torch.distributed._composable.contract import (
-                    REGISTRY_KEY,
-                    RegistryItem,
-                )
-
-                def ignore_module_for_fully_shard(module: nn.Module):
-                    default_registry = {}
-                    registry = module.__dict__.setdefault(
-                        REGISTRY_KEY, default_registry
-                    )
-                    registry.setdefault("fully_shard", RegistryItem())
-
-                ignore_module_for_fully_shard(transformer_block.moe.experts)
 
                 if transformer_block.moe.shared_expert is not None:
                     _apply_tp_to_expert(transformer_block.moe.shared_expert, tp_mesh)
