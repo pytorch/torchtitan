@@ -195,7 +195,7 @@ def build_metric_logger(
     )
 
     if not should_log:
-        logger.debug("Returning DummyLogger due to should_log=False")
+        logger.debug("Returning BaseLogger due to should_log=False")
         return BaseLogger()
 
     # Setup logging directory
