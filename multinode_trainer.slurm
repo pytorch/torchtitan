@@ -53,7 +53,8 @@ export NCCL_SOCKET_IFNAME="eth0,en,eth,em,bond"
 export NCCL_BUFFSIZE=2097152
 #export TORCH_DIST_INIT_BARRIER=1
 export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
-CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama2_13b.toml"}
+
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/llama3_8b.toml"}
 
 dcgmi profile --pause
 # adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
