@@ -136,7 +136,7 @@ class WandBLogger(BaseLogger):
             project="torchtitan",
             dir=log_dir,
         )
-        logger.debug("WandB logging enabled")
+        logger.info("WandB logging enabled")
 
     def log(self, metrics: Dict[str, Any], step: int) -> None:
         wandb_metrics = {
