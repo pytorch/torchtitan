@@ -60,7 +60,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 6. DDP and HSDP
 7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
 8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
-9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [TensorBoard](#tensorboard)
+9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](#logging)
 10. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
 11. All options easily configured via [toml files](train_configs/)
 

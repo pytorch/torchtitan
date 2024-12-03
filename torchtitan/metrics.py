@@ -87,7 +87,7 @@ class DeviceMemoryMonitor:
 
 
 def build_device_memory_monitor():
-    device_memory_monitor = DeviceMemoryMonitor()
+    device_memory_monitor = DeviceMemoryMonitor(device_type)
     logger.info(
         f"{device_type.upper()} capacity: {device_memory_monitor.device_name}"
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
@@ -95,7 +95,7 @@ def build_device_memory_monitor():
     return device_memory_monitor
 
 
-class DummyLogger:
+class BaseLogger:
     """Logger that does nothing, used when logging is disabled."""
 
     def log(self, metrics: Dict[str, Any], step: int) -> None:
@@ -105,7 +105,7 @@ class DummyLogger:
         pass
 
 
-class TensorBoardLogger:
+class TensorBoardLogger(BaseLogger):
     """Logger implementation for TensorBoard."""
 
     def __init__(self, log_dir: str, tag: Optional[str] = None):
@@ -122,7 +122,7 @@ class TensorBoardLogger:
         self.writer.close()
 
 
-class WandBLogger:
+class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
     def __init__(self, log_dir: str, tag: Optional[str] = None):
@@ -167,14 +167,14 @@ def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
 
 def build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
-) -> Union[DummyLogger, TensorBoardLogger, WandBLogger]:
+) -> Union[BaseLogger, TensorBoardLogger, WandBLogger]:
     """
     Build an appropriate metric logger based on configuration.
     """
     metrics_config = job_config.metrics
 
     # Log initial config state
-    logger.info(
+    logger.debug(
         f"Building logger with config: wandb={metrics_config.enable_wandb}, "
         f"tensorboard={metrics_config.enable_tensorboard}"
     )
@@ -190,13 +190,13 @@ def build_metric_logger(
         metrics_rank = _get_metrics_rank(parallel_dims)
         should_log = torch.distributed.get_rank() == metrics_rank
 
-    logger.info(
+    logger.debug(
         f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
     )
 
     if not should_log:
-        logger.info("Returning DummyLogger due to should_log=False")
-        return DummyLogger()
+        logger.debug("Returning DummyLogger due to should_log=False")
+        return BaseLogger()
 
     # Setup logging directory
     dump_dir = job_config.job.dump_folder
@@ -211,7 +211,7 @@ def build_metric_logger(
 
     # Create loggers in priority order
     if metrics_config.enable_wandb:
-        logger.info("Attempting to create WandB logger")
+        logger.debug("Attempting to create WandB logger")
         try:
             return WandBLogger(base_log_dir, tag)
         except Exception as e:
@@ -223,8 +223,8 @@ def build_metric_logger(
                 logger.error(f"Failed to create WandB logger: {e}")
 
     if metrics_config.enable_tensorboard:
-        logger.info("Creating TensorBoard logger")
+        logger.debug("Creating TensorBoard logger")
         return TensorBoardLogger(base_log_dir, tag)
 
-    logger.info("No loggers enabled, returning DummyLogger")
-    return DummyLogger()
+    logger.debug("No loggers enabled, returning BaseLogger")
+    return BaseLogger()
