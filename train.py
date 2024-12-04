@@ -27,7 +27,7 @@ from torchtitan.parallelisms import (
     ParallelDims,
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-from torchtitan.utils import clip_grad_norm_, device_module, device_type
+from torchtitan.utils import device_module, device_type
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -177,7 +177,7 @@ def main(job_config: JobConfig):
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
-        f"{device_type.upper} memory usage for model: "
+        f"{device_type.upper()} memory usage for model: "
         f"{device_mem_stats.max_reserved_gib:.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%)"
     )
@@ -308,7 +308,7 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            clip_grad_norm_(
+            utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],
                 job_config.training.max_norm,
                 foreach=True,
@@ -351,14 +351,14 @@ def main(job_config: JobConfig):
 
                 time_delta = time.perf_counter() - time_last_log
 
-                # tokens per second, abbr. as wps by convention
-                wps = ntokens_since_last_log / (
+                # tokens per second per device, abbreviated as tps
+                tps = ntokens_since_last_log / (
                     time_delta * parallel_dims.non_data_parallel_size
                 )
                 # model FLOPS utilization
                 # For its definition and calculation, please refer to the PaLM paper:
                 # https://arxiv.org/abs/2204.02311
-                mfu = 100 * num_flop_per_token * wps / gpu_peak_flops
+                mfu = 100 * num_flop_per_token * tps / gpu_peak_flops
 
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = sum(data_loading_times) / len(data_loading_times)
@@ -369,7 +369,7 @@ def main(job_config: JobConfig):
                 metrics = {
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
-                    "wps": wps,
+                    "throughput(tps)": tps,
                     "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
@@ -388,7 +388,7 @@ def main(job_config: JobConfig):
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-                    f"{color.blue}wps: {round(wps):,}  "
+                    f"{color.blue}tps: {round(tps):,}  "
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 

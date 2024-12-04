@@ -77,6 +77,10 @@ def set_determinism(
         torch.manual_seed(seed)
         # set Python seed
         os.environ["PYTHONHASHSEED"] = str(seed)
+        torch.use_deterministic_algorithms(True)
+        # env var for deterministic CuBLAS
+        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     else:
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups
@@ -202,6 +206,15 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
     return context
 
 
+def _get_distributed_backend(job_config):
+    backend = "nccl"
+    if device_type in torch.distributed.Backend.default_device_backend_map.keys():
+        backend = torch.distributed.Backend.default_device_backend_map.get(device_type)
+    if job_config.training.enable_cpu_offload:
+        backend = f"{device_type}:{backend},cpu:gloo"
+    return backend
+
+
 def init_distributed(job_config):
     # FlightRecorder is incompatible with =1 mode where watchdog aborts work, must use =3 (skipcleanup)
     # to get flight recorder dumps. See https://github.com/pytorch/pytorch/issues/121055
@@ -223,11 +236,8 @@ def init_distributed(job_config):
     # such as those in tensor parallelism
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
-    backend = "nccl"
-    if job_config.training.enable_cpu_offload:
-        backend = "cuda:nccl,cpu:gloo"
     torch.distributed.init_process_group(
-        backend=backend,
+        backend=_get_distributed_backend(job_config),
         timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
     )
 
