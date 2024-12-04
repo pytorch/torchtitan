@@ -6,26 +6,41 @@
 
 import contextlib
 import gc
+import math
 import os
 import subprocess
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Generator, List, Optional, Set, Union
+from typing import Generator, Iterable, List, Optional, Set, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+from torch import distributed as dist
+from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torchtitan.logging import logger
 
 
+def get_device_info():
+    device_type = _get_available_device_type()
+    if device_type is None:
+        device_type = "cuda"  # default device_type: cuda
+    device_module = _get_device_module(device_type)  # default device_module:torch.cuda
+    return device_type, device_module
+
+
+device_type, device_module = get_device_info()
+
+
 def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
 def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).cuda()
+    tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
 
@@ -49,6 +64,10 @@ def set_determinism(seed: Optional[int]) -> None:
         torch.backends.cudnn.benchmark = False
         # set Python seed
         os.environ["PYTHONHASHSEED"] = str(seed)
+        torch.use_deterministic_algorithms(True)
+        # env var for deterministic CuBLAS
+        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     else:
         # ensure we turn off deterministic cudnn algorithms
         torch.backends.cudnn.deterministic = False
@@ -71,8 +90,8 @@ def set_pg_timeouts(timeout, world_mesh):
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
-    torch.cuda.synchronize()
+    torch.distributed.barrier(device_ids=[device_module.current_device()])
+    device_module.synchronize()
 
     groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
 
@@ -270,3 +289,64 @@ class NoColor:
     cyan = ""
     white = ""
     reset = ""
+
+
+@torch.no_grad()
+def clip_grad_norm_(
+    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    max_norm: float,
+    norm_type: float = 2.0,
+    error_if_nonfinite: bool = False,
+    foreach: Optional[bool] = None,
+    pp_mesh: Optional[DeviceMesh] = None,
+) -> torch.Tensor:
+    """
+    Clip the gradient norm of an iterable of parameters.
+
+    Gradient norm clipping requires computing the gradient norm over the entire model.
+    `torch.nn.utils.clip_grad_norm_` only computes gradient norm along DP/FSDP/TP dimensions.
+    We need to manually reduce the gradient norm across PP stages.
+    See https://github.com/pytorch/torchtitan/issues/596 for details.
+
+    Args:
+        parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
+        max_norm (float): max norm of the gradients
+        norm_type (float): type of the used p-norm. Can be ``'inf'`` for
+            infinity norm.
+        error_if_nonfinite (bool): if True, an error is thrown if the total
+            norm of the gradients from :attr:`parameters` is ``nan``,
+            ``inf``, or ``-inf``. Default: False (will switch to True in the future)
+        foreach (bool): use the faster foreach-based implementation.
+            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
+            fall back to the slow implementation for other device types.
+            Default: ``None``
+        pp_mesh: pipeline parallel device mesh. If not None, will reduce gradient norm across PP stages.
+
+    Returns:
+        Total norm of the parameter gradients (viewed as a single vector).
+
+    """
+    grads = [p.grad for p in parameters if p.grad is not None]
+    total_norm = torch.nn.utils.get_total_norm(
+        grads, norm_type, error_if_nonfinite, foreach
+    )
+
+    if pp_mesh is not None:
+        if isinstance(total_norm, DTensor):
+            # will reach here if PP + other parallelism is used. If only using PP, total_norm will be a local tensor
+
+            # if total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`
+            # we can simply reduce the DTensor to get the total norm in this tensor's process group
+            # and then convert it to a local tensor
+            total_norm = total_norm.full_tensor()
+
+        # TODO: cleanup maybe using DTensor
+        if math.isinf(norm_type):
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
+        else:
+            total_norm **= norm_type
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+            total_norm **= 1.0 / norm_type
+
+    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    return total_norm
