@@ -121,15 +121,16 @@ class JobConfig:
             help="How often to log metrics to TensorBoard, in iterations",
         )
         self.parser.add_argument(
-            "--metrics.enable_color_printing",
-            default=False,
-            action="store_true",
-            help="Whether to enable color printing",
-        )
-        self.parser.add_argument(
             "--metrics.enable_tensorboard",
             action="store_true",
+            default=False,
             help="Whether to log metrics to TensorBoard",
+        )
+        self.parser.add_argument(
+            "--metrics.enable_color_printing",
+            action="store_true",
+            default=True,
+            help="Whether to enable color printing in logs",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
@@ -139,13 +140,19 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--metrics.rank_0_only",
-            default=True,
             action="store_true",
+            default=True,
             help="""
                 Whether to save TensorBoard metrics only for rank 0 or for all ranks.
                 When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
                 which is the only stage that computes loss metrics.
             """,
+        )
+        self.parser.add_argument(
+            "--metrics.enable_wandb",
+            action="store_true",
+            default=False,
+            help="Whether to log metrics to Weights & Biases",
         )
 
         # model configs
