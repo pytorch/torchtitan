@@ -65,7 +65,7 @@ def get_fully_shard_mesh_dim_names(parallel_dims: ParallelDims) -> Tuple[str, ..
             if parallel_dims.dp_replicate_enabled:
                 return ("dp_replicate", "dp_cp")
             else:
-                return("dp_cp",)
+                return ("dp_cp",)
         else:
             if parallel_dims.dp_replicate_enabled:
                 return ("dp_replicate", "dp_shard")
