@@ -103,28 +103,16 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
-        optim_in_bwd: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
-        self.optim_in_bwd = optim_in_bwd
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        if not self.optim_in_bwd:
-            return {
-                k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()
-            }
-        else:
-            state_dict = {}
-            for optim in self.optim:
-                for sub_opt in optim:
-                    for sd in map(func, self.model, (sub_opt,)):
-                        state_dict.update(sd)
-            return state_dict
+        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         func = functools.partial(
@@ -132,12 +120,31 @@ class OptimizerWrapper(Stateful):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        if not self.optim_in_bwd:
-            list(map(func, self.model, self.optim))
-        else:
-            for optim in self.optim:
-                for sub_opt in optim:
-                    list(map(func, self.model, (sub_opt,)))
+        list(map(load_func, self.model, self.optim))
+
+
+class OptimizerInBackwardWrapper(OptimizerWrapper):
+    def state_dict(self) -> Dict[str, Any]:
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        state_dict = {}
+        for optim in self.optim:
+            for sub_opt in optim:
+                for sd in map(func, self.model, (sub_opt,)):
+                    state_dict.update(sd)
+        return state_dict
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        for optim in self.optim:
+            for sub_opt in optim:
+                list(map(load_func, self.model, (sub_opt,)))
 
 
 class Terminate:
@@ -183,7 +190,7 @@ class CheckpointManager:
         dataloader: DataLoader,
         model_parts: List[nn.Module],
         optimizers: Union[
-            List[torch.optim.Optimizer], list[Dict[str, torch.optim.Optimizer]]
+            List[torch.optim.Optimizer], List[List[torch.optim.Optimizer]]
         ],
         lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         states: Dict[str, Any],
@@ -233,10 +240,16 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(
-                    model_parts,
-                    optimizers,
-                    job_config.training.enable_optimizer_in_backward,
+                "optimizer": (
+                    OptimizerWrapper(
+                        model_parts,
+                        optimizers,
+                    )
+                    if not job_config.training.enable_optimizer_in_backward
+                    else OptimizerInBackwardWrapper(
+                        model_parts,
+                        optimizers,
+                    )
                 ),
                 "dataloader": dataloader,
             }
