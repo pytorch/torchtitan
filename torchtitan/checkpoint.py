@@ -245,7 +245,7 @@ class CheckpointManager:
                         model_parts,
                         optimizers,
                     )
-                    if not job_config.training.enable_optimizer_in_backward
+                    if not job_config.optimizer.backward
                     else OptimizerInBackwardWrapper(
                         model_parts,
                         optimizers,

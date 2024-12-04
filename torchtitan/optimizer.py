@@ -16,7 +16,7 @@ def build_optimizers(model_parts, job_config: JobConfig):
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
     """
-    optim_in_bwd = job_config.training.enable_optimizer_in_backward
+    optim_in_bwd = job_config.optimizer.backward
 
     def _build_optimizer(model):
         name = job_config.optimizer.name
@@ -135,7 +135,7 @@ def linear_warmup_linear_decay(
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
-    optim_in_bwd = job_config.training.enable_optimizer_in_backward
+    optim_in_bwd = job_config.optimizer.backward
 
     def _build_lr_scheduler(optimizer):
         """Build a linear warmup and linear decay scheduler"""

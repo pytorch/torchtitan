@@ -187,6 +187,14 @@ class JobConfig:
             action="store_true",
             help="Whether the fused implementation(CUDA only) is used.",
         )
+        self.parser.add_argument(
+            "--optimizer.backward",
+            type=bool,
+            default=False,
+            help="""
+            Whether to apply optimizer in the backward. Caution, optimizer_in_backward
+            is not compatible with gradients clipping.""",
+        )
 
         # training configs
         self.parser.add_argument(
@@ -269,14 +277,6 @@ class JobConfig:
             default=True,
             action="store_true",
             help="Whether to apply loss parallel when sequence parallel is enabled",
-        )
-        self.parser.add_argument(
-            "--training.enable_optimizer_in_backward",
-            type=bool,
-            default=False,
-            help="""
-            Whether to apply optimizer in the backward. Caution, optimizer_in_backward
-            cannot compile with gradients clipping.""",
         )
         self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
