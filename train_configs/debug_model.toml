@@ -17,6 +17,7 @@ log_freq = 1
 enable_color_printing = true
 enable_tensorboard = true
 save_tb_folder = "tb"
+enable_wandb = false
 
 [model]
 name = "llama3"
