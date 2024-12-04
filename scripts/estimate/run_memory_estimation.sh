@@ -23,4 +23,4 @@ fi
 # Export WORLD_SIZE and LOCAL_RANK
 export WORLD_SIZE=$((NGPU * NNODES))
 export LOCAL_RANK=0
-python estimation.py --job.config_file ${CONFIG_FILE} --memory_estimation.enabled $overrides
+python scripts/estimate/estimation.py --job.config_file ${CONFIG_FILE} --memory_estimation.enabled $overrides

@@ -81,8 +81,15 @@ def parallelize_llama(
         parallel_dims.dp_shard_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
         try:
+            dp_mesh_dim_names = (
+                ("dp_replicate", "dp_shard")
+                if parallel_dims.dp_replicate_enabled
+                else ("dp",)
+            )
             dp_mesh = (
-                world_mesh["dp_cp"] if parallel_dims.cp_enabled else world_mesh["dp"]
+                world_mesh["dp_cp"]
+                if parallel_dims.cp_enabled
+                else world_mesh[(*dp_mesh_dim_names,)]
             )
         except IndexError:
             # note: this is a workaround of the above logic for old pytorch version
@@ -236,6 +243,10 @@ _save_list = {
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max(abs(tensor))
+    torch.ops.aten.abs.default,
+    torch.ops.aten.max.default,
 }
 
 
