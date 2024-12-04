@@ -120,7 +120,7 @@ class OptimizerWrapper(Stateful):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(load_func, self.model, self.optim))
+        list(map(func, self.model, self.optim))
 
 
 class OptimizerInBackwardWrapper(OptimizerWrapper):
@@ -144,7 +144,7 @@ class OptimizerInBackwardWrapper(OptimizerWrapper):
         )
         for optim in self.optim:
             for sub_opt in optim:
-                list(map(load_func, self.model, (sub_opt,)))
+                list(map(func, self.model, (sub_opt,)))
 
 
 class Terminate:
