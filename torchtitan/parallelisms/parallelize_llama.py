@@ -343,6 +343,16 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
+    from torch.distributed._composable import replicate
+
+    def cast_output_to_bf16(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
+        return output.to(torch.bfloat16)
+
+    for module_name, module in model.named_modules():
+        if "norm" in module_name:
+            replicate(module, device_mesh=dp_mesh)
+            module.register_forward_hook(cast_output_to_bf16)
+
     for layer_id, transformer_block in model.layers.items():
         if pp_enabled:
             # For PP, do not reshard after forward to avoid per-microbatch
