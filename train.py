@@ -206,7 +206,7 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint_loaded = checkpoint.load()
+    checkpoint_loaded = checkpoint.load(step=job_config.checkpoint.load_step)
 
     if parallel_dims.pp_enabled and not checkpoint_loaded:
         # TODO: fix this by allowing each rank to set their own seed
