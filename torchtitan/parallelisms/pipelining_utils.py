@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import os
 from typing import Tuple
 
 from torch.distributed.pipelining.schedules import (
@@ -56,13 +57,17 @@ This may be sub-optimal as the number of layers per stage may be unbalanced."
 
 
 def build_pipeline_schedule(job_config, stages, loss_fn):
+    pp_schedule_csv = job_config.experimental.pipeline_parallel_schedule_csv
+
+    # Validate that pp_schedule_csv is a valid path
+    if pp_schedule_csv and not os.path.isfile(pp_schedule_csv):
+        raise FileNotFoundError(
+            f"The specified path {pp_schedule_csv} does not exist or is not a file."
+        )
+
     schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
     )
-    if schedule_class in [PipelineScheduleSingle, PipelineScheduleMulti]:
-        raise ValueError(
-            f"{schedule_class} is not supported as we do not support custom CSV schedules."
-        )
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     logger.info(
@@ -72,11 +77,20 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
     if n_microbatches is None:
         n_microbatches = job_config.experimental.pipeline_parallel_degree
 
-    return schedule_class(
+    schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
     )
+
+    if pp_schedule_csv:
+        assert schedule_class in [
+            PipelineScheduleSingle,
+            PipelineScheduleMulti,
+        ], "Only PipelineScheduleSingle (single stage) and PipelineScheduleMulti (multistage) support csv schedules"
+        schedule._load_csv(pp_schedule_csv)
+
+    return schedule
 
 
 # TODO(whc) should this be a utility inside torch.pipelining?

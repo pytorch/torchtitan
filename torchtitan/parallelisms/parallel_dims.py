@@ -72,14 +72,16 @@ class ParallelDims:
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
         # Create all the submesh here to ensure all required process groups are
         # initialized
-        if self.dp_replicate > 1 and self.dp_shard > 1:  # HSDP
+        if self.dp_shard_enabled and self.dp_replicate_enabled:  # HSDP
             mesh["dp_replicate", "dp_shard"]._flatten(mesh_dim_name="dp")
 
-        if self.cp > 1:
-            if self.dp_replicate > 1 and self.dp_shard > 1:  # HSDP
-                mesh["dp_replicate", "dp_shard", "cp"]._flatten(mesh_dim_name="dp_cp")
-            elif self.dp_shard > 1:  # FSDP
-                mesh["dp", "cp"]._flatten(mesh_dim_name="dp_cp")
+        if self.cp_enabled:
+            dp_cp_mesh_dim_name = (
+                (("dp_shard", "cp") if self.dp_replicate_enabled else ("dp", "cp"))
+                if self.dp_shard_enabled  # FSDP or HSDP
+                else "cp"
+            )
+            mesh[dp_cp_mesh_dim_name]._flatten(mesh_dim_name="dp_cp")
 
         return mesh
 
