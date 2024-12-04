@@ -103,9 +103,15 @@ class OptimizerWrapper(Stateful):
         self,
         model: Union[nn.Module, List[nn.Module]],
         optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+        optim_in_bwd: bool = False,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        if not optim_in_bwd:
+            self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        else:
+            self.optim = [
+                sub_optim for optim_group in optim for sub_optim in optim_group
+            ]
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
@@ -121,30 +127,6 @@ class OptimizerWrapper(Stateful):
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
         list(map(func, self.model, self.optim))
-
-
-class OptimizerInBackwardWrapper(OptimizerWrapper):
-    def state_dict(self) -> Dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        state_dict = {}
-        for optim in self.optim:
-            for sub_opt in optim:
-                for sd in map(func, self.model, (sub_opt,)):
-                    state_dict.update(sd)
-        return state_dict
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        for optim in self.optim:
-            for sub_opt in optim:
-                list(map(func, self.model, (sub_opt,)))
 
 
 class Terminate:
@@ -240,16 +222,10 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": (
-                    OptimizerWrapper(
-                        model_parts,
-                        optimizers,
-                    )
-                    if not job_config.optimizer.backward
-                    else OptimizerInBackwardWrapper(
-                        model_parts,
-                        optimizers,
-                    )
+                "optimizer": OptimizerWrapper(
+                    model_parts,
+                    optimizers,
+                    job_config.optimizer.backward,
                 ),
                 "dataloader": dataloader,
             }

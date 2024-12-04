@@ -170,10 +170,7 @@ def build_lr_schedulers(optimizers, job_config: JobConfig):
                 schedulers.step()
 
     class SchedulersInBackwardContainer(SchedulersContainer):
-        """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
-
-        def __init__(self, schedulers):
-            self.schedulers = schedulers
+        """Util for calling step on multiple learning rate schedulers when optimizers are in backward"""
 
         def step(self):
             for schedulers in self.schedulers:
