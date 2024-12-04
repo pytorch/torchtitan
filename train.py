@@ -86,7 +86,6 @@ def main(job_config: JobConfig):
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
-
     # build dataloader
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
