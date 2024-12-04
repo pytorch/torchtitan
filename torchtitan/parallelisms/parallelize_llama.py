@@ -34,10 +34,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import (
-    check_if_feature_in_pytorch,
-    get_fully_shard_mesh_dim_names,
-)
+from torchtitan.parallelisms.utils import get_fully_shard_mesh_dim_names
 
 
 def parallelize_llama(
