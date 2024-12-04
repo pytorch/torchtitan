@@ -483,8 +483,8 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.load_step",
             type=int,
-            default=0,
-            help="Load the checkpoint at the specified step. If 0, load the latest checkpoint.",
+            default=-1,
+            help="Load the checkpoint at the specified step. If -1, load the latest checkpoint.",
         )
         # activation checkpointing configs
         self.parser.add_argument(
