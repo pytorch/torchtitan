@@ -60,7 +60,6 @@ class Float8Handler:
             cast_config_input=CastConfig(scaling_type=scaling_type_input),
             cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
             cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
-            enable_pre_and_post_forward=False,
         )
 
         self.enabled = True
@@ -73,9 +72,9 @@ class Float8Handler:
 
         # for sync_float8_amax_and_scale_history
         self.delayed_scaling = (
-            scaling_type_input == "delayed"
-            or scaling_type_weight == "delayed"
-            or scaling_type_grad_output == "delayed"
+            scaling_type_input is ScalingType.DELAYED
+            or scaling_type_weight is ScalingType.DELAYED
+            or scaling_type_grad_output is ScalingType.DELAYED
         )
         self._sync_float8_amax_and_scale_history = None
         self.compile = job_config.training.compile
