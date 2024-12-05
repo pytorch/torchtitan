@@ -62,8 +62,6 @@ def set_determinism(
     Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
     seeds across PP groups (if applicable).
 
-    TODO: Link to documentation for DTensor RNG setup? Or explain more here?
-
     Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
     and DTensor manages its own RNG tracker, but we could extend to support both if needed.
 
