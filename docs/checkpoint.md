@@ -49,7 +49,8 @@ export_dtype = "bfloat16"
 enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
-interval = 5
+interval = 10
+load_step = 5
 model_weights_only = true
 export_dtype = "bfloat16"
 ```
