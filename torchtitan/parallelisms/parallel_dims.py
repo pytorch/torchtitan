@@ -76,7 +76,8 @@ class ParallelDims:
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
 
-        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+        if dp_mesh_dim_names != []:
+            mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
 
         # Mesh for param sharding
         dp_shard_cp_mesh_dim_name = []
