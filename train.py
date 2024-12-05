@@ -193,7 +193,7 @@ def main(job_config: JobConfig):
         dataloader=data_loader,
         model_parts=model_parts,
         optimizers=optimizers,
-        lr_schedulers=lr_schedulers.schedulers,
+        lr_schedulers=lr_schedulers,
         states={"train_state": train_state},
         job_config=job_config,
     )

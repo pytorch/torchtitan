@@ -195,9 +195,9 @@ class JobConfig:
             help="Whether the fused implementation(CUDA only) is used.",
         )
         self.parser.add_argument(
-            "--optimizer.backward",
-            type=bool,
+            "--optimizer.early_step_in_backward",
             default=False,
+            action="store_true",
             help="""
             Whether to apply optimizer in the backward. Caution, optimizer_in_backward
             is not compatible with gradients clipping, users should not call

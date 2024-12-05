@@ -30,7 +30,11 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
-from torchtitan.optimizer import OptimizersContainer, OptimizersInBackwardContainer
+from torchtitan.optimizer import (
+    OptimizersContainer,
+    OptimizersInBackwardContainer,
+    SchedulersContainer,
+)
 
 
 class IntervalType(enum.Enum):
@@ -179,7 +183,7 @@ class CheckpointManager:
         dataloader: DataLoader,
         model_parts: List[nn.Module],
         optimizers: OptimizersContainer,
-        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
+        lr_schedulers: SchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -219,7 +223,7 @@ class CheckpointManager:
             optimizers.optimizers
         ), "Must pass one optimizer per model part"
         assert len(model_parts) == len(
-            lr_schedulers
+            lr_schedulers.schedulers
         ), "Must pass one lr_scheduler per model part"
 
         self.states = states
@@ -234,12 +238,12 @@ class CheckpointManager:
                 "dataloader": dataloader,
             }
         )
-        if len(lr_schedulers) == 1:
-            self.states["lr_scheduler"] = lr_schedulers[0]
+        if len(lr_schedulers.schedulers) == 1:
+            self.states["lr_scheduler"] = lr_schedulers.schedulers[0]
         else:
             # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
             # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-            for idx, lr_scheduler in enumerate(lr_schedulers):
+            for idx, lr_scheduler in enumerate(lr_schedulers.schedulers):
                 self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)

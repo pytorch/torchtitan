@@ -77,7 +77,7 @@ def build_optimizers(model_parts, job_config: JobConfig):
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
     """
-    optim_in_bwd = job_config.optimizer.backward
+    optim_in_bwd = job_config.optimizer.early_step_in_backward
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
     fused = job_config.optimizer.fused
@@ -131,25 +131,31 @@ class SchedulersContainer:
             schedulers.step()
 
 
-class SchedulersInBackwardContainer:
+class SchedulersInBackwardContainer(SchedulersContainer):
     """Util for calling step on multiple learning rate schedulers when optimizers are in backward"""
 
     def __init__(self, optimizers, lr_lambda):
+        # all the schedulers for each optimizer group are the same, here we only store the first one
+        # to self.schedulers follow the same structure as SchedulersContainer, but store all of them
+        # to self.all_schedulers for container.step() to call
         self.schedulers = []
-        for optimizer in optimizers:
+        self.all_schedulers = []
+        for optim_group in optimizers:
+            if len(optim_group) > 0:
+                self.schedulers.append(LambdaLR(optim_group[0], lr_lambda=lr_lambda))
             schedulers = []
-            for optim in optimizer:
-                schedulers.append(LambdaLR(optim, lr_lambda=lr_lambda))
-            self.schedulers.append(schedulers)
+            for sub_optim in optim_group:
+                schedulers.append(LambdaLR(sub_optim, lr_lambda=lr_lambda))
+            self.all_schedulers.append(schedulers)
 
     def step(self):
-        for schedulers in self.schedulers:
-            for scheduler in schedulers:
+        for scheduler_group in self.all_schedulers:
+            for scheduler in scheduler_group:
                 scheduler.step()
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):
-    optim_in_bwd = job_config.optimizer.backward
+    optim_in_bwd = job_config.optimizer.early_step_in_backward
     warmup_steps = int(job_config.training.warmup_steps)
     decay_steps = float(max(1, job_config.training.steps - warmup_steps))
     lr_lambda = functools.partial(linear_warmup_linear_decay, warmup_steps, decay_steps)
