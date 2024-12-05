@@ -5,9 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import pickle
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import torch
+
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -15,15 +19,11 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
-
 # To load your own custom dataset, please follow instructions in docs/datasets.md
 
 
 def load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
-    logger.info("Loading C4 dataset...")
     return load_dataset(dataset_path, name="en", split="train", streaming=True)
 
 
@@ -32,22 +32,41 @@ def process_c4_text(sample: Dict[str, Any]) -> str:
     return sample["text"]
 
 
-# Map from dataset name to a local directory or dataset repository
-_supported_datasets = {
-    "c4_test": "test/assets/c4_test",
-    "c4": "allenai/c4",
-}
-
-DATASET_LOADERS = {
-    "c4": load_c4_dataset,
-    "c4_test": lambda path, **kwargs: load_dataset(path, split="train"),
-}
+class DatasetConfig(NamedTuple):
+    path: str
+    loader: Callable
+    text_processor: Callable
 
 
-DATASET_TEXT_PROCESSORS = {
-    "c4": process_c4_text,
-    "c4_test": process_c4_text,
+# Add your dataset here here - more information at docs/datasets.md
+DATASETS = {
+    "c4": DatasetConfig(
+        path="allenai/c4",
+        loader=load_c4_dataset,
+        text_processor=process_c4_text,
+    ),
+    "c4_test": DatasetConfig(
+        path="test/assets/c4_test",
+        loader=lambda path, **kwargs: load_dataset(path, split="train"),
+        text_processor=process_c4_text,
+    ),
 }
+
+
+def validate_dataset(
+    dataset_name: str, dataset_path: str = None
+) -> tuple[str, Callable, Callable]:
+    """Validate dataset name and path."""
+    if dataset_name not in DATASETS:
+        raise ValueError(
+            f"Dataset {dataset_name} is not supported. "
+            f"Supported datasets are: {list(DATASETS.keys())}"
+        )
+
+    config = DATASETS[dataset_name]
+    path = dataset_path or config.path
+    logger.info(f"Preparing {dataset_name} dataset from {path}")
+    return path, config.loader, config.text_processor
 
 
 class HuggingFaceDataset(IterableDataset, Stateful):
@@ -64,32 +83,17 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
-        if dataset_name not in _supported_datasets:
-            raise ValueError(
-                f"Dataset {dataset_name} is not supported. "
-                f"Supported datasets are: {list(_supported_datasets.keys())}"
-            )
-
-        if not dataset_path:
-            dataset_path = _supported_datasets[dataset_name]
-
-        if dataset_name not in DATASET_LOADERS:
-            raise ValueError(f"No loader found for dataset {dataset_name}")
-
-        dataset_loader = DATASET_LOADERS[dataset_name]
-        logger.info(f"Using dataset loader for {dataset_name}")
-        ds = dataset_loader(dataset_path)
+        path, dataset_loader, text_processor = validate_dataset(
+            dataset_name, dataset_path
+        )
+        ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, rank, world_size)
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
-
-        if dataset_name not in DATASET_TEXT_PROCESSORS:
-            raise ValueError(f"No text processor found for dataset {dataset_name}")
-
-        self._text_processor = DATASET_TEXT_PROCESSORS[dataset_name]
+        self._text_processor = text_processor
 
         # Variables for checkpointing
         self._sample_idx = 0
