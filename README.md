@@ -58,7 +58,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 4. `torch.compile` support
 5. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
 6. DDP and HSDP
-7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries)
+7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
 8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
 9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 10. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
