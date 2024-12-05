@@ -6,7 +6,7 @@
 
 import pickle
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from torch.distributed.checkpoint.stateful import Stateful
