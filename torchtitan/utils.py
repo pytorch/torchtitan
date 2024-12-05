@@ -69,40 +69,28 @@ def set_determinism(
 
     Set Determinism flags for increased reproducibility with loss of performance.
     """
-    deterministic = job_config.training.deterministic
-    seed = job_config.training.seed
-
-    if deterministic:
+    if job_config.training.deterministic:
         logger.info("Deterministic training enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark = not deterministic
 
     # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
     # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
-    if seed is not None:
-        # CPU and GPU determinism
-        torch.manual_seed(seed)
-        # set Python seed
-        os.environ["PYTHONHASHSEED"] = str(seed)
-
-    else:
+    seed = job_config.training.seed
+    if seed is None:
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups
         seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.view(torch.uint64).item()
 
-    # In special cases the trainer can be launched with a single rank, in which case we're done now
-    if c10d.get_world_size() == 1:
-        return
-
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
-    if "pp" in world_mesh.mesh_dim_names:
+    if c10d.get_world_size() > 1 and "pp" in world_mesh.mesh_dim_names:
         pp_mesh = world_mesh["pp"]
         seed += pp_mesh.get_local_rank()
         seed %= 2**64 - 1
@@ -117,6 +105,10 @@ def set_determinism(
     else:
         spmd_mesh = world_mesh
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
+
+    # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
+    torch.manual_seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
