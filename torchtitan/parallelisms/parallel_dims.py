@@ -76,7 +76,8 @@ class ParallelDims:
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
 
-        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+        if dp_mesh_dim_names != []:
+            mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
 
         if self.cp > 1:
             if self.dp_replicate > 1 and self.dp_shard > 1:  # HSDP
