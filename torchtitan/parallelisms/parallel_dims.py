@@ -60,28 +60,34 @@ class ParallelDims:
         ):
             if d > 1:
                 dims.append(d)
-                if (name == "dp_replicate" and self.dp_shard == 1) or (
-                    name == "dp_shard" and self.dp_replicate == 1
-                ):
-                    names.append("dp")
-                else:
-                    names.append(name)
+                names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         names = tuple(names)
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+
         # Create all the submesh here to ensure all required process groups are
-        # initialized
-        if self.dp_shard_enabled and self.dp_replicate_enabled:  # HSDP
-            mesh["dp_replicate", "dp_shard"]._flatten(mesh_dim_name="dp")
+        # initialized:
+        # Mesh for data loading
+        dp_mesh_dim_names = []
+        if self.dp_replicate_enabled:
+            dp_mesh_dim_names.append("dp_replicate")
+
+        if self.dp_shard_enabled:
+            dp_mesh_dim_names.append("dp_shard")
+
+        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+
+        # Mesh for param sharding
+        dp_shard_cp_mesh_dim_name = []
+        if self.dp_shard_enabled:
+            dp_shard_cp_mesh_dim_name.append("dp_shard")
 
         if self.cp_enabled:
-            dp_cp_mesh_dim_name = (
-                (("dp_shard", "cp") if self.dp_replicate_enabled else ("dp", "cp"))
-                if self.dp_shard_enabled  # FSDP or HSDP
-                else "cp"
-            )
-            mesh[dp_cp_mesh_dim_name]._flatten(mesh_dim_name="dp_cp")
+            dp_shard_cp_mesh_dim_name.append("cp")
+
+        if dp_shard_cp_mesh_dim_name != []:
+            mesh[tuple(dp_shard_cp_mesh_dim_name)]._flatten(mesh_dim_name="dp_shard_cp")
 
         return mesh
 
