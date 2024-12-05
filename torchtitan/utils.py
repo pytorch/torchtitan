@@ -52,18 +52,19 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
-def set_determinism(seed: Optional[int]) -> None:
+def set_determinism(seed: Optional[int], deterministic: bool) -> None:
     """
     Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
     """
     if seed is not None:
         # CPU and GPU determinism
         torch.manual_seed(seed)
+        # set Python seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
+    if deterministic:
         # set deterministic cudnn algorithms
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        # set Python seed
-        os.environ["PYTHONHASHSEED"] = str(seed)
         torch.use_deterministic_algorithms(True)
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html

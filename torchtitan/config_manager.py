@@ -392,6 +392,12 @@ class JobConfig:
             default=None,
             help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
         )
+        self.parser.add_argument(
+            "--training.deterministic",
+            type=bool,
+            default=False,
+            help="Enable the use of deterministic algorithms (can decrease performance)",
+        )
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
