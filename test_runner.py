@@ -382,7 +382,7 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--training.enable_cpu_offload True",
-                    "--optimizer.early_step_in_backward True",
+                    "--optimizer.early_step_in_backward",
                 ],
             ],
             "Enable CPU Offload with PP",
