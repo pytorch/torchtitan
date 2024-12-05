@@ -119,7 +119,6 @@ class OptimizerWrapper(Stateful):
                 if isinstance(optimizers, torch.optim.Optimizer)
                 else optimizers
             )
-        print(self.optim)
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
