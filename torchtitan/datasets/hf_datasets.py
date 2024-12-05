@@ -9,15 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import torch
-
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
+
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 
 
 def load_c4_dataset(dataset_path: str):
@@ -30,7 +30,8 @@ def process_c4_text(sample: Dict[str, Any]) -> str:
     return sample["text"]
 
 
-class DatasetConfig(NamedTuple):
+@dataclass
+class DatasetConfig:
     path: str
     loader: Callable
     text_processor: Callable
