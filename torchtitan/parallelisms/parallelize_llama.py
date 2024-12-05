@@ -34,7 +34,6 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import get_fully_shard_mesh_dim_names
 
 
 def parallelize_llama(
@@ -81,10 +80,20 @@ def parallelize_llama(
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
 
-        dp_mesh_dim_names = get_fully_shard_mesh_dim_names(parallel_dims)
+        if not parallel_dims.dp_shard_enabled and parallel_dims.dp_replicate_enabled:
+            # Composability of DDP + CP is not supported.
+            raise RuntimeError("Composability of DDP + CP is not supported.")
+
+        # the mesh dim names of which the model params are sharded on
+        dp_mesh_dim_names = []
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names.append("dp_replicate")
+
+        dp_mesh_dim_names.append("dp_shard_cp")
+
         apply_fsdp(
             model,
-            world_mesh[dp_mesh_dim_names],
+            world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             tp_enabled=parallel_dims.tp_enabled,
