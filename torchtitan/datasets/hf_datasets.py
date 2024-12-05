@@ -19,8 +19,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
-# To load your own custom dataset, please follow instructions in docs/datasets.md
-
 
 def load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
