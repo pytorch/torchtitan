@@ -42,10 +42,10 @@ context_parallel_degree = 1
 pipeline_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = true
+enable_checkpoint = false
 folder = "checkpoint"
 interval_type = "steps"
-interval = 10
+interval = 500
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]

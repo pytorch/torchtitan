@@ -69,6 +69,6 @@ That's it! Your custom dataset is now ready to use with TorchTitan.
   - `text_processor`: Function to process individual samples
 - The loader function should return a HuggingFace dataset object
 - The processor function should return a string that combines the relevant fields from your dataset
-- Use streaming=True for large datasets to manage memory efficiently
+- Use `streaming=True` for large datasets to manage memory efficiently
 
 Now you can start training with your custom dataset!

@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -16,16 +19,13 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
 
-
-def load_c4_dataset(dataset_path: str):
+def _load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
     return load_dataset(dataset_path, name="en", split="train", streaming=True)
 
 
-def process_c4_text(sample: Dict[str, Any]) -> str:
+def _process_c4_text(sample: Dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
     return sample["text"]
 
@@ -41,18 +41,18 @@ class DatasetConfig:
 DATASETS = {
     "c4": DatasetConfig(
         path="allenai/c4",
-        loader=load_c4_dataset,
-        text_processor=process_c4_text,
+        loader=_load_c4_dataset,
+        text_processor=_process_c4_text,
     ),
     "c4_test": DatasetConfig(
         path="test/assets/c4_test",
-        loader=lambda path, **kwargs: load_dataset(path, split="train"),
-        text_processor=process_c4_text,
+        loader=lambda path: load_dataset(path, split="train"),
+        text_processor=_process_c4_text,
     ),
 }
 
 
-def validate_dataset(
+def _validate_dataset(
     dataset_name: str, dataset_path: str = None
 ) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
@@ -82,7 +82,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
-        path, dataset_loader, text_processor = validate_dataset(
+        path, dataset_loader, text_processor = _validate_dataset(
             dataset_name, dataset_path
         )
         ds = dataset_loader(path)
