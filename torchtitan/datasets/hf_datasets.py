@@ -8,15 +8,15 @@ import pickle
 from typing import Any, Dict, List, Optional
 
 import torch
-
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
+
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 
 # To load your own custom dataset, please follow instructions in docs/datasets.md
 
