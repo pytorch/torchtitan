@@ -193,7 +193,8 @@ class JobConfig:
             default=False,
             help="""
             Whether to apply optimizer in the backward. Caution, optimizer_in_backward
-            is not compatible with gradients clipping.""",
+            is not compatible with gradients clipping, users should not call
+            register_post_accumulate_grad_hook after the optimizer is built.""",
         )
 
         # training configs

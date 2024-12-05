@@ -30,6 +30,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
+from torchtitan.optimizer import OptimizersContainer, OptimizersInBackwardContainer
 
 
 class IntervalType(enum.Enum):
@@ -102,16 +103,23 @@ class OptimizerWrapper(Stateful):
     def __init__(
         self,
         model: Union[nn.Module, List[nn.Module]],
-        optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
-        optim_in_bwd: bool = False,
+        optim: OptimizersContainer,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        if not optim_in_bwd:
-            self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
-        else:
+        if isinstance(optim, OptimizersInBackwardContainer):
             self.optim = [
-                sub_optim for optim_group in optim for sub_optim in optim_group
+                sub_optim
+                for optim_group in optim.optimizers
+                for sub_optim in optim_group
             ]
+        else:
+            optimizers = optim.optimizers
+            self.optim = (
+                [optimizers]
+                if isinstance(optimizers, torch.optim.Optimizer)
+                else optimizers
+            )
+        print(self.optim)
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
@@ -171,9 +179,7 @@ class CheckpointManager:
         self,
         dataloader: DataLoader,
         model_parts: List[nn.Module],
-        optimizers: Union[
-            List[torch.optim.Optimizer], List[List[torch.optim.Optimizer]]
-        ],
+        optimizers: OptimizersContainer,
         lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
         states: Dict[str, Any],
         job_config: JobConfig,
@@ -211,7 +217,7 @@ class CheckpointManager:
             TODO: This is currently unsolved and needs a fix.
         """
         assert len(model_parts) == len(
-            optimizers
+            optimizers.optimizers
         ), "Must pass one optimizer per model part"
         assert len(model_parts) == len(
             lr_schedulers
@@ -225,7 +231,6 @@ class CheckpointManager:
                 "optimizer": OptimizerWrapper(
                     model_parts,
                     optimizers,
-                    job_config.optimizer.backward,
                 ),
                 "dataloader": dataloader,
             }
