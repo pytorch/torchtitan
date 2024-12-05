@@ -15,7 +15,6 @@ dependencies = [
 
     # Tokenization
     "blobfile",
-    "sentencepiece",
     "tiktoken",
 
     # Miscellaneous
