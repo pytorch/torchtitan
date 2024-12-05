@@ -113,7 +113,7 @@ def set_determinism(
         spmd_mesh_dims = list(
             filter(lambda name: name != "pp", world_mesh.mesh_dim_names)
         )
-        spmd_mesh = (world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None,)
+        spmd_mesh = world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None
     else:
         spmd_mesh = world_mesh
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
