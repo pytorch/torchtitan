@@ -75,7 +75,7 @@ def main(job_config: JobConfig):
     # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
     spmd_mesh_dims = list(filter(lambda name: name != "pp", world_mesh.mesh_dim_names))
     utils.set_determinism(
-        spmd_mesh=world_mesh[spmd_mesh_dims],
+        spmd_mesh=world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None,
         device=device,
         pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
         seed=job_config.training.seed,

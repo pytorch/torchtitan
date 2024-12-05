@@ -53,7 +53,7 @@ def _warn_overwrite_env(env, val):
 
 
 def set_determinism(
-    spmd_mesh: DeviceMesh,
+    spmd_mesh: Optional[DeviceMesh],
     device: torch.device,
     pp_mesh: Optional[DeviceMesh],
     seed: Optional[int] = None,
@@ -93,12 +93,14 @@ def set_determinism(
         seed %= 2**64 - 1
 
         logger.debug(
-            f"PP rank {pp_mesh.get_local_rank()}, Global rank {spmd_mesh.get_rank()} using seed: {seed}"
+            f"PP rank {pp_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
 
-    logger.debug(f"Global Rank {spmd_mesh.get_rank()} using seed: {seed}")
+    logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
-    torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
+    torch.manual_seed(seed)
+    if spmd_mesh:
+        torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
 
     if deterministic:
         logger.info(
