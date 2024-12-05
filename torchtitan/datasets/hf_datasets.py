@@ -18,7 +18,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
-# To create your own custom dataset, add
+# To load your own custom dataset, please follow instructions in docs/datasets.md
 
 
 def load_c4_dataset(dataset_path: str):
@@ -36,20 +36,17 @@ def process_c4_text(sample: Dict[str, Any]) -> str:
 _supported_datasets = {
     "c4_test": "test/assets/c4_test",
     "c4": "allenai/c4",
-    "wikipedia": "wikipedia",
 }
 
 DATASET_LOADERS = {
     "c4": load_c4_dataset,
     "c4_test": lambda path, **kwargs: load_dataset(path, split="train"),
-    "wikipedia": load_wikipedia_dataset,
 }
 
 
 DATASET_TEXT_PROCESSORS = {
     "c4": process_c4_text,
     "c4_test": process_c4_text,
-    "wikipedia": process_wikipedia_text,
 }
 
 
