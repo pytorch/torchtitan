@@ -30,6 +30,12 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
+from torchtitan.optimizer import (
+    OptimizersContainer,
+    OptimizersInBackwardContainer,
+    SchedulersContainer,
+    SchedulersInBackwardContainer,
+)
 
 
 class IntervalType(enum.Enum):
@@ -102,10 +108,22 @@ class OptimizerWrapper(Stateful):
     def __init__(
         self,
         model: Union[nn.Module, List[nn.Module]],
-        optim: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
+        optim: OptimizersContainer,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.optim = [optim] if isinstance(optim, torch.optim.Optimizer) else optim
+        if isinstance(optim, OptimizersInBackwardContainer):
+            self.optim = [
+                sub_optim
+                for optim_group in optim.optimizers
+                for sub_optim in optim_group
+            ]
+        else:
+            optimizers = optim.optimizers
+            self.optim = (
+                [optimizers]
+                if isinstance(optimizers, torch.optim.Optimizer)
+                else optimizers
+            )
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
@@ -165,8 +183,8 @@ class CheckpointManager:
         self,
         dataloader: DataLoader,
         model_parts: List[nn.Module],
-        optimizers: List[torch.optim.Optimizer],
-        lr_schedulers: List[torch.optim.lr_scheduler.LRScheduler],
+        optimizers: OptimizersContainer,
+        lr_schedulers: SchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -203,10 +221,10 @@ class CheckpointManager:
             TODO: This is currently unsolved and needs a fix.
         """
         assert len(model_parts) == len(
-            optimizers
+            optimizers.optimizers
         ), "Must pass one optimizer per model part"
         assert len(model_parts) == len(
-            lr_schedulers
+            lr_schedulers.schedulers
         ), "Must pass one lr_scheduler per model part"
 
         self.states = states
@@ -214,17 +232,32 @@ class CheckpointManager:
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(model_parts, optimizers),
+                "optimizer": OptimizerWrapper(
+                    model_parts,
+                    optimizers,
+                ),
                 "dataloader": dataloader,
             }
         )
-        if len(lr_schedulers) == 1:
-            self.states["lr_scheduler"] = lr_schedulers[0]
+        # SchedulersInBackwardContainer has a different structure than SchedulersContainer, List[List[Scheduler]] rahter
+        # than List[Scheduler], but the schedulers are the same for each list inside, so here just store the first one.
+        # TODO: Restructure SchedulersInBackwardContainer to be consisitent with SchedulersContainer.
+        if isinstance(lr_schedulers, SchedulersInBackwardContainer):
+            if len(lr_schedulers.schedulers) == 1:
+                self.states["lr_scheduler"] = lr_schedulers.schedulers[0][0]
+            else:
+                # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+                # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+                for idx, lr_scheduler in enumerate(lr_schedulers.schedulers):
+                    self.states[f"lr_scheduler_{idx}"] = lr_scheduler[0]
         else:
-            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
-            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-            for idx, lr_scheduler in enumerate(lr_schedulers):
-                self.states[f"lr_scheduler_{idx}"] = lr_scheduler
+            if len(lr_schedulers.schedulers) == 1:
+                self.states["lr_scheduler"] = lr_schedulers.schedulers[0]
+            else:
+                # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+                # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+                for idx, lr_scheduler in enumerate(lr_schedulers.schedulers):
+                    self.states[f"lr_scheduler_{idx}"] = lr_scheduler
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
