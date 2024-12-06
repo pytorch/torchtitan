@@ -79,7 +79,6 @@ def main(job_config: JobConfig):
     # build tokenizer
     tokenizer_type = model_name_to_tokenizer[model_name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
-
     # build dataloader
     data_loader = build_hf_data_loader(
         job_config.training.dataset,
@@ -199,8 +198,7 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint.load()
-
+    checkpoint.load(step=job_config.checkpoint.load_step)
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
