@@ -139,17 +139,14 @@ class SchedulersInBackwardContainer(SchedulersContainer):
         # to self.schedulers follow the same structure as SchedulersContainer, but store all of them
         # to self.all_schedulers for container.step() to call
         self.schedulers = []
-        self.all_schedulers = []
         for optim_group in optimizers:
-            if len(optim_group) > 0:
-                self.schedulers.append(LambdaLR(optim_group[0], lr_lambda=lr_lambda))
-            schedulers = []
+            scheduler_group = []
             for sub_optim in optim_group:
-                schedulers.append(LambdaLR(sub_optim, lr_lambda=lr_lambda))
-            self.all_schedulers.append(schedulers)
+                scheduler_group.append(LambdaLR(sub_optim, lr_lambda=lr_lambda))
+            self.schedulers.append(scheduler_group)
 
     def step(self):
-        for scheduler_group in self.all_schedulers:
+        for scheduler_group in self.schedulers:
             for scheduler in scheduler_group:
                 scheduler.step()
 
