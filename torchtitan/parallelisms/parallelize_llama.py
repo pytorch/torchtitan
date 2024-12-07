@@ -118,7 +118,6 @@ def parallelize_llama(
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            tp_enabled=parallel_dims.tp_enabled,
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
         )
@@ -338,7 +337,6 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    tp_enabled: bool,
     pp_enabled: bool,
     cpu_offload: bool = False,
 ):
