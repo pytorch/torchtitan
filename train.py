@@ -264,6 +264,7 @@ def main(job_config: JobConfig):
                     cp_buffers=[input_ids, labels, model.freqs_cis],
                     cp_seq_dims=[1, 1, 0],
                     cp_no_restore_buffers={input_ids, labels},
+                    cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
                 )
                 if parallel_dims.cp_enabled
                 else None
