@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = false
+enable_tensorboard = true
 save_tb_folder = "tb"
 enable_wandb = false
 
@@ -31,7 +31,7 @@ name = "AdamW"
 lr = 8e-4
 
 [training]
-batch_size = 1
+batch_size = 8
 seq_len = 2048
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 max_norm = 1.0  # grad norm clipping
