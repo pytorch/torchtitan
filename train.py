@@ -42,15 +42,6 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
-    # set determinisism, use seed == None to skip deterministic training
-    utils.set_determinism(job_config.training.seed)
-    if job_config.training.seed is None:
-        logger.info("Deterministic training off")
-    else:
-        logger.info(
-            f"Deterministic training on. Using seed: {job_config.training.seed}"
-        )
-
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -81,6 +72,8 @@ def main(job_config: JobConfig):
     if parallel_dims.pp_enabled:
         pp_mesh = world_mesh["pp"]
 
+    # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
+    utils.set_determinism(world_mesh, device, job_config)
     model_name = job_config.model.name
 
     # build tokenizer
@@ -205,15 +198,7 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint_loaded = checkpoint.load(step=job_config.checkpoint.load_step)
-
-    if parallel_dims.pp_enabled and not checkpoint_loaded:
-        # TODO: fix this by allowing each rank to set their own seed
-        logger.warning(
-            "Pipeline Parallelism is being used without a seed checkpoint. "
-            "All the substages will be initialized with random weights with same RNG state which can affect convergence."
-        )
-
+    checkpoint.load(step=job_config.checkpoint.load_step)
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard
