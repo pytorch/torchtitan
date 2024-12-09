@@ -394,8 +394,7 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.deterministic",
-            type=bool,
-            default=False,
+            action="store_true",
             help="Use deterministic algorithms wherever possible, may be slower",
         )
         # checkpointing configs
