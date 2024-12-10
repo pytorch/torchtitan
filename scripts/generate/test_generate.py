@@ -26,7 +26,6 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan import utils
-from torchtitan.utils import device_module, device_type
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
@@ -34,6 +33,7 @@ from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import ParallelDims
+from torchtitan.utils import device_module, device_type
 
 # support running w/o installing as package
 wd = Path(__file__).parent.parent.resolve()

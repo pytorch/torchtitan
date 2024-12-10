@@ -91,7 +91,8 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
             PipelineScheduleSingle,
             PipelineScheduleMulti,
             _PipelineScheduleRuntime,
-        ], "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), and _PipelineScheduleRuntime support csv schedules"
+        ], "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), \
+            and _PipelineScheduleRuntime support csv schedules"
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
