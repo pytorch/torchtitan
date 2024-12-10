@@ -365,6 +365,13 @@ class JobConfig:
             help="Context parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
+            "--experimental.expert_parallel_mode",
+            type=str,
+            default="none",
+            choices=["none", "tp", "tp2ep", "dp2ep"],
+            help="Expert Parallel mode",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
