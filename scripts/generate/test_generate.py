@@ -30,7 +30,7 @@ from torchtitan import utils
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
+from torchtitan.metrics import build_device_memory_monitor
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.utils import device_module, device_type
@@ -143,7 +143,8 @@ def test_generate(
         # Build world mesh for parallelism
         world_mesh = parallel_dims.build_mesh(device_type=device_type)
 
-        # apply_tp (with Sequence Parallel) on unevenly sharded sequences would require https://github.com/pytorch/torchtitan/pull/686
+        # apply_tp (with Sequence Parallel) on unevenly sharded
+        # sequences would require https://github.com/pytorch/torchtitan/pull/686
         apply_tp_minus_sp(model, world_mesh["tp"])
 
     # materalize model
