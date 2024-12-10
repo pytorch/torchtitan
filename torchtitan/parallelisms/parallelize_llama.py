@@ -35,7 +35,6 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.utils import check_if_feature_in_pytorch
 
 
 def parallelize_llama(
@@ -66,16 +65,15 @@ def parallelize_llama(
             enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
         )
 
-    ep_mode = job_config.experimental.expert_parallel_mode
-    if ep_mode != "none":
+    if parallel_dims.ep_mode != "none":
         apply_ep(
             model,
-            ep_mode=ep_mode,
-            dp_mesh=world_mesh["dp"] if parallel_dims.dp_shard_enabled else None,
+            ep_mode=parallel_dims.ep_mode,
+            ep_mesh=world_mesh["ep"] if parallel_dims.ep_mode == "dp2ep" else None,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            dp_tp_mesh=(
-                world_mesh["dp", "tp"]
-                if parallel_dims.dp_shard_enabled and parallel_dims.tp_enabled
+            ep_tp_mesh=(
+                world_mesh["ep", "tp"]
+                if parallel_dims.ep_mode == "dp2ep" and parallel_dims.tp_enabled
                 else None
             ),
         )
@@ -94,48 +92,39 @@ def parallelize_llama(
 
     if (
         parallel_dims.dp_shard_enabled
+        or parallel_dims.cp_enabled
+        or parallel_dims.ep_mode == "dp2ep"
     ):  # apply FSDP or HSDP, potentially with Context Parallel
-        try:
-            dp_mesh_dim_names = (
-                ("dp_replicate", "dp_shard")
-                if parallel_dims.dp_replicate_enabled
-                else ("dp",)
-            )
-            dp_mesh = (
-                world_mesh["dp_cp"]
-                if parallel_dims.cp_enabled
-                else world_mesh[(*dp_mesh_dim_names,)]
-            )
-        except IndexError:
-            # note: this is a workaround of the above logic for old pytorch version
-            # where https://github.com/pytorch/pytorch/pull/138945 is not included
-            # throw a warning to encourage users to upgrade to a newer pytorch version
-            check_if_feature_in_pytorch(
-                "DeviceMesh flattening over 3D+ meshes",
-                "https://github.com/pytorch/pytorch/pull/138945",
-                "2.6.0.dev20241030",
-            )
-            # TODO: remove this workaround once PyTorch 2.6 is released
-            dp_mesh_dim_names = (
-                ("dp_replicate", "dp_shard")
-                if parallel_dims.dp_replicate_enabled
-                else ("dp",)
-            )
-            # note that mesh can only be flattened from the finest-grained mesh dimensions
-            dp_mesh = (
-                world_mesh[(*dp_mesh_dim_names, "cp")]._flatten("dp_cp")
-                if parallel_dims.cp_enabled
-                else world_mesh[dp_mesh_dim_names]
+
+        if not parallel_dims.dp_shard_enabled and parallel_dims.dp_replicate_enabled:
+            # Composability of DDP + CP is not supported.
+            raise RuntimeError(
+                "Composability of DDP + CP or DDP + EP is not supported."
             )
 
-        # apply_fsdp(
-        #     model,
-        #     dp_mesh,
-        #     param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-        #     reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-        #     pp_enabled=parallel_dims.pp_enabled,
-        #     cpu_offload=job_config.training.enable_cpu_offload,
-        # )
+        # the mesh dim names of which the model params are sharded on
+        dp_mesh_dim_names = []
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names.append("dp_replicate")
+        dp_mesh_dim_names.append("dp_shard_cp")
+
+        # the mesh dim names of which the MoE params are sharded on
+        dp_mod_ep_mesh_dim_names = []
+        if parallel_dims.ep_mode == "dp2ep":
+            if parallel_dims.dp_replicate_enabled:
+                dp_mod_ep_mesh_dim_names.append("dp_replicate")
+            dp_mod_ep_mesh_dim_names.append("dp_shard_1")
+
+        apply_fsdp(
+            model,
+            world_mesh[tuple(dp_mesh_dim_names)],
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=job_config.training.enable_cpu_offload,
+            ep_enabled=(parallel_dims.ep_mode == "dp2ep"),
+            dp_mod_ep_mesh=world_mesh[tuple(dp_mod_ep_mesh_dim_names)],
+        )
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the model")
@@ -254,9 +243,9 @@ def apply_tp(
 def apply_ep(
     model: nn.Module,
     ep_mode: str,
-    dp_mesh: Optional[DeviceMesh] = None,
+    ep_mesh: Optional[DeviceMesh] = None,
     tp_mesh: Optional[DeviceMesh] = None,
-    dp_tp_mesh: Optional[DeviceMesh] = None,
+    ep_tp_mesh: Optional[DeviceMesh] = None,
 ):
     from torch.distributed.tensor import Partial
     from torch.distributed.tensor.parallel import PrepareModuleOutput
@@ -317,10 +306,10 @@ def apply_ep(
 
         elif ep_mode == "dp2ep":
             if not tp_mesh:
-                assert dp_mesh is not None
+                assert ep_mesh is not None
                 parallelize_module(
                     module=transformer_block.moe.experts,
-                    device_mesh=dp_mesh,
+                    device_mesh=ep_mesh,
                     # input / output sharding on the tokens dim
                     parallelize_plan=ExpertParallel(
                         input_layouts=Shard(1),
@@ -329,7 +318,7 @@ def apply_ep(
                 )
 
             else:  # dp2ep with TP (no Router Parallel)
-                assert dp_tp_mesh is not None
+                assert ep_tp_mesh is not None
                 moe_plan = {
                     # input / output sharding on the seqlen dim
                     "moe": PrepareModuleInputOutput(
@@ -356,8 +345,10 @@ def apply_ep(
 
                 parallelize_module(
                     module=transformer_block.moe.experts,
-                    device_mesh=dp_tp_mesh,
-                    parallelize_plan=ExpertTensorParallel(),
+                    device_mesh=ep_tp_mesh,
+                    parallelize_plan=ExpertTensorParallel(
+                        tp_mesh=tp_mesh, ep_mesh=ep_tp_mesh
+                    ),
                 )
 
     logger.info(f"Applied {ep_mode} Expert Parallelism to the model")
@@ -466,6 +457,8 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
+    ep_enabled: bool = False,
+    dp_mod_ep_mesh: Optional[DeviceMesh] = None,
 ):
     """
     Apply data parallelism to the model. FSDP2 is used here.
@@ -484,6 +477,16 @@ def apply_fsdp(
             # As an optimization, do not reshard after forward for the last
             # transformer block since FSDP would prefetch it immediately
             reshard_after_forward = int(layer_id) < len(model.layers) - 1
+
+        fsdp_mod_ep_config = fsdp_config.copy()
+        fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
+        if ep_enabled:
+            fully_shard(
+                transformer_block.moe.experts,
+                **fsdp_mod_ep_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+
         fully_shard(
             transformer_block,
             **fsdp_config,

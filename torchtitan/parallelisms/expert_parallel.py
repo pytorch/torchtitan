@@ -329,22 +329,37 @@ class ExpertParallel(ParallelStyle):
 
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ParallelStyle):
+    def __init__(
+        self,
+        *,
+        tp_mesh: DeviceMesh,
+        ep_mesh: DeviceMesh,
+    ):
+        super().__init__()
+        # TODO: has to pass in the meshes in addition to device_mesh,
+        #       as there's an issue from DeviceMesh that
+        #       "Cannot create a submesh from a submesh."
+        self.tp_mesh = tp_mesh
+        self.ep_mesh = ep_mesh
+
     @staticmethod
-    def _prepare_input_fn(mod, inputs, device_mesh):
+    def _prepare_input_fn(tp_mesh, ep_mesh, mod, inputs, device_mesh):
         input_tensor = inputs[0]
         # input_tensor of placements Shard(1) on the tp mesh
+        assert not isinstance(input_tensor, DTensor)
 
         # a2a(ep)
-        input_tensor = DTensor.from_local(input_tensor, device_mesh["dp"], (Shard(1),))
+        input_tensor = DTensor.from_local(input_tensor, ep_mesh, (Shard(1),))
         input_tensor = input_tensor.redistribute(placements=(Shard(0),)).to_local()
         # ag(tp)
-        input_tensor = DTensor.from_local(input_tensor, device_mesh["tp"], (Shard(1),))
+        input_tensor = DTensor.from_local(input_tensor, tp_mesh, (Shard(1),))
         input_tensor = input_tensor.redistribute(placements=(Replicate(),))
 
         return input_tensor
 
-    def _partition_fn(self, name, module, device_mesh):
-        # NOTE: the following code should work when FSDP is applied on the non-expert modules.
+    @staticmethod
+    def _partition_fn(tp_mesh, ep_mesh, name, module, device_mesh):
+        # TODO: FSDP doesn't support sharding a 2D Tensor
         # module.register_parameter(
         #     "gate_proj",
         #     nn.Parameter(
@@ -364,9 +379,8 @@ class ExpertTensorParallel(ParallelStyle):
         #     ),
         # )  # Column-wise sharding
 
-        # NOTE: the following code works when FSDP is not applied.
-        # TODO: the above 2D sharding (only on experts) causes optimizer foreach to fail
-        # TODO: apply FSDP on the non-expert params should resolve the issue
+        # NOTE: instead, for MoE experts, we shard on the EP mesh and then "forget" it
+        # TODO: this is problematic from the DCP perspective
         module.register_parameter(
             "gate_proj",
             nn.Parameter(
@@ -376,7 +390,7 @@ class ExpertTensorParallel(ParallelStyle):
                             module.gate_proj, device_mesh, [Shard(0), Shard(2)]
                         ).to_local()
                     ),
-                    device_mesh["tp"],
+                    tp_mesh,
                     (Shard(2),),
                 )
             ),
@@ -390,7 +404,7 @@ class ExpertTensorParallel(ParallelStyle):
                             module.down_proj, device_mesh, [Shard(0), Shard(1)]
                         ).to_local()
                     ),
-                    device_mesh["tp"],
+                    tp_mesh,
                     (Shard(1),),
                 )
             ),
@@ -404,20 +418,20 @@ class ExpertTensorParallel(ParallelStyle):
                             module.up_proj, device_mesh, [Shard(0), Shard(2)]
                         ).to_local()
                     ),
-                    device_mesh["tp"],
+                    tp_mesh,
                     (Shard(2),),
                 )
             ),
         )  # Column-wise sharding
 
     @staticmethod
-    def _prepare_output_fn(mod, outputs, device_mesh):
+    def _prepare_output_fn(tp_mesh, ep_mesh, mod, outputs, device_mesh):
         # outputs of placements Partial() on the tp mesh
 
         # rs(tp)
         outputs = outputs.redistribute(placements=(Shard(1),)).to_local()
         # a2a(ep)
-        outputs = DTensor.from_local(outputs, device_mesh["dp"], (Shard(0),))
+        outputs = DTensor.from_local(outputs, ep_mesh, (Shard(0),))
         outputs = outputs.redistribute(placements=(Shard(1),)).to_local()
 
         return outputs
@@ -426,7 +440,7 @@ class ExpertTensorParallel(ParallelStyle):
         return distribute_module(
             module,
             device_mesh,
-            self._partition_fn,
-            self._prepare_input_fn,
-            self._prepare_output_fn,
+            partial(self._partition_fn, self.tp_mesh, self.ep_mesh),
+            partial(self._prepare_input_fn, self.tp_mesh, self.ep_mesh),
+            partial(self._prepare_output_fn, self.tp_mesh, self.ep_mesh),
         )
