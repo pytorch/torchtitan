@@ -365,6 +365,17 @@ class JobConfig:
             help="Context parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
+            "--experimental.expert_parallel_degree",
+            type=int,
+            default=1,
+            help="""
+                Expert parallelism degree. 1 means disabled.
+                When expert_parallel_mode is 'tp' or 'tp2ep', it has to be equal to tensor_parallel_degree.
+                When expert_parallel_mode is 'dp2ep', it has to be k * context_parallel_degree,
+                where k >= 1 and k | data_parallel_shard_degree.
+            """,
+        )
+        self.parser.add_argument(
             "--experimental.expert_parallel_mode",
             type=str,
             default="none",

@@ -50,6 +50,8 @@ def main(job_config: JobConfig):
         cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
+        ep=job_config.experimental.expert_parallel_degree,
+        ep_mode=job_config.experimental.expert_parallel_mode,
         world_size=world_size,
         enable_loss_parallel=job_config.training.enable_loss_parallel,
     )
