@@ -275,7 +275,6 @@ def build_test_list():
             ],
             "PP with custom pipeline schedule loaded from CSV file",
             "pp_custom_csv",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
