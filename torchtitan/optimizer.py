@@ -86,7 +86,7 @@ def build_optimizers(model_parts, job_config: JobConfig):
         "betas": (0.9, 0.95),
         "weight_decay": 0.1,
         "fused": fused,
-        "foreach": not fused,
+        "foreach": False,
     }
 
     return (

@@ -67,17 +67,18 @@ def parallelize_llama(
         )
 
     ep_mode = job_config.experimental.expert_parallel_mode
-    apply_ep(
-        model,
-        ep_mode=ep_mode,
-        dp_mesh=world_mesh["dp"] if parallel_dims.dp_shard_enabled else None,
-        tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-        dp_tp_mesh=(
-            world_mesh["dp", "tp"]
-            if parallel_dims.dp_shard_enabled and parallel_dims.tp_enabled
-            else None
-        ),
-    )
+    if ep_mode != "none":
+        apply_ep(
+            model,
+            ep_mode=ep_mode,
+            dp_mesh=world_mesh["dp"] if parallel_dims.dp_shard_enabled else None,
+            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
+            dp_tp_mesh=(
+                world_mesh["dp", "tp"]
+                if parallel_dims.dp_shard_enabled and parallel_dims.tp_enabled
+                else None
+            ),
+        )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
