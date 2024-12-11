@@ -79,11 +79,16 @@ class ParallelDims:
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
 
-        if self.cp > 1:
-            if self.dp_replicate > 1 and self.dp_shard > 1:  # HSDP
-                mesh["dp_replicate", "dp_shard", "cp"]._flatten(mesh_dim_name="dp_cp")
-            elif self.dp_shard > 1:  # FSDP
-                mesh["dp_shard", "cp"]._flatten(mesh_dim_name="dp_cp")
+        # Mesh for param sharding
+        dp_shard_cp_mesh_dim_name = []
+        if self.dp_shard_enabled:
+            dp_shard_cp_mesh_dim_name.append("dp_shard")
+
+        if self.cp_enabled:
+            dp_shard_cp_mesh_dim_name.append("cp")
+
+        if dp_shard_cp_mesh_dim_name != []:
+            mesh[tuple(dp_shard_cp_mesh_dim_name)]._flatten(mesh_dim_name="dp_shard_cp")
 
         return mesh
 
