@@ -275,7 +275,6 @@ def build_test_list():
             ],
             "PP with custom pipeline schedule loaded from CSV file",
             "pp_custom_csv",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -391,8 +390,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--training.enable_cpu_offload True",
+                    "--optimizer.early_step_in_backward",
                 ],
             ],
             "Enable CPU Offload with PP",

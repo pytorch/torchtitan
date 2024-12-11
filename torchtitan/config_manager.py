@@ -194,6 +194,15 @@ class JobConfig:
             action="store_true",
             help="Whether the fused implementation(CUDA only) is used.",
         )
+        self.parser.add_argument(
+            "--optimizer.early_step_in_backward",
+            default=False,
+            action="store_true",
+            help="""
+            Whether to apply optimizer in the backward. Caution, optimizer_in_backward
+            is not compatible with gradients clipping, users should not call
+            register_post_accumulate_grad_hook after the optimizer is built.""",
+        )
 
         # training configs
         self.parser.add_argument(
@@ -328,7 +337,7 @@ class JobConfig:
             help="""
                 Specify the path to the pipeline parallel schedule csv file to use.
                 The pipeline_parallel_schedule argument must be either
-                PipelineScheduleSingle or PipelineScheduleMulti.
+                PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
             """,
         )
 
@@ -404,7 +413,12 @@ class JobConfig:
             "--training.seed",
             type=int,
             default=None,
-            help="Implement reproducibility by setting a Python, PyTorch and CUDA seed",
+            help="Choose the base RNG seed used for training",
+        )
+        self.parser.add_argument(
+            "--training.deterministic",
+            action="store_true",
+            help="Use deterministic algorithms wherever possible, may be slower",
         )
         # checkpointing configs
         self.parser.add_argument(

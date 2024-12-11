@@ -20,6 +20,7 @@ from torch import distributed as dist
 from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 
 
@@ -52,26 +53,65 @@ def _warn_overwrite_env(env, val):
     os.environ[env] = val
 
 
-def set_determinism(seed: Optional[int]) -> None:
+def set_determinism(
+    world_mesh: DeviceMesh,
+    device: torch.device,
+    job_config: JobConfig,
+) -> None:
     """
-    Set Python, PyTorch, CUDA seeds and cudnn settings for reproducibility
+    Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
+    seeds across PP groups (if applicable).
+
+    Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
+    and DTensor manages its own RNG tracker, but we could extend to support both if needed.
+
+    Set Determinism flags for increased reproducibility with loss of performance.
     """
-    if seed is not None:
-        # CPU and GPU determinism
-        torch.manual_seed(seed)
-        # set deterministic cudnn algorithms
+    if job_config.training.deterministic:
+        logger.info("Deterministic training enabled (expect perf degradation).")
+        torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        # set Python seed
-        os.environ["PYTHONHASHSEED"] = str(seed)
-        torch.use_deterministic_algorithms(True)
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
+    # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
+    seed = job_config.training.seed
+    if seed is None:
+        # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
+        # seeds for unique SPMD groups
+        seed_tensor = torch.get_rng_state()[:8].to(device)
+        torch.distributed.broadcast(seed_tensor, src=0)
+        seed = seed_tensor.view(torch.uint64).item()
+
+    # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
+    # and choose a unique seed for each rank on the PP mesh.
+    if c10d.get_world_size() > 1 and "pp" in world_mesh.mesh_dim_names:
+        pp_mesh = world_mesh["pp"]
+        seed += pp_mesh.get_local_rank()
+        seed %= 2**64 - 1
+
+        logger.debug(
+            f"PP rank {pp_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
+        )
+        spmd_mesh_dims = list(
+            filter(lambda name: name != "pp", world_mesh.mesh_dim_names)
+        )
+        spmd_mesh = world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None
     else:
-        # ensure we turn off deterministic cudnn algorithms
-        torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = True
+        spmd_mesh = world_mesh
+        logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
+
+    # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
+    torch.manual_seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
+    # IF PP is also used, this seed is unique per PP rank.
+    if spmd_mesh:
+        torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
 
 
 def set_pg_timeouts(timeout, world_mesh):
