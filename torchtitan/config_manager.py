@@ -494,7 +494,12 @@ class JobConfig:
                 0 is the default value.
             """,
         )
-
+        self.parser.add_argument(
+            "--checkpoint.load_step",
+            type=int,
+            default=-1,
+            help="Load the checkpoint at the specified step. If -1, load the latest checkpoint.",
+        )
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
