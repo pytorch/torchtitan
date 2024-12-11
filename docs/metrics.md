@@ -1,5 +1,3 @@
-# Metrics
-
 We support automatically collecting metrics such as
 1. High level system metrics such as MFU, average loss, max loss and words per second along with some
 2. Memory metrics to measure max VRAM consumption and the number of OOMs
