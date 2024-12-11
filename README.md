@@ -18,7 +18,7 @@ Our guiding principles when building `torchtitan`:
 
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
 
-### Our torchtitan paper on arXiv
+### torchtitan paper on arXiv
 
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg?style=plastic)](https://arxiv.org/abs/2410.06511)
 
@@ -61,7 +61,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
 8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
 9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-10. Debugging tools including CPU/GPU profiling, [memory profiling](docs/memory_profiler.md), [Flight Recorder](#debugging), etc.
+10. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
 11. All options easily configured via [toml files](train_configs/)
 
 We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
@@ -120,14 +120,6 @@ If your gpu count per node is not 8, adjust:
 ```#SBATCH --gpus-per-task```
 
 in the SBATCH command section.
-
-
-## Debugging
-### Troubleshooting jobs that timeout
-If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
-When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
-To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
-
 
 ## License
 

@@ -1,6 +1,6 @@
 This note clarifies the recommended practices to follow when testing the loss converging of a new feature.
 
-#### Disclaimers
+### Disclaimers
 1. We assume the vanilla 1D FSDP to be “correct”, and would serve as the baseline for comparisons. The correctness of FSDP can be verified by comparing with DDP on small models, which has been widely adopted and believed to be correct.
 
 2. The focus is on the correctness of new distributed training techniques. For a new model size / architecture, the demonstration of loss-converging is not in the scope of this note.
@@ -54,7 +54,7 @@ Remarks
 | 2D (MN GPUs) <br> e.g. M=8 | FSDP N, CP M | to verify CP with a larger degree |
 
 
-#### Test results
+### Test results
 (TBA)
 
 [^1]: Model initialization in a sharded setting can hardly match that in a single-device setting (or a differently sharded setting), because each time a random operator is called, the underlying RNG state offset is advanced by a quantized amount, often not aligned with the amount of randomness needed, thus “wasting” different amount of randomness on differently sharded settings.

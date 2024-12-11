@@ -89,7 +89,7 @@ class DeviceMemoryMonitor:
 def build_device_memory_monitor():
     device_memory_monitor = DeviceMemoryMonitor(device_type)
     logger.info(
-        f"{device_type.upper()} capacity: {device_memory_monitor.device_name}"
+        f"{device_type.upper()} capacity: {device_memory_monitor.device_name} "
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
     return device_memory_monitor

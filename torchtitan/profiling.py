@@ -39,11 +39,11 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             if not os.path.exists(curr_trace_dir):
                 os.makedirs(curr_trace_dir, exist_ok=True)
 
-            logger.info(f"Dumping traces at step {prof.step_num}")
+            logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
             prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
             logger.info(
-                f"Finished dumping traces in {time.monotonic() - begin:.2f} seconds"
+                f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
