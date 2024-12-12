@@ -91,7 +91,7 @@ def set_determinism(
     if c10d.get_world_size() > 1 and "pp" in world_mesh.mesh_dim_names:
         pp_mesh = world_mesh["pp"]
         seed += pp_mesh.get_local_rank()
-        seed %= 2**64 - 1
+        seed %= 2**64
 
         logger.debug(
             f"PP rank {pp_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
@@ -106,8 +106,8 @@ def set_determinism(
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
     torch.manual_seed(seed)
-    # PYTHONHASHSEED can be a decimal number in the range [0,2**32 - 1]
-    os.environ["PYTHONHASHSEED"] = str(seed % (2**32 - 1))
+    # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
+    os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
