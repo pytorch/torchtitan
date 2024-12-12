@@ -34,6 +34,13 @@ class ModelArgs:
     depth_init: bool = True
     norm_type: str = "rmsnorm"
 
+    # MoE args
+    enable_moe: bool = True
+    num_experts: int = 8
+    capacity_factor: float = 1.0
+    use_shared_expert: bool = True
+    auto_scale_hidden_dim: bool = True
+
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     """
@@ -283,12 +290,55 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         self.attention = Attention(model_args)
-        self.feed_forward = FeedForward(
-            dim=model_args.dim,
-            hidden_dim=4 * model_args.dim,
-            multiple_of=model_args.multiple_of,
-            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-        )
+        self.enable_moe = model_args.enable_moe
+
+        if not self.enable_moe:
+            self.feed_forward = FeedForward(
+                dim=model_args.dim,
+                hidden_dim=4 * model_args.dim,
+                multiple_of=model_args.multiple_of,
+                ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            )
+        else:
+            from torchtitan.models.llama.moe_layer import (
+                ExpertChoiceTopKRouter,
+                GroupedExperts,
+                MoE,
+            )
+
+            hidden_dim_denom = 1
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim_denom = model_args.capacity_factor + int(
+                    model_args.use_shared_expert
+                )
+
+            dim = model_args.dim
+            hidden_dim = 4 * model_args.dim
+            hidden_dim = int(2 * hidden_dim / 3)
+            if model_args.ffn_dim_multiplier is not None:
+                hidden_dim = int(model_args.ffn_dim_multiplier * hidden_dim)
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim = int(hidden_dim / hidden_dim_denom)
+            hidden_dim += -hidden_dim % model_args.multiple_of
+
+            num_experts = model_args.num_experts
+            self.moe = MoE(
+                experts=GroupedExperts(
+                    dim_in=dim, dim_out=hidden_dim, num_experts=num_experts
+                ),
+                router=ExpertChoiceTopKRouter(
+                    gate=nn.Linear(dim, num_experts, bias=False),
+                    dim=dim,
+                    num_experts=num_experts,
+                    capacity_factor=model_args.capacity_factor,
+                ),
+                shared_expert=(
+                    GroupedExperts(dim_in=dim, dim_out=hidden_dim, num_experts=1)
+                    if model_args.use_shared_expert
+                    else None
+                ),
+            )
+
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
@@ -321,14 +371,20 @@ class TransformerBlock(nn.Module):
 
         """
         h = x + self.attention(self.attention_norm(x), freqs_cis)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        if not self.enable_moe:
+            out = h + self.feed_forward(self.ffn_norm(h))
+        else:
+            out = h + self.moe(self.ffn_norm(h))
         return out
 
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        if not self.enable_moe:
+            self.feed_forward.init_weights(self.weight_init_std)
+        else:
+            self.moe.init_weights(self.weight_init_std)
 
 
 class Transformer(nn.Module):
