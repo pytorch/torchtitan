@@ -312,10 +312,22 @@ def build_test_list():
             [
                 [
                     "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "CP",
-            "cp",
+            "CP (allgather)",
+            "cp_allgather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='alltoall'",
+                ]
+            ],
+            "CP (alltoall)",
+            "cp_alltoall",
             ngpu=4,
         ),
         OverrideDefinitions(
