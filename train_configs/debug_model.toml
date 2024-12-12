@@ -38,7 +38,7 @@ max_norm = 1.0  # grad norm clipping
 steps = 10
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 1
+tensor_parallel_degree = 4
 compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
@@ -46,6 +46,7 @@ dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
+expert_parallel_mode = "tp2ep"
 
 [checkpoint]
 enable_checkpoint = false
