@@ -365,6 +365,16 @@ class JobConfig:
             help="Context parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
+            "--experimental.expert_parallel_mode",
+            type=str,
+            default="none",
+            choices=["none", "tp", "tp2ep"],
+            help="""
+                Expert Parallel mode.
+                'tp2ep' would use the entire TP mesh to shard non-shared experts on the num_experts dimension.
+            """,
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
