@@ -316,7 +316,7 @@ def build_test_list():
                 ]
             ],
             "CP (allgather)",
-            "cp allgather",
+            "cp_allgather",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -327,7 +327,7 @@ def build_test_list():
                 ]
             ],
             "CP (alltoall)",
-            "cp alltoall",
+            "cp_alltoall",
             ngpu=4,
         ),
         OverrideDefinitions(

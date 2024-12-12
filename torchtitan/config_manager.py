@@ -371,7 +371,7 @@ class JobConfig:
             help="""
                 The collective to use in context parallel SDPA for kv shards exchange.
 
-                'allgather' means to all-gather all kv shards on ranks,
+                'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
 
                 'alltoall' means to all-to-all shuffle the kv shards.
 
