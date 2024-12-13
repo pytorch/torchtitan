@@ -5,17 +5,26 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+from typing import Any, Dict
 
 import torch
+from torch.distributed.checkpoint.state_dict import (
+    get_optimizer_state_dict,
+    set_optimizer_state_dict,
+    StateDictOptions,
+)
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config_manager import JobConfig
 
 
-class OptimizersContainer:
-    """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages"""
+class OptimizersContainer(Stateful):
+    """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages and save"""
 
     def __init__(self, model_parts, optimizer_kwargs, name):
         self.optimizers = []
+        self.model = []
+        self.plain_optim = []
         for model in model_parts:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
@@ -26,6 +35,14 @@ class OptimizersContainer:
                 raise NotImplementedError(f"Optimizer {name} not added.")
             self.optimizers.append(optimizer)
 
+    def update_for_checkpoint(self, model):
+        self.model = [model] if isinstance(model, torch.nn.Module) else model
+        self.plain_optim = (
+            [self.optimizers]
+            if isinstance(self.optimizers, torch.optim.Optimizer)
+            else self.optimizers
+        )
+
     def step(self):
         for optimizer in self.optimizers:
             optimizer.step()
@@ -33,6 +50,25 @@ class OptimizersContainer:
     def zero_grad(self):
         for optimizer in self.optimizers:
             optimizer.zero_grad()
+
+    def state_dict(self) -> Dict[str, Any]:
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        return {
+            k: v
+            for sd in map(func, self.model, self.plain_optim)
+            for k, v in sd.items()
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        list(map(func, self.model, self.plain_optim))
 
 
 class OptimizersInBackwardContainer(OptimizersContainer):
@@ -64,6 +100,12 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     param.register_post_accumulate_grad_hook(optim_hook)
 
             self.optimizers.append([optim_dict[param] for param in model.parameters()])
+
+    def update_for_checkpoint(self, model):
+        self.model = [model] if isinstance(model, torch.nn.Module) else model
+        self.plain_optim = [
+            sub_optim for optim_group in self.optimizers for sub_optim in optim_group
+        ]
 
     def step(self):
         pass
@@ -130,6 +172,17 @@ class SchedulersContainer:
         for schedulers in self.schedulers:
             schedulers.step()
 
+    def update_state(self) -> Dict[str, Any]:
+        state_dict = {}
+        if len(self.schedulers) == 1:
+            state_dict["lr_scheduler"] = self.schedulers[0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(self.schedulers):
+                state_dict[f"lr_scheduler_{idx}"] = lr_scheduler
+        return state_dict
+
 
 class SchedulersInBackwardContainer(SchedulersContainer):
     """Util for calling step on multiple learning rate schedulers when optimizers are in backward"""
@@ -149,6 +202,17 @@ class SchedulersInBackwardContainer(SchedulersContainer):
         for scheduler_group in self.schedulers:
             for scheduler in scheduler_group:
                 scheduler.step()
+
+    def update_state(self) -> Dict[str, Any]:
+        state_dict = {}
+        if len(self.schedulers) == 1:
+            state_dict["lr_scheduler"] = self.schedulers[0][0]
+        else:
+            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
+            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
+            for idx, lr_scheduler in enumerate(self.schedulers):
+                state_dict[f"lr_scheduler_{idx}"] = lr_scheduler[0]
+        return state_dict
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig):

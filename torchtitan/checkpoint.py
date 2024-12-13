@@ -34,7 +34,6 @@ from torchtitan.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
     SchedulersContainer,
-    SchedulersInBackwardContainer,
 )
 
 
@@ -229,35 +228,15 @@ class CheckpointManager:
 
         self.states = states
 
+        optimizers.update_for_checkpoint(model_parts)
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
-                "optimizer": OptimizerWrapper(
-                    model_parts,
-                    optimizers,
-                ),
+                "optimizer": optimizers,
                 "dataloader": dataloader,
             }
         )
-        # SchedulersInBackwardContainer has a different structure than SchedulersContainer, List[List[Scheduler]] rahter
-        # than List[Scheduler], but the schedulers are the same for each list inside, so here just store the first one.
-        # TODO: Restructure SchedulersInBackwardContainer to be consisitent with SchedulersContainer.
-        if isinstance(lr_schedulers, SchedulersInBackwardContainer):
-            if len(lr_schedulers.schedulers) == 1:
-                self.states["lr_scheduler"] = lr_schedulers.schedulers[0][0]
-            else:
-                # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
-                # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-                for idx, lr_scheduler in enumerate(lr_schedulers.schedulers):
-                    self.states[f"lr_scheduler_{idx}"] = lr_scheduler[0]
-        else:
-            if len(lr_schedulers.schedulers) == 1:
-                self.states["lr_scheduler"] = lr_schedulers.schedulers[0]
-            else:
-                # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
-                # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-                for idx, lr_scheduler in enumerate(lr_schedulers.schedulers):
-                    self.states[f"lr_scheduler_{idx}"] = lr_scheduler
+        self.states.update(lr_schedulers.update_state())
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
