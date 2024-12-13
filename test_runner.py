@@ -30,7 +30,6 @@ class OverrideDefinitions:
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
     test_name: str = "default"
-    requires_seed_checkpoint: bool = False
     ngpu: int = 4
     model_flavor: str = "debugmodel"
 
@@ -146,7 +145,6 @@ def build_test_list():
             ],
             "PP looped zero bubble test",
             "pp_looped_zero_bubble",
-            requires_seed_checkpoint=True,
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -160,7 +158,6 @@ def build_test_list():
             ],
             "PP 1D test 1F1B",
             "pp_1f1b",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -174,7 +171,6 @@ def build_test_list():
             ],
             "PP 1D test GPipe",
             "pp_gpipe",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -188,7 +184,6 @@ def build_test_list():
             ],
             "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
@@ -201,7 +196,6 @@ def build_test_list():
             ],
             "PP+DP GPipe 2D test",
             "pp_dp_gpipe",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
@@ -213,7 +207,6 @@ def build_test_list():
             ],
             "PP+TP 2D test",
             "pp_tp",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
@@ -233,7 +226,6 @@ def build_test_list():
             ],
             "PP+DP+TP 3D test with save/load resume ckpt",
             "pp_dp_tp",
-            requires_seed_checkpoint=True,
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -247,7 +239,6 @@ def build_test_list():
             ],
             "PP+DP+TP 3D test with torch.compile",
             "3d_compile",
-            requires_seed_checkpoint=True,
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -260,7 +251,6 @@ def build_test_list():
             ],
             "PP looped 1F1B test",
             "pp_looped_1f1b",
-            requires_seed_checkpoint=True,
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -384,7 +374,7 @@ def build_test_list():
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_mem_tracker",
+            "fsdp2_memory_estimation",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -421,17 +411,9 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
-    if test_flavor.requires_seed_checkpoint:
-        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg} {model_flavor_arg}"
-        logger.info(
-            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-        )
-        result = _run_cmd(cmd)
-        logger.info(result.stdout)
-
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
-        if test_name == "fsdp2_mem_tracker":
+        if test_name == "fsdp2_memory_estimation":
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 "./scripts/estimate/run_memory_estimation.sh"

@@ -111,7 +111,7 @@ def set_determinism(
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
-    if spmd_mesh:
+    if spmd_mesh and spmd_mesh.get_coordinate() is not None:
         torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
 
 
