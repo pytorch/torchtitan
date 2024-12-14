@@ -172,7 +172,7 @@ class SchedulersContainer:
         for schedulers in self.schedulers:
             schedulers.step()
 
-    def update_state(self) -> Dict[str, Any]:
+    def get_lr_scheduler_state(self) -> Dict[str, Any]:
         state_dict = {}
         if len(self.schedulers) == 1:
             state_dict["lr_scheduler"] = self.schedulers[0]
@@ -203,7 +203,7 @@ class SchedulersInBackwardContainer(SchedulersContainer):
             for scheduler in scheduler_group:
                 scheduler.step()
 
-    def update_state(self) -> Dict[str, Any]:
+    def get_lr_scheduler_state(self) -> Dict[str, Any]:
         state_dict = {}
         if len(self.schedulers) == 1:
             state_dict["lr_scheduler"] = self.schedulers[0][0]

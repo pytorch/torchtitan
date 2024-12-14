@@ -236,7 +236,7 @@ class CheckpointManager:
                 "dataloader": dataloader,
             }
         )
-        self.states.update(lr_schedulers.update_state())
+        self.states.update(lr_schedulers.get_lr_scheduler_state())
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
