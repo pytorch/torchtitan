@@ -19,13 +19,15 @@ from torchtitan.config_manager import JobConfig
 
 
 class OptimizersContainer(Stateful):
-    """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages and save"""
+    """Util for calling step/zero_grad on multiple optimizers needed for virtual pipeline stages
+    and saving/loading optimizer state_dict at checkpoint.
+    """
 
     def __init__(self, model_parts, optimizer_kwargs, name):
         self.optimizers = []
-        self.model = []
+        self.model = model_parts
         self.plain_optim = []
-        for model in model_parts:
+        for model in self.model:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
                 optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
@@ -34,9 +36,13 @@ class OptimizersContainer(Stateful):
             else:
                 raise NotImplementedError(f"Optimizer {name} not added.")
             self.optimizers.append(optimizer)
+        self.plain_optim = (
+            [self.optimizers]
+            if isinstance(self.optimizers, torch.optim.Optimizer)
+            else self.optimizers
+        )
 
     def update_for_checkpoint(self, model):
-        self.model = [model] if isinstance(model, torch.nn.Module) else model
         self.plain_optim = (
             [self.optimizers]
             if isinstance(self.optimizers, torch.optim.Optimizer)
@@ -76,7 +82,8 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def __init__(self, model_parts, optimizer_kwargs, name):
         self.optimizers = []
-        for model in model_parts:
+        self.model = model_parts
+        for model in self.model:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
                 optim_dict = {
@@ -100,9 +107,6 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     param.register_post_accumulate_grad_hook(optim_hook)
 
             self.optimizers.append([optim_dict[param] for param in model.parameters()])
-
-    def update_for_checkpoint(self, model):
-        self.model = [model] if isinstance(model, torch.nn.Module) else model
         self.plain_optim = [
             sub_optim for optim_group in self.optimizers for sub_optim in optim_group
         ]

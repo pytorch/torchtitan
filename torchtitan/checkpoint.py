@@ -21,20 +21,14 @@ import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
-    get_optimizer_state_dict,
     set_model_state_dict,
-    set_optimizer_state_dict,
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
-from torchtitan.optimizer import (
-    OptimizersContainer,
-    OptimizersInBackwardContainer,
-    SchedulersContainer,
-)
+from torchtitan.optimizer import OptimizersContainer, SchedulersContainer
 
 
 class IntervalType(enum.Enum):
@@ -103,43 +97,6 @@ class ModelWrapper(Stateful):
         list(map(func, self.model))
 
 
-class OptimizerWrapper(Stateful):
-    def __init__(
-        self,
-        model: Union[nn.Module, List[nn.Module]],
-        optim: OptimizersContainer,
-    ) -> None:
-        self.model = [model] if isinstance(model, nn.Module) else model
-        if isinstance(optim, OptimizersInBackwardContainer):
-            self.optim = [
-                sub_optim
-                for optim_group in optim.optimizers
-                for sub_optim in optim_group
-            ]
-        else:
-            optimizers = optim.optimizers
-            self.optim = (
-                [optimizers]
-                if isinstance(optimizers, torch.optim.Optimizer)
-                else optimizers
-            )
-
-    def state_dict(self) -> Dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        return {k: v for sd in map(func, self.model, self.optim) for k, v in sd.items()}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        list(map(func, self.model, self.optim))
-
-
 class Terminate:
     pass
 
@@ -203,7 +160,7 @@ class CheckpointManager:
         restore its optimizer states, others will error.
 
             The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
-            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerWrapper.
+            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerContainer.
 
         2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
         requiring us to reason about multiple 'optim' objects locally.
@@ -228,7 +185,6 @@ class CheckpointManager:
 
         self.states = states
 
-        optimizers.update_for_checkpoint(model_parts)
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
