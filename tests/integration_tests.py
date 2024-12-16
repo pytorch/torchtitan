@@ -260,7 +260,7 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule PipelineScheduleMulti",
-                    "--experimental.pipeline_parallel_schedule_csv ./test/assets/custom_schedule.csv",
+                    "--experimental.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
                     "--experimental.pipeline_parallel_microbatches 8",
                 ],
             ],
