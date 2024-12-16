@@ -95,12 +95,20 @@ def test_generate(
             "The input prompt is empty, model will respond from a empty sequence."
         )
 
-    utils.set_determinism(seed)
+    if seed is not None:
+        torch.manual_seed(seed)
+        # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
+        os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        # env var for deterministic CuBLAS
+        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    if seed is None:
-        logger.info("Deterministic sampling off")
-    else:
         logger.info(f"Deterministic sampling on. Using seed: {seed}")
+    else:
+        logger.info("Deterministic sampling off")
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
