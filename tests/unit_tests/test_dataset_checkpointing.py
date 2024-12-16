@@ -9,10 +9,10 @@ from torchtitan.datasets.hf_datasets import build_hf_data_loader
 from torchtitan.datasets.tokenizer import build_tokenizer
 
 
-class TestCheckpoint:
+class TestDatasetCheckpointing:
     def test_c4_resumption(self):
         dataset_name = "c4_test"
-        dataset_path = "./test/assets/c4_test"
+        dataset_path = "./tests/assets/c4_test"
         batch_size = 1
         seq_len = 1024
         world_size = 4
@@ -41,8 +41,7 @@ class TestCheckpoint:
     def _build_dataloader(
         self, dataset_name, dataset_path, batch_size, seq_len, world_size, rank
     ):
-        tokenizer_type = "tiktoken"
-        tokenizer = build_tokenizer("tiktoken", "./test/assets/test_tiktoken.model")
+        tokenizer = build_tokenizer("tiktoken", "./tests/assets/test_tiktoken.model")
         return build_hf_data_loader(
             dataset_name=dataset_name,
             dataset_path=dataset_path,

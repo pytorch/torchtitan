@@ -12,7 +12,10 @@ from torchtitan.models.llama_multimodal import (
     VisionEncoder,
 )
 
-from test.multimodal_model.test_utils import fixed_init_model, fixed_init_tensor
+from tests.unit_tests.multimodal_model.test_utils import (
+    fixed_init_model,
+    fixed_init_tensor,
+)
 
 
 @pytest.fixture
