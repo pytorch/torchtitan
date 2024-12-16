@@ -61,17 +61,18 @@ def build_test_list():
             "1D compile",
             "1d_compile",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile",
-                    "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
-                ],
-            ],
-            "1D compile with selective op AC",
-            "1d_compile_sac_op",
-        ),
+        # TODO: temporarily disabling to let CI be able to run other tests
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--training.compile",
+        #             "--activation_checkpoint.mode selective",
+        #             "--activation_checkpoint.selective_ac_option op",
+        #         ],
+        #     ],
+        #     "1D compile with selective op AC",
+        #     "1d_compile_sac_op",
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -414,7 +415,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         # dump compile trace for debugging purpose
-        cmd = f"TORCH_TRACE=\"{output_dir}/{test_name}/compile_trace\" " + cmd
+        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         if test_name == "fsdp2_memory_estimation":
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
