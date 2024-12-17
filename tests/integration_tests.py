@@ -472,10 +472,6 @@ def run_tests(args):
                                     f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
                                     f" because --ngpu arg is {args.ngpu}"
                                 )
-                            elif args.ngpu == 8 and test_flavor.ngpu != 8:
-                                logger.info(
-                                    f"Skipping non-8gpu test {test_flavor.test_name} on 8-gpu runner"
-                                )
                             else:
                                 run_test(test_flavor, full_path, args.output_dir)
 
@@ -489,7 +485,7 @@ def main():
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
-    parser.add_argument("--ngpu", default=4, type=int)
+    parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
