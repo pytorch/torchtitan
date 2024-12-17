@@ -156,13 +156,15 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
-            m.init_weights(buffer_device=buffer_device)
+            with torch.no_grad():
+                m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
-        model.init_weights(buffer_device=buffer_device)
+        with torch.no_grad():
+            model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]
