@@ -6,7 +6,7 @@ description = "Llama 3 debug training"
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 enable_color_printing = true
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
 
@@ -51,7 +51,7 @@ enable_async_tensor_parallel = false
 enable_checkpoint = false
 folder = "checkpoint"
 interval_type = "steps"
-interval = 5
+interval = 10
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
