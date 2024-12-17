@@ -20,7 +20,6 @@ from torch import distributed as dist
 from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 
 
@@ -56,7 +55,8 @@ def _warn_overwrite_env(env, val):
 def set_determinism(
     world_mesh: DeviceMesh,
     device: torch.device,
-    job_config: JobConfig,
+    seed: Optional[int] = None,
+    deterministic: bool = False,
 ) -> None:
     """
     Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
@@ -67,7 +67,7 @@ def set_determinism(
 
     Set Determinism flags for increased reproducibility with loss of performance.
     """
-    if job_config.training.deterministic:
+    if deterministic:
         logger.info("Deterministic training enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
@@ -78,7 +78,6 @@ def set_determinism(
 
     # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
     # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
-    seed = job_config.training.seed
     if seed is None:
         # Extract the seed for torch's main generator on rank 0 and standardizes on using that to build
         # seeds for unique SPMD groups

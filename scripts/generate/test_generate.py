@@ -95,21 +95,6 @@ def test_generate(
             "The input prompt is empty, model will respond from a empty sequence."
         )
 
-    if seed is not None:
-        torch.manual_seed(seed)
-        # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
-        os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
-        torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        # env var for deterministic CuBLAS
-        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
-        logger.info(f"Deterministic sampling on. Using seed: {seed}")
-    else:
-        logger.info("Deterministic sampling off")
-
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
@@ -136,6 +121,7 @@ def test_generate(
         logger.info(f"Init model on init_device: {init_device}")
         model = model_cls.from_model_args(model_config)
 
+    world_mesh = None
     # Init distributed env
     if world_size > 1:
         utils.init_distributed(config)
@@ -154,6 +140,8 @@ def test_generate(
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
         apply_tp_minus_sp(model, world_mesh["tp"])
+
+    utils.set_determinism(world_mesh, device, seed, deterministic=(seed is not None))
 
     # materalize model
     model.to_empty(device=device_type)
