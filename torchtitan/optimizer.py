@@ -5,9 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import torch
+import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
@@ -23,10 +24,11 @@ class OptimizersContainer(Stateful):
     and saving/loading optimizer state_dict at checkpoint.
     """
 
-    def __init__(self, model_parts, optimizer_kwargs, name):
+    def __init__(
+        self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
+    ) -> None:
         self.optimizers = []
         self.model = model_parts
-        self.plain_optim = []
         for model in self.model:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
@@ -42,18 +44,11 @@ class OptimizersContainer(Stateful):
             else self.optimizers
         )
 
-    def update_for_checkpoint(self, model):
-        self.plain_optim = (
-            [self.optimizers]
-            if isinstance(self.optimizers, torch.optim.Optimizer)
-            else self.optimizers
-        )
-
-    def step(self):
+    def step(self) -> None:
         for optimizer in self.optimizers:
             optimizer.step()
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         for optimizer in self.optimizers:
             optimizer.zero_grad()
 
@@ -80,7 +75,9 @@ class OptimizersContainer(Stateful):
 class OptimizersInBackwardContainer(OptimizersContainer):
     """Optimiers in backward to skip .step() and .zero_grad()"""
 
-    def __init__(self, model_parts, optimizer_kwargs, name):
+    def __init__(
+        self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
+    ) -> None:
         self.optimizers = []
         self.model = model_parts
         for model in self.model:
@@ -111,15 +108,17 @@ class OptimizersInBackwardContainer(OptimizersContainer):
             sub_optim for optim_group in self.optimizers for sub_optim in optim_group
         ]
 
-    def step(self):
+    def step(self) -> None:
         pass
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         pass
 
 
 # consider split between PP and non-PP
-def build_optimizers(model_parts, job_config: JobConfig):
+def build_optimizers(
+    model_parts: List[nn.Module], job_config: JobConfig
+) -> OptimizersContainer:
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
     """
@@ -167,12 +166,12 @@ def linear_warmup_linear_decay(
 class SchedulersContainer:
     """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
 
-    def __init__(self, optimizers, lr_lambda):
+    def __init__(self, optimizers, lr_lambda) -> None:
         self.schedulers = []
         for optimizer in optimizers:
             self.schedulers.append(LambdaLR(optimizer, lr_lambda=lr_lambda))
 
-    def step(self):
+    def step(self) -> None:
         for schedulers in self.schedulers:
             schedulers.step()
 
@@ -191,7 +190,7 @@ class SchedulersContainer:
 class SchedulersInBackwardContainer(SchedulersContainer):
     """Util for calling step on multiple learning rate schedulers when optimizers are in backward"""
 
-    def __init__(self, optimizers, lr_lambda):
+    def __init__(self, optimizers, lr_lambda) -> None:
         # all the schedulers for each optimizer group are the same, here we only store the first one
         # to self.schedulers follow the same structure as SchedulersContainer, but store all of them
         # to self.all_schedulers for container.step() to call
@@ -202,7 +201,7 @@ class SchedulersInBackwardContainer(SchedulersContainer):
                 scheduler_group.append(LambdaLR(sub_optim, lr_lambda=lr_lambda))
             self.schedulers.append(scheduler_group)
 
-    def step(self):
+    def step(self) -> None:
         for scheduler_group in self.schedulers:
             for scheduler in scheduler_group:
                 scheduler.step()
@@ -219,7 +218,7 @@ class SchedulersInBackwardContainer(SchedulersContainer):
         return state_dict
 
 
-def build_lr_schedulers(optimizers, job_config: JobConfig):
+def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:
     optim_in_bwd = job_config.optimizer.early_step_in_backward
     warmup_steps = int(job_config.training.warmup_steps)
     decay_steps = float(max(1, job_config.training.steps - warmup_steps))
