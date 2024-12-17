@@ -64,18 +64,17 @@ def build_test_list():
             "1D compile",
             "1d_compile",
         ),
-        # TODO: temporarily disabling to let CI be able to run other tests
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--training.compile",
-        #             "--activation_checkpoint.mode selective",
-        #             "--activation_checkpoint.selective_ac_option op",
-        #         ],
-        #     ],
-        #     "1D compile with selective op AC",
-        #     "1d_compile_sac_op",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "1D compile with selective op AC",
+            "1d_compile_sac_op",
+        ),
         OverrideDefinitions(
             [
                 [
