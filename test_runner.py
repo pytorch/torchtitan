@@ -47,7 +47,10 @@ def build_test_list():
     integration_tests_flavors["debug_model.toml"] = [
         OverrideDefinitions(
             [
-                [],
+                [
+                    "--profiling.enable_profiling",
+                    "--metrics.enable_tensorboard",
+                ],
             ],
             "default",
             "default",
@@ -138,7 +141,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
@@ -150,7 +152,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
@@ -163,7 +164,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 1",
@@ -176,7 +176,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 2",
@@ -188,7 +187,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 2",
@@ -200,7 +198,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
@@ -244,7 +241,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule Interleaved1F1B",
                 ],
@@ -256,7 +252,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--experimental.pipeline_parallel_schedule_csv ./test/assets/custom_schedule.csv",
@@ -413,6 +408,8 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
     for override_arg in test_flavor.override_args:
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
+        # dump compile trace for debugging purpose
+        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         if test_name == "fsdp2_memory_estimation":
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
