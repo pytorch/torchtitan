@@ -53,7 +53,7 @@ def _warn_overwrite_env(env, val):
 
 
 def set_determinism(
-    world_mesh: DeviceMesh,
+    world_mesh: Optional[DeviceMesh],
     device: torch.device,
     seed: Optional[int] = None,
     deterministic: bool = False,
@@ -68,13 +68,20 @@ def set_determinism(
     Set Determinism flags for increased reproducibility with loss of performance.
     """
     if deterministic:
-        logger.info("Deterministic training enabled (expect perf degradation).")
+        logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    if not world_mesh:
+        if seed is not None:
+            torch.manual_seed(seed)
+            os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
+            logger.debug(f"Single-process job using seed: {seed}")
+        return
 
     # to ensure we can control which ranks have same or different seeds, all ranks agree on a starting seed.
     # if user provides one, we use this. Otherwise rank 0 rolls the dice and everyone else uses that.
