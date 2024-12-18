@@ -73,7 +73,9 @@ def main(job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
 
     # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
-    utils.set_determinism(world_mesh, device, job_config)
+    utils.set_determinism(
+        world_mesh, device, job_config.training.seed, job_config.training.deterministic
+    )
     model_name = job_config.model.name
 
     # build tokenizer

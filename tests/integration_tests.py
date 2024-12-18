@@ -365,6 +365,19 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.enable_cpu_offload True",
+                    "--optimizer.early_step_in_backward",
+                ],
+            ],
+            "Enable CPU Offload with PP",
+            "enable_cpu_offload+PP",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--memory_estimation.enabled",
                 ]
             ],
@@ -376,14 +389,14 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--training.enable_cpu_offload True",
-                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    # placeholder for the generation script's generate step
                 ],
             ],
-            "Enable CPU Offload with PP",
-            "enable_cpu_offload+PP",
-            ngpu=4,
+            "Generation script test",
+            "test_generate",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors
@@ -406,7 +419,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
-    for override_arg in test_flavor.override_args:
+    for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
@@ -422,6 +435,16 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
+
+        # save checkpoint (idx == 0) and load it for generation (idx == 1)
+        if test_name == "test_generate" and idx == 1:
+            cmd = (
+                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
+                "PROMPT='What is the meaning of life?' "
+                f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
+            )
+
         result = _run_cmd(cmd)
         logger.info(result.stdout)
         if result.returncode != 0:
