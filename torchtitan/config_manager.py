@@ -610,6 +610,9 @@ class JobConfig:
             action="store_true",
         )
 
+    def to_dict(self):
+        return self.args_dict
+
     def parse_args(self, args_list: list = sys.argv[1:]):
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
@@ -646,6 +649,8 @@ class JobConfig:
         for section, section_args in cmd_args_dict.items():
             for k, v in section_args.items():
                 args_dict[section][k] = v
+
+        self.args_dict = args_dict
 
         for k, v in args_dict.items():
             class_type = type(k.title(), (), v)
