@@ -43,4 +43,4 @@ jobs:
         python -m pip install -e .
 
         mkdir artifacts-to-be-uploaded
-        python ./test_runner.py artifacts-to-be-uploaded --ngpu 4
+        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 4
