@@ -52,6 +52,7 @@ class JobConfig:
     """
 
     def __init__(self):
+        self.args_dict = None
         # main parser
         self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
 
