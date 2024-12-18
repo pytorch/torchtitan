@@ -28,8 +28,8 @@ class OptimizersContainer(Stateful):
         self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
     ) -> None:
         self.optimizers = []
-        self.model = model_parts
-        for model in self.model:
+        self.model_parts = model_parts
+        for model in self.model_parts:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
                 optimizer = torch.optim.Adam(model.parameters(), **optimizer_kwargs)
@@ -38,6 +38,10 @@ class OptimizersContainer(Stateful):
             else:
                 raise NotImplementedError(f"Optimizer {name} not added.")
             self.optimizers.append(optimizer)
+        expected_optim_num = len(self.model_parts)
+        assert expected_optim_num == len(
+            self.optimizers
+        ), "Must pass one optimizer per model part"
 
     def step(self) -> None:
         for optimizer in self.optimizers:
@@ -53,7 +57,9 @@ class OptimizersContainer(Stateful):
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
         return {
-            k: v for sd in map(func, self.model, self.optimizers) for k, v in sd.items()
+            k: v
+            for sd in map(func, self.model_parts, self.optimizers)
+            for k, v in sd.items()
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -62,7 +68,7 @@ class OptimizersContainer(Stateful):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(func, self.model, self.optimizers))
+        list(map(func, self.model_parts, self.optimizers))
 
 
 class OptimizersInBackwardContainer(OptimizersContainer):
@@ -72,8 +78,8 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
     ) -> None:
         self.optimizers = []
-        self.model = model_parts
-        for model in self.model:
+        self.model_parts = model_parts
+        for model in self.model_parts:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
                 optim_dict = {
@@ -97,6 +103,12 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     param.register_post_accumulate_grad_hook(optim_hook)
 
             self.optimizers.extend([optim_dict[param] for param in model.parameters()])
+        expected_optim_num = sum(
+            len([param for param in model.parameters()]) for model in self.model_parts
+        )
+        assert expected_optim_num == len(
+            self.optimizers
+        ), "Must pass one optimizer per model param part"
 
     def step(self) -> None:
         pass
@@ -162,8 +174,8 @@ class SchedulersContainer:
             self.schedulers.append(LambdaLR(optimizer, lr_lambda=lr_lambda))
 
     def step(self) -> None:
-        for schedulers in self.schedulers:
-            schedulers.step()
+        for scheduler in self.schedulers:
+            scheduler.step()
 
     def get_lr_scheduler_state(self) -> Dict[str, Any]:
         state_dict = {}

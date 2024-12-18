@@ -176,19 +176,6 @@ class CheckpointManager:
 
             TODO: This is currently unsolved and needs a fix.
         """
-        if job_config.optimizer.early_step_in_backward:
-            expected_optim_num = sum(
-                len([param for param in model.parameters()]) for model in model_parts
-            )
-        else:
-            expected_optim_num = len(model_parts)
-        assert expected_optim_num == len(
-            optimizers.optimizers
-        ), "Must pass one optimizer per model part (or per param for optim_in_bwd)"
-        assert expected_optim_num == len(
-            lr_schedulers.schedulers
-        ), "Must pass one lr_scheduler per model part (or per param for optim_in_bwd)"
-
         self.states = states
 
         self.states.update(
