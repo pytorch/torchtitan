@@ -130,8 +130,9 @@ def main(job_config: JobConfig):
             pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
 
-    if job_config.training.compile:
-        loss_fn = torch.compile(loss_fn)
+    # TODO: compiling loss function causes CUDA errors, turning off for now
+    # if job_config.training.compile:
+    #     loss_fn = torch.compile(loss_fn)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
     if job_config.checkpoint.create_seed_checkpoint:
