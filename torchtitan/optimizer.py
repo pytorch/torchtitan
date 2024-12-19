@@ -38,10 +38,12 @@ class OptimizersContainer(Stateful):
             else:
                 raise NotImplementedError(f"Optimizer {name} not added.")
             self.optimizers.append(optimizer)
-        expected_optim_num = len(self.model_parts)
-        assert expected_optim_num == len(
+        self._validate_length(len(self.model_parts))
+
+    def _validate_length(self, expected_length) -> None:
+        assert expected_length == len(
             self.optimizers
-        ), "Must pass one optimizer per model part"
+        ), "Must pass one optimizer per model part or per param if using OptimizersInBackwardContainer"
 
     def step(self) -> None:
         for optimizer in self.optimizers:
@@ -103,12 +105,12 @@ class OptimizersInBackwardContainer(OptimizersContainer):
                     param.register_post_accumulate_grad_hook(optim_hook)
 
             self.optimizers.extend([optim_dict[param] for param in model.parameters()])
-        expected_optim_num = sum(
-            len([param for param in model.parameters()]) for model in self.model_parts
+        self._validate_length(
+            sum(
+                len([param for param in model.parameters()])
+                for model in self.model_parts
+            )
         )
-        assert expected_optim_num == len(
-            self.optimizers
-        ), "Must pass one optimizer per model param part"
 
     def step(self) -> None:
         pass
