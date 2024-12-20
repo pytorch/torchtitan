@@ -36,8 +36,11 @@ def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
 
+    if job_config.job.print_args:
+        logger.info(f"Running with args: {job_config.to_dict()}")
+
     # used for colorful printing
-    color = utils.Color if job_config.metrics.enable_color_printing else utils.NoColor
+    color = utils.NoColor if job_config.metrics.disable_color_printing else utils.Color
 
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
@@ -51,7 +54,7 @@ def main(job_config: JobConfig):
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
-        enable_loss_parallel=job_config.training.enable_loss_parallel,
+        enable_loss_parallel=not job_config.training.disable_loss_parallel,
     )
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     device_module.set_device(device)
