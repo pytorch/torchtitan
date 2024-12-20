@@ -49,7 +49,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 1. Multi-dimensional composable parallelisms
    - [FSDP2](docs/fsdp.md) with per-parameter sharding
    - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
-   - Pipeline Parallel
+   - [Pipeline Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-training-with-zero-bubble-pipeline-parallelism/214420)
    - Context Parallel
 2. Selective layer and operator activation checkpointing
 3. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
