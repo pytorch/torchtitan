@@ -3,6 +3,7 @@
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
+print_args = false
 use_for_integration_test = true
 
 [profiling]
@@ -14,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
 log_freq = 1
-enable_color_printing = true
+disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false

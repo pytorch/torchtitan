@@ -78,9 +78,13 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--job.use_for_integration_test",
-            default=False,
             action="store_true",
             help="Add this config to the integration test suite",
+        )
+        self.parser.add_argument(
+            "--job.print_args",
+            action="store_true",
+            help="Print the args to terminal",
         )
 
         # profiling configs
@@ -104,7 +108,6 @@ class JobConfig:
         self.parser.add_argument(
             "--profiling.enable_memory_snapshot",
             action="store_true",
-            default=False,
             help="Whether to dump memory snapshot",
         )
         self.parser.add_argument(
@@ -124,14 +127,12 @@ class JobConfig:
         self.parser.add_argument(
             "--metrics.enable_tensorboard",
             action="store_true",
-            default=False,
             help="Whether to log metrics to TensorBoard",
         )
         self.parser.add_argument(
-            "--metrics.enable_color_printing",
+            "--metrics.disable_color_printing",
             action="store_true",
-            default=True,
-            help="Whether to enable color printing in logs",
+            help="Whether to disable color printing in logs",
         )
         self.parser.add_argument(
             "--metrics.save_tb_folder",
@@ -139,6 +140,7 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
+        # TODO: store_true & default=True make impossible for cmd to set it to False
         self.parser.add_argument(
             "--metrics.rank_0_only",
             action="store_true",
@@ -152,7 +154,6 @@ class JobConfig:
         self.parser.add_argument(
             "--metrics.enable_wandb",
             action="store_true",
-            default=False,
             help="Whether to log metrics to Weights & Biases",
         )
 
@@ -191,13 +192,11 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--optimizer.fused",
-            default=False,
             action="store_true",
             help="Whether the fused implementation(CUDA only) is used.",
         )
         self.parser.add_argument(
             "--optimizer.early_step_in_backward",
-            default=False,
             action="store_true",
             help="""
             Whether to apply optimizer in the backward. Caution, optimizer_in_backward
@@ -270,8 +269,7 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.enable_cpu_offload",
-            type=bool,
-            default=False,
+            action="store_true",
             help="""
             Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP""",
         )
@@ -282,14 +280,12 @@ class JobConfig:
             help="Tensor Parallelism degree. 1 means disabled.",
         )
         self.parser.add_argument(
-            "--training.enable_loss_parallel",
-            default=True,
+            "--training.disable_loss_parallel",
             action="store_true",
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
-            default=False,
             action="store_true",
             help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
         )
@@ -545,13 +541,11 @@ class JobConfig:
         self.parser.add_argument(
             "--float8.enable_fsdp_float8_all_gather",
             action="store_true",
-            default=False,
             help="Whether enable float8 all-gather in FSDP",
         )
         self.parser.add_argument(
             "--float8.precompute_float8_dynamic_scale_for_fsdp",
             action="store_true",
-            default=False,
             help="Whether precompute float8 scales dynamically for FSDP",
         )
         self.parser.add_argument(
@@ -607,7 +601,6 @@ class JobConfig:
         self.parser.add_argument(
             "--memory_estimation.disable_fake_mode",
             help="Whether to estimate memory under FakeTensorMode",
-            default=False,
             action="store_true",
         )
 
