@@ -328,7 +328,12 @@ class TransformerBlock(nn.Module):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        if 'LayerNormMLP' in str(type(self.feed_forward)):
+            torch.nn.init.ones_(self.feed_forward.layer_norm_weight)
+            torch.nn.init.trunc_normal_(self.feed_forward.fc1_weight, mean=0.0, std=self.weight_init_std)
+            torch.nn.init.trunc_normal_(self.feed_forward.fc2_weight, mean=0.0, std=self.weight_init_std)
+        else:
+            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Transformer(nn.Module):
