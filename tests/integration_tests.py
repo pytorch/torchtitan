@@ -341,13 +341,25 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.data_parallel_shard_degree=1",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (with dp_shard)",
+            "hsdp+cp_without_dp_shard",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.data_parallel_shard_degree=2",
                     "--training.data_parallel_replicate_degree=2",
                     "--experimental.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP",
-            "hsdp+cp",
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_with_dp_shard",
             ngpu=8,
         ),
         OverrideDefinitions(

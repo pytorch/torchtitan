@@ -336,10 +336,14 @@ def main(job_config: JobConfig):
             ):
                 losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = sum(losses) / len(losses), max(losses)
-                if parallel_dims.dp_enabled:
+                if (
+                    parallel_dims.dp_replicate_enabled
+                    or parallel_dims.dp_shard_enabled
+                    or parallel_dims.cp_enabled
+                ):
                     global_avg_loss, global_max_loss = (
-                        utils.dist_mean(avg_loss, dp_mesh),
-                        utils.dist_max(max_loss, dp_mesh),
+                        utils.dist_mean(avg_loss, world_mesh["dp_cp"]),
+                        utils.dist_max(max_loss, world_mesh["dp_cp"]),
                     )
                 else:
                     global_avg_loss, global_max_loss = avg_loss, max_loss

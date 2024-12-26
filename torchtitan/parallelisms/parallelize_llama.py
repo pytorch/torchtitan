@@ -79,17 +79,10 @@ def parallelize_llama(
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
-
-        if not parallel_dims.dp_shard_enabled and parallel_dims.dp_replicate_enabled:
-            # Composability of DDP + CP is not supported.
-            raise RuntimeError("Composability of DDP + CP is not supported.")
-
-        # the mesh dim names of which the model params are sharded on
-        dp_mesh_dim_names = []
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-
-        dp_mesh_dim_names.append("dp_shard_cp")
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+        else:
+            dp_mesh_dim_names = ("dp_shard_cp",)
 
         apply_fsdp(
             model,
