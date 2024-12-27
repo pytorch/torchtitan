@@ -2,7 +2,7 @@
 
 # torchtitan
 
-#### A PyTorch native library for large model training
+#### A PyTorch native library for large-scale model training
 
 [![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
@@ -16,16 +16,16 @@
 
 ## Overview
 
-`torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, MegaBlocks, LLM Foundry, DeepSpeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
+`torchtitan` is a proof-of-concept for large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. `torchtitan` is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, MegaBlocks, LLM Foundry, DeepSpeed, etc. Instead, we hope that the features showcased in `torchtitan` will be adopted by these codebases quickly. `torchtitan` is unlikely to ever grow a large community around it.
 
 Our guiding principles when building `torchtitan`:
 
 * Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallel.
+* Minimal changes to the model code when applying multi-dimensional parallelism.
 * Modular components instead of a monolithic codebase.
 * Get started in minutes, not hours!
 
-### Intro video - learn more about torchtitan in under 4 mins
+### Intro video - learn more about `torchtitan` in under 4 mins
 
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
 
