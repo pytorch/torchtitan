@@ -1,48 +1,33 @@
-[![8 GPU Integration Test](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
+<div align="center">
 
 # torchtitan
 
+#### A PyTorch native library for large-scale model training
+
+[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
+[![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
+[![docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/)
+[![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
+[![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
+
+</div>
+
 `torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
 
-`torchtitan` is a proof-of-concept for Large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. torchtitan is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, Megablocks, LLM Foundry, Deepspeed, etc. Instead, we hope that the features showcased in torchtitan will be adopted by these codebases quickly. torchtitan is unlikely to ever grow a large community around it.
+## Overview
+
+`torchtitan` is a proof-of-concept for large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. `torchtitan` is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, MegaBlocks, LLM Foundry, DeepSpeed, etc. Instead, we hope that the features showcased in `torchtitan` will be adopted by these codebases quickly. `torchtitan` is unlikely to ever grow a large community around it.
 
 Our guiding principles when building `torchtitan`:
 
 * Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code when applying 1D, 2D, or (soon) 3D Parallel.
+* Minimal changes to the model code when applying multi-dimensional parallelism.
 * Modular components instead of a monolithic codebase.
 * Get started in minutes, not hours!
 
-### Intro video - learn more about torchtitan in under 4 mins:
+### Intro video - learn more about `torchtitan` in under 4 mins
 
 [![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
-
-### torchtitan paper on arXiv
-
-[![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg?style=plastic)](https://arxiv.org/abs/2410.06511)
-
-We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511).
-```
-@misc{torchtitan,
-      title={TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training},
-      author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
-      year={2024},
-      eprint={2410.06511},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2410.06511},
-}
-```
-
-### Dive into the code
-
-You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
-* [train.py](train.py) - the main training loop and high-level setup code
-* [torchtitan/parallelisms/parallelize_llama.py](torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
-* [torchtitan/parallelisms/pipeline_llama.py](torchtitan/parallelisms/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
-* [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
-* [torchtitan/float8.py](torchtitan/float8.py) - utils for applying Float8 techniques
-* [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama 3.1 model definition
 
 ### Key features available
 
@@ -62,8 +47,22 @@ You may want to see how the model is defined or how parallelism techniques are a
 9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 10. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
 11. All options easily configured via [toml files](train_configs/)
+12. [Helper scripts](scripts/) to
+    - convert original Llama 3 checkpoints into the expected DCP format
+    - estimate FSDP/HSDP memory usage without materializing the model
+    - run distributed inference with Tensor Parallel
 
 We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
+
+### Dive into the code
+
+You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
+* [train.py](train.py) - the main training loop and high-level setup code
+* [torchtitan/parallelisms/parallelize_llama.py](torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
+* [torchtitan/parallelisms/pipeline_llama.py](torchtitan/parallelisms/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
+* [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
+* [torchtitan/float8.py](torchtitan/float8.py) - utils for applying Float8 techniques
+* [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama 3.1 model definition
 
 
 ## Installation
@@ -95,7 +94,7 @@ Llama 3 8B model locally on 8 GPUs
 CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
 ```
 
-## Multi-Node Training
+### Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
 
 To get started adjust the number of nodes and GPUs
@@ -110,15 +109,22 @@ Then start a run where `nnodes` is your total node count, matching the sbatch no
 srun torchrun --nnodes 2
 ```
 
-If your gpu count per node is not 8, adjust:
+If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
-```--nproc_per_node```
+## Citation
 
- in the torchrun command and
-
-```#SBATCH --gpus-per-task```
-
-in the SBATCH command section.
+We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511).
+```
+@misc{torchtitan,
+      title={TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training},
+      author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
+      year={2024},
+      eprint={2410.06511},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2410.06511},
+}
+```
 
 ## License
 
