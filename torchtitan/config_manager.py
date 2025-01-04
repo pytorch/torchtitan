@@ -7,7 +7,7 @@
 
 import sys
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import tyro
@@ -452,8 +452,7 @@ class JobConfig:
 
     def parse_args(self, args=None) -> None:
         """
-        Parse CLI arguments, optionally load from a TOML file,
-        merge with defaults, and return a JobConfig instance.
+        Parse command line arguments and return the parsed args and the command line only args
         """
         toml_data = self.maybe_load_toml(args or sys.argv[1:])
         defaults = self.__class__
