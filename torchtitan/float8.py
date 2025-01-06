@@ -47,6 +47,8 @@ class Float8Handler:
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
+        self.use_float8nocompile = float8_config.no_compile
+
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
             parallel_dims.dp_shard_enabled
@@ -90,14 +92,28 @@ class Float8Handler:
         if not self.enabled:
             return
 
-        from torchao.float8 import convert_to_float8_training
+        # TODO: should we implicitly use this if self.compile is False, rather
+        # than having an explicit flag?
+        if self.use_float8nocompile:
+            logger.info("Using float8nocompile prototype")
+            from torchao.prototype.float8nocompile.float8nocompile_linear_utils import (
+                convert_to_float8_nocompile_training,
+            )
 
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        convert_to_float8_training(
-            model,
-            config=self.config,
-            module_filter_fn=lambda mod, fqn: fqn != "output",
-        )
+            convert_to_float8_nocompile_training(
+                model,
+                config=self.config,
+                module_filter_fn=lambda mod, fqn: fqn != "output",
+            )
+        else:
+            from torchao.float8 import convert_to_float8_training
+
+            # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+            convert_to_float8_training(
+                model,
+                config=self.config,
+                module_filter_fn=lambda mod, fqn: fqn != "output",
+            )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
