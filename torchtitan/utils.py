@@ -34,12 +34,12 @@ def get_device_info():
 device_type, device_module = get_device_info()
 
 
-def dist_max(x: Union[int, float], mesh: DeviceMesh) -> float:
+def dist_max(x: Union[int, float, torch.Tensor], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
 
 
-def dist_mean(x: Union[int, float], mesh: DeviceMesh) -> float:
+def dist_mean(x: Union[int, float, torch.Tensor], mesh: DeviceMesh) -> float:
     tensor = torch.tensor(x).to(device_type)
     return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
 
