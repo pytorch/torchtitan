@@ -64,9 +64,7 @@ def pipeline_llama_manual_split(
     """
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
-    microbatches = (
-        job_config.experimental.pipeline_parallel_microbatches or parallel_dims.pp
-    )
+
     splits = (
         job_config.experimental.pipeline_parallel_split_points
         or generate_split_points(job_config, parallel_dims.pp, model_config)
@@ -117,7 +115,7 @@ def pipeline_llama_manual_split(
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx}"
-            f" with start_layer {start_layer}, stop_layer {stop_layer}: model chunk \n{model_chunk}"
+            f" with start_layer {start_layer}, stop_layer {stop_layer}"
         )
         stages.append(stage)
         models.append(model_chunk)
