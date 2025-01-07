@@ -83,13 +83,14 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     n_microbatches = job_config.experimental.pipeline_parallel_microbatches
-    num_stages = job_config.experimental.pipeline_parallel_degree * len(stages)
+    # We expect that the number of local stages (`len(stages)`) is the same across all ranks
+    num_total_stages = job_config.experimental.pipeline_parallel_degree * len(stages)
     if n_microbatches is None:
-        n_microbatches = num_stages
-    elif n_microbatches < num_stages:
+        n_microbatches = num_total_stages
+    elif n_microbatches < num_total_stages:
         logger.warning(
             f"Number of microbatches ({n_microbatches}) is less than the total number \
-of stages ({num_stages}) which may result in a bubble in the pipeline."
+of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
     schedule = schedule_class(
@@ -99,7 +100,7 @@ of stages ({num_stages}) which may result in a bubble in the pipeline."
     )
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} \
-with {n_microbatches} and {num_stages} stages."
+with {n_microbatches} and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:
