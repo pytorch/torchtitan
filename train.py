@@ -11,6 +11,7 @@ from datetime import timedelta
 import torch
 
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
@@ -336,6 +337,9 @@ def main(job_config: JobConfig):
                     or parallel_dims.dp_shard_enabled
                     or parallel_dims.cp_enabled
                 ):
+                    loss = loss.detach()
+                    if isinstance(loss, DTensor):
+                        loss = loss.full_tensor()
                     global_avg_loss, global_max_loss = (
                         utils.dist_mean(loss, world_mesh["dp_cp"]),
                         utils.dist_max(loss, world_mesh["dp_cp"]),
