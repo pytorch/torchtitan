@@ -415,13 +415,7 @@ def build_test_list():
 
 
 def _run_cmd(cmd):
-    return subprocess.run(
-        [cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        shell=True,
-    )
+    return subprocess.run([cmd], text=True, shell=True)
 
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
