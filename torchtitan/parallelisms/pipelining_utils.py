@@ -93,6 +93,13 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
 of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
+    # validate that the batch size is divisible by the number of microbatches otherwise we'll hang or error during training
+    if job_config.training.batch_size % n_microbatches != 0:
+        raise ValueError(
+            f"Batch size {job_config.training.batch_size} must be divisible by number of microbatches {n_microbatches}. "
+            "Update the config arguments for either batch_size or pipeline_parallel_microbatches."
+        )
+
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
