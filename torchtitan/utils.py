@@ -34,14 +34,20 @@ def get_device_info():
 device_type, device_module = get_device_info()
 
 
-def dist_max(x: Union[int, float, torch.Tensor], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).to(device_type)
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.MAX.name, group=mesh).item()
+def dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
+    if isinstance(x, DTensor):
+        # DTensors do not support functional collectives
+        x = x.full_tensor()
+    assert x.numel() == 1  # required by `.item()`
+    return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
 
-def dist_mean(x: Union[int, float, torch.Tensor], mesh: DeviceMesh) -> float:
-    tensor = torch.tensor(x).to(device_type)
-    return funcol.all_reduce(tensor, reduceOp=c10d.ReduceOp.AVG.name, group=mesh).item()
+def dist_max(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    return dist_reduce(x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh)
+
+
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    return dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh)
 
 
 def _warn_overwrite_env(env, val):
