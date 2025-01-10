@@ -11,6 +11,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
+    ScheduleZBVZeroBubble,
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
@@ -81,7 +82,7 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
             job_config.experimental.pipeline_parallel_schedule
         )
 
-    looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
+    is_multistage_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     n_microbatches = job_config.experimental.pipeline_parallel_microbatches
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = job_config.experimental.pipeline_parallel_degree * len(stages)
@@ -100,11 +101,50 @@ of stages ({num_total_stages}) which may result in a bubble in the pipeline."
             "Update the config arguments for either batch_size or pipeline_parallel_microbatches."
         )
 
-    schedule = schedule_class(
-        stages if looped_schedule else stages[0],
-        n_microbatches=n_microbatches,
-        loss_fn=loss_fn,
+    pipeline_parallel_stages_per_rank = (
+        job_config.experimental.pipeline_parallel_stages_per_rank
     )
+
+    logger.info(f"{pipeline_parallel_stages_per_rank=}")
+    if pipeline_parallel_stages_per_rank is not None:
+        stage_index_to_group_rank = {
+            value: index
+            for index, sublist in enumerate(pipeline_parallel_stages_per_rank)
+            for value in sublist
+        }
+    else:
+        stage_index_to_group_rank = None
+    logger.info(f"stage_index_to_group_rank: {stage_index_to_group_rank}")
+
+    if not is_multistage_schedule:
+        stages = stages[0]
+
+    if (
+        schedule_class == ScheduleZBVZeroBubble
+        or schedule_class == _PipelineScheduleRuntime
+    ):
+        schedule = schedule_class(
+            stages,
+            n_microbatches=n_microbatches,
+            loss_fn=loss_fn,
+            stage_index_to_group_rank=stage_index_to_group_rank,
+        )
+    else:
+        schedule = schedule_class(
+            stages, n_microbatches=n_microbatches, loss_fn=loss_fn
+        )
+
+    if schedule_class == ScheduleZBVZeroBubble:
+        # run this under the new runtime
+        old_schedule = schedule
+        schedule = _PipelineScheduleRuntime(
+            stages,
+            n_microbatches=n_microbatches,
+            loss_fn=loss_fn,
+            stage_index_to_group_rank=stage_index_to_group_rank,
+        )
+        schedule._load_actions(old_schedule.pipeline_order)
+
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} \
 with {n_microbatches} and {num_total_stages} stages."

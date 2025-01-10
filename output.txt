@@ -1,0 +1,172 @@
+INFO:__main__:=====Integration test, flavor : PP zero bubble test (v shaped), command : TORCH_TRACE="./test-out/pp_v_shape_zb/compile_trace" CONFIG_FILE=./train_configs/debug_model.toml NGPU=4 LOG_RANK=0,1,2,3 ./run_llama_train.sh --job.dump_folder ./test-out/pp_v_shape_zb --model.flavor debugmodel --experimental.pipeline_parallel_degree 4 --experimental.pipeline_parallel_schedule ZBVZeroBubble --experimental.pipeline_parallel_microbatches 8 --experimental.pipeline_parallel_stages_per_rank [[0,7],[1,6],[2,5],[3,4]]=====
++ NGPU=4
++ LOG_RANK=0,1,2,3
++ CONFIG_FILE=./train_configs/debug_model.toml
++ overrides=
++ '[' 12 -ne 0 ']'
++ overrides='--job.dump_folder ./test-out/pp_v_shape_zb --model.flavor debugmodel --experimental.pipeline_parallel_degree 4 --experimental.pipeline_parallel_schedule ZBVZeroBubble --experimental.pipeline_parallel_microbatches 8 --experimental.pipeline_parallel_stages_per_rank [[0,7],[1,6],[2,5],[3,4]]'
++ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
++ torchrun --nproc_per_node=4 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0,1,2,3 --role rank --tee 3 train.py --job.config_file ./train_configs/debug_model.toml --job.dump_folder ./test-out/pp_v_shape_zb --model.flavor debugmodel --experimental.pipeline_parallel_degree 4 --experimental.pipeline_parallel_schedule ZBVZeroBubble --experimental.pipeline_parallel_microbatches 8 --experimental.pipeline_parallel_stages_per_rank '[[0,7],[1,6],[2,5],[3,4]]'
+W0110 14:53:45.987000 6198 torch/distributed/run.py:792] 
+W0110 14:53:45.987000 6198 torch/distributed/run.py:792] *****************************************
+W0110 14:53:45.987000 6198 torch/distributed/run.py:792] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0110 14:53:45.987000 6198 torch/distributed/run.py:792] *****************************************
+[rank1]:2025-01-10 14:53:52,462 - root - INFO - Starting job: Llama 3 debug training
+[rank0]:2025-01-10 14:53:52,778 - root - INFO - Starting job: Llama 3 debug training
+[rank3]:2025-01-10 14:53:52,750 - root - INFO - Starting job: Llama 3 debug training
+[rank2]:2025-01-10 14:53:52,836 - root - INFO - Starting job: Llama 3 debug training
+[rank0]:2025-01-10 14:53:53,387 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:2025-01-10 14:53:53,390 - root - INFO - CUDA capacity: NVIDIA PG509-210 with 79.14GiB memory
+[rank0]:2025-01-10 14:53:53,411 - root - WARNING - Peak flops undefined for: NVIDIA PG509-210, fallback to A100
+[rank0]:2025-01-10 14:53:53,411 - root - INFO - Peak FLOPS used for computing MFU: 3.120e+14
+[rank0]:2025-01-10 14:53:53,411 - root - INFO - Building 1-D device mesh with ['pp'], [4]
+[rank1]:2025-01-10 14:53:54,312 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank1]:2025-01-10 14:53:54,316 - root - INFO - CUDA capacity: NVIDIA PG509-210 with 79.14GiB memory
+[rank1]:2025-01-10 14:53:54,338 - root - WARNING - Peak flops undefined for: NVIDIA PG509-210, fallback to A100
+[rank1]:2025-01-10 14:53:54,338 - root - INFO - Peak FLOPS used for computing MFU: 3.120e+14
+[rank1]:2025-01-10 14:53:54,338 - root - INFO - Building 1-D device mesh with ['pp'], [4]
+[rank2]:2025-01-10 14:53:54,703 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank2]:2025-01-10 14:53:54,706 - root - INFO - CUDA capacity: NVIDIA PG509-210 with 79.14GiB memory
+[rank2]:2025-01-10 14:53:54,730 - root - WARNING - Peak flops undefined for: NVIDIA PG509-210, fallback to A100
+[rank2]:2025-01-10 14:53:54,730 - root - INFO - Peak FLOPS used for computing MFU: 3.120e+14
+[rank2]:2025-01-10 14:53:54,730 - root - INFO - Building 1-D device mesh with ['pp'], [4]
+[rank3]:2025-01-10 14:53:54,697 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank3]:2025-01-10 14:53:54,701 - root - INFO - CUDA capacity: NVIDIA PG509-210 with 79.14GiB memory
+[rank3]:2025-01-10 14:53:54,724 - root - WARNING - Peak flops undefined for: NVIDIA PG509-210, fallback to A100
+[rank3]:2025-01-10 14:53:54,725 - root - INFO - Peak FLOPS used for computing MFU: 3.120e+14
+[rank3]:2025-01-10 14:53:54,725 - root - INFO - Building 1-D device mesh with ['pp'], [4]
+[rank0]:2025-01-10 14:53:56,247 - root - INFO - Building tiktoken tokenizer locally from ./tests/assets/test_tiktoken.model
+[rank0]:2025-01-10 14:53:56,268 - root - INFO - TikTokenizer built: #words 2256, BOS ID 2000, EOS ID 2001
+[rank0]:2025-01-10 14:53:56,268 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank2]:2025-01-10 14:53:56,260 - root - INFO - Building tiktoken tokenizer locally from ./tests/assets/test_tiktoken.model
+[rank2]:2025-01-10 14:53:56,280 - root - INFO - TikTokenizer built: #words 2256, BOS ID 2000, EOS ID 2001
+[rank2]:2025-01-10 14:53:56,280 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank1]:2025-01-10 14:53:56,249 - root - INFO - Building tiktoken tokenizer locally from ./tests/assets/test_tiktoken.model
+[rank1]:2025-01-10 14:53:56,271 - root - INFO - TikTokenizer built: #words 2256, BOS ID 2000, EOS ID 2001
+[rank1]:2025-01-10 14:53:56,271 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank3]:2025-01-10 14:53:56,260 - root - INFO - Building tiktoken tokenizer locally from ./tests/assets/test_tiktoken.model
+[rank3]:2025-01-10 14:53:56,280 - root - INFO - TikTokenizer built: #words 2256, BOS ID 2000, EOS ID 2001
+[rank3]:2025-01-10 14:53:56,280 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:2025-01-10 14:53:56,571 - root - INFO - Building llama3 debugmodel with ModelArgs(dim=256, n_layers=16, n_heads=16, n_kv_heads=None, vocab_size=2256, multiple_of=256, ffn_dim_multiplier=None, norm_eps=1e-05, rope_theta=500000, max_seq_len=64, depth_init=True, norm_type='rmsnorm')
+[rank2]:2025-01-10 14:53:56,572 - root - INFO - Building llama3 debugmodel with ModelArgs(dim=256, n_layers=16, n_heads=16, n_kv_heads=None, vocab_size=2256, multiple_of=256, ffn_dim_multiplier=None, norm_eps=1e-05, rope_theta=500000, max_seq_len=64, depth_init=True, norm_type='rmsnorm')
+[rank1]:2025-01-10 14:53:56,571 - root - INFO - Building llama3 debugmodel with ModelArgs(dim=256, n_layers=16, n_heads=16, n_kv_heads=None, vocab_size=2256, multiple_of=256, ffn_dim_multiplier=None, norm_eps=1e-05, rope_theta=500000, max_seq_len=64, depth_init=True, norm_type='rmsnorm')
+[rank3]:2025-01-10 14:53:56,571 - root - INFO - Building llama3 debugmodel with ModelArgs(dim=256, n_layers=16, n_heads=16, n_kv_heads=None, vocab_size=2256, multiple_of=256, ffn_dim_multiplier=None, norm_eps=1e-05, rope_theta=500000, max_seq_len=64, depth_init=True, norm_type='rmsnorm')
+[rank0]:2025-01-10 14:53:56,766 - root - INFO - [34mModel llama3 debugmodel [31msize: 14,795,008 total parameters[39m
+[rank0]:2025-01-10 14:53:56,766 - root - INFO - No 'pipeline_parallel_split_points' provided so the generated splits are: ['layers.2', 'layers.4', 'layers.6', 'layers.8', 'layers.10', 'layers.12', 'layers.14'] This may be sub-optimal as the number of layers per stage may be unbalanced.
+[rank0]:[rank0]:V0110 14:53:56.781000 6666 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=0, self.is_first=True, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank0]:2025-01-10 14:53:56,781 - root - INFO - PP rank 0 is building stage_idx 0 with start_layer None, stop_layer layers.2
+[rank2]:2025-01-10 14:53:56,785 - root - INFO - [34mModel llama3 debugmodel [31msize: 14,795,008 total parameters[39m
+[rank2]:2025-01-10 14:53:56,785 - root - INFO - No 'pipeline_parallel_split_points' provided so the generated splits are: ['layers.2', 'layers.4', 'layers.6', 'layers.8', 'layers.10', 'layers.12', 'layers.14'] This may be sub-optimal as the number of layers per stage may be unbalanced.
+[rank1]:2025-01-10 14:53:56,773 - root - INFO - [34mModel llama3 debugmodel [31msize: 14,795,008 total parameters[39m
+[rank1]:2025-01-10 14:53:56,773 - root - INFO - No 'pipeline_parallel_split_points' provided so the generated splits are: ['layers.2', 'layers.4', 'layers.6', 'layers.8', 'layers.10', 'layers.12', 'layers.14'] This may be sub-optimal as the number of layers per stage may be unbalanced.
+[rank1]:[rank1]:V0110 14:53:56.788000 6668 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=1, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank1]:2025-01-10 14:53:56,789 - root - INFO - PP rank 1 is building stage_idx 1 with start_layer layers.2, stop_layer layers.4
+[rank3]:2025-01-10 14:53:56,768 - root - INFO - [34mModel llama3 debugmodel [31msize: 14,795,008 total parameters[39m
+[rank3]:2025-01-10 14:53:56,769 - root - INFO - No 'pipeline_parallel_split_points' provided so the generated splits are: ['layers.2', 'layers.4', 'layers.6', 'layers.8', 'layers.10', 'layers.12', 'layers.14'] This may be sub-optimal as the number of layers per stage may be unbalanced.
+[rank3]:[rank3]:V0110 14:53:56.783000 6673 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=3, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank3]:2025-01-10 14:53:56,784 - root - INFO - PP rank 3 is building stage_idx 3 with start_layer layers.6, stop_layer layers.8
+[rank0]:[rank0]:V0110 14:53:56.794000 6666 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=7, self.is_first=False, self.is_last=True, self.num_stages=8,  running shape-inference at runtime
+[rank0]:2025-01-10 14:53:56,794 - root - INFO - PP rank 0 is building stage_idx 7 with start_layer layers.14, stop_layer None
+[rank0]:2025-01-10 14:53:56,794 - root - INFO - pipeline_parallel_stages_per_rank=[[0, 7], [1, 6], [2, 5], [3, 4]]
+[rank0]:2025-01-10 14:53:56,794 - root - INFO - stage_index_to_group_rank: {0: 0, 7: 0, 1: 1, 6: 1, 2: 2, 5: 2, 3: 3, 4: 3}
+[rank0]:[rank0]:I0110 14:53:56.794000 6666 torch/distributed/pipelining/schedules.py:254] Using ScheduleZBVZeroBubble
+[rank0]:[rank0]:I0110 14:53:56.795000 6666 torch/distributed/pipelining/schedules.py:254] Using _PipelineScheduleRuntime
+[rank0]:2025-01-10 14:53:56,797 - root - INFO - Using pipeline schedule ZBVZeroBubble with 8 and 8 stages.
+[rank2]:[rank2]:V0110 14:53:56.800000 6671 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=2, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank2]:2025-01-10 14:53:56,800 - root - INFO - PP rank 2 is building stage_idx 2 with start_layer layers.4, stop_layer layers.6
+[rank2]:[rank2]:V0110 14:53:56.814000 6671 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=5, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank2]:2025-01-10 14:53:56,814 - root - INFO - PP rank 2 is building stage_idx 5 with start_layer layers.10, stop_layer layers.12
+[rank2]:2025-01-10 14:53:56,814 - root - INFO - pipeline_parallel_stages_per_rank=[[0, 7], [1, 6], [2, 5], [3, 4]]
+[rank2]:2025-01-10 14:53:56,814 - root - INFO - stage_index_to_group_rank: {0: 0, 7: 0, 1: 1, 6: 1, 2: 2, 5: 2, 3: 3, 4: 3}
+[rank2]:[rank2]:I0110 14:53:56.814000 6671 torch/distributed/pipelining/schedules.py:254] Using ScheduleZBVZeroBubble
+[rank2]:[rank2]:I0110 14:53:56.815000 6671 torch/distributed/pipelining/schedules.py:254] Using _PipelineScheduleRuntime
+[rank2]:2025-01-10 14:53:56,817 - root - INFO - Using pipeline schedule ZBVZeroBubble with 8 and 8 stages.
+[rank1]:[rank1]:V0110 14:53:56.801000 6668 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=6, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank1]:2025-01-10 14:53:56,802 - root - INFO - PP rank 1 is building stage_idx 6 with start_layer layers.12, stop_layer layers.14
+[rank1]:2025-01-10 14:53:56,802 - root - INFO - pipeline_parallel_stages_per_rank=[[0, 7], [1, 6], [2, 5], [3, 4]]
+[rank1]:2025-01-10 14:53:56,802 - root - INFO - stage_index_to_group_rank: {0: 0, 7: 0, 1: 1, 6: 1, 2: 2, 5: 2, 3: 3, 4: 3}
+[rank1]:[rank1]:I0110 14:53:56.802000 6668 torch/distributed/pipelining/schedules.py:254] Using ScheduleZBVZeroBubble
+[rank1]:[rank1]:I0110 14:53:56.803000 6668 torch/distributed/pipelining/schedules.py:254] Using _PipelineScheduleRuntime
+[rank1]:2025-01-10 14:53:56,804 - root - INFO - Using pipeline schedule ZBVZeroBubble with 8 and 8 stages.
+[rank3]:[rank3]:V0110 14:53:56.797000 6673 torch/distributed/pipelining/stage.py:1313] Finished pipeline stage init, self.stage_index=4, self.is_first=False, self.is_last=False, self.num_stages=8,  running shape-inference at runtime
+[rank3]:2025-01-10 14:53:56,797 - root - INFO - PP rank 3 is building stage_idx 4 with start_layer layers.8, stop_layer layers.10
+[rank3]:2025-01-10 14:53:56,797 - root - INFO - pipeline_parallel_stages_per_rank=[[0, 7], [1, 6], [2, 5], [3, 4]]
+[rank3]:2025-01-10 14:53:56,797 - root - INFO - stage_index_to_group_rank: {0: 0, 7: 0, 1: 1, 6: 1, 2: 2, 5: 2, 3: 3, 4: 3}
+[rank3]:[rank3]:I0110 14:53:56.797000 6673 torch/distributed/pipelining/schedules.py:254] Using ScheduleZBVZeroBubble
+[rank3]:[rank3]:I0110 14:53:56.798000 6673 torch/distributed/pipelining/schedules.py:254] Using _PipelineScheduleRuntime
+[rank3]:2025-01-10 14:53:56,800 - root - INFO - Using pipeline schedule ZBVZeroBubble with 8 and 8 stages.
+[rank0]:2025-01-10 14:53:57,248 - root - INFO - CUDA memory usage for model: 0.03GiB(0.04%)
+[rank0]:2025-01-10 14:53:57,249 - root - INFO - Training starts at step 1, with local batch size 16, global batch size 16, sequence length 64, total steps 10 (warmup 2)
+[rank0]:[rank0]:V0110 14:53:57.255000 6666 torch/distributed/pipelining/stage.py:1331] Shape inference: stage 0 skipping recv, because shape info passed in via `args`
+[rank0]:[rank0]:V0110 14:53:57.256000 6666 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 0 running forward
+[rank2]:2025-01-10 14:53:57,248 - root - INFO - CUDA memory usage for model: 0.01GiB(0.02%)
+[rank2]:2025-01-10 14:53:57,250 - root - INFO - Training starts at step 1, with local batch size 16, global batch size 16, sequence length 64, total steps 10 (warmup 2)
+[rank2]:[rank2]:V0110 14:53:57.255000 6671 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 2 receiving from stage 1
+[rank2]:[rank2]:[W110 14:53:57.436974570 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank1]:2025-01-10 14:53:57,246 - root - INFO - CUDA memory usage for model: 0.01GiB(0.02%)
+[rank1]:2025-01-10 14:53:57,247 - root - INFO - Training starts at step 1, with local batch size 16, global batch size 16, sequence length 64, total steps 10 (warmup 2)
+[rank3]:2025-01-10 14:53:57,247 - root - INFO - CUDA memory usage for model: 0.01GiB(0.02%)
+[rank3]:2025-01-10 14:53:57,249 - root - INFO - Training starts at step 1, with local batch size 16, global batch size 16, sequence length 64, total steps 10 (warmup 2)
+[rank3]:[rank3]:V0110 14:53:57.255000 6673 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 3 receiving from stage 2
+[rank3]:[rank3]:[W110 14:53:57.436947844 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank1]:[rank1]:V0110 14:53:57.253000 6668 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 1 receiving from stage 0
+[rank1]:[rank1]:[W110 14:53:57.434939069 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank0]:[rank0]:V0110 14:53:57.829000 6666 torch/distributed/pipelining/stage.py:1395] Shape inference: stage 0 sending to stage 1
+[rank0]:[rank0]:[W110 14:53:57.011614422 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank0]:[rank0]:V0110 14:54:00.320000 6666 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 7 receiving from stage 6
+[rank0]:[rank0]:[W110 14:54:00.502425819 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank1]:[rank1]:V0110 14:54:00.327000 6668 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 1 running forward
+[rank1]:[rank1]:V0110 14:54:00.983000 6668 torch/distributed/pipelining/stage.py:1395] Shape inference: stage 1 sending to stage 2
+[rank1]:[rank1]:[W110 14:54:00.165713226 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank2]:[rank2]:V0110 14:54:01.441000 6671 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 2 running forward
+[rank1]:[rank1]:V0110 14:54:01.418000 6668 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 6 receiving from stage 5
+[rank2]:[rank2]:V0110 14:54:02.062000 6671 torch/distributed/pipelining/stage.py:1395] Shape inference: stage 2 sending to stage 3
+[rank2]:[rank2]:[W110 14:54:02.244645967 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank2]:[rank2]:V0110 14:54:03.370000 6671 torch/distributed/pipelining/stage.py:1341] Shape inference: stage 5 receiving from stage 4
+[rank3]:[rank3]:V0110 14:54:03.383000 6673 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 3 running forward
+[rank3]:[rank3]:V0110 14:54:03.517000 6673 torch/distributed/pipelining/stage.py:1388] Shape inference: stage 3 skipping send to next stage
+[rank3]:[rank3]:V0110 14:54:03.518000 6673 torch/distributed/pipelining/stage.py:1331] Shape inference: stage 4 skipping recv, because shape info passed in via `args`
+[rank3]:[rank3]:V0110 14:54:03.518000 6673 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 4 running forward
+[rank3]:[rank3]:V0110 14:54:03.521000 6673 torch/distributed/pipelining/stage.py:1395] Shape inference: stage 4 sending to stage 5
+[rank3]:[rank3]:[W110 14:54:03.703497118 ProcessGroupNCCL.cpp:3438] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS=1 has no effect for point-to-point collectives. (function operator())
+[rank0]:[rank0]:V0110 14:54:03.821000 6666 torch/distributed/pipelining/stage.py:1361] Shape inference: stage 7 running forward
+[rank0]:[rank0]:V0110 14:54:03.824000 6666 torch/distributed/pipelining/stage.py:1388] Shape inference: stage 7 skipping send to next stage
+[rank0]:[rank0]:V0110 14:54:03.824000 6666 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 0, action 0UNSHARD
+[rank0]:[rank0]:V0110 14:54:03.825000 6666 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 1, action 7UNSHARD
+[rank0]:[rank0]:V0110 14:54:03.825000 6666 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 2, action 0F0
+[rank0]:[rank0]:V0110 14:54:03.834000 6666 torch/distributed/pipelining/stage.py:714] [Stage 0] Forwarded chunk 0, outputs: Tensor(torch.Size([2, 64, 256]), grad=True, dtype=torch.float32)
+[rank0]:[rank0]:V0110 14:54:03.834000 6666 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 3, action 0SEND_F0
+[rank0]:[rank0]:V0110 14:54:03.834000 6666 torch/distributed/pipelining/stage.py:449] [Stage 0] Sending tensor to Stage 1: torch.Size([2, 64, 256])
+[rank0]:[rank0]:V0110 14:54:03.834000 6666 torch/distributed/pipelining/schedules.py:410] batch_p2p [P2POp(isend pg=0, group_src=0, group_dst=1,  torch.Size([2, 64, 256]), torch.float32)]
+[rank3]:[rank3]:V0110 14:54:03.808000 6673 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 0, action 3UNSHARD
+[rank3]:[rank3]:V0110 14:54:03.808000 6673 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 1, action 4UNSHARD
+[rank3]:[rank3]:V0110 14:54:03.808000 6673 torch/distributed/pipelining/schedules.py:1528] _PipelineScheduleRuntime running time_step 2, action 3RECV_F0
+[rank3]:[rank3]:V0110 14:54:03.808000 6673 torch/distributed/pipelining/schedules.py:410] batch_p2p [P2POp(irecv pg=0, group_src=2, group_dst=3,  torch.Size([2, 64, 256]), torch.float32)]
+W0110 14:55:05.687000 6198 torch/distributed/elastic/agent/server/api.py:719] Received Signals.SIGINT death signal, shutting down workers
+W0110 14:55:05.687000 6198 torch/distributed/elastic/multiprocessing/api.py:898] Sending process 6666 closing signal SIGINT
+W0110 14:55:05.688000 6198 torch/distributed/elastic/multiprocessing/api.py:898] Sending process 6668 closing signal SIGINT
+W0110 14:55:05.688000 6198 torch/distributed/elastic/multiprocessing/api.py:898] Sending process 6671 closing signal SIGINT
+W0110 14:55:05.688000 6198 torch/distributed/elastic/multiprocessing/api.py:898] Sending process 6673 closing signal SIGINT
+Traceback (most recent call last):
+  File "/home/howardhuang/local/torchtitan/tests/integration_tests.py", line 531, in <module>
+    main()
+  File "/home/howardhuang/local/torchtitan/tests/integration_tests.py", line 527, in main
+    run_tests(args)
+  File "/home/howardhuang/local/torchtitan/tests/integration_tests.py", line 508, in run_tests
+    run_test(test_flavor, full_path, args.output_dir)
+  File "/home/howardhuang/local/torchtitan/tests/integration_tests.py", line 481, in run_test
+    result = _run_cmd(cmd)
+  File "/home/howardhuang/local/torchtitan/tests/integration_tests.py", line 445, in _run_cmd
+    return subprocess.run([cmd], text=True, shell=True)
+  File "/home/howardhuang/.conda/envs/titan/lib/python3.10/subprocess.py", line 505, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+  File "/home/howardhuang/.conda/envs/titan/lib/python3.10/subprocess.py", line 1146, in communicate
+    self.wait()
+  File "/home/howardhuang/.conda/envs/titan/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/howardhuang/.conda/envs/titan/lib/python3.10/subprocess.py", line 1959, in _wait
+    (pid, sts) = self._try_wait(0)
+  File "/home/howardhuang/.conda/envs/titan/lib/python3.10/subprocess.py", line 1917, in _try_wait
+    (pid, sts) = os.waitpid(self.pid, wait_flags)
+KeyboardInterrupt
+W0110 14:55:35.689000 6198 torch/distributed/elastic/multiprocessing/api.py:917] Unable to shutdown process 6666 via Signals.SIGINT, forcefully exiting via Signals.SIGKILL
