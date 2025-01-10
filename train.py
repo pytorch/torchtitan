@@ -429,7 +429,13 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
+    print("IN MAIN")
     config = JobConfig()
     config.parse_args()
+
+    # import os
+    # os.environ["NCCL_DEBUG"] = "INFO"
+    # os.environ["NCCL_DEBUG_SUBSYS"] = "ALL"
+
     main(config)
     torch.distributed.destroy_process_group()

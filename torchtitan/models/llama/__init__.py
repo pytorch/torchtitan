@@ -11,7 +11,7 @@ from torchtitan.models.llama.model import ModelArgs, Transformer
 __all__ = ["Transformer"]
 
 llama3_configs = {
-    "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
+    "debugmodel": ModelArgs(dim=256, n_layers=16, n_heads=16, rope_theta=500000),
     "8B": ModelArgs(
         dim=4096,
         n_layers=32,

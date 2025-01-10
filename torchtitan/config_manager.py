@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from typing import Tuple, Union
@@ -27,6 +28,15 @@ TORCH_DTYPE_MAP = {
 
 def string_list(raw_arg):
     return raw_arg.split(",")
+
+
+def parse_json_list_of_lists(arg):
+    print(f"{arg=}")
+    try:
+        # Parse the JSON string into a Python object
+        return json.loads(arg)
+    except json.JSONDecodeError:
+        raise argparse.ArgumentTypeError("Invalid JSON format for list of lists")
 
 
 class JobConfig:
@@ -337,7 +347,6 @@ class JobConfig:
                 PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
             """,
         )
-
         self.parser.add_argument(
             "--experimental.pipeline_parallel_microbatches",
             type=int,
@@ -348,6 +357,27 @@ class JobConfig:
                 The global training batch size must be evenly divisible by the number of microbatches.
 
                 The default value will be the number of pipeline stages, if unspecified.
+            """,
+        )
+        self.parser.add_argument(
+            "--experimental.pipeline_parallel_stages_per_rank",
+            type=string_list,
+            nargs="+",
+            default=[],
+            help="""
+                The list of stages for each rank. The argument should be a
+                list of list of ints. Each index in the list represents the rank, and the list at each index
+                represents the stages for that rank. For example for 2 rank, 2 stage interleaved schedule it would look like:
+                [0, 2], [1, 3].
+
+                For a V-shaped schedule this would be different stage layout, e.g.:
+                [0, 7, 8], [1, 6, 9], [2, 5, 10], [3, 4, 11]
+                Rank 0: 0       7 8
+                Rank 1:  1     6   9
+                Rank 2:   2   5     10
+                Rank 3:    3 4        11
+
+                By default, the stage id to rank mapping is set to the interleaved format as shown above.
             """,
         )
         self.parser.add_argument(
@@ -684,6 +714,8 @@ class JobConfig:
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
+            elif arg == "experimental.pipeline_parallel_stages_per_rank":
+                aux_parser.add_argument("--" + arg, type=parse_json_list_of_lists)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
 
