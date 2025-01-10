@@ -56,4 +56,5 @@ selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac ba
 
 [float8]
 enable_float8_linear = false
-no_compile = false # TODO: should this go in [experimental]?
+float8nocompile = false # TODO: should this go in [experimental]?
+float8nocompile_ac = false

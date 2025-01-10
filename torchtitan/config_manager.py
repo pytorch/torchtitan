@@ -568,9 +568,14 @@ class JobConfig:
             help="float8 scaling for input, dynamic (default) or delayed",
         )
         self.parser.add_argument(
-            "--float8.no_compile",
+            "--float8.float8nocompile",
             action="store_true",
             help="use the float8nocompile prototype implementation",
+        )
+        self.parser.add_argument(
+            "--float8.float8nocompile_ac",
+            action="store_true",
+            help="use activation checkpointing with float8nocompile linear layers",
         )
 
         # communications library settings

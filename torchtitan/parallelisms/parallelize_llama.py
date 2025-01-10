@@ -7,6 +7,7 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
+import os
 from collections import defaultdict
 
 import torch
@@ -299,11 +300,21 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
-        model.layers.register_module(layer_id, transformer_block)
+    compile_linear_only = bool(os.environ.get("TORCHTITAN_COMPILE_LINEAR_ONLY", False))
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    if compile_linear_only:
+        logger.info("Compiling linear layers with torch.compile")
+        for name, child in model.named_children():
+            if isinstance(child, torch.nn.Linear):
+                new_child = torch.compile(child)
+                setattr(model, name, new_child)
+            else:
+                apply_compile(child)
+    else:
+        logger.info("Compiling each TransformerBlock with torch.compile")
+        for layer_id, transformer_block in model.layers.named_children():
+            transformer_block = torch.compile(transformer_block, fullgraph=True)
+            model.layers.register_module(layer_id, transformer_block)
 
 
 def apply_fsdp(

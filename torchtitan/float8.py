@@ -47,7 +47,8 @@ class Float8Handler:
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
-        self.use_float8nocompile = float8_config.no_compile
+        self.use_float8nocompile = float8_config.float8nocompile
+        self.use_float8nocompile_ac = float8_config.float8nocompile_ac
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
@@ -104,8 +105,10 @@ class Float8Handler:
                 model,
                 config=self.config,
                 module_filter_fn=lambda mod, fqn: fqn != "output",
+                use_activation_checkpointing=self.use_float8nocompile_ac,
             )
         else:
+            logger.info("Using float8 training")
             from torchao.float8 import convert_to_float8_training
 
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
