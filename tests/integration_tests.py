@@ -32,6 +32,7 @@ class OverrideDefinitions:
     test_name: str = "default"
     ngpu: int = 4
     model_flavor: str = "debugmodel"
+    # model_flavor: str = "8B"
 
     def __repr__(self):
         return self.test_descr
@@ -148,6 +149,32 @@ def build_test_list():
             "PP looped zero bubble test",
             "pp_looped_zero_bubble",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                    "--experimental.pipeline_parallel_stages_per_rank [[0,7],[1,6],[2,5],[3,4]]",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_v_shape_zb",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 8",
+                    # "--training.data_parallel_shard_degree 8",
+                    "--experimental.pipeline_parallel_schedule Interleaved1F1B",
+                    # "--experimental.pipeline_parallel_microbatches 16",
+                ],
+            ],
+            "sandbox",
+            "sandbox",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [

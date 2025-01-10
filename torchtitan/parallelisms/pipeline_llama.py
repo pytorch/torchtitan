@@ -103,7 +103,13 @@ def pipeline_llama_manual_split(
 
     stages = []
     models = []
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
+
+    if job_config.experimental.pipeline_parallel_schedule == "ZBVZeroBubble":
+        style = "v"
+    else:
+        style = "loop"
+
+    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
         start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
         stop_layer = splits[stage_idx] if stage_idx < num_stages - 1 else None
         stage, model_chunk = _build_stage(
