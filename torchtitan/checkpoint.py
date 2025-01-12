@@ -263,7 +263,7 @@ class CheckpointManager:
         self.begin_time = time.monotonic()
 
     def _create_checkpoint_id(self, step: int) -> str:
-        """Convert step to checkpoint id acceptable by dcp.save
+        """Convert step to checkpoint id acceptable by dcp.save.
 
         Can be overriden for compatibility with custom storage_reader/storage_writer
         """
@@ -439,7 +439,7 @@ class CheckpointManager:
             self.staging = False
 
     def _check_checkpoint_exitsts(self, step: int) -> bool:
-        """Check if a checkpoint has been fully written for the corresponding step
+        """Check if a checkpoint has been fully written for the corresponding step.
 
         Can be overriden for compatibility with custom storage_reader/storage_writer
         """
@@ -452,7 +452,7 @@ class CheckpointManager:
         """List steps that have their corresponding directories created.
 
         Failed checkpoints are also returned here,
-        existance of .metadata should be checked separately
+        existance of .metadata should be checked separately.
 
         Can be overriden for compatibility with custom storage_reader/storage_writer
         """
@@ -515,16 +515,22 @@ class CheckpointManager:
         states.update(original_stateful_states)
         return True
 
+    def _remove_checkpoint(self, step: int) -> None:
+        """Remove a checkpoint for the given step.
+        
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+        path = self._create_checkpoint_id(step)
+
+        logger.info(f"Deleting old checkpoint {path}")
+        shutil.rmtree(path, ignore_errors=True)
+
     def _purge_stale_checkpoints(self):
         if self.keep_latest_k > 0:
-            discovered_checkpoints = [
-                (step, self._create_checkpoint_id(step))
-                for step in self._discover_checkpointed_steps()
-            ]
-
+            discovered_checkpoints = self._discover_checkpointed_steps()
             discovered_checkpoints.sort()
+
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
-            for _, path in to_delete:
-                logger.info(f"Deleting old checkpoint {path}")
-                shutil.rmtree(path, ignore_errors=True)
+            for step in to_delete:
+                self._remove_checkpoint(step)
