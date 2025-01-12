@@ -201,7 +201,10 @@ def main(job_config: JobConfig):
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
             world_size == 1
-        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        ), "Must create seed checkpoint using a single device, to disable sharding"
+        assert (
+            job_config.checkpoint.enable_checkpoint
+        ), "Must enable checkpointing when creating a seed checkpoint"
         checkpoint.save(curr_step=0, force=True)
         logger.info("Created seed checkpoint")
         return

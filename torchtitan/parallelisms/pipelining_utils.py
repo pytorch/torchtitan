@@ -107,7 +107,7 @@ of stages ({num_total_stages}) which may result in a bubble in the pipeline."
     )
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} \
-with {n_microbatches} and {num_total_stages} stages."
+with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:
