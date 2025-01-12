@@ -449,7 +449,10 @@ class CheckpointManager:
         return os.path.isfile(metadata_probe)
 
     def _discover_checkpointed_steps(self) -> List[int]:
-        """List steps that have their corresponding directories created
+        """List steps that have their corresponding directories created.
+
+        Failed checkpoints are also returned here,
+        existance of .metadata should be checked separately
 
         Can be overriden for compatibility with custom storage_reader/storage_writer
         """
