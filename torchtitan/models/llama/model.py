@@ -291,9 +291,6 @@ class TransformerBlock(nn.Module):
         self.dim = model_args.dim
         self.attention = Attention(model_args)
         # removed Self.feedforward
-        print(f"layer_id: {layer_id}")
-        print(f"{model_args=}")
-        print(f"{model_args.enable_moe=}")
 
         self.is_moe_model = model_args.enable_moe
         self.is_dense_model = not self.is_moe_model

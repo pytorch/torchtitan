@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -62,6 +63,13 @@ def parallelize_llama(
             loss_parallel=parallel_dims.loss_parallel_enabled,
             enable_float8=job_config.float8.enable_float8_linear,
             enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
+        )
+    ep_mode = job_config.experimental.expert_parallel_mode
+    if ep_mode != "none":
+        apply_ep(
+            model,
+            ep_mode=ep_mode,
+            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -208,6 +216,74 @@ def apply_tp(
         f"Applied {'Float8 ' if enable_float8 else ''}{'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )
+
+
+def apply_ep(
+    model: nn.Module,
+    ep_mode: str,
+    tp_mesh: Optional[DeviceMesh] = None,
+):
+    from torch.distributed.tensor import Partial
+    from torchtitan.parallelisms.expert_parallel import (
+        ExpertParallel,
+        PrepareModuleInputOutput,
+        TensorParallel,
+    )
+
+    if ep_mode == "tp":
+        assert tp_mesh is not None
+
+        for _, transformer_block in model.layers.items():
+            moe_plan = {
+                # input / output sharding on the seqlen dim
+                "moe": PrepareModuleInputOutput(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                    output_layouts=(Partial(),),
+                    desired_output_layouts=(Shard(1),),
+                ),
+                # Router Parallel, sharding on the expert dim
+                "moe.router.gate": ColwiseParallel(),
+                # input / output sharding on the expert dim
+                "moe.experts": TensorParallel(
+                    input_layouts=Shard(0),
+                    output_layouts=Shard(0),
+                ),
+                "moe.shared_expert": TensorParallel(),
+            }
+            parallelize_module(
+                module=transformer_block,
+                device_mesh=tp_mesh,
+                parallelize_plan=moe_plan,
+            )
+
+    elif ep_mode == "tp2ep":
+        print(f"Applying {ep_mode} to the model")
+        print(f"tp_mesh: {tp_mesh} ")
+        assert tp_mesh is not None
+
+        for _, transformer_block in model.layers.items():
+            moe_plan = {
+                # input / output sharding on the seqlen dim
+                "moe": PrepareModuleInputOutput(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                    output_layouts=(Partial(),),
+                    desired_output_layouts=(Shard(1),),
+                ),
+                # Router Parallel, sharding on the expert dim
+                "moe.router.gate": ColwiseParallel(),
+                # input / output replicated
+                "moe.experts": ExpertParallel(),
+                "moe.shared_expert": TensorParallel(),
+            }
+            parallelize_module(
+                module=transformer_block,
+                device_mesh=tp_mesh,
+                parallelize_plan=moe_plan,
+            )
+
+    logger.info(f"Applied {ep_mode} Expert Parallelism to the model")
 
 
 # for selective op activation checkpointing
