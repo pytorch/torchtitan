@@ -517,7 +517,7 @@ class CheckpointManager:
 
     def _remove_checkpoint(self, step: int) -> None:
         """Remove a checkpoint for the given step.
-        
+
         Can be overriden for compatibility with custom storage_reader/storage_writer
         """
         path = self._create_checkpoint_id(step)
