@@ -573,7 +573,7 @@ class JobConfig:
             help="use the float8nocompile prototype implementation",
         )
         self.parser.add_argument(
-            "--float8.float8nocompile_ac",
+            "--float8.float8nocompile_no_precompute_for_backward",
             action="store_true",
             help="use activation checkpointing with float8nocompile linear layers",
         )
