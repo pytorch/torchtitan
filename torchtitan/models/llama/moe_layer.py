@@ -9,6 +9,8 @@ from typing import Callable, Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchtitan.logging import init_logger, logger
+from torchtitan.moe_token_tracker import ExpertTokenTracker
 
 
 class GroupedExperts(nn.Module):
@@ -99,6 +101,9 @@ class ExpertChoiceTopKRouter(nn.Module):
         self.num_experts = num_experts
         self.capacity_factor = capacity_factor
         self.use_sigmoid = use_sigmoid
+        logger.info(
+            f"Num Experts: {self.num_experts}, Capacity Factor: {self.capacity_factor}"
+        )
 
     def forward(self, x: torch.Tensor):
         """
@@ -121,11 +126,15 @@ class ExpertChoiceTopKRouter(nn.Module):
         tokens_per_expert += -tokens_per_expert % 8
         # Take the smaller of tokens_per_expert and the number of tokens
         tokens_per_expert = min(tokens_per_expert, x.shape[0])
+        logger.info(f"tokens_per_expert: {tokens_per_expert}")
         # top_scores shape (num_experts, tokens_per_expert)
         top_scores, selected_token_indices = torch.topk(
             scores, k=tokens_per_expert, dim=1
         )
-
+        # print("top_scores", {top_scores}, top_scores.shape)
+        # logger.info(
+        #    f"selected tokens: {selected_token_indices} {selected_token_indices.shape}"
+        # )
         return top_scores, selected_token_indices
 
     def init_weights(self, init_std: float):
@@ -149,11 +158,13 @@ class MoE(nn.Module):
         experts: nn.Module,
         router: nn.Module,
         shared_expert: Optional[nn.Module] = None,
+        token_tracker: Optional[ExpertTokenTracker] = None,
     ):
         super().__init__()
         self.experts = experts
         self.router = router
         self.shared_expert = shared_expert
+        self.token_tracker = token_tracker
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -168,16 +179,20 @@ class MoE(nn.Module):
         # routed_input shape (num_experts*tokens_per_expert, dim) for EC
         x = x.reshape(bz * slen, dim)
         top_scores, selected_token_indices = self.router(x)
+        self.token_tracker.record_assignments(selected_token_indices)
+
         num_experts, _ = top_scores.shape
 
         # token_indices shape (num_experts*tokens_per_expert, dim)
         token_indices = selected_token_indices.reshape(-1, 1).expand(-1, dim)
+
         # routed_input shape (num_experts*tokens_per_expert, dim)
         routed_input = torch.gather(x, dim=0, index=token_indices)
         routed_input = routed_input * top_scores.reshape(-1, 1)
 
         # routed_input shape (num_experts, tokens_per_expert, dim_in)
         routed_input = routed_input.reshape(num_experts, -1, dim)
+
         # routed_output shape (num_experts, tokens_per_expert, dim_out)
         routed_output = self.experts(routed_input)
         # routed_output shape (num_experts*tokens_per_expert, dim_out)

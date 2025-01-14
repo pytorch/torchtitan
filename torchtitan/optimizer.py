@@ -135,7 +135,8 @@ def build_optimizers(
         "betas": (0.9, 0.95),
         "weight_decay": 0.1,
         "fused": fused,
-        "foreach": not fused,
+        # "foreach": not fused,
+        "foreach": False,
     }
 
     return (

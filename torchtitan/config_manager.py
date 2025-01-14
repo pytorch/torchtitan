@@ -376,14 +376,22 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--experimental.expert_parallel_degree",
+            type=int,
+            default=1,
+            help="""
+                Expert parallelism degree. 1 means disabled.
+                When expert_parallel_mode is 'tp' or 'tp2ep', it has to be equal to tensor_parallel_degree.
+                When expert_parallel_mode is 'dp2ep', it has to be k * context_parallel_degree,
+                where k >= 1 and k | data_parallel_shard_degree.
+            """,
+        )
+        self.parser.add_argument(
             "--experimental.expert_parallel_mode",
             type=str,
             default="none",
-            choices=["none", "tp", "tp2ep"],
-            help="""
-                Expert Parallel mode.
-                'tp2ep' would use the entire TP mesh to shard non-shared experts on the num_experts dimension.
-            """,
+            choices=["none", "tp", "tp2ep", "dp2ep"],
+            help="Expert Parallel mode",
         )
         self.parser.add_argument(
             "--training.mixed_precision_param",

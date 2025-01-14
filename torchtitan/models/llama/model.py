@@ -13,7 +13,9 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchtitan.logging import logger
 from torchtitan.models.norms import build_norm
+from torchtitan.moe_token_tracker import ExpertTokenTracker
 
 
 @dataclass
@@ -285,7 +287,7 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: ModelArgs):
+    def __init__(self, layer_id: int, model_args: ModelArgs, token_tracker=None):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -294,6 +296,9 @@ class TransformerBlock(nn.Module):
 
         self.is_moe_model = model_args.enable_moe
         self.is_dense_model = not self.is_moe_model
+
+        if self.is_moe_model:
+            self.token_tracker = token_tracker
 
         if self.is_dense_model:
             self.feed_forward = FeedForward(
@@ -340,6 +345,7 @@ class TransformerBlock(nn.Module):
                     if model_args.use_shared_expert
                     else None
                 ),
+                token_tracker=self.token_tracker,
             )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
@@ -418,6 +424,12 @@ class Transformer(nn.Module):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+        self.token_tracker = None
+        if model_args.enable_moe:
+            from torchtitan.moe_token_tracker import ExpertTokenTracker
+
+            self.token_tracker = ExpertTokenTracker(model_args.n_layers)
+            logger.info(f"Using ExpertTokenTracker with {model_args.n_layers} layers")
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -432,7 +444,9 @@ class Transformer(nn.Module):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = TransformerBlock(
+                layer_id, model_args, self.token_tracker
+            )
 
         self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps

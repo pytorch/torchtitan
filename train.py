@@ -53,6 +53,8 @@ def main(job_config: JobConfig):
         cp=job_config.experimental.context_parallel_degree,
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
+        ep=job_config.experimental.expert_parallel_degree,
+        ep_mode=job_config.experimental.expert_parallel_mode,
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
     )
@@ -262,6 +264,7 @@ def main(job_config: JobConfig):
             data_loading_times.append(time.perf_counter() - data_load_start)
 
             input_ids = input_ids.to(device_type)
+            logger.info(f"input_ids: {input_ids}, labels: {labels}")
             labels = labels.to(device_type)
             optimizers.zero_grad()
 
@@ -308,12 +311,13 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            utils.clip_grad_norm_(
+            """utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],
                 job_config.training.max_norm,
                 foreach=True,
                 pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
             )
+            """
 
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
