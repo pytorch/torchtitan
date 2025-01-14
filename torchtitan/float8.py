@@ -97,6 +97,7 @@ class Float8Handler:
             logger.info("Using float8nocompile prototype")
             from torchao.prototype.float8nocompile.float8nocompile_linear_utils import (
                 convert_to_float8_nocompile_training,
+                no_precompute_for_backward_every_nth_layer,
             )
 
             # for full AC or no AC
@@ -174,22 +175,3 @@ class Float8Handler:
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             self._sync_float8_amax_and_scale_history(m)
-
-
-def no_precompute_for_backward_every_nth_layer(model: nn.Module, n: int):
-    """Set no_precompute_for_backward to True for every nth layer in the model."""
-    for layer_idx, (layer_id, transformer_block) in enumerate(
-        model.layers.named_children()
-    ):
-        if layer_idx % n == 0:
-            logger.info(f"Enabling no_precompute_for_backward to layer {layer_id}")
-            _enable_no_precompute_for_backward(transformer_block)
-
-
-def _enable_no_precompute_for_backward(model: nn.Module):
-    """Recursively set no_precompute_for_backward to True for all linear layers in the given model."""
-    for layer in model.children():
-        if isinstance(layer, nn.Linear):
-            layer.no_precompute_for_backward = True
-        else:
-            _enable_no_precompute_for_backward(layer)
