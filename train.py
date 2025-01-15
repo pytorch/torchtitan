@@ -291,10 +291,11 @@ def main(job_config: JobConfig):
                         pp_schedule.step()
 
                 # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses))
+                    torch.mean(torch.stack(losses)).to(device)
                     if is_last_stage
-                    else torch.Tensor([-1.0])
+                    else torch.tensor([-1.0], device=device)
                 )
             else:
                 # Non-PP forward / backward

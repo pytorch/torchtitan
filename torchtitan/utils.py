@@ -36,7 +36,7 @@ device_type, device_module = get_device_info()
 
 def dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
     if isinstance(x, DTensor):
-        # DTensors do not support functional collectives
+        # functional collectives do not support DTensor inputs
         x = x.full_tensor()
     assert x.numel() == 1  # required by `.item()`
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
