@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.logging import logger
@@ -425,10 +426,13 @@ class Transformer(nn.Module):
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
         self.token_tracker = None
+        self.local_rank = dist.get_rank()
         if model_args.enable_moe:
             from torchtitan.moe_token_tracker import ExpertTokenTracker
 
-            self.token_tracker = ExpertTokenTracker(model_args.n_layers)
+            self.token_tracker = ExpertTokenTracker(
+                model_args.n_layers, local_rank=self.local_rank
+            )
             logger.info(f"Using ExpertTokenTracker with {model_args.n_layers} layers")
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)

@@ -10,8 +10,8 @@ set -ex
 # use envs as local overrides for convenience
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_llama_train.sh
-NGPU=${NGPU:-"4"}
-LOG_RANK=${LOG_RANK:-0}
+NGPU=${NGPU:-"2"}
+LOG_RANK=${LOG_RANK:-0,1}
 CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
 
 overrides=""

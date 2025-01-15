@@ -20,10 +20,13 @@ class ExpertTokenTracker:
         self.token_expert_map.fill_(-1)
     """
 
-    def __init__(self, num_layers: int, base_filename: str = "token_paths"):
+    def __init__(
+        self, num_layers: int, local_rank: int = 0, base_filename: str = "token_paths"
+    ):
         self.num_layers = num_layers
         self.base_filename = base_filename
         self.reset_tracking()
+        self.local_rank = local_rank
 
     def reset_tracking(self):
         """Reset all tracking data."""
@@ -53,7 +56,9 @@ class ExpertTokenTracker:
         )
         num_elems = selected_token_indices.numel()
         shape = selected_token_indices.shape
-        print(f"record_assignments, num_elems: {num_elems}, shape: {shape}")
+        print(
+            f"record_assignments for rank {self.local_rank=}, num_elems: {num_elems}, shape: {shape}"
+        )
         # Convert tensors to CPU and numpy for processing
         # token_ids = token_ids.detach().cpu()
         # expert_assignments = expert_assignments.detach().cpu()
@@ -80,7 +85,7 @@ class ExpertTokenTracker:
         """
         base = custom_filename if custom_filename else self.base_filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        return f"{base}_{timestamp}.csv"
+        return f"{base}_{self.local_rank}_{timestamp}.csv"
 
     def save_token_paths(self, output_file: Optional[str] = None):
         """

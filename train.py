@@ -254,6 +254,7 @@ def main(job_config: JobConfig):
     ) as memory_profiler:
         while train_state.step < job_config.training.steps:
             train_state.step += 1
+            logger.info(f"step: {train_state.step}")
             gc_handler.run(train_state.step)
 
             # get batch
