@@ -99,7 +99,7 @@ class ExpertChoiceTopKRouter(nn.Module):
         self.gate = gate
         self.dim = dim
         self.num_experts = num_experts
-        self.capacity_factor = capacity_factor
+        self.capacity_factor = 3.0  # capacity_factor
         self.use_sigmoid = use_sigmoid
         logger.info(
             f"Num Experts: {self.num_experts}, Capacity Factor: {self.capacity_factor}"
@@ -185,18 +185,23 @@ class MoE(nn.Module):
 
         # token_indices shape (num_experts*tokens_per_expert, dim)
         token_indices = selected_token_indices.reshape(-1, 1).expand(-1, dim)
+        print("token_indices", {token_indices}, token_indices.shape)
 
         # routed_input shape (num_experts*tokens_per_expert, dim)
         routed_input = torch.gather(x, dim=0, index=token_indices)
+        print("routed_input", {routed_input}, routed_input.shape)
         routed_input = routed_input * top_scores.reshape(-1, 1)
 
         # routed_input shape (num_experts, tokens_per_expert, dim_in)
         routed_input = routed_input.reshape(num_experts, -1, dim)
+        print("routed_input_reshaped", {routed_input}, routed_input.shape)
 
         # routed_output shape (num_experts, tokens_per_expert, dim_out)
         routed_output = self.experts(routed_input)
+        print("routed_output", {routed_output}, routed_output.shape)
         # routed_output shape (num_experts*tokens_per_expert, dim_out)
         routed_output = routed_output.reshape(-1, dim)
+        print("routed_output_reshaped", {routed_output}, routed_output.shape)
 
         # shared expert
         if self.shared_expert is not None:

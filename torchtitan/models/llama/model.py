@@ -38,7 +38,7 @@ class ModelArgs:
 
     # MoE args
     enable_moe: bool = True
-    num_experts: int = 8
+    num_experts: int = 16
     capacity_factor: float = 1.0
     use_shared_expert: bool = True
     auto_scale_hidden_dim: bool = True

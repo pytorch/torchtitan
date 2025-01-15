@@ -12,7 +12,7 @@ __all__ = ["Transformer"]
 
 llama3_configs = {
     "debugmodel": ModelArgs(
-        dim=512,
+        dim=128,
         n_layers=2,
         n_heads=16,
         n_kv_heads=8,
