@@ -169,6 +169,10 @@ class Attention(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
+    @torch.compiler.disable
+    def SDPA(self, *args, **kwargs):
+        return F.scaled_dot_product_attention(*args, **kwargs)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -206,7 +210,8 @@ class Attention(nn.Module):
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
         # we use casual mask for training
-        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = self.SDPA(xq, xk, xv, is_causal=True)
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
