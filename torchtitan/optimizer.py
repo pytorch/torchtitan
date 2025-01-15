@@ -81,25 +81,31 @@ class OptimizersInBackwardContainer(OptimizersContainer):
     ) -> None:
         self.optimizers = []
         self.model_parts = model_parts
+        optim_dict = {}
         for model in self.model_parts:
             if name == "Adam":
                 # TODO: make the optimizer options configurable by toml/cmd args
-                optim_dict = {
-                    param: torch.optim.Adam([param], **optimizer_kwargs)
-                    for param in model.parameters()
-                }
+                optim_dict.update(
+                    {
+                        param: torch.optim.Adam([param], **optimizer_kwargs)
+                        for param in model.parameters()
+                    }
+                )
             elif name == "AdamW":
-                optim_dict = {
-                    param: torch.optim.AdamW([param], **optimizer_kwargs)
-                    for param in model.parameters()
-                }
+                optim_dict.update(
+                    {
+                        param: torch.optim.AdamW([param], **optimizer_kwargs)
+                        for param in model.parameters()
+                    }
+                )
             else:
                 raise NotImplementedError(f"Optimizer {name} not added.")
 
-            def optim_hook(param) -> None:
-                optim_dict[param].step()
-                optim_dict[param].zero_grad()
+        def optim_hook(param) -> None:
+            optim_dict[param].step()
+            optim_dict[param].zero_grad()
 
+        for model in self.model_parts:
             for param in model.parameters():
                 if param.requires_grad:
                     param.register_post_accumulate_grad_hook(optim_hook)
