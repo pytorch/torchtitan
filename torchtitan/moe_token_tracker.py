@@ -47,8 +47,13 @@ class ExpertTokenTracker:
                 f"Attempting to record assignments for layer {self.current_layer} "
                 f"but model only has {self.num_layers} layers"
             )
-        print(f"record_assignments, current_layer: {self.current_layer}")
-        print(f"record assignments: selected_token_indices: {selected_token_indices}")
+
+        print(
+            f"record assignments, layer {self.current_layer}: selected_token_indices: {selected_token_indices}"
+        )
+        num_elems = selected_token_indices.numel()
+        shape = selected_token_indices.shape
+        print(f"record_assignments, num_elems: {num_elems}, shape: {shape}")
         # Convert tensors to CPU and numpy for processing
         # token_ids = token_ids.detach().cpu()
         # expert_assignments = expert_assignments.detach().cpu()
