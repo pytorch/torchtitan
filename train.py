@@ -239,6 +239,8 @@ def main(job_config: JobConfig):
 
     checkpoint.reset()
 
+    num_mbs = 4
+
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
@@ -257,6 +259,8 @@ def main(job_config: JobConfig):
             train_state.step += 1
             gc_handler.run(train_state.step)
 
+            sync_step = train_state.step % num_mbs == 0
+
             # get batch
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
@@ -266,7 +270,7 @@ def main(job_config: JobConfig):
 
             input_ids = input_ids.to(device_type)
             labels = labels.to(device_type)
-            optimizers.zero_grad()
+            # optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
             optional_context_parallel_ctx = (
@@ -301,6 +305,29 @@ def main(job_config: JobConfig):
                     else torch.Tensor([-1.0])
                 )
             else:
+                # self.submod.set_is_last_backward(False)
+                # self.submod.set_reshard_after_backward(False)
+                # self.submod.set_requires_gradient_sync(False)
+                # result = perform_backward(backward_type)()
+                # if last_backward:
+                #     # perform_pp_grad_scaling()
+                #     # Manually call post backward for FSDP
+                #     def run_post_backward(fsdp_module: FSDPModule) -> None:
+                #         fsdp_module.set_is_last_backward(True)
+                #         fsdp_module.set_reshard_after_backward(True)
+                #         fsdp_module.set_requires_gradient_sync(True)
+                #         fsdp_state = fully_shard.state(fsdp_module)  # type: ignore[arg-type]
+                #         for state in fsdp_state._state_ctx.all_states:
+                #             if state._fsdp_param_group:
+                #                 state._fsdp_param_group.post_backward()
+                #         fsdp_state._root_post_backward_final_callback()
+                #     run_post_backward(self.submod)
+                #     perform_pp_grad_scaling()
+
+                model.set_is_last_backward(sync_step)
+                model.set_reshard_after_backward(sync_step)
+                model.set_requires_gradient_sync(sync_step)
+
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
@@ -309,6 +336,11 @@ def main(job_config: JobConfig):
                     # need to free to before bwd to avoid peaking memory
                     del pred
                     loss.backward()
+
+            if sync_step:
+                for name, p in model.named_parameters():
+                    assert p.grad is not None, name
+                    p.grad.div_(num_mbs)
 
             # clip gradients
             utils.clip_grad_norm_(
@@ -321,10 +353,12 @@ def main(job_config: JobConfig):
             # sync float8 amaxes and scales
             float8_handler.sync_float8_amax_and_scale_history(model_parts)
 
-            # optimizer step
-            checkpoint.maybe_wait_for_staging()
-            optimizers.step()
-            lr_schedulers.step()
+            if sync_step:
+                # optimizer step
+                checkpoint.maybe_wait_for_staging()
+                optimizers.step()
+                lr_schedulers.step()
+                optimizers.zero_grad()
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
@@ -333,10 +367,11 @@ def main(job_config: JobConfig):
             losses_since_last_log.append(loss)
 
             # log metrics
-            if (
-                train_state.step == 1
-                or train_state.step % job_config.metrics.log_freq == 0
-            ):
+            # if (
+            #     train_state.step == 1
+            #     or train_state.step % job_config.metrics.log_freq == 0
+            # ):
+            if sync_step:
                 losses = [loss.item() for loss in losses_since_last_log]
                 avg_loss, max_loss = sum(losses) / len(losses), max(losses)
                 if (
@@ -388,7 +423,7 @@ def main(job_config: JobConfig):
                     "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
-                metric_logger.log(metrics, step=train_state.step)
+                metric_logger.log(metrics, step=train_state.step // num_mbs)
 
                 logger.info(
                     f"{color.cyan}step: {train_state.step:2}  "
