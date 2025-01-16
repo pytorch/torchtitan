@@ -136,7 +136,7 @@ def build_optimizers(
     optim_in_bwd = job_config.optimizer.early_step_in_backward
     if optim_in_bwd and job_config.experimental.pipeline_parallel_degree > 1:
         raise NotImplementedError(
-            "OptimizersInBackwardContainer is not supported with pipeline parallelism"
+            "Optimizers in backward is not supported with pipeline parallelism."
         )
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
