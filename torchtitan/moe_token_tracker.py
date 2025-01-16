@@ -1,7 +1,11 @@
 import csv
+import glob
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -32,6 +36,7 @@ class ExpertTokenTracker:
         self.reset_tracking()
         self.local_rank = local_rank
         self.num_tokens = num_tokens
+        self.save_path = None
         # routing assignment for each layer
         self.layer_assignments = {}
 
@@ -54,6 +59,10 @@ class ExpertTokenTracker:
         [rank0]:        [4, 6, 3, 5, 7, 2, 1, 0]], device='cuda:0') torch.Size([4, 8])
 
         """
+        # reset on first iter
+        if self.current_layer == 0:
+            self.reset_tracking()
+
         if self.current_layer >= self.num_layers:
             raise ValueError(
                 f"Attempting to record assignments for layer {self.current_layer} "
@@ -80,7 +89,6 @@ class ExpertTokenTracker:
             print(f"\nrank {self.local_rank=}, path_summary: {path_summary}")
             print(f"rank {self.local_rank=}, path1: {path1}\n")
             # Reset layer assignments
-            self.reset_tracking()
 
     def create_routing_traces(
         self,
@@ -143,6 +151,228 @@ class ExpertTokenTracker:
         }
 
         return primary_trace, duplicate_trace, triplicate_trace, path_summary
+
+    def save_routing_traces(
+        self,
+        primary_trace: torch.Tensor,
+        duplicate_trace: torch.Tensor,
+        triplicate_trace: torch.Tensor,
+        path_summary: Dict,
+        output_dir: Optional[str] = None,
+    ):
+        """
+        Save routing traces and summary to files.
+
+        Args:
+            primary_trace: Primary routing tensor
+            duplicate_trace: Duplicate routing tensor
+            triplicate_trace: Triplicate routing tensor
+            path_summary: Dictionary containing routing statistics
+            output_dir: Optional output directory (defaults to current directory)
+        """
+        if output_dir is None:
+            output_dir = "routing_traces"
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        out_dir = Path(output_dir) / timestamp / f"rank_{self.local_rank}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Saving routing traces to {out_dir}")
+        self.save_path = Path(output_dir) / timestamp
+
+        # Save tensors as numpy arrays
+        np.save(out_dir / "primary_trace.npy", primary_trace.cpu().numpy())
+        np.save(out_dir / "duplicate_trace.npy", duplicate_trace.cpu().numpy())
+        np.save(out_dir / "triplicate_trace.npy", triplicate_trace.cpu().numpy())
+
+        # Save path summary as JSON
+
+        with open(out_dir / "path_summary.json", "w") as f:
+            # Convert any tensor values to Python types
+            clean_summary = json.loads(
+                json.dumps(
+                    path_summary,
+                    default=lambda x: x.tolist() if isinstance(x, torch.Tensor) else x,
+                )
+            )
+            json.dump(clean_summary, f, indent=2)
+
+    # @staticmethod
+    def load_and_combine_traces(
+        self, trace_dir: str, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict]:
+        """
+        Load and combine routing traces from multiple ranks.
+
+        Args:
+            trace_dir: Directory containing routing trace subdirectories
+            device: Target device for loaded tensors
+
+        Returns:
+            Combined primary, duplicate, and triplicate traces, and combined summary
+        """
+        # Find all rank directories
+        trace_dir = self.save_path
+        rank_dirs = sorted(Path(trace_dir).glob("rank_*"))
+        print(f"rank_dirs: {rank_dirs}")
+
+        if not rank_dirs:
+            raise ValueError(f"No rank directories found in {trace_dir}")
+
+        # Initialize combined tensors and statistics
+        combined_primary = None
+        combined_duplicate = None
+        combined_triplicate = None
+        combined_summary = {
+            "complete_paths": {
+                "primary": set(),
+                "duplicate": set(),
+                "triplicate": set(),
+            },
+            "stats": {
+                "total_tokens": 0,
+                "tokens_with_primary_path": 0,
+                "tokens_with_duplicate_path": 0,
+                "tokens_with_triplicate_path": 0,
+                "num_layers": None,
+            },
+        }
+
+        # Load and combine traces from each rank
+        for rank_dir in rank_dirs:
+            # Load trace tensors
+            primary = torch.from_numpy(np.load(rank_dir / "primary_trace.npy")).to(
+                device
+            )
+            duplicate = torch.from_numpy(np.load(rank_dir / "duplicate_trace.npy")).to(
+                device
+            )
+            triplicate = torch.from_numpy(
+                np.load(rank_dir / "triplicate_trace.npy")
+            ).to(device)
+
+            # Load summary
+            with open(rank_dir / "path_summary.json", "r") as f:
+                summary = json.load(f)
+
+            # Initialize combined tensors if needed
+            if combined_primary is None:
+                combined_primary = primary
+                combined_duplicate = duplicate
+                combined_triplicate = triplicate
+                combined_summary["stats"]["num_layers"] = summary["stats"]["num_layers"]
+            else:
+                # Combine traces by taking non-negative values
+                combined_primary = torch.where(primary != -1, primary, combined_primary)
+                combined_duplicate = torch.where(
+                    duplicate != -1, duplicate, combined_duplicate
+                )
+                combined_triplicate = torch.where(
+                    triplicate != -1, triplicate, combined_triplicate
+                )
+
+            # Update complete paths sets
+            for path_type in ["primary", "duplicate", "triplicate"]:
+                combined_summary["complete_paths"][path_type].update(
+                    summary["complete_paths"][path_type]
+                )
+
+        # Convert sets to sorted lists
+        for path_type in ["primary", "duplicate", "triplicate"]:
+            combined_summary["complete_paths"][path_type] = sorted(
+                combined_summary["complete_paths"][path_type]
+            )
+
+        # Update final statistics
+        combined_summary["stats"].update(
+            {
+                "tokens_with_primary_path": len(
+                    combined_summary["complete_paths"]["primary"]
+                ),
+                "tokens_with_duplicate_path": len(
+                    combined_summary["complete_paths"]["duplicate"]
+                ),
+                "tokens_with_triplicate_path": len(
+                    combined_summary["complete_paths"]["triplicate"]
+                ),
+                "total_tokens": primary.shape[0],
+            }
+        )
+
+        return (
+            combined_primary,
+            combined_duplicate,
+            combined_triplicate,
+            combined_summary,
+        )
+
+    def process_and_save_all(self):
+        """Process current assignments and save all outputs."""
+        # Create routing traces
+        primary_trace, duplicate_trace, triplicate_trace, path_summary = (
+            self.create_routing_traces()
+        )
+
+        # Save token paths to CSV
+        self.save_token_paths()
+
+        # Save routing traces and summary
+        self.save_routing_traces(
+            primary_trace, duplicate_trace, triplicate_trace, path_summary
+        )
+
+        return primary_trace, duplicate_trace, triplicate_trace, path_summary
+
+    @staticmethod
+    def analyze_combined_results(
+        primary: torch.Tensor,
+        duplicate: torch.Tensor,
+        triplicate: torch.Tensor,
+        summary: Dict,
+    ) -> Dict:
+        """
+        Analyze combined routing traces to extract additional insights.
+
+        Args:
+            primary: Combined primary routing tensor
+            duplicate: Combined duplicate routing tensor
+            triplicate: Combined triplicate routing tensor
+            summary: Combined path summary
+
+        Returns:
+            Dictionary containing additional analysis results
+        """
+        num_layers = primary.shape[1]
+        num_tokens = primary.shape[0]
+
+        analysis = {
+            "layer_stats": [],
+            "token_stats": {
+                "tokens_with_full_path": len(summary["complete_paths"]["primary"]),
+                "tokens_with_partial_path": 0,
+                "tokens_with_no_path": 0,
+            },
+            "routing_patterns": {},
+        }
+
+        # Analyze each layer
+        for layer in range(num_layers):
+            layer_stats = {
+                "layer": layer,
+                "active_tokens": (primary[:, layer] != -1).sum().item(),
+                "duplicated_tokens": (duplicate[:, layer] != -1).sum().item(),
+                "triplicated_tokens": (triplicate[:, layer] != -1).sum().item(),
+            }
+            analysis["layer_stats"].append(layer_stats)
+
+        # Count tokens with partial paths
+        for token in range(num_tokens):
+            path_length = (primary[token] != -1).sum().item()
+            if path_length == 0:
+                analysis["token_stats"]["tokens_with_no_path"] += 1
+            elif path_length < num_layers:
+                analysis["token_stats"]["tokens_with_partial_path"] += 1
+
+        return analysis
 
     def get_timestamped_filename(self, custom_filename: Optional[str] = None) -> str:
         """

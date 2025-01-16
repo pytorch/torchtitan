@@ -185,27 +185,27 @@ class MoE(nn.Module):
 
         # token_indices shape (num_experts*tokens_per_expert, dim)
         token_indices = selected_token_indices.reshape(-1, 1).expand(-1, dim)
-        print(f"\ntoken_indices, {token_indices[0][0:2]=}, {token_indices.shape=}")
+        # print(f"\ntoken_indices, {token_indices[0][0:2]=}, {token_indices.shape=}")
 
         # routed_input shape (num_experts*tokens_per_expert, dim)
         routed_input = torch.gather(x, dim=0, index=token_indices)
-        print(f"routed_input, {routed_input[0][0]=}, {routed_input.shape=}")
+        # print(f"routed_input, {routed_input[0][0]=}, {routed_input.shape=}")
         routed_input = routed_input * top_scores.reshape(-1, 1)
 
         # routed_input shape (num_experts, tokens_per_expert, dim_in)
         routed_input = routed_input.reshape(num_experts, -1, dim)
-        print(
-            f"routed_input_reshaped, {routed_input[0][0][0:2]=}, {routed_input.shape=}"
-        )
+        # print(
+        #    f"routed_input_reshaped, {routed_input[0][0][0:2]=}, {routed_input.shape=}"
+        # )
 
         # routed_output shape (num_experts, tokens_per_expert, dim_out)
         routed_output = self.experts(routed_input)
-        print(f"routed_output, {routed_output[0][0][0:2]=}, {routed_output.shape=}")
+        # print(f"routed_output, {routed_output[0][0][0:2]=}, {routed_output.shape=}")
         # routed_output shape (num_experts*tokens_per_expert, dim_out)
         routed_output = routed_output.reshape(-1, dim)
-        print(
-            f"routed_output_reshaped, {routed_output[0][0:2]=}, {routed_output.shape=}"
-        )
+        # print(
+        #    f"routed_output_reshaped, {routed_output[0][0:2]=}, {routed_output.shape=}"
+        # )
 
         # shared expert
         if self.shared_expert is not None:

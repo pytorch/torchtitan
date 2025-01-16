@@ -459,6 +459,9 @@ class Transformer(nn.Module):
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
+    def get_token_tracker(self):
+        return self.token_tracker
+
     def init_weights(
         self,
         buffer_device: Optional[torch.device] = None,

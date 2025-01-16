@@ -177,6 +177,10 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
+    # get token tracker
+    token_tracker = model.get_token_tracker()
+    logger.info(f"Token tracker linked: {token_tracker}")
+
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
         f"{device_type.upper()} memory usage for model: "
@@ -424,6 +428,9 @@ def main(job_config: JobConfig):
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
                     world_mesh=world_mesh,
                 )
+    # ---- save out rank tracing files
+    primary, duplicate, triplicate, summary = token_tracker.process_and_save_all()
+    logger.info(f"primary: {primary}")
 
     if torch.distributed.get_rank() == 0:
         logger.info("Sleeping 2 seconds for other ranks to complete")
@@ -431,6 +438,20 @@ def main(job_config: JobConfig):
 
     metric_logger.close()
     logger.info("Training completed")
+
+    # combine all rank's tracing files
+    # Later, load and combine results from multiple ranks
+    combined_primary, combined_duplicate, combined_triplicate, combined_summary = (
+        token_tracker.load_and_combine_traces("routing_traces/20240115_1200", device)
+    )
+    logger.info(f"\n ======Results=========\n combined_primary: {combined_primary}")
+
+    # Analyze combined results
+    analysis = token_tracker.analyze_combined_results(
+        combined_primary, combined_duplicate, combined_triplicate, combined_summary
+    )
+
+    logger.info(f"\n ======Analysis=========\n {analysis}")
 
 
 if __name__ == "__main__":
