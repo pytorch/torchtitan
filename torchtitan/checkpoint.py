@@ -177,15 +177,17 @@ class CheckpointManager:
             TODO: This is currently unsolved and needs a fix.
         """
         self.states = states
-
+        for scheduler in lr_schedulers.schedulers:
+            print("sample: ", scheduler)
         self.states.update(
             {
                 "model": ModelWrapper(model_parts),
                 "optimizer": optimizers,
                 "dataloader": dataloader,
+                "lr_scheduler": lr_schedulers,
             }
         )
-        self.states.update(lr_schedulers.get_lr_scheduler_state())
+        # self.states.update(lr_schedulers.get_lr_scheduler_state())
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval_type = (
