@@ -179,17 +179,6 @@ class SchedulersContainer:
         for scheduler in self.schedulers:
             scheduler.step()
 
-    def get_lr_scheduler_state(self) -> Dict[str, Any]:
-        state_dict = {}
-        if len(self.schedulers) == 1:
-            state_dict["lr_scheduler"] = self.schedulers[0]
-        else:
-            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
-            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-            for idx, lr_scheduler in enumerate(self.schedulers):
-                state_dict[f"lr_scheduler_{idx}"] = lr_scheduler
-        return state_dict
-
 
 def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:
     warmup_steps = int(job_config.training.warmup_steps)
