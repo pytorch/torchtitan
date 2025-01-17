@@ -213,11 +213,11 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        self.noop()
-        # we use casual mask for training                
+        # self.noop()
+        # we use casual mask for training
         output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         # output = self.SDPA(xq, xk, xv, is_causal=True)
-        self.noop()
+        # self.noop()
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
