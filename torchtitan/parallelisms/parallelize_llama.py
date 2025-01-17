@@ -299,8 +299,10 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # torch._inductor.config.force_disable_caches = True
+
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        transformer_block = torch.compile(transformer_block, fullgraph=False)
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")

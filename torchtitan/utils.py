@@ -213,6 +213,7 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
                 stack.enter_context(
                     sdpa_kernel(
                         [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+                        # [SDPBackend.CUDNN_ATTENTION]
                     )
                 )
                 stack.enter_context(cp_context)
