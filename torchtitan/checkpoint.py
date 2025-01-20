@@ -197,13 +197,14 @@ class CheckpointManager:
         self.begin_time = 0
         self.time_sync_work = None
         self.time_sync_result = None
-        self.pg = dist.new_group(backend="gloo")
+        async_mode = ckpt_config.async_mode.lower()
+        if async_mode == AsyncMode.ASYNC or self.interval_type == IntervalType.SECONDS:
+            self.pg = dist.new_group(backend="gloo")
 
         self.model_weights_only = ckpt_config.model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
 
         self.mp = None
-        async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.DISABLED:
             self.async_mode = AsyncMode.DISABLED
         elif async_mode == AsyncMode.ASYNC:
