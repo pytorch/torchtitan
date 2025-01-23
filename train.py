@@ -149,6 +149,17 @@ def main(job_config: JobConfig):
             pred.flatten(0, 1), labels.flatten(0, 1)
         )
 
+    def train_step(input_ids, labels):
+        pred = model(input_ids)
+        loss = loss_fn(pred, labels)
+        # pred.shape=(bs, seq_len, vocab_size)
+        # need to free to before bwd to avoid peaking memory
+        del pred
+        return loss
+
+    if job_config.training.compile:
+        train_step = torch.compile(train_step)
+
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
@@ -255,6 +266,7 @@ def main(job_config: JobConfig):
         f"total steps {job_config.training.steps} "
         f"(warmup {job_config.training.warmup_steps})"
     )
+    batch = None
     with maybe_enable_profiling(
         job_config, global_step=train_state.step
     ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -266,7 +278,8 @@ def main(job_config: JobConfig):
 
             # get batch
             data_load_start = time.perf_counter()
-            batch = next(data_iterator)
+            if batch is None:
+                batch = next(data_iterator)
             input_ids, labels = batch
             ntokens_since_last_log += labels.numel()
             data_loading_times.append(time.perf_counter() - data_load_start)
@@ -297,11 +310,7 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context():
-                    pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
+                    loss = train_step(input_ids, labels)
                     loss.backward()
 
             # clip gradients
@@ -323,6 +332,8 @@ def main(job_config: JobConfig):
             float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
 
             losses_since_last_log.append(loss)
+            if train_state.step < job_config.training.steps:
+                batch = next(data_iterator)
 
             # log metrics
             if (
