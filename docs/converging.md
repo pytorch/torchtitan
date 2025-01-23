@@ -35,27 +35,25 @@ If the technique is not a parallelism
 
 ## Example
 
-Setup
+This is a series of loss-converging tests covering both parallelisms and training optimizations.
+Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `torchtitan`.
+
+### Setup
 - Base config: [train_configs/llama3_8b.toml](../train_configs/llama3_8b.toml)
-- `training.batch_size = 4`
-  - a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
+- `training.batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
+- `training.data_parallel_shard_degree = 8`, resulting in global batch size 32
 - `training.steps = 3000`, `training.warmup_steps = 600`
 
-Remarks
-- This is an example series of loss-converging tests on parallelisms, not including training optimizations.
-- The default global batch size in the toml config is 64 (DP 64, local batch size 1). Given hardware resource availability, one can consider using a smaller (or larger) N. This will result in smaller (or larger, respectively) global batch size, which would possibly necessitate a smaller (or larger, respectively) learning rate (`optimizer.lr`) to keep training stability.
-
-
-| Parallelisms Dimension <br> (N = 16 by default) | Setup | Remarks |
+| Parallelism | Techniques | Remarks |
 | ----- | ----- | ----- |
-| 1D (N GPUs) | FSDP N | the 1D control set |
-| 3D (4N GPUs) | FSDP N, TP2, PP 2 | 3D test set |
-| 4D (8N GPUs) | FSDP N, TP 2, CP 2, PP 2 | 4D test set |
-| 2D (MN GPUs) <br> e.g. M=8 | FSDP N, CP M | to verify CP with a larger degree |
-
+| FSDP 8 | default | 1D control set |
+| FSDP 8, TP 2, PP 2 | torch.compile, Float8, async TP | 3D test set |
+| FSDP 8, TP 2, CP 2, PP 2 | torch.compile, Float8, async TP, Interleaved 1F1B | 4D test set |
+| FSDP 8, CP 8 | default | to verify CP with a larger degree |
 
 ### Test results
-(TBA)
+![image](../assets/images/loss_curves.png)
+
 
 [^1]: Model initialization in a sharded setting can hardly match that in a single-device setting (or a differently sharded setting), because each time a random operator is called, the underlying RNG state offset is advanced by a quantized amount, often not aligned with the amount of randomness needed, thus “wasting” different amount of randomness on differently sharded settings.
 
