@@ -1,10 +1,14 @@
 We demonstrate the effectiveness of elastic distributed training using torchtitan, via experiments on Llama 3.1 8B, 70B, and 405B models, from 1D parallelism to 4D parallelism, at the scale from 8 GPUs to 512 GPUs.
 
-The experiments are conducted on NVIDIA H100 GPUs[^1] with 95 GiB memory, where each host is equipped with 8 GPUs and NVSwitch. Two hosts form a rack connected to a TOR switch. A backend RDMA network connects the TOR switches.
+We ran our performance benchmarks on the [Grand Teton platform](https://engineering.fb.com/2022/10/18/open-source/ocp-summit-2022-grand-teton/), where
+- Each host has 8 NVIDIA H100 GPUs fully connected with NVLink.
+- Each H100 GPU is equipped with 96GB HBM2e with 2.4 TB/sec peak memory bandwidth.
+- Hosts are inter-connected with backend RDMA network with 400 Gb/s per GPU.
+- We used the default 500W power limit, although tuning it up to 700W TDP can potentially provide further speedups.
 
-We note that, throughout our experimentation, memory readings are stable across the whole training process, whereas throughput numbers (TPS/GPU) are calculated and logged every 10 iterations, and always read at the (arbitrarily determined) 90th iteration.
+We note that, throughout our experimentation, memory readings are stable across the whole training process[^1], whereas throughput numbers (TPS/GPU) are calculated and logged every 10 iterations, and always read at the (arbitrarily determined) 90th iteration.
 
-We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled, both BFLOAT16 Tensor Core and FP8 Tensor Core are involved in model training, but they have different peak FLOPS and the definition of MFU under such scenario is not well-defined. We note that the 1D Llama 3.1 8B model training on 8 or 128 H100 GPUs without Float8 achieves 33% to 39% MFU (with or without torch.compile, respectively).
+We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled (on `nn.Linear` modules), both BFLOAT16 Tensor Core and FP8 Tensor Core are involved in model training, but they have different peak FLOPS and the definition of MFU under such scenario is not well-defined. We note that the 1D Llama 3.1 8B model training on 8 or 128 H100 GPUs without Float8 achieves 33% to 39% MFU[^2] (with or without torch.compile, respectively).
 
 **Table 1** 1D Parallelism (FSDP). Llama 3.1 8B model. 8 GPUs. Local batch size 2, global batch size 16. Selective activation checkpointing.
 
@@ -14,7 +18,7 @@ We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled, b
 | FSDP + torch.compile | 6,667 | 77.0 |
 | FSDP + torch.compile + Float8 | 8,532 | 76.8 |
 
-**Table 2** FSDP + CP. Llama 3.1 8B model. 8 GPUs. Full activation checkpointing. Local batch size 1. torch.compile + Float8.
+**Table 2** FSDP + CP + torch.compile + Float8. Llama 3.1 8B model. 8 GPUs. Local batch size 1. Full activation checkpointing.
 
 | Parallelism | Sequence Length | TPS/GPU | Memory(GiB) |
 | ----- | ----: | ----: | ----: |
@@ -40,7 +44,7 @@ We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled, b
 
 **Table 5** 3D parallelism (FSDP + TP + PP) + torch.compile + Float8 + AsyncTP. Llama 3.1 405B model. 512 GPUs (FSDP 8, TP 8, PP8). Local batch size 32, global batch size 256. Full activation checkpointing.
 
-| Schedule | TPS/GPU | Memory(GiB)[^2] |
+| Schedule | TPS/GPU | Memory(GiB) |
 | ----- | ----: | ----: |
 | 1F1B | 100 | 82.5 |
 | Interleaved 1F1B | 128 | 72.7 |
@@ -63,6 +67,6 @@ We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled, b
 | torchtitan | [9dec370](https://github.com/pytorch/torchtitan/commit/9dec370ad26b5f8e9a7333a0e36165018262644b) | 2024/12/26 |
 
 
-[^1]: We used HBM2e based lower TDP SXM H100(95GB) for our test, the actual peak TFLOPs number is between SXM and NVL, and we don't know its exact value. So this MFU number is lower than actual MFU because we use the peak number of SXM directly.
+[^1]: Different PP ranks can have different peak memory usages. We take the maximum across all GPUs.
 
-[^2]: Different PP ranks can have different peak memory usages. We take the maximum across all GPUs.
+[^2]: In our test we used HBM2e-based SXM H100 with lower TDP, the actual peak TFLOPs number is between SXM and NVL, and we don't know its exact value. So this MFU number is lower than actual MFU because we use the peak number of SXM directly.
