@@ -48,10 +48,7 @@ class TestJobConfig:
     def test_parse_pp_split_points(self):
 
         toml_splits = ["layers.2", "layers.4", "layers.6"]
-        toml_split_str = ",".join(toml_splits)
         cmdline_splits = ["layers.1", "layers.3", "layers.5"]
-        cmdline_split_str = ",".join(cmdline_splits)
-        # no split points specified
         config = JobConfig()
         config.parse_args(
             [
@@ -68,7 +65,7 @@ class TestJobConfig:
                 "--job.config_file",
                 "./train_configs/debug_model.toml",
                 "--experimental.pipeline_parallel_split_points",
-                f"{cmdline_split_str}",
+                *cmdline_splits,
             ]
         )
         assert (
@@ -81,7 +78,7 @@ class TestJobConfig:
                 tomli_w.dump(
                     {
                         "experimental": {
-                            "pipeline_parallel_split_points": toml_split_str,
+                            "pipeline_parallel_split_points": toml_splits,
                         }
                     },
                     f,
@@ -98,7 +95,7 @@ class TestJobConfig:
                 tomli_w.dump(
                     {
                         "experimental": {
-                            "pipeline_parallel_split_points": toml_split_str,
+                            "pipeline_parallel_split_points": toml_splits,
                         }
                     },
                     f,
@@ -109,7 +106,7 @@ class TestJobConfig:
                     "--job.config_file",
                     fp.name,
                     "--experimental.pipeline_parallel_split_points",
-                    f"{cmdline_split_str}",
+                    *cmdline_splits,
                 ]
             )
             assert (
@@ -117,6 +114,7 @@ class TestJobConfig:
             ), config.experimental.pipeline_parallel_split_points
 
     def test_print_help(self):
-        config = JobConfig()
-        parser = config.parser
+        from tyro.extras import get_parser
+
+        parser = get_parser(JobConfig)
         parser.print_help()
