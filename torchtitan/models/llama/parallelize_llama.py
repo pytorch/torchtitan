@@ -56,12 +56,23 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
+
         enable_float8_linear = "float8" in job_config.model.converters
+        float8_is_rowwise = job_config.float8.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
+        )
+
+        # For now, float8 all-gather with TP is only supported for tensorwise
+        # float8 scaling recipes. For rowwise recipes, we use regular TP and
+        # all-gather happens in high precision.
+        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+
         apply_tp(
             model,
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
-            enable_float8=enable_float8_linear,
+            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
         )
 
@@ -115,7 +126,7 @@ def apply_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
-    enable_float8: bool,
+    enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
 ):
     """Apply tensor parallelism."""
@@ -141,10 +152,8 @@ def apply_tp(
     )
 
     # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears
-    if enable_float8:
-        # TODO(vkuzo): once float8 configuration supports delayed scaling,
-        # add a check here to enforce supported float8 all-gather configurations
+    # inputs may be different for float8 linears with tensorwise scaling.
+    if enable_float8_tensorwise_tp:
         # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
         from torchao.float8.float8_tensor_parallel import (
             Float8ColwiseParallel,
@@ -202,7 +211,7 @@ def apply_tp(
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
-        f"Applied {'Float8 ' if enable_float8 else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )
 

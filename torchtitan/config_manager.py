@@ -613,20 +613,31 @@ class JobConfig:
         self.parser.add_argument(
             "--float8.enable_fsdp_float8_all_gather",
             action="store_true",
-            help="Whether enable float8 all-gather in FSDP",
+            help="Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling",
         )
         self.parser.add_argument(
             "--float8.precompute_float8_dynamic_scale_for_fsdp",
             action="store_true",
-            help="Whether precompute float8 scales dynamically for FSDP",
+            help="Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling",
         )
         self.parser.add_argument(
             "--float8.force_recompute_fp8_weight_in_bwd",
             action="store_true",
             help="""
             Whether to force the recomputation of FP8 weights during backward pass.
-            When using FSDP, it is recommended to enable `force_recompute_fp8_weight_in_bwd`
-            to prevent saving unsharded FP8 weights for backward computation.
+            When using FSDP with tensorwise scaling, it is recommended to enable
+            `force_recompute_fp8_weight_in_bwd` to prevent saving unsharded FP8 weights
+            for backward computation.
+            """,
+        )
+        self.parser.add_argument(
+            "--float8.recipe_name",
+            type=str,
+            default=None,
+            choices=["tensorwise", "rowwise", "rowwise_with_gw_hp"],
+            help="""
+            If specified, creates float8 config from recipe name, valid choices are
+            `tensorwise`, `rowwise` and `rowwise_with_gw_hp`.
             """,
         )
 
