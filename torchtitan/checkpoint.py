@@ -149,6 +149,9 @@ class CheckpointManager:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
         self.ft_manager = ft_manager
+        self.enable_staging = (
+            self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        ) or self.ft_manager
 
         if not self.enable_checkpoint and self.ft_manager is None:
             return
@@ -158,9 +161,6 @@ class CheckpointManager:
         )
 
         async_mode = ckpt_config.async_mode.lower()
-        self.enable_staging = (
-            self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-        ) or self.ft_manager
         self.staging = False
         self.sending_to_checkpoint_mp = False
         self.staging_id = None
