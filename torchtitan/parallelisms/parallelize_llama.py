@@ -141,7 +141,10 @@ def apply_tp(
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears
-    if enable_float8:
+    # TODO(before land): gate the check below to be on for float8 + tensorwise,
+    # and be off for float8 + rowwise, because we don't want to do float8 
+    # all-gather for rowwise.
+    if enable_float8 and False:
         # TODO(vkuzo): once float8 configuration supports delayed scaling,
         # add a check here to enforce supported float8 all-gather configurations
         # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
