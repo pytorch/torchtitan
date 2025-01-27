@@ -577,6 +577,12 @@ class JobConfig:
             action="store_true",
             help="Whether precompute float8 scales dynamically for FSDP",
         )
+        self.parser.add_argument(
+            "--float8.recipe_name",
+            type=str,
+            default=None,
+            help="If specified, creates float8 config from recipe name, choices are `all_axiswise` and `lw_axiswise_with_gw_hp`",
+        )
 
         # communications library settings
         self.parser.add_argument(
