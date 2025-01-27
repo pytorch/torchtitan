@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,11 @@ class OptimizersContainer(Stateful):
     """
 
     def __init__(
-        self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
+        self,
+        model_parts: List[nn.Module],
+        optimizer_kwargs: Dict[str, Any],
+        name: str,
+        ft_manager: Optional[Any] = None,
     ) -> None:
         self.optimizers = []
         self.model_parts = model_parts
@@ -38,6 +42,19 @@ class OptimizersContainer(Stateful):
             else:
                 raise NotImplementedError(f"Optimizer {name} not added.")
             self.optimizers.append(optimizer)
+        if ft_manager:
+            import torchft as ft
+
+            # Force to initialize the optimizer state so that `optim.step()`
+            # won't be called by ft.Optimizer.step().
+            _ = {
+                k: v
+                for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
+                for k, v in sd.items()
+            }
+            self.optimizers = [
+                ft.Optimizer(ft_manager, optim) for optim in self.optimizers
+            ]
         self._validate_length(len(self.model_parts))
 
     def _validate_length(self, expected_length) -> None:
@@ -128,7 +145,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
 # consider split between PP and non-PP
 def build_optimizers(
-    model_parts: List[nn.Module], job_config: JobConfig
+    model_parts: List[nn.Module], job_config: JobConfig, ft_manager: Optional[Any]
 ) -> OptimizersContainer:
     """Wrap one optimizer per model part in an OptimizersContainer which provides a single
     step() and zero_grad() method for all the child optimizers.
@@ -148,9 +165,11 @@ def build_optimizers(
         "fused": fused,
         "foreach": not fused,
     }
+    if optim_in_bwd and ft_manager:
+        raise NotImplementedError("TorchFT currently doesn't support optim_in_bwd.")
 
     return (
-        OptimizersContainer(model_parts, optimizer_kwargs, name)
+        OptimizersContainer(model_parts, optimizer_kwargs, name, ft_manager)
         if not optim_in_bwd
         else OptimizersInBackwardContainer(model_parts, optimizer_kwargs, name)
     )

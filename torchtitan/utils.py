@@ -35,6 +35,13 @@ device_type, device_module = get_device_info()
 
 
 def dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
+    import torchft as ft
+
+    if isinstance(mesh, ft.process_group._FlattenDeviceMesh):
+        torch.distributed.all_reduce(x, group=mesh.managed_mesh.replicate_pg)
+        # x = funcol.all_reduce(x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg)
+        mesh = mesh.managed_mesh.mesh
+
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
         x = x.full_tensor()
@@ -399,6 +406,7 @@ def clip_grad_norm_(
     if isinstance(total_norm, DTensor):
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
+        assert False, total_norm.placements
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:
