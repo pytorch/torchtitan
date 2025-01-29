@@ -167,7 +167,7 @@ def linear_warmup_linear_decay(
     return curr_adjustment
 
 
-class SchedulersContainer:
+class SchedulersContainer(Stateful):
     """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
 
     def __init__(self, optimizers, lr_lambda) -> None:
@@ -178,6 +178,16 @@ class SchedulersContainer:
     def step(self) -> None:
         for scheduler in self.schedulers:
             scheduler.step()
+
+    def state_dict(self) -> Dict[str, Any]:
+        state_dict = {}
+        for idx, lr_scheduler in enumerate(self.schedulers):
+            state_dict[f"lr_scheduler_{idx}"] = lr_scheduler
+        return state_dict
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        for idx in range(len(self.schedulers)):
+            self.schedulers[idx].load_state_dict(state_dict[f"lr_scheduler_{idx}"])
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:
