@@ -182,7 +182,7 @@ class SchedulersContainer(Stateful):
     def state_dict(self) -> Dict[str, Any]:
         state_dict = {}
         for idx, lr_scheduler in enumerate(self.schedulers):
-            state_dict[f"lr_scheduler_{idx}"] = lr_scheduler
+            state_dict[f"lr_scheduler_{idx}"] = lr_scheduler.state_dict()
         return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
