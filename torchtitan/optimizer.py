@@ -180,8 +180,7 @@ class SchedulersContainer(Stateful):
             scheduler.step()
 
     def state_dict(self) -> Dict[str, Any]:
-        # Right now we have lr_scheduler with the same state_dict for all optimizers,
-        # so we can just save one.
+        # We have lr_scheduler with the same state_dict for all optimizers, so can just save one.
         assert (
             len(self.schedulers) > 0
         ), "Must have at least one scheduler to save state_dict"
