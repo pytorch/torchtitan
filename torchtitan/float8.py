@@ -13,7 +13,7 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
-from typing import List, Union
+from typing import Callable, List, Union
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,9 @@ class Float8Handler:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
+
+        self.use_float8nocompile = float8_config.float8nocompile
+        self.ac_config = job_config.activation_checkpoint
 
         # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
         enable_fsdp_float8_all_gather = (
@@ -90,14 +93,40 @@ class Float8Handler:
         if not self.enabled:
             return
 
-        from torchao.float8 import convert_to_float8_training
+        if self.use_float8nocompile:
+            logger.info("Using float8nocompile prototype")
+            from torchao.prototype.float8nocompile.float8nocompile_linear_utils import (
+                convert_to_float8_nocompile_training,
+            )
 
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        convert_to_float8_training(
-            model,
-            config=self.config,
-            module_filter_fn=lambda mod, fqn: fqn != "output",
-        )
+            # for full AC or no AC
+            no_precompute_for_backward = self.ac_config.mode == "full"
+            convert_to_float8_nocompile_training(
+                model,
+                config=self.config,
+                module_filter_fn=lambda mod, fqn: fqn != "output",
+                no_precompute_for_backward=no_precompute_for_backward,
+            )
+
+            # for selective per layer AC
+            if (
+                self.ac_config.mode == "selective"
+                and self.ac_config.selective_ac_option.isdigit()
+            ):
+                no_precompute_for_backward_every_nth_layer(
+                    model,
+                    int(self.ac_config.selective_ac_option),
+                )
+        else:
+            logger.info("Using float8 training")
+            from torchao.float8 import convert_to_float8_training
+
+            # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+            convert_to_float8_training(
+                model,
+                config=self.config,
+                module_filter_fn=lambda mod, fqn: fqn != "output",
+            )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
@@ -145,3 +174,20 @@ class Float8Handler:
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             self._sync_float8_amax_and_scale_history(m)
+
+
+def no_precompute_for_backward_every_nth_layer(model: nn.Module, n: int):
+    """Set no_precompute_for_backward to True for every nth layer in the model."""
+    for layer_idx, (layer_id, layer) in enumerate(model.layers.named_children()):
+        if layer_idx % n == 0:
+            logger.info(f"Enabling no_precompute_for_backward for layer {layer_id}")
+            _enable_no_precompute_for_backward(layer)
+
+
+def _enable_no_precompute_for_backward(model: nn.Module):
+    """Recursively set no_precompute_for_backward to True for all linear layers in the given model."""
+    for child_layer in model.children():
+        if isinstance(child_layer, nn.Linear):
+            child_layer.no_precompute_for_backward = True
+        else:
+            _enable_no_precompute_for_backward(child_layer)
