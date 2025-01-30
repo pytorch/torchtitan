@@ -41,7 +41,7 @@ class Float8Handler:
             )
             return
         try:
-            from torchao.float8 import CastConfig, Float8LinearConfig, ScalingType
+            from torchao.float8 import Float8LinearConfig
         except ImportError as e:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
@@ -52,15 +52,11 @@ class Float8Handler:
             parallel_dims.dp_shard_enabled
             and float8_config.enable_fsdp_float8_all_gather
         )
-        scaling_type_input = ScalingType(float8_config.scaling_type_input)
-        scaling_type_weight = ScalingType(float8_config.scaling_type_weight)
-        scaling_type_grad_output = ScalingType(float8_config.scaling_type_grad_output)
         self.config = Float8LinearConfig(
             enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-            cast_config_input=CastConfig(scaling_type=scaling_type_input),
-            cast_config_weight=CastConfig(scaling_type=scaling_type_weight),
-            cast_config_grad_output=CastConfig(scaling_type=scaling_type_grad_output),
         )
+        if torch.distributed.get_rank() == 0:
+            print("config: ", self.config)
 
         self.enabled = True
 
