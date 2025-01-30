@@ -189,8 +189,8 @@ class SchedulersContainer(Stateful):
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         # Load the same state_dict for all schedulers
-        for idx in range(len(self.schedulers)):
-            self.schedulers[idx].load_state_dict(state_dict)
+        for scheduler in self.schedulers:
+            scheduler.load_state_dict(state_dict)
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:
