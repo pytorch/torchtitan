@@ -180,14 +180,17 @@ class SchedulersContainer(Stateful):
             scheduler.step()
 
     def state_dict(self) -> Dict[str, Any]:
-        state_dict = {}
-        for idx, lr_scheduler in enumerate(self.schedulers):
-            state_dict[f"lr_scheduler_{idx}"] = lr_scheduler.state_dict()
-        return state_dict
+        # Right now we have lr_scheduler with the same state_dict for all optimizers,
+        # so we can just save one.
+        assert (
+            len(self.schedulers) > 0
+        ), "Must have at least one scheduler to save state_dict"
+        return self.schedulers[0].state_dict()
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # Load the same state_dict for all schedulers
         for idx in range(len(self.schedulers)):
-            self.schedulers[idx].load_state_dict(state_dict[f"lr_scheduler_{idx}"])
+            self.schedulers[idx].load_state_dict(state_dict)
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:
