@@ -70,15 +70,6 @@ class Float8Handler:
             and float8_config.precompute_float8_dynamic_scale_for_fsdp
         )
 
-        # for sync_float8_amax_and_scale_history
-        self.delayed_scaling = (
-            scaling_type_input is ScalingType.DELAYED
-            or scaling_type_weight is ScalingType.DELAYED
-            or scaling_type_grad_output is ScalingType.DELAYED
-        )
-        self._sync_float8_amax_and_scale_history = None
-        self.compile = job_config.training.compile
-
         logger.info("Float8 training active")
 
     def convert_to_float8_training(self, model: nn.Module):
@@ -117,31 +108,3 @@ class Float8Handler:
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             precompute_float8_dynamic_scale_for_fsdp(m)
-
-    def sync_float8_amax_and_scale_history(
-        self, model: Union[nn.Module, List[nn.Module]]
-    ):
-        if not self.enabled:
-            return
-
-        if not self.delayed_scaling:
-            return
-
-        from torchao.float8 import sync_float8_amax_and_scale_history
-
-        # TODO(vkuzo): see if precalculating the modules to sync over is going to
-        # meaningfully help performance
-
-        if self._sync_float8_amax_and_scale_history is None:
-            if self.compile:
-                self._sync_float8_amax_and_scale_history = torch.compile(
-                    sync_float8_amax_and_scale_history
-                )
-            else:
-                self._sync_float8_amax_and_scale_history = (
-                    sync_float8_amax_and_scale_history
-                )
-
-        models = [model] if isinstance(model, nn.Module) else model
-        for m in models:
-            self._sync_float8_amax_and_scale_history(m)

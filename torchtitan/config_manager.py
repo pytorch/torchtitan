@@ -552,20 +552,20 @@ class JobConfig:
             "--float8.scaling_type_input",
             type=str,
             default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-            choices=["dynamic", "delayed"],
+            help="float8 scaling for input, dynamic (default)",
+            choices=["dynamic"],
         )
         self.parser.add_argument(
             "--float8.scaling_type_weight",
             type=str,
             default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
+            help="float8 scaling for input, dynamic (default)",
         )
         self.parser.add_argument(
             "--float8.scaling_type_grad_output",
             type=str,
             default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
+            help="float8 scaling for input, dynamic (default)",
         )
 
         # communications library settings
