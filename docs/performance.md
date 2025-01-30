@@ -59,7 +59,7 @@ We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled (o
 | FSDP 1, CP 8 | 262144 | 16 | 84.9 |
 
 
-#### Versions
+#### Versions used for performance testing
 | repo | commit | date |
 | --- | --- | --- |
 | torch | [1963fc8](https://github.com/pytorch/pytorch/commit/1963fc83a1c32e162162e2414f78b043f0674bae) | 2024/12/23 |
