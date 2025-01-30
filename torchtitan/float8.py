@@ -55,8 +55,6 @@ class Float8Handler:
         self.config = Float8LinearConfig(
             enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
         )
-        if torch.distributed.get_rank() == 0:
-            print("config: ", self.config)
 
         self.enabled = True
 
