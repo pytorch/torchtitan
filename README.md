@@ -52,7 +52,7 @@ Our guiding principles when building `torchtitan`:
     - estimate FSDP/HSDP memory usage without materializing the model
     - run distributed inference with Tensor Parallel
 
-We report our [Performance](docs/performance.md) verified on 64/128 GPUs.
+We report [performance](docs/performance.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
 
 ### Dive into the code
 
