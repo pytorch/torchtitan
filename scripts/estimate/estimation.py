@@ -116,7 +116,11 @@ def estimate_memory(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    with FakeTensorMode() if not job_config.memory_estimation.disable_fake_mode else contextlib.nullcontext():
+    with (
+        FakeTensorMode()
+        if not job_config.memory_estimation.disable_fake_mode
+        else contextlib.nullcontext()
+    ):
 
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
@@ -174,8 +178,6 @@ def estimate_memory(job_config: JobConfig):
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
-                # sync float8 amaxes and scales
-                float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
