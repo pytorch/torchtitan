@@ -1,14 +1,13 @@
-from typing import Any, Callable, Optional
 import importlib
+from typing import Any, Callable, Optional
+
+from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 
 from torchtitan.config_manager import JobConfig
-from torch.distributed._state_dict_utils import (
-    _copy_state_dict,
-    _create_cpu_state_dict,
-)
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
+
     has_torchft = True
 else:
     has_torchft = False

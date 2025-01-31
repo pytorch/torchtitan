@@ -320,14 +320,13 @@ def main(job_config: JobConfig):
                     del pred
                     loss.backward()
 
-            # TODO(torchft): fix this
             # clip gradients
-            # utils.clip_grad_norm_(
-            # [p for m in model_parts for p in m.parameters()],
-            # job_config.training.max_norm,
-            # foreach=True,
-            # pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
-            # )
+            utils.clip_grad_norm_(
+                [p for m in model_parts for p in m.parameters()],
+                job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+            )
 
             # TODO(torchft): fix this
             # sync float8 amaxes and scales

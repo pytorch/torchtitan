@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import copy
 import gc
 import math
 import os
@@ -16,6 +17,7 @@ from typing import Generator, Iterable, List, Optional, Set, Union
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+import torchft as ft
 from torch import distributed as dist
 from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
@@ -35,8 +37,6 @@ device_type, device_module = get_device_info()
 
 
 def dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
-    import torchft as ft
-
     if isinstance(mesh, ft.process_group._FlattenDeviceMesh):
         torch.distributed.all_reduce(x, group=mesh.managed_mesh.replicate_pg)
         # x = funcol.all_reduce(x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg)
@@ -406,7 +406,16 @@ def clip_grad_norm_(
     if isinstance(total_norm, DTensor):
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
-        assert False, total_norm.placements
+        mesh = total_norm._spec.mesh
+        if isinstance(mesh, ft.process_group.ManagedDeviceMesh):
+            local_tensor = total_norm.to_local()
+            dist.all_reduce(local_tensor, op=dist.ReduceOp.AVG, group=mesh.replicate_pg)
+
+            placements = list(copy.copy(total_norm._spec.placements))
+            placements.pop(mesh.replicate_dim)
+            mesh = mesh.mesh
+            total_norm = DTensor.from_local(local_tensor, mesh, placements)
+
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:
