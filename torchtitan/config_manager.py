@@ -548,25 +548,6 @@ class JobConfig:
             action="store_true",
             help="Whether precompute float8 scales dynamically for FSDP",
         )
-        self.parser.add_argument(
-            "--float8.scaling_type_input",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-            choices=["dynamic", "delayed"],
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_weight",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_grad_output",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-        )
 
         # communications library settings
         self.parser.add_argument(
