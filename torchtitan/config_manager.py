@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import importlib
 import sys
 from collections import defaultdict
 from typing import Tuple, Union
@@ -377,10 +376,18 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--experimental.model_module_path",
+            "--experimental.custom_model_path",
             type=str,
             default="",
-            help="",
+            help="""
+                The --custom_model_path option allows to specify a custom path to a model module
+
+                that is not natively implemented within TorchTitan.
+
+                Acceptable values are the file system path to the module (e.g., my_models/model_x)
+
+                dotted import module  (e.g., some_package.model_x).
+            """
         )
         self.parser.add_argument(
             "--training.mixed_precision_param",
