@@ -387,7 +387,7 @@ class JobConfig:
                 Acceptable values are the file system path to the module (e.g., my_models/model_x)
 
                 dotted import module  (e.g., some_package.model_x).
-            """
+            """,
         )
         self.parser.add_argument(
             "--training.mixed_precision_param",

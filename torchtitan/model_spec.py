@@ -4,14 +4,14 @@ from typing import Callable, Dict, List, Protocol, Tuple, Type
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
+
 @dataclass
 class BaseModelArgs:
     _enforced: str = "This field is used to enforce all fields have defaults."
 
 
 class ModelProtocol(Protocol):
-    def from_model_args(self, args: BaseModelArgs) -> nn.Module:
-        ...
+    def from_model_args(self, args: BaseModelArgs) -> nn.Module: ...
 
 
 @dataclass
