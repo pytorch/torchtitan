@@ -46,6 +46,8 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    device_module.set_device(device)
     ft_manager = init_ft_manager(job_config)
 
     # init distributed
@@ -60,8 +62,6 @@ def main(job_config: JobConfig):
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
         ft_manager=ft_manager,
     )
-    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
-    device_module.set_device(device)
     utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
