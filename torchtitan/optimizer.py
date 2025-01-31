@@ -197,7 +197,7 @@ def linear_warmup_linear_decay(
     return curr_adjustment
 
 
-class SchedulersContainer:
+class SchedulersContainer(Stateful):
     """Util for calling step on multiple learning rate schedulers needed for virtual pipeline stages"""
 
     def __init__(self, optimizers, lr_lambda) -> None:
@@ -209,16 +209,21 @@ class SchedulersContainer:
         for scheduler in self.schedulers:
             scheduler.step()
 
-    def get_lr_scheduler_state(self) -> Dict[str, Any]:
-        state_dict = {}
-        if len(self.schedulers) == 1:
-            state_dict["lr_scheduler"] = self.schedulers[0]
-        else:
-            # For now, pipeline-parallel with looped schedules does not support resharding for lr_scheduler.
-            # It should only support saving and loading a distributed checkpoint with the same number of pp ranks
-            for idx, lr_scheduler in enumerate(self.schedulers):
-                state_dict[f"lr_scheduler_{idx}"] = lr_scheduler
-        return state_dict
+    def state_dict(self) -> Dict[str, Any]:
+        # Currently, we have one scheduler per optimizer. However, when using MultiSchedule PP or optimizer-in-backward,
+        # there are multiple optimizers and schedulers, but the scheduler state_dict remains the same for all.
+        # Therefore, we only save the first one and later load it for all.
+        assert (
+            len(self.schedulers) > 0
+        ), "Must have at least one scheduler to save state_dict"
+        return self.schedulers[0].state_dict()
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # Load the same state_dict for all schedulers. The key value we're concerned with in scheduler.state_dict() is `last_epoch`,
+        # which is an integer that will be automatically copied. As long as `training.steps` and `training.warmup_steps` remain
+        # unchanged when resuming from a checkpoint, this approach is safe. We call `.copy()` here to ensure extra safety.
+        for scheduler in self.schedulers:
+            scheduler.load_state_dict(state_dict.copy())
 
 
 def build_lr_schedulers(optimizers, job_config: JobConfig) -> SchedulersContainer:

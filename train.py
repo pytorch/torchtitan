@@ -328,10 +328,6 @@ def main(job_config: JobConfig):
                 pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
             )
 
-            # TODO(torchft): fix this
-            # sync float8 amaxes and scales
-            # float8_handler.sync_float8_amax_and_scale_history(model_parts)
-
             # optimizer step
             checkpoint.maybe_wait_for_staging()
             optimizers.step()
