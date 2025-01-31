@@ -13,11 +13,12 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchtitan.model_spec import BaseModelArgs, ModelProtocol
 from torchtitan.models.norms import build_norm
 
 
 @dataclass
-class ModelArgs:
+class ModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
@@ -258,7 +259,7 @@ class FeedForward(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
-class TransformerBlock(nn.Module):
+class TransformerBlock(nn.Module, ModelProtocol):
     """
     TransformerBlock Module
 

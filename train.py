@@ -19,13 +19,9 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.models import build_model_specs
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.parallelisms import (
-    models_parallelize_fns,
-    models_pipelining_fns,
-    ParallelDims,
-)
+from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import device_module, device_type
 
@@ -80,9 +76,10 @@ def main(job_config: JobConfig):
         world_mesh, device, job_config.training.seed, job_config.training.deterministic
     )
     model_name = job_config.model.name
+    model_spec = build_model_specs()[model_name]
 
     # build tokenizer
-    tokenizer_type = model_name_to_tokenizer[model_name]
+    tokenizer_type = model_spec.tokenizer
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
     # build dataloader
     data_loader = build_hf_data_loader(
@@ -96,8 +93,8 @@ def main(job_config: JobConfig):
     )
 
     # build model (using meta init)
-    model_cls = model_name_to_cls[model_name]
-    model_config = models_config[model_name][job_config.model.flavor]
+    model_cls = model_spec.cls
+    model_config = model_spec.config[job_config.model.flavor]
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. vocab size from tokenizer
@@ -151,7 +148,7 @@ def main(job_config: JobConfig):
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        pp_schedule, model_parts = models_pipelining_fns[model_name](
+        pp_schedule, model_parts = model_spec.pipelining_fn(
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
@@ -162,14 +159,14 @@ def main(job_config: JobConfig):
         # optimizer, and checkpointing
         for m in model_parts:
             # apply SPMD-style PT-D techniques
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+            model_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
             with torch.no_grad():
                 m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+        model_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
         with torch.no_grad():
             model.init_weights(buffer_device=buffer_device)

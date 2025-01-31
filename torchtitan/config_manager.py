@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
 import sys
 from collections import defaultdict
 from typing import Tuple, Union
@@ -376,6 +377,12 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--experimental.model_module_path",
+            type=str,
+            default="",
+            help="",
+        )
+        self.parser.add_argument(
             "--training.mixed_precision_param",
             type=str,
             default="bfloat16",
@@ -637,6 +644,15 @@ class JobConfig:
             exp["pipeline_parallel_split_points"] = string_list(
                 exp["pipeline_parallel_split_points"]
             )
+
+        if (
+            "experimental" in args_dict
+            and "model_module_path" in args_dict["experimental"]
+            and args_dict["experimental"]["model_module_path"]
+        ):
+            from torchtitan.models import add_model_spec_path
+
+            add_model_spec_path(args_dict["experimental"]["model_module_path"])
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)

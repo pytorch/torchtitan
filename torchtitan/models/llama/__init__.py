@@ -6,9 +6,9 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from torchtitan.model_spec import ModelSpec
 from torchtitan.models.llama.model import ModelArgs, Transformer
 
-__all__ = ["Transformer"]
 
 llama3_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
@@ -40,3 +40,18 @@ llama3_configs = {
         rope_theta=500000,
     ),
 }
+
+
+def build_model_spec() -> ModelSpec:
+    # Avoid circular import
+    from torchtitan.parallelisms.parallelize_llama import parallelize_llama
+    from torchtitan.parallelisms.pipeline_llama import pipeline_llama
+
+    return ModelSpec(
+        name="llama3",
+        cls=Transformer,
+        config=llama3_configs,
+        tokenizer="tiktoken",
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+    )
