@@ -11,7 +11,8 @@ class BaseModelArgs:
 
 
 class ModelProtocol(Protocol):
-    def from_model_args(self, args: BaseModelArgs) -> nn.Module: ...
+    def from_model_args(self, args: BaseModelArgs) -> nn.Module:
+        ...
 
 
 @dataclass
