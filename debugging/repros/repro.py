@@ -20,8 +20,6 @@ from torch.utils.checkpoint import (
 from torchao.float8.config import Float8LinearRecipeName, recipe_name_to_linear_config
 from torchao.float8.float8_linear_utils import convert_to_float8_training
 
-TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
-
 # Keep a max of 100,000 alloc/free events in the recorded history
 # leading up to the snapshot.
 MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
@@ -68,6 +66,10 @@ def main(args: Namespace):
         device = torch.device("cuda")
         torch.cuda.reset_peak_memory_stats(device)
 
+        # start memory profile
+        start_record_memory_history()
+
+        # allocate model and inputs
         model = FFN(4096, 4 * 4096).to(torch.bfloat16).to(device)
         x = torch.randn(16, 4096, dtype=torch.bfloat16).to(device)
 
@@ -89,9 +91,7 @@ def main(args: Namespace):
             setup_distributed()
             apply_fsdp(model)
 
-        # memory profile one fwd+bwd
-        start_record_memory_history()
-
+        # one fwd + backward
         out = model(x)
         out.sum().backward()
 
