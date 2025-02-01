@@ -36,52 +36,62 @@ logger.setLevel(level=logging.INFO)
 
 def main(args: Namespace):
     assert torch.cuda.is_available()
+
+    fsdp_enabled = args.fsdp
+    memory_snapshotting_enabled = args.snapshot_file is not None
+    use_float8 = args.float8
+    use_compile = args.compile
+    model_type = args.model_type
+    use_per_op_ac = args.per_op_ac
+    run_training_loop = args.train
+
     try:
         device = torch.device("cuda")
         torch.cuda.reset_peak_memory_stats(device)
 
         # start memory profile
-        start_record_memory_history()
+        if memory_snapshotting_enabled:
+            start_record_memory_history()
 
         # allocate model and inputs
-        if args.model_type == "linear":
+        if model_type == "linear":
             model = LinearModel(args.num_layers).to(torch.bfloat16).to(device)
-        elif args.model_type == "ffn":
+        elif model_type == "ffn":
             dim = 4096
             hidden_dim = 4 * dim
             model = FFN(dim, hidden_dim).to(torch.bfloat16).to(device)
-        elif args.model_type == "attn":
+        elif model_type == "attn":
             head_dim = 4096
             heads = 4
             kv_heads = 4
             model = Attention(head_dim, heads, kv_heads).to(torch.bfloat16).to(device)
         else:
             raise ValueError(
-                f"invalid model type: {args.model_type} (must be one of: linear,ffn,attn)"
+                f"invalid model type: {model_type} (must be one of: linear,ffn,attn)"
             )
 
         # fp8 rowwise quant
-        if args.float8:
+        if use_float8:
             apply_fp8_rowwise_quant(model)
 
         # selective per op AC
-        if args.per_op_ac:
+        if use_per_op_ac:
             model = apply_ac(model)
 
         # compile
-        if args.compile:
+        if use_compile:
             model = apply_compile(model)
 
         # FSDP2 (2 GPUs or more required to avoid _scaled_mm error:
         # "RuntimeError: Only bf16 high precsion output types are supported for row-wise scaling."
-        if args.fsdp:
+        if fsdp_enabled:
             setup_distributed()
             apply_fsdp(model)
 
         x = torch.randn(1, 16, 4096, dtype=torch.bfloat16).to(device)
 
         # if training is enabled, perform 5 training iterations with optimizer steps.
-        if args.train:
+        if run_training_loop:
             logger.info("Training for 5 steps")
             optimizer = torch.optim.AdamW(model.parameters())
             label = torch.ones((1,), device=device, dtype=torch.bfloat16)
@@ -101,10 +111,12 @@ def main(args: Namespace):
         torch.cuda.synchronize()
 
         # snapshot memory. only 1 process should snapshot memory
-        if not (args.fsdp and dist.get_rank() != 0):
-            export_memory_snapshot(args.snapshot_file)
+        if memory_snapshotting_enabled:
+            is_rank_0 = fsdp_enabled and dist.get_rank() == 0
+            if not fsdp_enabled or (fsdp_enabled and is_rank_0):
+                export_memory_snapshot(args.snapshot_file)
 
-        stop_record_memory_history()
+            stop_record_memory_history()
 
         peak_memory = torch.cuda.max_memory_allocated(device)
         print(f"Peak GPU memory usage: {peak_memory / (1024 ** 2):.2f} MB")
@@ -131,7 +143,7 @@ def apply_compile(model: nn.Module):
 def apply_ac(model: nn.Module):
     if hasattr(model, "layers"):
         for layer_id, layer in model.layers.named_children():
-            layer = _apply_per_op_ac_to_model(transformer_block, ac_config)
+            layer = _apply_per_op_ac_to_model(layer)
             model.layers.register_module(layer_id, layer)
         logger.info(
             f"Applied selective per op activation checkpoitning to multi-layer model"
@@ -500,9 +512,13 @@ if __name__ == "__main__":
     argparser.add_argument("--compile", action="store_true")
     argparser.add_argument("--per-op-ac", action="store_true")
     argparser.add_argument("--num-layers", type=int, default=1)
-    argparser.add_argument("--model-type", type=str, required=True)
     argparser.add_argument(
-        "--snapshot-file", type=str, required=True, help="[linear,ffn,attn]"
+        "--model-type", type=str, required=True, help="[linear,ffn,attn]"
+    )
+    argparser.add_argument(
+        "--snapshot-file",
+        type=str,
+        help="where to write the memory snapshot pickle file",
     )
     argparser.add_argument(
         "--train",
