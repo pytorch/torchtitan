@@ -89,9 +89,13 @@ def apply_compile(model: nn.Module):
     return model
 
 
+# modified version of per op AC implementation from torchtitan.
+# this applies per op selective AC to a model, without assuming it is a transformer model,
+# and supports no other AC settings.
+# source: https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/parallelisms/parallelize_llama.py#L288
 def apply_ac(model: nn.Module):
     """Apply activation checkpointing to the model."""
-    model = _apply_ac_to_transformer_block(model)
+    model = _apply_per_op_ac_to_model(model)
     logger.info(f"Applied selective per op activation checkpointing to the model")
     return model
 
@@ -108,7 +112,7 @@ def apply_fsdp(model: nn.Module):
     logger.info("Applied FSDP2 to model")
 
 
-def _apply_ac_to_transformer_block(module: nn.Module):
+def _apply_per_op_ac_to_model(module: nn.Module):
     _save_list = {
         torch.ops.aten.mm.default,
         torch.ops.aten._scaled_dot_product_efficient_attention.default,
