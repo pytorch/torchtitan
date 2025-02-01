@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+
+from attention import Attention, precompute_freqs_cis
 from torch import nn
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -73,10 +75,19 @@ def main(args: Namespace):
         if args.model_type == "linear":
             model = LinearModel(args.num_layers).to(torch.bfloat16).to(device)
         elif args.model_type == "ffn":
-            model = FFN(4096, 4 * 4096).to(torch.bfloat16).to(device)
+            dim = 4096
+            hidden_dim = 4 * dim
+            model = FFN(dim, hidden_dim).to(torch.bfloat16).to(device)
+        elif args.model_type == "attn":
+            head_dim = 4096
+            heads = 4
+            kv_heads = 4
+            model = Attention(head_dim, heads, kv_heads).to(torch.bfloat16).to(device)
         else:
-            raise ValueError(f"invalid model type: {args.model_type}")
-        x = torch.randn(16, 4096, dtype=torch.bfloat16).to(device)
+            raise ValueError(
+                f"invalid model type: {args.model_type} (must be one of: linear,ffn,attn)"
+            )
+        x = torch.randn(1, 16, 4096, dtype=torch.bfloat16).to(device)
 
         # fp8 rowwise quant
         if args.float8:
@@ -124,9 +135,18 @@ def apply_compile(model: nn.Module):
 # and supports no other AC settings.
 # source: https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/parallelisms/parallelize_llama.py#L288
 def apply_ac(model: nn.Module):
-    """Apply activation checkpointing to the model."""
-    model = _apply_per_op_ac_to_model(model)
-    logger.info(f"Applied selective per op activation checkpointing to the model")
+    if hasattr(model, "layers"):
+        for layer_id, layer in model.layers.named_children():
+            layer = _apply_per_op_ac_to_model(transformer_block, ac_config)
+            model.layers.register_module(layer_id, layer)
+        logger.info(
+            f"Applied selective per op activation checkpoitning to multi-layer model"
+        )
+    else:
+        model = _apply_per_op_ac_to_model(model)
+        logger.info(
+            f"Applied selective per op activation checkpointing to single layer model"
+        )
     return model
 
 
@@ -240,7 +260,7 @@ if __name__ == "__main__":
     argparser.add_argument("--num-layers", type=int, default=1)
     argparser.add_argument("--model-type", type=str, required=True)
     argparser.add_argument(
-        "--snapshot-file", type=str, required=True, help="[linear,ffn]"
+        "--snapshot-file", type=str, required=True, help="[linear,ffn,attn]"
     )
     args = argparser.parse_args()
     main(args)
