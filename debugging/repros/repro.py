@@ -70,7 +70,12 @@ def main(args: Namespace):
         start_record_memory_history()
 
         # allocate model and inputs
-        model = FFN(4096, 4 * 4096).to(torch.bfloat16).to(device)
+        if args.model_type == "linear":
+            model = LinearModel(args.num_layers).to(torch.bfloat16).to(device)
+        elif args.model_type == "ffn":
+            model = FFN(4096, 4 * 4096).to(torch.bfloat16).to(device)
+        else:
+            raise ValueError(f"invalid model type: {args.model_type}")
         x = torch.randn(16, 4096, dtype=torch.bfloat16).to(device)
 
         # fp8 rowwise quant
@@ -233,6 +238,9 @@ if __name__ == "__main__":
     argparser.add_argument("--compile", action="store_true")
     argparser.add_argument("--per-op-ac", action="store_true")
     argparser.add_argument("--num-layers", type=int, default=1)
-    argparser.add_argument("--snapshot-file", type=str, required=True)
+    argparser.add_argument("--model-type", type=str, required=True)
+    argparser.add_argument(
+        "--snapshot-file", type=str, required=True, help="[linear,ffn]"
+    )
     args = argparser.parse_args()
     main(args)
