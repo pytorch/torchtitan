@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch import nn
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -44,10 +45,31 @@ class LinearModel(nn.Module):
         return self.layers(x)
 
 
+# Simplified FFN from Llama3 https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/models/llama/model.py#L217
+class FFN(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int):
+        super(FFN, self).__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
 def main(args: Namespace):
+    assert torch.cuda.is_available()
     try:
-        model = LinearModel(num_layers=args.num_layers).to(torch.bfloat16).cuda()
-        x = torch.randn(16, 4096, dtype=torch.bfloat16).cuda()
+        device = torch.device("cuda")
+        torch.cuda.reset_peak_memory_stats(device)
+
+        model = FFN(4096, 4 * 4096).to(torch.bfloat16).to(device)
+        x = torch.randn(16, 4096, dtype=torch.bfloat16).to(device)
 
         # fp8 rowwise quant
         if args.float8:
@@ -78,6 +100,9 @@ def main(args: Namespace):
             export_memory_snapshot(args.snapshot_file)
 
         stop_record_memory_history()
+
+        peak_memory = torch.cuda.max_memory_allocated(device)
+        print(f"Peak GPU memory usage: {peak_memory / (1024 ** 2):.2f} MB")
     finally:
         if args.fsdp:
             clean_up_distributed()
