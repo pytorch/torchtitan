@@ -23,6 +23,8 @@ from torch.utils.checkpoint import (
 from torchao.float8.config import Float8LinearRecipeName, recipe_name_to_linear_config
 from torchao.float8.float8_linear_utils import convert_to_float8_training
 
+from torchtitan.models.norms import build_norm
+
 
 # logging
 logging.basicConfig(
@@ -53,22 +55,35 @@ def main(args: Namespace):
         if memory_snapshotting_enabled:
             start_record_memory_history()
 
+        ffwd_dim = 4096
+        ffwd_hidden = 4 * ffwd_dim
+        head_dim = 4096
+        num_heads = 4
+        num_kv_heads = 4
+
         # allocate model and inputs
         if model_type == "linear":
-            model = LinearModel(args.num_layers).to(torch.bfloat16).to(device)
+            model = LinearModel(args.num_layers)
         elif model_type == "ffn":
-            dim = 4096
-            hidden_dim = 4 * dim
-            model = FFN(dim, hidden_dim).to(torch.bfloat16).to(device)
+            model = FeedForward(ffwd_dim, ffwd_hidden)
         elif model_type == "attn":
-            head_dim = 4096
-            heads = 4
-            kv_heads = 4
-            model = Attention(head_dim, heads, kv_heads).to(torch.bfloat16).to(device)
+            model = Attention(head_dim, num_heads, num_kv_heads)
+        elif model_type == "transformer_block":
+            layer_id = 0
+            model = TransformerBlock(
+                layer_id,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                ffwd_dim,
+                ffwd_hidden,
+            )
         else:
             raise ValueError(
                 f"invalid model type: {model_type} (must be one of: linear,ffn,attn)"
             )
+
+        model = model.bfloat16().cuda()
 
         # fp8 rowwise quant
         if use_float8:
@@ -286,10 +301,10 @@ class LinearModel(nn.Module):
         return self.layers(x)
 
 
-# Simplified FFN from Llama3 https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/models/llama/model.py#L217
-class FFN(nn.Module):
+# Simplified FeedForward from Llama3 https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/models/llama/model.py#L217
+class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int):
-        super(FFN, self).__init__()
+        super(FeedForward, self).__init__()
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -340,13 +355,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(num_heads * self.head_dim, head_dim, bias=False)
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
-        # TODO persistent should be set to false, since this buffer can be recomputed.
-        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
-        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
-        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
-        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
-        # initialized by the checkpoint, or we need to add a separate initializer for
-        # just the non-persistent buffers that is called after loading checkpoints.
+
         self.register_buffer(
             "freqs_cis",
             self._precompute_freqs_cis(head_dim, num_heads, max_seq_len, rope_theta),
@@ -505,6 +514,59 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+# source: https://github.com/pytorch/torchtitan/blob/cca07028e440de6a13189d251c28337bd34256ef/torchtitan/models/llama/model.py#L261
+class TransformerBlock(nn.Module):
+
+    def __init__(
+        self,
+        layer_id: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        ffwd_dim: int,
+        ffwd_hidden: int,
+        norm_type: str = "rmsnorm",
+        max_seq_len: int = 1024,
+        rope_theta: int = 10000,
+    ):
+        super().__init__()
+        self.n_heads = num_heads
+        self.attention = Attention(head_dim, num_heads, num_kv_heads)
+        self.feed_forward = FeedForward(
+            dim=ffwd_dim,
+            hidden_dim=ffwd_hidden,
+        )
+        self.layer_id = layer_id
+
+        self.attention_norm = build_norm(
+            norm_type,
+            dim=head_dim,
+        )
+        self.ffn_norm = build_norm(
+            norm_type,
+            dim=ffwd_dim,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ):
+        """
+        Perform a forward pass through the TransformerBlock.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+
+        Returns:
+            torch.Tensor: Output tensor after applying attention and feedforward layers.
+
+        """
+        h = x + self.attention(self.attention_norm(x))
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
+
+
 if __name__ == "__main__":
     argparser = ArgumentParser()
     argparser.add_argument("--float8", action="store_true")
@@ -513,7 +575,10 @@ if __name__ == "__main__":
     argparser.add_argument("--per-op-ac", action="store_true")
     argparser.add_argument("--num-layers", type=int, default=1)
     argparser.add_argument(
-        "--model-type", type=str, required=True, help="[linear,ffn,attn]"
+        "--model-type",
+        type=str,
+        required=True,
+        help="[linear,ffn,attn,transformer_block]",
     )
     argparser.add_argument(
         "--snapshot-file",
