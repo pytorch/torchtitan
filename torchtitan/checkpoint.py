@@ -405,8 +405,8 @@ class CheckpointManager:
 
     def load(
         self,
+        dp_degree: int,
         step: int = -1,
-        dp_degree: int = 1,
     ) -> bool:
         if not self.enable_checkpoint:
             return False
