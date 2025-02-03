@@ -405,7 +405,6 @@ class CheckpointManager:
 
     def load(
         self,
-        dp_degree: int,
         step: int = -1,
     ) -> bool:
         if not self.enable_checkpoint:
@@ -443,9 +442,6 @@ class CheckpointManager:
             states,
             checkpoint_id=self._create_checkpoint_id(step),
         )
-        assert (
-            states["dataloader"]._world_size == dp_degree
-        ), "dp_degree is inconsistent before and after checkpoint, DataLoader sharding is not supported yet."
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )

@@ -174,8 +174,10 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
                 f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}"
             )
             return
+        assert (
+            self._world_size == state_dict["world_size"]
+        ), "dp_degree is inconsistent before and after checkpoint, dataloader resharding is not supported yet."
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
-        self._world_size = state_dict["world_size"]
 
 
 def build_hf_data_loader(
