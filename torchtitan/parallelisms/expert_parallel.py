@@ -325,3 +325,122 @@ class ExpertParallel(ParallelStyle):
                 self._prepare_output_fn, self.output_layouts, self.use_local_output
             ),
         )
+
+
+# This class is for dp2ep with TP (without TP we can just use ExpertParallel)
+class ExpertTensorParallel(ParallelStyle):
+    def __init__(
+        self,
+        *,
+        tp_mesh: DeviceMesh,
+        ep_mesh: DeviceMesh,
+    ):
+        super().__init__()
+        # TODO: has to pass in the meshes in addition to device_mesh,
+        #       as there's an issue from DeviceMesh that
+        #       "Cannot create a submesh from a submesh."
+        self.tp_mesh = tp_mesh
+        self.ep_mesh = ep_mesh
+
+    @staticmethod
+    def _prepare_input_fn(tp_mesh, ep_mesh, mod, inputs, device_mesh):
+        input_tensor = inputs[0]
+        # input_tensor of placements Shard(1) on the tp mesh
+        assert not isinstance(input_tensor, DTensor)
+
+        # a2a(ep)
+        input_tensor = DTensor.from_local(input_tensor, ep_mesh, (Shard(1),))
+        input_tensor = input_tensor.redistribute(placements=(Shard(0),)).to_local()
+        # ag(tp)
+        input_tensor = DTensor.from_local(input_tensor, tp_mesh, (Shard(1),))
+        input_tensor = input_tensor.redistribute(placements=(Replicate(),))
+
+        return input_tensor
+
+    @staticmethod
+    def _partition_fn(tp_mesh, ep_mesh, name, module, device_mesh):
+        # TODO: FSDP doesn't support sharding a 2D Tensor into a 3D one yet
+        # module.register_parameter(
+        #     "gate_proj",
+        #     nn.Parameter(
+        #         distribute_tensor(module.gate_proj, device_mesh, [Shard(0), Shard(2)])
+        #     ),
+        # )  # Column-wise sharding
+        # module.register_parameter(
+        #     "down_proj",
+        #     nn.Parameter(
+        #         distribute_tensor(module.down_proj, device_mesh, [Shard(0), Shard(1)])
+        #     ),
+        # )  # Row-wise sharding
+        # module.register_parameter(
+        #     "up_proj",
+        #     nn.Parameter(
+        #         distribute_tensor(module.up_proj, device_mesh, [Shard(0), Shard(2)])
+        #     ),
+        # )  # Column-wise sharding
+
+        # TODO: Instead, for MoE experts, we shard on the EP mesh and then "forget" it.
+        #       This would become an issue from DCP resharding perspective.
+        module.register_parameter(
+            "gate_proj",
+            nn.Parameter(
+                DTensor.from_local(
+                    (
+                        distribute_tensor(
+                            module.gate_proj, device_mesh, [Shard(0), Shard(2)]
+                        ).to_local()
+                    ),
+                    tp_mesh,
+                    (Shard(2),),
+                )
+            ),
+        )  # Column-wise sharding
+        module.register_parameter(
+            "down_proj",
+            nn.Parameter(
+                DTensor.from_local(
+                    (
+                        distribute_tensor(
+                            module.down_proj, device_mesh, [Shard(0), Shard(1)]
+                        ).to_local()
+                    ),
+                    tp_mesh,
+                    (Shard(1),),
+                )
+            ),
+        )  # Row-wise sharding
+        module.register_parameter(
+            "up_proj",
+            nn.Parameter(
+                DTensor.from_local(
+                    (
+                        distribute_tensor(
+                            module.up_proj, device_mesh, [Shard(0), Shard(2)]
+                        ).to_local()
+                    ),
+                    tp_mesh,
+                    (Shard(2),),
+                )
+            ),
+        )  # Column-wise sharding
+
+    @staticmethod
+    def _prepare_output_fn(tp_mesh, ep_mesh, mod, outputs, device_mesh):
+        # outputs of placements Partial() on the tp mesh
+
+        # rs(tp)
+        outputs = outputs.redistribute(placements=(Shard(1),)).to_local()
+        # a2a(ep)
+        outputs = DTensor.from_local(outputs, ep_mesh, (Shard(0),))
+        outputs = outputs.redistribute(placements=(Shard(1),)).to_local()
+
+        return outputs
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partial(self._partition_fn, self.tp_mesh, self.ep_mesh),
+            partial(self._prepare_input_fn, self.tp_mesh, self.ep_mesh),
+            partial(self._prepare_output_fn, self.tp_mesh, self.ep_mesh),
+        )

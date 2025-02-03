@@ -47,7 +47,8 @@ dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
 enable_async_tensor_parallel = false
-expert_parallel_mode = "tp2ep"
+expert_parallel_degree = 8
+expert_parallel_mode = "dp2ep"
 
 [checkpoint]
 enable_checkpoint = false
