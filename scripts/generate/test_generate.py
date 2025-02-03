@@ -52,7 +52,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         },
     )
 
-    for layer_id, transformer_block in model.layers.items():
+    for _, transformer_block in model.layers.items():
         layer_plan = {
             "attention.wq": ColwiseParallel(),
             "attention.wk": ColwiseParallel(),
@@ -81,6 +81,7 @@ def test_generate(
     batch_size: int = 1,
     top_k: Optional[int] = None,
     seed: Optional[int] = None,
+    deterministic: bool = False,
 ):
     init_logger()
     color = utils.Color
@@ -94,13 +95,6 @@ def test_generate(
         logger.warning(
             "The input prompt is empty, model will respond from a empty sequence."
         )
-
-    utils.set_determinism(seed)
-
-    if seed is None:
-        logger.info("Deterministic sampling off")
-    else:
-        logger.info(f"Deterministic sampling on. Using seed: {seed}")
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -128,6 +122,7 @@ def test_generate(
         logger.info(f"Init model on init_device: {init_device}")
         model = model_cls.from_model_args(model_config)
 
+    world_mesh = None
     # Init distributed env
     if world_size > 1:
         utils.init_distributed(config)
@@ -146,6 +141,8 @@ def test_generate(
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
         apply_tp_minus_sp(model, world_mesh["tp"])
+
+    utils.set_determinism(world_mesh, device, seed, deterministic)
 
     # materalize model
     model.to_empty(device=device_type)
@@ -276,8 +273,13 @@ if __name__ == "__main__":
         "--top_k", type=int, help="Prune to select from top_k probabilities. Optional"
     )
     parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Use deterministic algorithms wherever possible, may be slower",
+    )
 
-    parser.add_argument("--prompt", type=str, help="Input prompt")
+    parser.add_argument("--prompt", type=str, default="", help="Input prompt")
 
     parser.add_argument(
         "--out",
@@ -297,6 +299,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         top_k=args.top_k,
         seed=args.seed,
+        deterministic=args.deterministic,
     )
 
     if torch.distributed.is_initialized():
