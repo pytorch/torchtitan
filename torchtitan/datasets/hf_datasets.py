@@ -16,6 +16,9 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
+
 
 def _load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""

@@ -445,7 +445,7 @@ class CheckpointManager:
         )
         assert (
             states["dataloader"]._world_size == dp_degree
-        ), "Dp_degree mismatch in checkpoint."
+        ), "Dataloader resharding detected. Please ensure dp_degree is consistent before and after checkpoint."
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
