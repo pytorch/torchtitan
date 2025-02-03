@@ -30,7 +30,6 @@ class OverrideDefinitions:
     override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
     test_descr: str = "default"
     test_name: str = "default"
-    requires_seed_checkpoint: bool = False
     ngpu: int = 4
     model_flavor: str = "debugmodel"
 
@@ -48,7 +47,10 @@ def build_test_list():
     integration_tests_flavors["debug_model.toml"] = [
         OverrideDefinitions(
             [
-                [],
+                [
+                    "--profiling.enable_profiling",
+                    "--metrics.enable_tensorboard",
+                ],
             ],
             "default",
             "default",
@@ -139,20 +141,17 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
             ],
             "PP looped zero bubble test",
             "pp_looped_zero_bubble",
-            requires_seed_checkpoint=True,
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
@@ -160,13 +159,11 @@ def build_test_list():
             ],
             "PP 1D test 1F1B",
             "pp_1f1b",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 1",
@@ -174,13 +171,11 @@ def build_test_list():
             ],
             "PP 1D test GPipe",
             "pp_gpipe",
-            requires_seed_checkpoint=True,
             ngpu=2,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 2",
@@ -188,12 +183,10 @@ def build_test_list():
             ],
             "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule GPipe",
                     "--training.data_parallel_shard_degree 2",
@@ -201,19 +194,16 @@ def build_test_list():
             ],
             "PP+DP GPipe 2D test",
             "pp_dp_gpipe",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--training.tensor_parallel_degree 2",
                 ],
             ],
             "PP+TP 2D test",
             "pp_tp",
-            requires_seed_checkpoint=True,
         ),
         OverrideDefinitions(
             [
@@ -233,7 +223,6 @@ def build_test_list():
             ],
             "PP+DP+TP 3D test with save/load resume ckpt",
             "pp_dp_tp",
-            requires_seed_checkpoint=True,
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -247,29 +236,25 @@ def build_test_list():
             ],
             "PP+DP+TP 3D test with torch.compile",
             "3d_compile",
-            requires_seed_checkpoint=True,
             ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 4",
                     "--experimental.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
             "PP looped 1F1B test",
             "pp_looped_1f1b",
-            requires_seed_checkpoint=True,
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
                     "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule PipelineScheduleMulti",
-                    "--experimental.pipeline_parallel_schedule_csv ./test/assets/custom_schedule.csv",
+                    "--experimental.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
                     "--experimental.pipeline_parallel_microbatches 8",
                 ],
             ],
@@ -312,10 +297,22 @@ def build_test_list():
             [
                 [
                     "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "CP",
-            "cp",
+            "CP (allgather)",
+            "cp_allgather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='alltoall'",
+                ]
+            ],
+            "CP (alltoall)",
+            "cp_alltoall",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -344,13 +341,25 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--training.data_parallel_shard_degree=1",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (with dp_shard)",
+            "hsdp+cp_without_dp_shard",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--training.data_parallel_shard_degree=2",
                     "--training.data_parallel_replicate_degree=2",
                     "--experimental.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP",
-            "hsdp+cp",
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_with_dp_shard",
             ngpu=8,
         ),
         OverrideDefinitions(
@@ -368,38 +377,53 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+            ],
+            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+            "cpu_offload+opt_in_bwd+TP+DP+CP",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--memory_estimation.enabled",
                 ]
             ],
             "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_mem_tracker",
+            "fsdp2_memory_estimation",
             ngpu=2,
         ),
         OverrideDefinitions(
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--experimental.pipeline_parallel_degree 2",
-                    "--training.enable_cpu_offload True",
-                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    # placeholder for the generation script's generate step
                 ],
             ],
-            "Enable CPU Offload with PP",
-            "enable_cpu_offload+PP",
-            ngpu=4,
+            "Generation script test",
+            "test_generate",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors
 
 
 def _run_cmd(cmd):
-    return subprocess.run(
-        [cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        shell=True,
-    )
+    return subprocess.run([cmd], text=True, shell=True)
 
 
 def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
@@ -409,17 +433,11 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
-    if test_flavor.requires_seed_checkpoint:
-        cmd = f"CONFIG_FILE={full_path} ./create_seed_checkpoint.sh {dump_folder_arg} {model_flavor_arg}"
-        logger.info(
-            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-        )
-        result = _run_cmd(cmd)
-        logger.info(result.stdout)
-
-    for override_arg in test_flavor.override_args:
+    for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
-        if test_name == "fsdp2_mem_tracker":
+        # dump compile trace for debugging purpose
+        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
+        if test_name == "fsdp2_memory_estimation":
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 "./scripts/estimate/run_memory_estimation.sh"
@@ -431,6 +449,16 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(
             f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
+
+        # save checkpoint (idx == 0) and load it for generation (idx == 1)
+        if test_name == "test_generate" and idx == 1:
+            cmd = (
+                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
+                "PROMPT='What is the meaning of life?' "
+                f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
+            )
+
         result = _run_cmd(cmd)
         logger.info(result.stdout)
         if result.returncode != 0:
@@ -457,10 +485,6 @@ def run_tests(args):
                                     f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
                                     f" because --ngpu arg is {args.ngpu}"
                                 )
-                            elif args.ngpu == 8 and test_flavor.ngpu != 8:
-                                logger.info(
-                                    f"Skipping non-8gpu test {test_flavor.test_name} on 8-gpu runner"
-                                )
                             else:
                                 run_test(test_flavor, full_path, args.output_dir)
 
@@ -474,7 +498,7 @@ def main():
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
-    parser.add_argument("--ngpu", default=4, type=int)
+    parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):

@@ -36,7 +36,7 @@ dev = [
 ]
 
 [tool.setuptools.dynamic]
-version = {file = "version.txt"}
+version = {file = "assets/version.txt"}
 
 
 # ---- Explicit project build information ---- #

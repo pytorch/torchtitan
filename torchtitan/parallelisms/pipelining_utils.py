@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import os
-from typing import Tuple
+from typing import List, Tuple
 
 from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
@@ -12,10 +12,19 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
+from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
+from torchtitan.models.llama.model import ModelArgs
 
 
-def generate_split_points(job_config, pp_dim, model_config):
+def generate_split_points(
+    job_config: JobConfig, pp_dim: int, model_config: ModelArgs
+) -> List[str]:
+    """
+    Generate a default split point based on the number of layers and
+    pipeline parallel dimension.
+    """
+
     schedule_class = get_schedule_class(
         job_config.experimental.pipeline_parallel_schedule
     )
@@ -51,7 +60,7 @@ def generate_split_points(job_config, pp_dim, model_config):
                 current_layer += base_interval
         splits.append("layers." + str(current_layer))
     logger.info(
-        f"No 'pipeline_parallel_split_points' so the generated splits are: {splits} \
+        f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} \
 This may be sub-optimal as the number of layers per stage may be unbalanced."
     )
     return splits
@@ -73,17 +82,32 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
         )
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    logger.info(
-        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule}"
-    )
     n_microbatches = job_config.experimental.pipeline_parallel_microbatches
+    # We expect that the number of local stages (`len(stages)`) is the same across all ranks
+    num_total_stages = job_config.experimental.pipeline_parallel_degree * len(stages)
     if n_microbatches is None:
-        n_microbatches = job_config.experimental.pipeline_parallel_degree
+        n_microbatches = num_total_stages
+    elif n_microbatches < num_total_stages:
+        logger.warning(
+            f"Number of microbatches ({n_microbatches}) is less than the total number \
+of stages ({num_total_stages}) which may result in a bubble in the pipeline."
+        )
+
+    # validate that the batch size is divisible by the number of microbatches otherwise we'll hang or error during training
+    if job_config.training.batch_size % n_microbatches != 0:
+        raise ValueError(
+            f"Batch size {job_config.training.batch_size} must be divisible by number of microbatches {n_microbatches}. "
+            "Update the config arguments for either batch_size or pipeline_parallel_microbatches."
+        )
 
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+    )
+    logger.info(
+        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} \
+with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:

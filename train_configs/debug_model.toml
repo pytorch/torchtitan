@@ -3,10 +3,11 @@
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
+print_args = false
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -14,8 +15,8 @@ save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
 log_freq = 1
-enable_color_printing = true
-enable_tensorboard = true
+disable_color_printing = false
+enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
 
@@ -24,7 +25,7 @@ name = "llama3"
 flavor = "debugmodel"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm / fused_rmsnorm
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./test/assets/test_tiktoken.model"
+tokenizer_path = "./tests/assets/test_tiktoken.model"
 
 [optimizer]
 name = "AdamW"
@@ -51,7 +52,7 @@ enable_async_tensor_parallel = false
 enable_checkpoint = false
 folder = "checkpoint"
 interval_type = "steps"
-interval = 5
+interval = 10
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
