@@ -585,6 +585,19 @@ class JobConfig:
             action="store_true",
         )
 
+        self.parser.add_argument(
+            "--experimental.enable_torchft",
+            action="store_true",
+            help="Enable TorchFT integration.",
+        )
+
+        self.parser.add_argument(
+            "--experimental.ft_replica_group_id",
+            type=int,
+            default=-1,
+            help="The FT replicate group of this run.",
+        )
+
     def to_dict(self):
         return self.args_dict
 

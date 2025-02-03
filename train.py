@@ -17,6 +17,7 @@ from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
+from torchtitan.ft import init_ft_manager, set_ft_state_dict_fns
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
@@ -45,6 +46,10 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    device_module.set_device(device)
+    ft_manager = init_ft_manager(job_config)
+
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -55,9 +60,8 @@ def main(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        ft_manager=ft_manager,
     )
-    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
-    device_module.set_device(device)
     utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
@@ -154,7 +158,8 @@ def main(job_config: JobConfig):
         pp_schedule, model_parts = models_pipelining_fns[model_name](
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
-        # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
+        # when PP is enabled, `model` obj is no longer used after this point,
+        # model_parts is used instead
         del model
 
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -185,7 +190,7 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = build_optimizers(model_parts, job_config)
+    optimizers = build_optimizers(model_parts, job_config, ft_manager)
     lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
 
     train_state = TrainState()
@@ -198,7 +203,9 @@ def main(job_config: JobConfig):
         lr_schedulers=lr_schedulers,
         states={"train_state": train_state},
         job_config=job_config,
+        ft_manager=ft_manager,
     )
+    set_ft_state_dict_fns(ft_manager, checkpoint)
 
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
@@ -328,7 +335,7 @@ def main(job_config: JobConfig):
 
             # calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
+            # float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
 
             # log metrics
             if (
