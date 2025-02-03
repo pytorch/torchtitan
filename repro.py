@@ -69,15 +69,28 @@ def main(args: Namespace):
         elif model_type == "attn":
             model = Attention(head_dim, num_heads, num_kv_heads)
         elif model_type == "transformer_block":
-            layer_id = 0
-            model = TransformerBlock(
-                layer_id,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                ffwd_dim,
-                ffwd_hidden,
-            )
+
+            class Transformer(nn.Module):
+                def __init__(self):
+                    super(Transformer, self).__init__()
+                    self.layers = nn.Sequential(
+                        *[
+                            TransformerBlock(
+                                layer_id,
+                                num_heads,
+                                num_kv_heads,
+                                head_dim,
+                                ffwd_dim,
+                                ffwd_hidden,
+                            )
+                            for layer_id in range(args.num_layers)
+                        ]
+                    )
+
+                def forward(self, x: torch.Tensor):
+                    return self.layers(x)
+
+            model = Transformer()
         else:
             raise ValueError(
                 f"invalid model type: {model_type} (must be one of: linear,ffn,attn)"
@@ -161,7 +174,7 @@ def apply_ac(model: nn.Module):
             layer = _apply_per_op_ac_to_model(layer)
             model.layers.register_module(layer_id, layer)
         logger.info(
-            f"Applied selective per op activation checkpoitning to multi-layer model"
+            f"Applied selective per op activation checkpointing to multi-layer model"
         )
     else:
         model = _apply_per_op_ac_to_model(model)
