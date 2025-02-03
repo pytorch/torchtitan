@@ -33,16 +33,6 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
-    # if tp > or pp > 1, we exit
-    if (
-        job_config.training.tensor_parallel_degree > 1
-        or job_config.experimental.pipeline_parallel_degree > 1
-    ):
-        logger.info(
-            "Tensor parallelism and pipeline parallelism are not supported yet."
-        )
-        return
-
     # fake tensor doesn't work with fused rmsnorm
     if (
         job_config.model.norm_type == "fused_rmsnorm"
@@ -70,8 +60,21 @@ def estimate_memory(job_config: JobConfig):
         tp=job_config.training.tensor_parallel_degree,
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
-        enable_loss_parallel=job_config.training.enable_loss_parallel,
+        enable_loss_parallel=not job_config.training.disable_loss_parallel,
     )
+
+    # only FSDP and HSDP are supported
+    if (
+        (parallel_dims.dp_replicate_enabled and not parallel_dims.dp_shard_enabled)
+        or parallel_dims.tp_enabled
+        or parallel_dims.pp_enabled
+        or parallel_dims.cp_enabled
+    ):
+        logger.warning("DDP, TP, PP, CP are not supported yet.")
+        return
+    if not parallel_dims.dp_shard_enabled:
+        logger.warning("FSDP or HSDP is not enabled. Skipping memory estimation.")
+        return
 
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
@@ -84,10 +87,6 @@ def estimate_memory(job_config: JobConfig):
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
-
-    if not parallel_dims.dp_enabled:
-        logger.info("Data parallelism is not enabled. Skipping memory estimation.")
-        return
 
     model_name = job_config.model.name
 
@@ -117,7 +116,11 @@ def estimate_memory(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    with FakeTensorMode() if not job_config.memory_estimation.disable_fake_mode else contextlib.nullcontext():
+    with (
+        FakeTensorMode()
+        if not job_config.memory_estimation.disable_fake_mode
+        else contextlib.nullcontext()
+    ):
 
         logger.info(
             f"Building {model_name} {job_config.model.flavor} with {model_config}"
@@ -175,8 +178,6 @@ def estimate_memory(job_config: JobConfig):
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(), job_config.training.max_norm, foreach=True
                 )
-                # sync float8 amaxes and scales
-                float8_handler.sync_float8_amax_and_scale_history(model)
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
