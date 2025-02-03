@@ -408,9 +408,10 @@ def clip_grad_norm_(
         # If only using PP, total_norm will be a local tensor.
         mesh = total_norm._spec.mesh
         if isinstance(mesh, ft.process_group.ManagedDeviceMesh):
+            # The gradients along the replicated dim has been reduced.
+            # So we don't need another reducution beforing removing the
+            # replicate dimension
             local_tensor = total_norm.to_local()
-            dist.all_reduce(local_tensor, op=dist.ReduceOp.AVG, group=mesh.replicate_pg)
-
             placements = list(copy.copy(total_norm._spec.placements))
             placements.pop(mesh.replicate_dim)
             mesh = mesh.mesh
