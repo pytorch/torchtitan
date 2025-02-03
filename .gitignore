@@ -5,6 +5,7 @@ __pycache__
 build
 outputs
 dist/*
+.vscode
 
 # data
 data

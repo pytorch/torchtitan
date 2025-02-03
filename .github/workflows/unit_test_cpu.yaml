@@ -25,4 +25,4 @@ jobs:
         pip config --user set global.progress_bar off
 
         pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
-        pytest test --cov=. --cov-report=xml --durations=20 -vv
+        pytest tests/unit_tests --cov=. --cov-report=xml --durations=20 -vv
