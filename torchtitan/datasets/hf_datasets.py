@@ -16,9 +16,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
-
 
 def _load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
@@ -147,14 +144,22 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
     A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
     """
 
-    def __init__(self, dp_rank: int, hf_ds: IterableDataset, batch_size: int):
+    def __init__(
+        self, dp_rank: int, hf_ds: IterableDataset, batch_size: int, world_size: int
+    ):
         super().__init__(hf_ds, batch_size)
         self._dp_rank = dp_rank
         self._rank_id = f"dp_rank_{dp_rank}"
+        # Data loader resharding is not yet supported, so we need to store the world size to compare during loading
+        # raise error if dp_word_size does not match.
+        self._world_size = world_size
 
     def state_dict(self) -> Dict[str, Any]:
         # Store state only for dp rank to avoid replicating the same state across other dimensions
-        return {self._rank_id: pickle.dumps(super().state_dict())}
+        return {
+            self._rank_id: pickle.dumps(super().state_dict()),
+            "world_size": self._world_size,
+        }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         # State being empty is valid
@@ -167,6 +172,7 @@ class DPAwareDataLoader(StatefulDataLoader, Stateful):
             )
             return
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
+        self._world_size = state_dict["world_size"]
 
 
 def build_hf_data_loader(
@@ -183,4 +189,4 @@ def build_hf_data_loader(
     hf_ds = HuggingFaceDataset(
         dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
     )
-    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size)
+    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, world_size=world_size)

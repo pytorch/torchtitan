@@ -211,7 +211,7 @@ def main(job_config: JobConfig):
         logger.info("Created seed checkpoint")
         return
 
-    checkpoint.load(step=job_config.checkpoint.load_step)
+    checkpoint.load(step=job_config.checkpoint.load_step, dp_degree=dp_degree)
     metric_logger = build_metric_logger(job_config, parallel_dims)
 
     # plot losses loaded from checkpoint (if any) to TensorBoard

@@ -403,7 +403,11 @@ class CheckpointManager:
             sync_func()
             self.staging = False
 
-    def load(self, step: int = -1) -> bool:
+    def load(
+        self,
+        step: int = -1,
+        dp_degree: int = 1,
+    ) -> bool:
         if not self.enable_checkpoint:
             return False
         if not os.path.isdir(self.folder):
@@ -439,6 +443,9 @@ class CheckpointManager:
             states,
             checkpoint_id=self._create_checkpoint_id(step),
         )
+        assert (
+            states["dataloader"]._world_size == dp_degree
+        ), "Dp_degree mismatch in checkpoint."
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
