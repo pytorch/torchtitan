@@ -95,18 +95,10 @@ def parallelize_llama(
         or parallel_dims.cp_enabled
         or parallel_dims.ep_mode == "dp2ep"
     ):  # apply FSDP or HSDP, potentially with Context Parallel
-
-        if not parallel_dims.dp_shard_enabled and parallel_dims.dp_replicate_enabled:
-            # Composability of DDP + CP is not supported.
-            raise RuntimeError(
-                "Composability of DDP + CP or DDP + EP is not supported."
-            )
-
-        # the mesh dim names of which the model params are sharded on
-        dp_mesh_dim_names = []
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-        dp_mesh_dim_names.append("dp_shard_cp")
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+        else:
+            dp_mesh_dim_names = ("dp_shard_cp",)
 
         # the mesh dim names of which the MoE params are sharded on
         dp_mod_ep_mesh_dim_names = []
@@ -133,6 +125,9 @@ def parallelize_llama(
 
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
+
+        if job_config.training.enable_cpu_offload:
+            logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
@@ -354,7 +349,7 @@ def apply_ep(
                     module=transformer_block.moe.experts,
                     device_mesh=ep_tp_mesh,
                     parallelize_plan=ExpertTensorParallel(
-                        tp_mesh=tp_mesh, ep_mesh=ep_tp_mesh
+                        tp_mesh=tp_mesh, ep_mesh=ep_mesh
                     ),
                 )
 

@@ -5,8 +5,8 @@ on:
     branches: [ main ]
   pull_request:
   schedule:
-    # Runs nightly
-    - cron: '0 0 * * *'
+    # Runs every 6 hours
+    - cron: '0 */6 * * *'
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
@@ -21,7 +21,7 @@ jobs:
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
-      gpu-arch-version: "12.1"
+      gpu-arch-version: "12.4"
       # This image is faster to clone than the default, but it lacks CC needed by triton
       # (1m25s vs 2m37s).
       docker-image: torchtitan-ubuntu-20.04-clang12
@@ -37,5 +37,9 @@ jobs:
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
+
+        # install torchtitan to test the files in ./scripts
+        python -m pip install -e .
+
         mkdir artifacts-to-be-uploaded
-        python ./test_runner.py artifacts-to-be-uploaded --ngpu 8
+        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8

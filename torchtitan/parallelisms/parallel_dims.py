@@ -83,31 +83,37 @@ class ParallelDims:
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
-        # Mesh for data loading
+        # Mesh for data loading (no communication on this mesh)
         dp_mesh_dim_names = []
-        if self.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-        dp_mesh_dim_names.append("dp_shard_1")
-        if "dp_shard_2" in names:
-            dp_mesh_dim_names.append("dp_shard_2")
-        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
-
         # Mesh for param sharding
-        dp_shard_cp_mesh_dim_name = []
-        dp_shard_cp_mesh_dim_name.append("dp_shard_1")
-        if "dp_shard_2" in names:
-            dp_shard_cp_mesh_dim_name.append("dp_shard_2")
-        if self.cp_enabled:
-            dp_shard_cp_mesh_dim_name.append("cp")
-        mesh[tuple(dp_shard_cp_mesh_dim_name)]._flatten(mesh_dim_name="dp_shard_cp")
-
+        dp_shard_cp_mesh_dim_names = []
+        # Mesh for loss all-reduce
+        dp_cp_mesh_dim_names = []
         # Mesh for ep
         ep_mesh_dim_names = []
+
+        if self.dp_replicate_enabled:
+            dp_mesh_dim_names.append("dp_replicate")
+            dp_cp_mesh_dim_names.append("dp_replicate")
+        # dp_shard_1 is always needed, even if it's 1
+        dp_mesh_dim_names.append("dp_shard_1")
+        dp_shard_cp_mesh_dim_names.append("dp_shard_1")
+        dp_cp_mesh_dim_names.append("dp_shard_1")
         if "dp_shard_2" in names:
+            dp_mesh_dim_names.append("dp_shard_2")
+            dp_shard_cp_mesh_dim_names.append("dp_shard_2")
+            dp_cp_mesh_dim_names.append("dp_shard_2")
             ep_mesh_dim_names.append("dp_shard_2")
         if self.cp_enabled:
+            dp_shard_cp_mesh_dim_names.append("cp")
+            dp_cp_mesh_dim_names.append("cp")
             ep_mesh_dim_names.append("cp")
-        assert len(ep_mesh_dim_names) > 0
+
+        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+        mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
+            mesh_dim_name="dp_shard_cp"
+        )
+        mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
         mesh[tuple(ep_mesh_dim_names)]._flatten(mesh_dim_name="ep")
 
         return mesh
@@ -132,27 +138,32 @@ class ParallelDims:
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
-        # Mesh for data loading
+        # Mesh for data loading (no communication on this mesh)
         dp_mesh_dim_names = []
+        # Mesh for param sharding
+        dp_shard_cp_mesh_dim_names = []
+        # Mesh for loss all-reduce
+        dp_cp_mesh_dim_names = []
+
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
-
+            dp_cp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
+            dp_shard_cp_mesh_dim_names.append("dp_shard")
+            dp_cp_mesh_dim_names.append("dp_shard")
+        if self.cp_enabled:
+            dp_shard_cp_mesh_dim_names.append("cp")
+            dp_cp_mesh_dim_names.append("cp")
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
-
-        # Mesh for param sharding
-        dp_shard_cp_mesh_dim_name = []
-        if self.dp_shard_enabled:
-            dp_shard_cp_mesh_dim_name.append("dp_shard")
-
-        if self.cp_enabled:
-            dp_shard_cp_mesh_dim_name.append("cp")
-
-        if dp_shard_cp_mesh_dim_name != []:
-            mesh[tuple(dp_shard_cp_mesh_dim_name)]._flatten(mesh_dim_name="dp_shard_cp")
+        if dp_shard_cp_mesh_dim_names != []:
+            mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
+                mesh_dim_name="dp_shard_cp"
+            )
+        if dp_cp_mesh_dim_names != []:
+            mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
 
         return mesh
 

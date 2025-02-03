@@ -36,8 +36,11 @@ def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
 
+    if job_config.job.print_args:
+        logger.info(f"Running with args: {job_config.to_dict()}")
+
     # used for colorful printing
-    color = utils.Color if job_config.metrics.enable_color_printing else utils.NoColor
+    color = utils.NoColor if job_config.metrics.disable_color_printing else utils.Color
 
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
@@ -53,7 +56,7 @@ def main(job_config: JobConfig):
         ep=job_config.experimental.expert_parallel_degree,
         ep_mode=job_config.experimental.expert_parallel_mode,
         world_size=world_size,
-        enable_loss_parallel=job_config.training.enable_loss_parallel,
+        enable_loss_parallel=not job_config.training.disable_loss_parallel,
     )
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     device_module.set_device(device)
@@ -75,7 +78,9 @@ def main(job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
 
     # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
-    utils.set_determinism(world_mesh, device, job_config)
+    utils.set_determinism(
+        world_mesh, device, job_config.training.seed, job_config.training.deterministic
+    )
     model_name = job_config.model.name
 
     # build tokenizer
@@ -130,8 +135,9 @@ def main(job_config: JobConfig):
             pred.flatten(0, 1).float(), labels.flatten(0, 1)
         )
 
-    if job_config.training.compile:
-        loss_fn = torch.compile(loss_fn)
+    # TODO: compiling loss function causes CUDA errors, turning off for now
+    # if job_config.training.compile:
+    #     loss_fn = torch.compile(loss_fn)
 
     # move sharded model to CPU/GPU and initialize weights via DTensor
     if job_config.checkpoint.create_seed_checkpoint:
@@ -150,6 +156,8 @@ def main(job_config: JobConfig):
         pp_schedule, model_parts = models_pipelining_fns[model_name](
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
+        # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
+        del model
 
         # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
         # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
@@ -158,13 +166,15 @@ def main(job_config: JobConfig):
             # apply SPMD-style PT-D techniques
             models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
-            m.init_weights(buffer_device=buffer_device)
+            with torch.no_grad():
+                m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
-        model.init_weights(buffer_device=buffer_device)
+        with torch.no_grad():
+            model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]
@@ -195,7 +205,10 @@ def main(job_config: JobConfig):
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
             world_size == 1
-        ), "Must create seed-checkpoint using one gpu, to disable sharding"
+        ), "Must create seed checkpoint using a single device, to disable sharding"
+        assert (
+            job_config.checkpoint.enable_checkpoint
+        ), "Must enable checkpointing when creating a seed checkpoint"
         checkpoint.save(curr_step=0, force=True)
         logger.info("Created seed checkpoint")
         return
@@ -222,7 +235,6 @@ def main(job_config: JobConfig):
     )
 
     # variables used to keep info for metrics logging
-    losses_since_last_log = []
     ntokens_since_last_log = 0
     data_loading_times = []
     time_last_log = time.perf_counter()
@@ -260,12 +272,14 @@ def main(job_config: JobConfig):
             optimizers.zero_grad()
 
             # apply context parallelism if cp is enabled
+            # ensure CP handles the separate freqs_cis buffer for each pp stage
             optional_context_parallel_ctx = (
                 utils.create_context_parallel_ctx(
                     cp_mesh=world_mesh["cp"],
-                    cp_buffers=[input_ids, labels, model.freqs_cis],
-                    cp_seq_dims=[1, 1, 0],
+                    cp_buffers=[input_ids, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={input_ids, labels},
+                    cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
                 )
                 if parallel_dims.cp_enabled
                 else None
@@ -285,10 +299,11 @@ def main(job_config: JobConfig):
                         pp_schedule.step()
 
                 # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses))
+                    torch.mean(torch.stack(losses)).to(device)
                     if is_last_stage
-                    else torch.Tensor([-1.0])
+                    else torch.tensor([-1.0], device=device)
                 )
             else:
                 # Non-PP forward / backward
@@ -308,9 +323,6 @@ def main(job_config: JobConfig):
             #     pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
             # )
 
-            # sync float8 amaxes and scales
-            float8_handler.sync_float8_amax_and_scale_history(model_parts)
-
             # optimizer step
             checkpoint.maybe_wait_for_staging()
             optimizers.step()
@@ -320,22 +332,23 @@ def main(job_config: JobConfig):
             # it issues a single all-reduce for all parameters at once for better performance
             float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
 
-            losses_since_last_log.append(loss)
-
             # log metrics
             if (
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
-                losses = [loss.item() for loss in losses_since_last_log]
-                avg_loss, max_loss = sum(losses) / len(losses), max(losses)
-                if parallel_dims.dp_enabled:
+                if (
+                    parallel_dims.dp_replicate_enabled
+                    or parallel_dims.dp_shard_enabled
+                    or parallel_dims.cp_enabled
+                ):
+                    loss = loss.detach()
                     global_avg_loss, global_max_loss = (
-                        utils.dist_mean(avg_loss, dp_mesh),
-                        utils.dist_max(max_loss, dp_mesh),
+                        utils.dist_mean(loss, world_mesh["dp_cp"]),
+                        utils.dist_max(loss, world_mesh["dp_cp"]),
                     )
                 else:
-                    global_avg_loss, global_max_loss = avg_loss, max_loss
+                    global_avg_loss = global_max_loss = loss.item()
 
                 # update train state
                 train_state.log_steps.append(train_state.step)
@@ -385,7 +398,6 @@ def main(job_config: JobConfig):
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 
-                losses_since_last_log.clear()
                 ntokens_since_last_log = 0
                 data_loading_times.clear()
                 time_last_log = time.perf_counter()
