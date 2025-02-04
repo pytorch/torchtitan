@@ -151,7 +151,12 @@ def main(job_config: JobConfig):
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        pp_schedule, model_parts = models_pipelining_fns[model_name](
+        (
+            pp_schedule,
+            model_parts,
+            has_first_stage,
+            has_last_stage,
+        ) = models_pipelining_fns[model_name](
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
@@ -285,22 +290,19 @@ def main(job_config: JobConfig):
 
             if parallel_dims.pp_enabled:
                 # Pipeline Parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
-
                 with train_context(optional_context_parallel_ctx):
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
+                    targets = labels if has_last_stage else None
+                    losses = [] if has_last_stage else None
+                    if has_first_stage:
+                        pp_schedule.step(input_ids, target=targets, losses=losses)
                     else:
-                        pp_schedule.step()
+                        pp_schedule.step(target=targets, losses=losses)
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
                     torch.mean(torch.stack(losses)).to(device)
-                    if is_last_stage
+                    if has_last_stage
                     else torch.tensor([-1.0], device=device)
                 )
             else:
