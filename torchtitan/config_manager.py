@@ -511,6 +511,16 @@ class JobConfig:
             default=-1,
             help="Load the checkpoint at the specified step. If -1, load the latest checkpoint.",
         )
+        self.parser.add_argument(
+            "--checkpoint.exclude",
+            type=string_list,
+            default="",
+            help="""
+                Exclude specific keys from being loaded from the checkpoint.
+                Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
+                This will load the model only, excluding the specified keys.
+            """,
+        )
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
