@@ -96,10 +96,10 @@ del async_compile
 def call(args):
     primals_1, primals_2, primals_3, primals_4 = args
     args.clear()
-    assert_size_stride(primals_1, (1, 16, 4096), (65536, 4096, 1))
-    assert_size_stride(primals_2, (16384, 4096), (4096, 1))
-    assert_size_stride(primals_3, (16384, 4096), (4096, 1))
-    assert_size_stride(primals_4, (4096, 16384), (16384, 1))
+    assert_size_stride(primals_1, (1, 16, 4096), (65536, 4096, 1))  # input
+    assert_size_stride(primals_2, (16384, 4096), (4096, 1))  # w1
+    assert_size_stride(primals_3, (16384, 4096), (4096, 1))  # w3
+    assert_size_stride(primals_4, (4096, 16384), (16384, 1))  # w2
     with torch.cuda._DeviceGuard(1):
         torch.cuda.set_device(1)
         buf0 = empty_strided_cuda((16, 16384), (16384, 1), torch.bfloat16)
@@ -144,11 +144,11 @@ def call(args):
 
         # PEAK EXTRA MEM was line 134: (16*16384) + (1*16*16384) + (16*4096) = 589824 * 2 bytes for bf16 = 655360 bytes
     return (
-        reinterpret_tensor(buf3, (1, 16, 4096), (65536, 4096, 1), 0),
+        reinterpret_tensor(buf3, (1, 16, 4096), (65536, 4096, 1), 0),  # FFN output
         primals_1,
         primals_3,
         primals_4,
-        buf0,
+        buf0,  # w1(x)
     )
 
     # RETURNS (save for backward?) only buf0 and buf3  => buf0=(16*16384) + buf3=(1*16*4096) * 2 bytes for bf16 = 393216 bytes

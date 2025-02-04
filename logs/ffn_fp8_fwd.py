@@ -115,7 +115,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_0(in_ptr0
         tmp2 = tl.broadcast_to(tmp1, [XBLOCK, R0_BLOCK])
         tmp4 = triton_helpers.maximum(_tmp3, tmp2)
         _tmp3 = tl.where(r0_mask & xmask, tmp4, _tmp3)
-        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask & xmask) <------ amaxes
+        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask & xmask) <------ full input abs?
     tmp3 = triton_helpers.max2(_tmp3, 1)[:, None]
     tmp5 = tmp3.to(tl.float64)
     tmp6 = tl.full([1, 1], 1e-12, tl.float64)
@@ -918,14 +918,14 @@ def call(args):
     return (
         reinterpret_tensor(
             buf21, (1, 16, 4096), (65536, 4096, 1), 0
-        ),  # buf21:bf16=(16, 4096) => small
+        ),  # buf21:bf16=(16, 4096) => small (FFN output)
         primals_1,
         primals_3,
         primals_4,
-        buf0,  # buf0:bf16=(1, 16, 4096) => small
-        buf3,  # buf3:fp32=(16, 1) => small
-        buf7,  # buf7:bf16=(16, 16384) => small
-        buf8,  # buf8:bf16=(4096, 16384) => huge, this is the full abs(W3)
+        buf0,  # buf0:bf16=(1, 16, 4096)    => abs(input) => small
+        buf3,  # buf3:fp32=(16, 1)          => rowwise scales for inputs
+        buf7,  # buf7:bf16=(16, 16384)      => W1(x) => small
+        buf8,  # buf8:bf16=(4096, 16384)    => abs(W3) =>  huge
     )
 
     # RETURNS (save for backward): buf0:bf16=(1, 16, 4096) + buf3:fp32=(16, 1) + buf7:bf16=(16, 16384) + buf8:bf16=(4096, 16384) = 134,873,152 bytes
