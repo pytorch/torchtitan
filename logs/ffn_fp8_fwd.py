@@ -115,7 +115,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_0(in_ptr0
         tmp2 = tl.broadcast_to(tmp1, [XBLOCK, R0_BLOCK])
         tmp4 = triton_helpers.maximum(_tmp3, tmp2)
         _tmp3 = tl.where(r0_mask & xmask, tmp4, _tmp3)
-        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask & xmask)
+        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask & xmask) <------ amaxes
     tmp3 = triton_helpers.max2(_tmp3, 1)[:, None]
     tmp5 = tmp3.to(tl.float64)
     tmp6 = tl.full([1, 1], 1e-12, tl.float64)
@@ -126,7 +126,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_0(in_ptr0
     tmp11 = tmp9 * tmp10
     tmp12 = tmp11.to(tl.float32)
     tmp13 = tmp8 / tmp12
-    tl.store(out_ptr2 + (x0), tmp13, xmask)
+    tl.store(out_ptr2 + (x0), tmp13, xmask) <------ scale
     for r0_offset in range(0, r0_numel, R0_BLOCK):
         r0_index = r0_offset + r0_base
         r0_mask = r0_index < r0_numel
@@ -141,8 +141,8 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_0(in_ptr0
         tmp19 = 448.0
         tmp20 = triton_helpers.minimum(tmp18, tmp19)
         tmp21 = tmp20.to(tl.float8e4nv)
-        tl.store(out_ptr3 + (r0_1 + 4096*x0), tmp21, r0_mask & xmask)
-        tl.store(out_ptr4 + (r0_1 + 4096*x0), tmp21, r0_mask & xmask)
+        tl.store(out_ptr3 + (r0_1 + 4096*x0), tmp21, r0_mask & xmask)    <---- quantized values
+        tl.store(out_ptr4 + (r0_1 + 4096*x0), tmp21, r0_mask & xmask)    <---- quantized values
 """,
     device_str="cuda",
 )
@@ -210,7 +210,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_1(in_ptr0
         tmp2 = tl.broadcast_to(tmp1, [XBLOCK, R0_BLOCK])
         tmp4 = triton_helpers.maximum(_tmp3, tmp2)
         _tmp3 = tl.where(r0_mask, tmp4, _tmp3)
-    tmp3 = triton_helpers.max2(_tmp3, 1)[:, None]
+    tmp3 = triton_helpers.max2(_tmp3, 1)[:, None]   # <--- max along dim 1
     for r0_offset in range(0, r0_numel, R0_BLOCK):
         r0_index = r0_offset + r0_base
         r0_mask = r0_index < r0_numel
@@ -223,27 +223,27 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_1(in_ptr0
         tmp8 = tl.full([1, 1], 1e-12, tl.float64)
         tmp9 = triton_helpers.maximum(tmp7, tmp8)
         tmp10 = tl.full([1, 1], 1, tl.int32)
-        tmp11 = tmp10 / tmp9
+        tmp11 = tmp10 / tmp9                        <------ scale
         tmp12 = tl.full([1, 1], 448.0, tl.float64)
         tmp13 = tmp11 * tmp12
-        tmp14 = tmp13.to(tl.float32)
+        tmp14 = tmp13.to(tl.float32)                <--- apply scale
         tmp15 = tmp6 * tmp14
         tmp16 = -448.0
-        tmp17 = triton_helpers.maximum(tmp15, tmp16)
+        tmp17 = triton_helpers.maximum(tmp15, tmp16) <-- clamp
         tmp18 = 448.0
-        tmp19 = triton_helpers.minimum(tmp17, tmp18)
-        tmp20 = tmp19.to(tl.float8e4nv)
-        tl.store(out_ptr1 + (r0_1 + 4096*x0), tmp20, r0_mask)
+        tmp19 = triton_helpers.minimum(tmp17, tmp18) <-- clamp
+        tmp20 = tmp19.to(tl.float8e4nv)             <--- convert dtype  
+        tl.store(out_ptr1 + (r0_1 + 4096*x0), tmp20, r0_mask)   <----- quantized values
     tmp21 = tmp3.to(tl.float64)
-    tmp22 = tl.full([1, 1], 1e-12, tl.float64)
-    tmp23 = triton_helpers.maximum(tmp21, tmp22)
+    tmp22 = tl.full([1, 1], 1e-12, tl.float64)   <--- EPS
+    tmp23 = triton_helpers.maximum(tmp21, tmp22) <--- apply min EPS
     tmp24 = tl.full([1, 1], 1, tl.int32)
-    tmp25 = tmp24 / tmp23
-    tmp26 = tl.full([1, 1], 448.0, tl.float64)
-    tmp27 = tmp25 * tmp26
-    tmp28 = tmp27.to(tl.float32)
-    tmp29 = tmp24 / tmp28
-    tl.store(out_ptr2 + (x0), tmp29, None)
+    tmp25 = tmp24 / tmp23                        <---- reciprocal of clamped w/ min EPS
+    tmp26 = tl.full([1, 1], 448.0, tl.float64)   <--- max for fp8 dtype (448) 
+    tmp27 = tmp25 * tmp26                        <--- dtype max / clamped w/ EPS
+    tmp28 = tmp27.to(tl.float32)                
+    tmp29 = tmp24 / tmp28                        <--- reciprocal of scale
+    tl.store(out_ptr2 + (x0), tmp29, None)       <--- return reciprocal of scale
 """,
     device_str="cuda",
 )
@@ -311,7 +311,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_2(in_ptr0
         tmp2 = tl.broadcast_to(tmp1, [XBLOCK, R0_BLOCK])
         tmp4 = triton_helpers.maximum(_tmp3, tmp2)
         _tmp3 = tl.where(r0_mask, tmp4, _tmp3)
-        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask)
+        tl.store(out_ptr0 + (r0_1 + 4096*x0), tmp1, r0_mask) <---- full tensor abs values?
     tmp3 = triton_helpers.max2(_tmp3, 1)[:, None]
     for r0_offset in range(0, r0_numel, R0_BLOCK):
         r0_index = r0_offset + r0_base
@@ -335,7 +335,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_2(in_ptr0
         tmp18 = 448.0
         tmp19 = triton_helpers.minimum(tmp17, tmp18)
         tmp20 = tmp19.to(tl.float8e4nv)
-        tl.store(out_ptr2 + (r0_1 + 4096*x0), tmp20, r0_mask)
+        tl.store(out_ptr2 + (r0_1 + 4096*x0), tmp20, r0_mask) <--- quantized values
     tmp21 = tmp3.to(tl.float64)
     tmp22 = tl.full([1, 1], 1e-12, tl.float64)
     tmp23 = triton_helpers.maximum(tmp21, tmp22)
@@ -345,7 +345,7 @@ def triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_2(in_ptr0
     tmp27 = tmp25 * tmp26
     tmp28 = tmp27.to(tl.float32)
     tmp29 = tmp24 / tmp28
-    tl.store(out_ptr3 + (x0), tmp29, None)
+    tl.store(out_ptr3 + (x0), tmp29, None) <---- scale
 """,
     device_str="cuda",
 )
@@ -687,10 +687,10 @@ del async_compile
 def call(args):
     primals_1, primals_2, primals_3, primals_4 = args
     args.clear()
-    assert_size_stride(primals_1, (1, 16, 4096), (65536, 4096, 1))
-    assert_size_stride(primals_2, (16384, 4096), (4096, 1))
-    assert_size_stride(primals_3, (16384, 4096), (4096, 1))
-    assert_size_stride(primals_4, (4096, 16384), (16384, 1))
+    assert_size_stride(primals_1, (1, 16, 4096), (65536, 4096, 1))  # input
+    assert_size_stride(primals_2, (16384, 4096), (4096, 1))  # w1
+    assert_size_stride(primals_3, (16384, 4096), (4096, 1))  # w3
+    assert_size_stride(primals_4, (4096, 16384), (16384, 1))  # w2
     with torch.cuda._DeviceGuard(0):
         torch.cuda.set_device(0)
         buf0 = empty_strided_cuda((1, 16, 4096), (65536, 4096, 1), torch.bfloat16)
@@ -705,9 +705,18 @@ def call(args):
         # total bytes: 262,208
 
         # Topologically Sorted Source Nodes: [output, output_1], Original ATen: [aten.abs, aten.amax, aten._to_copy, aten.clamp, aten.reciprocal, aten.mul, aten._scaled_mm]
+        # INPUTS -> get amax, scales, and quantized values
         stream0 = get_raw_stream(0)
         triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_0.run(
-            primals_1, buf0, buf3, buf4, buf10, 16, 4096, grid=grid(16), stream=stream0
+            primals_1,
+            buf0,  # amaxes
+            buf3,  # scales
+            buf4,  # quantized values
+            buf10,  # copy of quantized values
+            16,
+            4096,
+            grid=grid(16),
+            stream=stream0,
         )
         buf5 = empty_strided_cuda((4096, 16384), (1, 4096), torch.float8_e4m3fn)
         buf6 = empty_strided_cuda((1, 16384), (16384, 1), torch.float32)
@@ -716,9 +725,16 @@ def call(args):
         # total bytes: 67,436,608
 
         # Topologically Sorted Source Nodes: [output], Original ATen: [aten.abs, aten.amax, aten._to_copy, aten.clamp, aten.reciprocal, aten.mul, aten._scaled_mm]
+        # W1 -> get quantized values and scale (or reciprocal of scale?)
         stream0 = get_raw_stream(0)
         triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_1.run(
-            primals_2, buf5, buf6, 16384, 4096, grid=grid(16384), stream=stream0
+            primals_2,
+            buf5,  # output quantized values
+            buf6,  # output scales
+            16384,
+            4096,
+            grid=grid(16384),
+            stream=stream0,
         )
         del primals_2
         buf7 = empty_strided_cuda((16, 16384), (16384, 1), torch.bfloat16)
@@ -728,14 +744,15 @@ def call(args):
         # total bytes: 67,960,896
 
         # Topologically Sorted Source Nodes: [output], Original ATen: [aten._to_copy, aten.clamp, aten.reciprocal, aten.mul, aten._scaled_mm]
+        # SCALED_MM WITH FP8 INPUTS AND W1
         extern_kernels._scaled_mm(
-            buf4,
-            buf5,
-            buf3,
-            buf6,
+            buf4,  # quantized inputs
+            buf5,  # quantized W1
+            buf3,  # input scales
+            buf6,  # w1 scales
             out_dtype=torch.bfloat16,
             use_fast_accum=True,
-            out=buf7,
+            out=buf7,  # w1(x)
         )
         del buf4
 
@@ -772,9 +789,17 @@ def call(args):
         # total bytes: 202,113,088
 
         # Topologically Sorted Source Nodes: [output_1], Original ATen: [aten.abs, aten.amax, aten._to_copy, aten.clamp, aten.reciprocal, aten.mul, aten._scaled_mm]
+        # W3 -> get quantized values and scale
         stream0 = get_raw_stream(0)
         triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_2.run(
-            primals_3, buf8, buf11, buf12, 16384, 4096, grid=grid(16384), stream=stream0
+            primals_3,  # W3
+            buf8,  # full W3 abs values?!
+            buf11,  # quantized values
+            buf12,  # scales
+            16384,
+            4096,
+            grid=grid(16384),
+            stream=stream0,
         )
         buf13 = empty_strided_cuda((16, 16384), (16384, 1), torch.bfloat16)
 
@@ -784,13 +809,13 @@ def call(args):
 
         # Topologically Sorted Source Nodes: [output_1], Original ATen: [aten._to_copy, aten.clamp, aten.reciprocal, aten.mul, aten._scaled_mm]
         extern_kernels._scaled_mm(
-            buf10,
-            buf11,
-            buf3,
-            buf12,
+            buf10,  # quantized inputs
+            buf11,  # quantized W3
+            buf3,  # input scales
+            buf12,  # W3 scales
             out_dtype=torch.bfloat16,
             use_fast_accum=True,
-            out=buf13,
+            out=buf13,  # W3(x)
         )
         del buf10
         del buf12
@@ -900,7 +925,7 @@ def call(args):
         buf0,  # buf0:bf16=(1, 16, 4096) => small
         buf3,  # buf3:fp32=(16, 1) => small
         buf7,  # buf7:bf16=(16, 16384) => small
-        buf8,  # buf8:bf16=(4096, 16384) => huge, what is this? used in triton_red_fused__scaled_mm__to_copy_abs_amax_clamp_mul_reciprocal_2
+        buf8,  # buf8:bf16=(4096, 16384) => huge, this is the full abs(W3)
     )
 
     # RETURNS (save for backward): buf0:bf16=(1, 16, 4096) + buf3:fp32=(16, 1) + buf7:bf16=(16, 16384) + buf8:bf16=(4096, 16384) = 134,873,152 bytes
