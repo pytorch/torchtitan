@@ -403,10 +403,7 @@ class CheckpointManager:
             sync_func()
             self.staging = False
 
-    def load(
-        self,
-        step: int = -1,
-    ) -> bool:
+    def load(self, step: int = -1) -> bool:
         if not self.enable_checkpoint:
             return False
         if not os.path.isdir(self.folder):
