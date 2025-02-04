@@ -142,16 +142,18 @@ def call(args):
         del buf2
         # EXTRA MEM: buf0=(16*16384) + buf3=(16*4096)
 
-        # PEAK EXTRA MEM was line 134: (16*16384) + (1*16*16384) + (16*4096) = 589824 * 2 bytes for bf16 = 655360 bytes
+        # PEAK EXTRA MEM was line 134: (16*16384) + (1*16*16384) + (16*4096) = 589824 * 2 bytes for bf16 = 655,360 bytes
     return (
-        reinterpret_tensor(buf3, (1, 16, 4096), (65536, 4096, 1), 0),  # FFN output
+        reinterpret_tensor(
+            buf3, (1, 16, 4096), (65536, 4096, 1), 0
+        ),  # FFN output => (1,16,4096) in bf16 = 131,072 bytes
         primals_1,
         primals_3,
         primals_4,
-        buf0,  # w1(x)
+        buf0,  # w1(x) => (16,16384) in bf16 = 524,288 bytes
     )
 
-    # RETURNS (save for backward?) only buf0 and buf3  => buf0=(16*16384) + buf3=(1*16*4096) * 2 bytes for bf16 = 393216 bytes
+    # RETURNS (save for backward?) only buf0 and buf3  => (buf0=(16*16384) + buf3=(1*16*4096)) * 2 bytes for bf16 = 655,360 bytes
 
 
 def benchmark_compiled_module(times=10, repeat=10):
