@@ -198,7 +198,7 @@ class CheckpointManager:
         self.model_weights_only = ckpt_config.model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
         self.exclude = (
-            [item.strip() for item in ckpt_config.exclude.split]
+            [item.strip() for item in ckpt_config.exclude]
             if ckpt_config.exclude
             else []
         )

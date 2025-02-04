@@ -418,6 +418,22 @@ def build_test_list():
             "test_generate",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 10",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude lr_scheduler,dataloader,optimizer",
+                    "--training.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
+        ),
     ]
     return integration_tests_flavors
 

@@ -628,6 +628,13 @@ class JobConfig:
             exp["pipeline_parallel_split_points"] = string_list(
                 exp["pipeline_parallel_split_points"]
             )
+        if (
+            "checkpoint" in args_dict
+            and "exclude" in args_dict["checkpoint"]
+            and isinstance(args_dict["checkpoint"]["exclude"], str)
+        ):
+            ckpt = args_dict["checkpoint"]
+            ckpt["exclude"] = string_list(ckpt["exclude"])
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
@@ -674,6 +681,9 @@ class JobConfig:
                 # without this special case, type inference breaks here,
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
+                aux_parser.add_argument("--" + arg, type=string_list)
+            elif arg == "checkpoint.exclude":
+                # same as above for checkpoint.exclude
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
