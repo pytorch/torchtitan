@@ -48,6 +48,65 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--profiling.enable_profiling",
+                    "--metrics.enable_tensorboard",
+                ],
+            ],
+            "default",
+            "default",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                ],
+            ],
+            "1D compile",
+            "1d_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "1D compile with selective op AC",
+            "1d_compile_sac_op",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 2",
+                ],
+            ],
+            "2D eager",
+            "2d_eager",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--training.tensor_parallel_degree 2",
+                ],
+            ],
+            "2D compile",
+            "2d_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.tensor_parallel_degree 2",
+                    "--model.norm_type=fused_rmsnorm",
+                ],
+            ],
+            "2D eager with fused_rmsnorm",
+            "2d_eager_fused_rmsnorm",
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--checkpoint.enable_checkpoint",
                 ],
                 [
@@ -57,6 +116,307 @@ def build_test_list():
             ],
             "Checkpoint Integration Test - Save Load Full Checkpoint",
             "full_checkpoint",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.model_weights_only",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Model Weights Only fp32",
+            "model_weights_only_fp32",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.model_weights_only",
+                    "--checkpoint.export_dtype bfloat16",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Model Weights Only bf16",
+            "model_weights_only_bf16",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_schedule InterleavedZeroBubble",
+                ],
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule 1F1B",
+                    "--training.data_parallel_shard_degree 1",
+                ],
+            ],
+            "PP 1D test 1F1B",
+            "pp_1f1b",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule GPipe",
+                    "--training.data_parallel_shard_degree 1",
+                ],
+            ],
+            "PP 1D test GPipe",
+            "pp_gpipe",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule 1F1B",
+                    "--training.data_parallel_shard_degree 2",
+                ],
+            ],
+            "PP+DP 1F1B 2D test",
+            "pp_dp_1f1b",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule GPipe",
+                    "--training.data_parallel_shard_degree 2",
+                ],
+            ],
+            "PP+DP GPipe 2D test",
+            "pp_dp_gpipe",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+TP 2D test",
+            "pp_tp",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                ],
+                [
+                    "--training.steps 20",
+                    "--checkpoint.enable_checkpoint",
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+DP+TP 3D test with save/load resume ckpt",
+            "pp_dp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--training.data_parallel_shard_degree 2",
+                    "--training.tensor_parallel_degree 2",
+                    "--training.compile",
+                ],
+            ],
+            "PP+DP+TP 3D test with torch.compile",
+            "3d_compile",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 4",
+                    "--experimental.pipeline_parallel_schedule Interleaved1F1B",
+                ],
+            ],
+            "PP looped 1F1B test",
+            "pp_looped_1f1b",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule PipelineScheduleMulti",
+                    "--experimental.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                ],
+            ],
+            "PP with custom pipeline schedule loaded from CSV file",
+            "pp_custom_csv",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--optimizer.name Adam --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.fused",
+                ]
+            ],
+            "Fused Optimizer Test",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=1",
+                    "--training.data_parallel_replicate_degree=4",
+                ]
+            ],
+            "DDP",
+            "ddp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "HSDP",
+            "hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='allgather'",
+                ]
+            ],
+            "CP (allgather)",
+            "cp_allgather",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.context_parallel_degree=4",
+                    "--experimental.context_parallel_rotate_method='alltoall'",
+                ]
+            ],
+            "CP (alltoall)",
+            "cp_alltoall",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--training.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=1",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (with dp_shard)",
+            "hsdp+cp_without_dp_shard",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_with_dp_shard",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.data_parallel_shard_degree=2",
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    "--training.tensor_parallel_degree=2",
+                    "--experimental.context_parallel_degree=2",
+                    "--training.data_parallel_replicate_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+            ],
+            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+            "cpu_offload+opt_in_bwd+TP+DP+CP",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--memory_estimation.enabled",
+                ]
+            ],
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_memory_estimation",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                ],
+                [
+                    # placeholder for the generation script's generate step
+                ],
+            ],
+            "Generation script test",
+            "test_generate",
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
