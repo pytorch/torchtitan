@@ -31,6 +31,7 @@ def _is_sm89_or_later():
 class Float8Handler:
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
+        self.job_config = job_config
 
         float8_config = job_config.float8
         if not float8_config.enable_float8_linear:
@@ -77,16 +78,28 @@ class Float8Handler:
 
         from torchao.float8 import convert_to_float8_training
 
+        if self.job_config.training.compile_ln_linear:
+            # only convert compiled regions to float8
+            module_filter_fn=lambda mod, fqn: (fqn != "output" and "norm_" in fqn)
+        elif self.job_config.training.compile_ln_mlp:
+            # only convert compiled regions to float8
+            module_filter_fn=lambda mod, fqn: (fqn != "output" and "feed_forward" in fqn)
+        else:
+            module_filter_fn=lambda mod, fqn: fqn != "output"
+
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=lambda mod, fqn: fqn != "output",
+            module_filter_fn=module_filter_fn,
+            # module_filter_fn=lambda mod, fqn: fqn != "output",
+            # module_filter_fn=lambda mod, fqn: fqn != "output" and "norm_w13" in fqn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
+        print(model)
 
     def precompute_float8_dynamic_scale_for_fsdp(
         self, model: Union[nn.Module, List[nn.Module]]
