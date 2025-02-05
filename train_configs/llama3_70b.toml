@@ -33,12 +33,10 @@ max_norm = 1.0  # grad norm clipping
 steps = 1000
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 8  # 8-way TP
 compile = false
 dataset = "c4"
-
-[data_parallel]
-reshard_after_forward_policy = "default" # default / never / always
 
 [experimental]
 context_parallel_degree = 1

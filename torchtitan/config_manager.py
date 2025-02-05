@@ -285,12 +285,12 @@ class JobConfig:
             help="Whether to apply loss parallel when sequence parallel is enabled",
         )
         self.parser.add_argument(
-            "--data_parallel.reshard_after_forward_policy",
+            "--training.fsdp_reshard_after_forward",
             type=str,
             default="default",
             choices=["default", "always", "never"],
             help="""
-            `reshard_after_forward_policy` specifies the policy for applying `reshard_after_forward`
+            `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
             within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
             trading off memory and communication. See torch's `fully_shard` API for more documentation
             on `reshard_after_forward`.
@@ -664,7 +664,7 @@ class JobConfig:
         if self.training.data_parallel_shard_degree == 1:
             logger.warning(
                 "data_parallel_shard_degree is set to 1. FSDP is disabled and "
-                f"reshard after forward policy '{self.data_parallel.reshard_after_forward_policy}' "
+                f"reshard after forward policy '{self.training.fsdp_reshard_after_forward}' "
                 "will be ignored."
             )
 

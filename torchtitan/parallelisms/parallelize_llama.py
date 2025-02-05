@@ -91,7 +91,7 @@ def parallelize_llama(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.data_parallel.reshard_after_forward_policy,
+            reshard_after_forward_policy=job_config.training.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
