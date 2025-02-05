@@ -441,7 +441,7 @@ class CheckpointManager:
             k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
         for exclude_key in self.exclude_from_loading:
-            if exclude_key not in states:
+            if exclude_key != "" and exclude_key not in states:
                 raise ValueError(f"{exclude_key} not found in state_dict, skipping")
         dcp.load(
             shadow_states,
