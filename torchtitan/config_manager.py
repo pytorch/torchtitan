@@ -514,6 +514,7 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.exclude_from_loading",
             type=string_list,
+            nargs="*",
             default=[],
             help="""
                 Exclude specific keys from being loaded from the checkpoint.
