@@ -426,7 +426,7 @@ def build_test_list():
                 ],
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.exclude lr_scheduler,dataloader,optimizer",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--training.tensor_parallel_degree 2",
                     "--training.steps 20",
                 ],

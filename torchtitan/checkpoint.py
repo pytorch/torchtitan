@@ -169,6 +169,9 @@ class CheckpointManager:
             into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
             which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
             support described in (1).
+
+        3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers by the ssumption that
+        all lr_schedulers have the same state_dict.
         """
         self.states = states
 
@@ -197,9 +200,9 @@ class CheckpointManager:
 
         self.model_weights_only = ckpt_config.model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
-        self.exclude = (
-            [item.strip() for item in ckpt_config.exclude]
-            if ckpt_config.exclude
+        self.exclude_from_loading = (
+            [item.strip() for item in ckpt_config.exclude_from_loading]
+            if ckpt_config.exclude_from_loading
             else []
         )
 
@@ -434,10 +437,12 @@ class CheckpointManager:
         }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
-        shadow_states = {k: v for k, v in states.items() if k not in self.exclude}
-        for exclude_key in self.exclude:
+        shadow_states = {
+            k: v for k, v in states.items() if k not in self.exclude_from_loading
+        }
+        for exclude_key in self.exclude_from_loading:
             if exclude_key not in states:
-                logger.warning(f"{exclude_key} not found in state_dict, skipping")
+                raise ValueError(f"{exclude_key} not found in state_dict, skipping")
         dcp.load(
             shadow_states,
             checkpoint_id=self._create_checkpoint_id(step),

@@ -512,7 +512,7 @@ class JobConfig:
             help="Load the checkpoint at the specified step. If -1, load the latest checkpoint.",
         )
         self.parser.add_argument(
-            "--checkpoint.exclude",
+            "--checkpoint.exclude_from_loading",
             type=string_list,
             default="",
             help="""
@@ -630,11 +630,11 @@ class JobConfig:
             )
         if (
             "checkpoint" in args_dict
-            and "exclude" in args_dict["checkpoint"]
-            and isinstance(args_dict["checkpoint"]["exclude"], str)
+            and "exclude_from_loading" in args_dict["checkpoint"]
+            and isinstance(args_dict["checkpoint"]["exclude_from_loading"], str)
         ):
             ckpt = args_dict["checkpoint"]
-            ckpt["exclude"] = string_list(ckpt["exclude"])
+            ckpt["exclude_from_loading"] = string_list(ckpt["exclude_from_loading"])
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
@@ -682,8 +682,8 @@ class JobConfig:
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
-            elif arg == "checkpoint.exclude":
-                # same as above for checkpoint.exclude
+            elif arg == "checkpoint.exclude_from_loading":
+                # same as above for checkpoint.exclude_from_loading
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
