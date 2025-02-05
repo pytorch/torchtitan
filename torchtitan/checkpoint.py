@@ -170,7 +170,7 @@ class CheckpointManager:
             which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
             support described in (1).
 
-        3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers by the ssumption that
+        3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers with the assumption that
         all lr_schedulers have the same state_dict.
         """
         self.states = states
@@ -200,11 +200,7 @@ class CheckpointManager:
 
         self.model_weights_only = ckpt_config.model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
-        self.exclude_from_loading = (
-            [item.strip() for item in ckpt_config.exclude_from_loading]
-            if ckpt_config.exclude_from_loading
-            else []
-        )
+        self.exclude_from_loading = ckpt_config.exclude_from_loading
 
         self.mp = None
         if async_mode == AsyncMode.DISABLED:
@@ -437,17 +433,17 @@ class CheckpointManager:
         }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
-        shadow_states = {
+        state_to_load = {
             k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
         for exclude_key in self.exclude_from_loading:
-            if exclude_key != "" and exclude_key not in states:
-                raise ValueError(f"{exclude_key} not found in state_dict, skipping")
+            if exclude_key not in states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
         dcp.load(
-            shadow_states,
+            state_to_load,
             checkpoint_id=self._create_checkpoint_id(step),
         )
-        states.update(shadow_states)
+        states.update(state_to_load)
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )

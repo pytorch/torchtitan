@@ -514,7 +514,7 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.exclude_from_loading",
             type=string_list,
-            default="",
+            default=[],
             help="""
                 Exclude specific keys from being loaded from the checkpoint.
                 Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
@@ -683,7 +683,7 @@ class JobConfig:
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
                 aux_parser.add_argument("--" + arg, type=string_list)
             elif arg == "checkpoint.exclude_from_loading":
-                # same as above for checkpoint.exclude_from_loading
+                # similar to the case above
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
