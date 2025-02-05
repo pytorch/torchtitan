@@ -661,12 +661,6 @@ class JobConfig:
         assert self.model.name
         assert self.model.flavor
         assert self.model.tokenizer_path
-        if self.training.data_parallel_shard_degree == 1:
-            logger.warning(
-                "data_parallel_shard_degree is set to 1. FSDP is disabled and "
-                f"reshard after forward policy '{self.training.fsdp_reshard_after_forward}' "
-                "will be ignored."
-            )
 
     def parse_args_from_command_line(
         self, args_list
