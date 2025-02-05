@@ -91,6 +91,7 @@ def parallelize_llama(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
+            reshard_after_forward_policy=job_config.data_parallel.reshard_after_forward_policy,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -313,9 +314,24 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
+    reshard_after_forward_policy: str = "default",
 ):
     """
-    Apply data parallelism to the model. FSDP2 is used here.
+    Apply data parallelism (via FSDP2) to the model.
+
+    Args:
+        model (nn.Module): The model to apply data parallelism to.
+        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        param_dtype (torch.dtype): The data type to use for model parameters.
+        reduce_dtype (torch.dtype): The data type to use for reduction operations.
+        pp_enabled (bool): Whether pipeline parallelism is enabled.
+        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
+        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
+            Other options: "never", "always".
+            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
+            - "always" will enable `reshard_after_forward` for all forward passes.
+            - "never" will disable `reshard_after_forward` for all forward passes.
+
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
@@ -323,14 +339,23 @@ def apply_fsdp(
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     for layer_id, transformer_block in model.layers.items():
-        if pp_enabled:
-            # For PP, do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
+        if reshard_after_forward_policy == "always":
+            reshard_after_forward = True
+        elif reshard_after_forward_policy == "never":
             reshard_after_forward = False
+        elif reshard_after_forward_policy == "default":
+            if pp_enabled:
+                # For PP, do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                reshard_after_forward = False
+            else:
+                # As an optimization, do not reshard after forward for the last
+                # transformer block since FSDP would prefetch it immediately
+                reshard_after_forward = int(layer_id) < len(model.layers) - 1
         else:
-            # As an optimization, do not reshard after forward for the last
-            # transformer block since FSDP would prefetch it immediately
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            raise ValueError(
+                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+            )
         fully_shard(
             transformer_block,
             **fsdp_config,

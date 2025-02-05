@@ -37,6 +37,9 @@ tensor_parallel_degree = 8  # 8-way TP
 compile = true
 dataset = "c4"
 
+[data_parallel]
+reshard_after_forward_policy = "default" # default / never / always
+
 [experimental]
 context_parallel_degree = 1
 pipeline_parallel_degree = 1

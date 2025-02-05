@@ -43,6 +43,9 @@ tensor_parallel_degree = 1
 compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
+[data_parallel]
+reshard_after_forward_policy = "default" # default / never / always
+
 [experimental]
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
