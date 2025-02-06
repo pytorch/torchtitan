@@ -421,7 +421,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--data_parallel.reshard_after_forward always",
+                    "--training.fsdp_reshard_after_forward always",
                 ],
             ],
             "Test always resharding after forward pass",
