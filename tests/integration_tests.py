@@ -408,6 +408,16 @@ def build_test_list():
             "test_generate",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fsdp_reshard_after_forward always",
+                ],
+            ],
+            "Test always resharding after forward pass",
+            "fsdp_reshard_always",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 
