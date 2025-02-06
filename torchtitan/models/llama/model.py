@@ -259,7 +259,7 @@ class FeedForward(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
-class TransformerBlock(nn.Module, ModelProtocol):
+class TransformerBlock(nn.Module):
     """
     TransformerBlock Module
 
@@ -332,7 +332,7 @@ class TransformerBlock(nn.Module, ModelProtocol):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module):
+class Transformer(nn.Module, ModelProtocol):
     """
     Transformer Module
 
