@@ -433,17 +433,17 @@ class CheckpointManager:
         }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
-        state_to_load = {
+        states_to_load = {
             k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
         dcp.load(
-            state_to_load,
+            states_to_load,
             checkpoint_id=self._create_checkpoint_id(step),
         )
-        states.update(state_to_load)
+        states.update(states_to_load)
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )

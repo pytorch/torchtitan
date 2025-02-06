@@ -118,9 +118,9 @@ class TestJobConfig:
 
     def test_parse_exclude_from_loading(self):
 
-        toml_splits = ["optimizer", "lr_scheduler", "dataloader"]
+        toml_splits = ["optimizer", "dataloader"]
         toml_split_str = ",".join(toml_splits)
-        cmdline_splits = ["optimizer", "lr_scheduler", "dataloader"]
+        cmdline_splits = ["optimizer", "lr_scheduler"]
         cmdline_split_str = ",".join(cmdline_splits)
         # no split points specified
         config = JobConfig()

@@ -26,7 +26,7 @@ TORCH_DTYPE_MAP = {
 
 
 def string_list(raw_arg):
-    return raw_arg.split(",")
+    return [s.strip() for s in raw_arg.split(",") if s.strip()]
 
 
 class JobConfig:
