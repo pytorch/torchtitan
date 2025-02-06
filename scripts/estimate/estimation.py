@@ -33,17 +33,6 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
-    # fake tensor doesn't work with fused rmsnorm
-    if (
-        job_config.model.norm_type == "fused_rmsnorm"
-        and not job_config.memory_estimation.disable_fake_mode
-    ):
-        logger.info(
-            "Fused RMSNorm is not supported yet under fake estimation mode. "
-            "Switching to rmsnorm."
-        )
-        job_config.model.norm_type = "rmsnorm"
-
     if job_config.model.norm_type == "compiled_rmsnorm":
         logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
         job_config.model.norm_type = "rmsnorm"

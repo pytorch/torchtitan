@@ -69,11 +69,6 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm is not compatible with torch.compile yet. "
-                "Please use rmsnorm or layernorm."
-            )
         apply_compile(model)
 
     if (
