@@ -69,11 +69,6 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
-        if job_config.model.norm_type == "fused_rmsnorm":
-            raise NotImplementedError(
-                "fused_rmsnorm is not compatible with torch.compile yet. "
-                "Please use rmsnorm or layernorm."
-            )
         apply_compile(model)
 
     if (
@@ -218,8 +213,8 @@ _save_list = {
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
-    # the result of max(abs(tensor))
-    torch.ops.aten.abs.default,
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
 }
 

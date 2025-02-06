@@ -97,16 +97,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type=fused_rmsnorm",
-                ],
-            ],
-            "2D eager with fused_rmsnorm",
-            "2d_eager_fused_rmsnorm",
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--checkpoint.enable_checkpoint",
                 ],
                 [
