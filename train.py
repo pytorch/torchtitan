@@ -16,9 +16,9 @@ from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
-from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
+from torchtitan.model_handler import build_model_handlers_container
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
@@ -110,10 +110,9 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
-    # a no-op hander if float8 is not enabled
-    float8_handler = Float8Handler(job_config, parallel_dims)
-    # swap to Float8Linear based on float8 configs
-    float8_handler.convert_to_float8_training(model)
+    # Build the collection of model handlers. No-op if `model.handlers` empty
+    model_handlers = build_model_handlers_container(job_config, parallel_dims)
+    model_handlers.convert(model)
 
     # log model size
     model_param_count = utils.get_num_params(model)
@@ -326,9 +325,10 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
-            # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+            # Post-optimizer model handlers hook.
+            # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
+            model_handlers.post_optimizer_hook(model_parts)
 
             # log metrics
             if (

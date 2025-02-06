@@ -183,6 +183,18 @@ class JobConfig:
             default="./torchtitan/datasets/tokenizer/tokenizer.model",
             help="Tokenizer path",
         )
+        self.parser.add_argument(
+            "--model.handlers",
+            type=str,
+            default="",
+            help="""
+                Comma separated list of handlers to apply to the model.
+
+                For instance, the `float8` handler swaps `torch.nn.Linear`
+                with `Float8Linear`. This feature requires you to install 'torchao'
+                which can be found here: https://github.com/pytorch/ao
+            """,
+        )
 
         # optimizer configs
         self.parser.add_argument(
@@ -558,15 +570,15 @@ class JobConfig:
         )
 
         # float8 configs
-        self.parser.add_argument(
-            "--float8.enable_float8_linear",
-            action="store_true",
-            help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear`.
-                This feature requires you to install 'torchao' which can be found
-                here: https://github.com/pytorch/ao
-            """,
-        )
+        # self.parser.add_argument(
+        #     "--float8.enable_float8_linear",
+        #     action="store_true",
+        #     help="""
+        #         If true, swaps `torch.nn.Linear` with `Float8Linear`.
+        #         This feature requires you to install 'torchao' which can be found
+        #         here: https://github.com/pytorch/ao
+        #     """,
+        # )
         self.parser.add_argument(
             "--float8.enable_fsdp_float8_all_gather",
             action="store_true",

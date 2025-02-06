@@ -20,6 +20,7 @@ name = "llama3"
 flavor = "405B"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
+handlers = "float8"
 
 [optimizer]
 name = "AdamW"
@@ -55,6 +56,5 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 mode = 'full' # ['none', 'selective', 'full']
 
 [float8]
-enable_float8_linear = true
 enable_fsdp_float8_all_gather = true
 precompute_float8_dynamic_scale_for_fsdp = true
