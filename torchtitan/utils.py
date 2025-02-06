@@ -6,9 +6,11 @@
 
 import contextlib
 import gc
+import importlib
 import math
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Generator, Iterable, List, Optional, Set, Union
@@ -411,3 +413,56 @@ def clip_grad_norm_(
 
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
+
+
+def check_if_feature_in_pytorch(
+    feature_name: str,
+    pull_request: str,
+    min_nightly_version: Optional[str] = None,
+) -> None:
+    if "git" in torch.__version__:  # pytorch is built from source
+        # notify users to check if the pull request is included in their pytorch
+        logger.warning(
+            "detected that the pytorch is built from source. Please make sure the PR "
+            f"({pull_request_link}) is included in pytorch for correct {feature_name}."
+        )
+    elif min_nightly_version is not None and torch.__version__ < min_nightly_version:
+        logger.warning(
+            f"detected that the pytorch version {torch.__version__} is older than "
+            f"{min_nightly_version}. Please upgrade a newer version to include the "
+            f"change in ({pull_request_link}) for correct {feature_name}."
+        )
+
+
+def import_module_from_path(path: str):
+    path = os.path.expanduser(path)
+
+    # 1. Check if path is an existing file or directory path.
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            init_file = os.path.join(path, "__init__.py")
+            if os.path.isfile(init_file):
+                return _import_module_from_init(path)
+
+            raise ImportError(
+                f"Directory '{path}' is not a Python package because it does not "
+                "contain an __init__.py file."
+            )
+        else:
+            raise ImportError(f"Path '{path}' is not a directory.")
+
+    # 2. If not a valid path, assume it's a dotted module name.
+    return importlib.import_module(path)
+
+
+def _import_module_from_init(path: str):
+    init_file = os.path.join(path, "__init__.py")
+    module_name = os.path.basename(path)
+    spec = importlib.util.spec_from_file_location(module_name, init_file)
+    if spec is None:
+        raise ImportError(f"Could not create spec from '{init_file}'")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module

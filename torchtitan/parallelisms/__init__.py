@@ -6,19 +6,16 @@
 
 
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.parallelize_llama import parallelize_llama
-from torchtitan.parallelisms.pipeline_llama import pipeline_llama
+from torchtitan.parallelisms.pipelining_utils import (
+    build_pipeline_schedule,
+    generate_split_points,
+    stage_ids_this_rank,
+)
 
 
 __all__ = [
-    "models_parallelize_fns",
-    "models_pipelining_fns",
     "ParallelDims",
+    "build_pipeline_schedule",
+    "generate_split_points",
+    "stage_ids_this_rank",
 ]
-
-models_parallelize_fns = {
-    "llama3": parallelize_llama,
-}
-models_pipelining_fns = {
-    "llama3": pipeline_llama,
-}

@@ -11,6 +11,9 @@ from torch.distributed.device_mesh import init_device_mesh
 from torchtitan.logging import logger
 
 
+__all__ = ["ParallelDims"]
+
+
 @dataclass
 class ParallelDims:
     dp_replicate: int

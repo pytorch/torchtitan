@@ -375,6 +375,12 @@ class JobConfig:
                 The default value is 'allgather'.
             """,
         )
+        # I'm not particularly fond of this. Users can choose to write their own wrapper
+        # module and import TorchTitan training loop and execute it, which look cleaner.
+        # One reason to provide this option is to allow users to use the existing run script.
+        # While the script is pretty trivial now, we may add more logic when integrating
+        # with TorchFT.
+        # This option is subject to change and may be deleted in the future.
         self.parser.add_argument(
             "--experimental.custom_model_path",
             type=str,
@@ -562,25 +568,6 @@ class JobConfig:
             action="store_true",
             help="Whether precompute float8 scales dynamically for FSDP",
         )
-        self.parser.add_argument(
-            "--float8.scaling_type_input",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-            choices=["dynamic", "delayed"],
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_weight",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-        )
-        self.parser.add_argument(
-            "--float8.scaling_type_grad_output",
-            type=str,
-            default="dynamic",
-            help="float8 scaling for input, dynamic (default) or delayed",
-        )
 
         # communications library settings
         self.parser.add_argument(
@@ -651,15 +638,6 @@ class JobConfig:
             exp["pipeline_parallel_split_points"] = string_list(
                 exp["pipeline_parallel_split_points"]
             )
-
-        if (
-            "experimental" in args_dict
-            and "model_module_path" in args_dict["experimental"]
-            and args_dict["experimental"]["model_module_path"]
-        ):
-            from torchtitan.models import add_model_spec_path
-
-            add_model_spec_path(args_dict["experimental"]["model_module_path"])
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)

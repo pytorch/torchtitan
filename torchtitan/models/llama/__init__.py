@@ -6,8 +6,14 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.model_spec import ModelSpec
+from torchtitan.model_spec import ModelSpec, register_model_spec
 from torchtitan.models.llama.model import ModelArgs, Transformer
+from torchtitan.optimizer import build_lr_schedulers, build_optimizers
+
+from .parallelize_llama import parallelize_llama
+from .pipeline_llama import pipeline_llama
+
+__all__ = ["parallelize_llama", "pipeline_llama", "ModelArgs", "Transformer"]
 
 
 llama3_configs = {
@@ -42,16 +48,15 @@ llama3_configs = {
 }
 
 
-def build_model_spec() -> ModelSpec:
-    # Avoid circular import
-    from torchtitan.parallelisms.parallelize_llama import parallelize_llama
-    from torchtitan.parallelisms.pipeline_llama import pipeline_llama
-
-    return ModelSpec(
+register_model_spec(
+    ModelSpec(
         name="llama3",
         cls=Transformer,
         config=llama3_configs,
         tokenizer="tiktoken",
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
     )
+)
