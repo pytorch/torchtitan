@@ -424,6 +424,8 @@ def build_test_list():
                     "--checkpoint.enable_checkpoint",
                     "--training.steps 10",
                 ],
+                # Save at [dp:4] and load at [dp:2, tp:2], dataloader should be excluded in
+                # loading otherwise would raise error for dp_degree mismatch
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
