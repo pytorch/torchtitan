@@ -97,16 +97,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.tensor_parallel_degree 2",
-                    "--model.norm_type=fused_rmsnorm",
-                ],
-            ],
-            "2D eager with fused_rmsnorm",
-            "2d_eager_fused_rmsnorm",
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--checkpoint.enable_checkpoint",
                 ],
                 [
@@ -416,6 +406,16 @@ def build_test_list():
             ],
             "Generation script test",
             "test_generate",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.fsdp_reshard_after_forward always",
+                ],
+            ],
+            "Test always resharding after forward pass",
+            "fsdp_reshard_always",
             ngpu=2,
         ),
         OverrideDefinitions(
