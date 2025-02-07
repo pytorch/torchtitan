@@ -418,6 +418,24 @@ def build_test_list():
             "fsdp_reshard_always",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 10",
+                ],
+                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
+                # excluded during loading to avoid errors caused by mismatched dp_degree.
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--training.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
+        ),
     ]
     return integration_tests_flavors
 
