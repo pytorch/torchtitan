@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from abc import ABC
 from typing import Any, Callable, Dict, Iterable, List
 
 import torch

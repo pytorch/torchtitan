@@ -439,17 +439,16 @@ def import_module_from_path(path: str):
 
     # 1. Check if path is an existing file or directory path.
     if os.path.exists(path):
-        if os.path.isdir(path):
-            init_file = os.path.join(path, "__init__.py")
-            if os.path.isfile(init_file):
-                return _import_module_from_init(path)
-
-            raise ImportError(
-                f"Directory '{path}' is not a Python package because it does not "
-                "contain an __init__.py file."
-            )
-        else:
+        if not os.path.isdir(path):
             raise ImportError(f"Path '{path}' is not a directory.")
+        init_file = os.path.join(path, "__init__.py")
+        if os.path.isfile(init_file):
+            return _import_module_from_init(path)
+
+        raise ImportError(
+            f"Directory '{path}' is not a Python package because it does not "
+            "contain an __init__.py file."
+        )
 
     # 2. If not a valid path, assume it's a dotted module name.
     return importlib.import_module(path)
