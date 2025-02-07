@@ -154,6 +154,7 @@ def main(job_config: JobConfig):
         pp_schedule, model_parts = models_pipelining_fns[model_name](
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
+        model_parts = [ m.half() for m in model_parts ]
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
         del model
 
@@ -175,7 +176,7 @@ def main(job_config: JobConfig):
             model.init_weights(buffer_device=buffer_device)
         model.train()
 
-        model_parts = [model]
+        model_parts = [model.half()]
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
