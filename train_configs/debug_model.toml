@@ -26,7 +26,6 @@ flavor = "debugmodel"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./tests/assets/test_tiktoken.model"
-handlers = ""
 
 [optimizer]
 name = "AdamW"
@@ -64,3 +63,4 @@ mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
+enable_float8_linear = false

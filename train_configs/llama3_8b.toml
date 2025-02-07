@@ -20,7 +20,6 @@ name = "llama3"
 flavor = "8B"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 tokenizer_path = "./torchtitan/datasets/tokenizer/original/tokenizer.model"
-handlers = ""
 
 [optimizer]
 name = "AdamW"
@@ -56,3 +55,4 @@ mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
+enable_float8_linear = false

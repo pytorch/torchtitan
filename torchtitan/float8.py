@@ -20,7 +20,7 @@ import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
-from torchtitan.model_handler import ModelHandler, register_model_handler
+from torchtitan.model_converter import ModelConverter, register_model_converter
 from torchtitan.parallelisms import ParallelDims
 
 
@@ -29,7 +29,7 @@ def _is_sm89_or_later():
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
 
 
-class Float8Handler(ModelHandler):
+class Float8Handler(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
@@ -109,4 +109,4 @@ class Float8Handler(ModelHandler):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-register_model_handler(Float8Handler, "float8")
+register_model_converter(Float8Handler, "float8")

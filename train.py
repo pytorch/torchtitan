@@ -10,6 +10,9 @@ from datetime import timedelta
 
 import torch
 
+# Import to register Float8Handler.
+import torchtitan.float8  # noqa: F401
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils
@@ -18,7 +21,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
-from torchtitan.model_handler import build_model_handlers_container
+from torchtitan.model_converter import build_model_converters
 from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import (
@@ -28,7 +31,6 @@ from torchtitan.parallelisms import (
 )
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.utils import device_module, device_type
-
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -110,9 +112,9 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
-    # Build the collection of model handlers. No-op if `model.handlers` empty
-    model_handlers = build_model_handlers_container(job_config, parallel_dims)
-    model_handlers.convert(model)
+    # Build the collection of model converters. No-op if `model.converters` empty
+    model_converters = build_model_converters(job_config, parallel_dims)
+    model_converters.convert(model)
 
     # log model size
     model_param_count = utils.get_num_params(model)
@@ -325,10 +327,10 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
-            # Post-optimizer model handlers hook.
+            # Post-optimizer model converters hook.
             # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            model_handlers.post_optimizer_hook(model_parts)
+            model_converters.post_optimizer_hook(model_parts)
 
             # log metrics
             if (

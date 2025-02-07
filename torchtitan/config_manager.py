@@ -26,7 +26,20 @@ TORCH_DTYPE_MAP = {
 
 
 def string_list(raw_arg):
+    """Comma-separated string list argument."""
     return [s.strip() for s in raw_arg.split(",") if s.strip()]
+
+
+def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
+    section, name = fullargname.split(".")
+    # Split string list which are still raw strings.
+    if (
+        section in args_dict
+        and name in args_dict[section]
+        and isinstance(args_dict[section][name], str)
+    ):
+        sec = args_dict[section]
+        sec[name] = string_list(sec[name])
 
 
 class JobConfig:
@@ -184,13 +197,14 @@ class JobConfig:
             help="Tokenizer path",
         )
         self.parser.add_argument(
-            "--model.handlers",
-            type=str,
-            default="",
+            "--model.converters",
+            type=string_list,
+            nargs="+",
+            default=[],
             help="""
-                Comma separated list of handlers to apply to the model.
+                Comma separated list of converters to apply to the model.
 
-                For instance, the `float8` handler swaps `torch.nn.Linear`
+                For instance, the `float8` converter swaps `torch.nn.Linear`
                 with `Float8Linear`. This feature requires you to install 'torchao'
                 which can be found here: https://github.com/pytorch/ao
             """,
@@ -570,15 +584,15 @@ class JobConfig:
         )
 
         # float8 configs
-        # self.parser.add_argument(
-        #     "--float8.enable_float8_linear",
-        #     action="store_true",
-        #     help="""
-        #         If true, swaps `torch.nn.Linear` with `Float8Linear`.
-        #         This feature requires you to install 'torchao' which can be found
-        #         here: https://github.com/pytorch/ao
-        #     """,
-        # )
+        self.parser.add_argument(
+            "--float8.enable_float8_linear",
+            action="store_true",
+            help="""
+                If true, swaps `torch.nn.Linear` with `Float8Linear`.
+                This feature requires you to install 'torchao' which can be found
+                here: https://github.com/pytorch/ao
+            """,
+        )
         self.parser.add_argument(
             "--float8.enable_fsdp_float8_all_gather",
             action="store_true",
@@ -647,25 +661,11 @@ class JobConfig:
                 logger.exception(f"Error details: {str(e)}")
                 raise e
 
+        # Checking string-list arguments are properly split into a list
         # if split-points came from 'args' (from cmd line) it would have already been parsed into a list by that parser
-        if (
-            "experimental" in args_dict
-            and "pipeline_parallel_split_points" in args_dict["experimental"]
-            and isinstance(
-                args_dict["experimental"]["pipeline_parallel_split_points"], str
-            )
-        ):
-            exp = args_dict["experimental"]
-            exp["pipeline_parallel_split_points"] = string_list(
-                exp["pipeline_parallel_split_points"]
-            )
-        if (
-            "checkpoint" in args_dict
-            and "exclude_from_loading" in args_dict["checkpoint"]
-            and isinstance(args_dict["checkpoint"]["exclude_from_loading"], str)
-        ):
-            ckpt = args_dict["checkpoint"]
-            ckpt["exclude_from_loading"] = string_list(ckpt["exclude_from_loading"])
+        string_list_argnames = self._get_string_list_argument_names()
+        for n in string_list_argnames:
+            check_string_list_argument(args_dict, n)
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
@@ -693,6 +693,13 @@ class JobConfig:
         assert self.model.flavor
         assert self.model.tokenizer_path
 
+    def _get_string_list_argument_names(self) -> list[str]:
+        """Get the parser argument names of type `string_list`."""
+        string_list_args = [
+            v.dest for v in self.parser._actions if v.type is string_list
+        ]
+        return string_list_args
+
     def parse_args_from_command_line(
         self, args_list
     ) -> Tuple[argparse.Namespace, argparse.Namespace]:
@@ -700,6 +707,7 @@ class JobConfig:
         Parse command line arguments and return the parsed args and the command line only args
         """
         args = self.parser.parse_args(args_list)
+        string_list_argnames = set(self._get_string_list_argument_names())
 
         # aux parser to parse the command line only args, with no defaults from main parser
         aux_parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS)
@@ -708,13 +716,10 @@ class JobConfig:
                 aux_parser.add_argument(
                     "--" + arg, action="store_true" if val else "store_false"
                 )
-            elif arg == "experimental.pipeline_parallel_split_points":
+            elif arg in string_list_argnames:
                 # without this special case, type inference breaks here,
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
-                aux_parser.add_argument("--" + arg, type=string_list)
-            elif arg == "checkpoint.exclude_from_loading":
-                # similar to the case above
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))

@@ -34,7 +34,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
 from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.model_handler import parse_model_handlers
+
 
 def parallelize_llama(
     model: nn.Module,
@@ -56,7 +56,10 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
-        enable_float8 = "float8" in parse_model_handlers(job_config)
+        enable_float8 = (
+            "float8" in job_config.model.converters
+            and job_config.float8.enable_float8_linear
+        )
         apply_tp(
             model,
             world_mesh["tp"],
