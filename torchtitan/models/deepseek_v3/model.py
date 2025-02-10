@@ -4,17 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
-#
-# Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
-#
 # This code is based on model definition of `deepseek-ai/DeepSeek-V3-Base` on
 # Hugging Face Model Hub. Url:
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/modeling_deepseek.py
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/resolve/main/configuration_deepseek.py
 #
 # It has been modified from its original forms to accommodate naming convention
-# of the TorchTitan project.
+# and usage patterns of the TorchTitan project.
+
+# Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,7 +29,7 @@
 import math
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -39,20 +37,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
+
+from attn_mask_utils import _prepare_4d_causal_attention_mask
 from torch import nn
 from torch.nn import CrossEntropyLoss
-
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from transformers.utils import logging
-
-
-logger = logging.get_logger(__name__)
 
 
 @dataclass
@@ -474,7 +462,7 @@ class MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_fn = nn.SiLU()
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -724,13 +712,6 @@ class Attention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        if layer_idx is None:
-            logger.warning_once(
-                f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will "
-                "to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
-                "when creating this class."
-            )
-
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -845,7 +826,7 @@ class Attention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_value=None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
@@ -1161,7 +1142,7 @@ class DeepseekV3Model(torch.nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = False,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> torch.Tensor:
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         # retrieve input_ids and inputs_embeds
@@ -1178,9 +1159,6 @@ class DeepseekV3Model(torch.nn.Module):
 
         past_key_values_length = 0
         if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:
@@ -1208,14 +1186,7 @@ class DeepseekV3Model(torch.nn.Module):
         hidden_states = inputs_embeds
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = None
-
         for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -1227,37 +1198,9 @@ class DeepseekV3Model(torch.nn.Module):
 
             hidden_states = layer_outputs[0]
 
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
-
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        next_cache = None
-        if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
-        if not return_dict:
-            return tuple(
-                v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
-                if v is not None
-            )
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-        )
+        return hidden_states
 
 
 class DeepseekV3ForCausalLM(torch.nn.Module):
@@ -1268,7 +1211,7 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
-        self.post_init()
+        # self.post_init()
 
     def forward(
         self,
@@ -1282,7 +1225,7 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = False,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Tuple:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1308,8 +1251,7 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        hidden_states = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1321,7 +1263,6 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
             return_dict=return_dict,
         )
 
-        hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
@@ -1338,17 +1279,8 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+        output = (logits,)
+        return (loss,) + output if loss is not None else output
 
     def prepare_inputs_for_generation(
         self,
@@ -1359,7 +1291,7 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         **kwargs,
     ):
         if past_key_values is not None:
-            if isinstance(past_key_values, Cache):
+            if True:  # if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
@@ -1427,6 +1359,8 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         return reordered_past
 
 
+# Single process run:
+# ``python model.py``
 if __name__ == "__main__":
     device = torch.device("cuda")
     model_args = ModelArgs()
@@ -1440,4 +1374,4 @@ if __name__ == "__main__":
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
     y = model(x)
-    print(y[0].shape)
+    print(y.shape)
