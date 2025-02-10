@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 #
 # Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
@@ -6,7 +12,7 @@
 # Hugging Face Model Hub. Url:
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/modeling_deepseek.py
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/resolve/main/configuration_deepseek.py
-# 
+#
 # It has been modified from its original forms to accommodate naming convention
 # of the TorchTitan project.
 #
@@ -145,14 +151,14 @@ class ModelArgs:
             The dropout ratio for the attention probabilities.
     """
 
-    vocab_size: int =129280
-    hidden_size: int =7168
-    intermediate_size: int=18432
+    vocab_size: int = 129280
+    hidden_size: int = 7168
+    intermediate_size: int = 18432
     moe_intermediate_size: int = 2048
-    num_hidden_layers: int=61
-    num_nextn_predict_layers: int=1
-    num_attention_heads: int =128
-    num_key_value_heads: int=128
+    num_hidden_layers: int = 61
+    num_nextn_predict_layers: int = 1
+    num_attention_heads: int = 128
+    num_key_value_heads: int = 128
     n_shared_experts: int = 1
     n_routed_experts: int = 256
     ep_size: int = 1
@@ -162,26 +168,27 @@ class ModelArgs:
     qk_rope_head_dim: int = 64
     v_head_dim: int = 128
     qk_nope_head_dim: int = 128
-    topk_method: str = 'noaux_tc'
+    topk_method: str = "noaux_tc"
     n_group: int = 8
     topk_group: int = 4
     num_experts_per_tok: int = 8
     moe_layer_freq: int = 1
     first_k_dense_replace: int = 3
     norm_topk_prob: bool = True
-    scoring_func: str = 'sigmoid'
+    scoring_func: str = "sigmoid"
     aux_loss_alpha: float = 0.001
     seq_aux: bool = True
-    hidden_act: str ="silu"
-    max_position_embeddings: int=4096
-    initializer_range: float=0.02
-    rms_norm_eps: float=1e-6
-    use_cache: bool=False
-    rope_theta: float=10000.0
-    rope_scaling=None
-    attention_bias: bool=False
-    attention_dropout: float =0.0
-    pad_token_id=None
+    hidden_act: str = "silu"
+    max_position_embeddings: int = 4096
+    initializer_range: float = 0.02
+    rms_norm_eps: float = 1e-6
+    use_cache: bool = False
+    rope_theta: float = 10000.0
+    rope_scaling = None
+    attention_bias: bool = False
+    attention_dropout: float = 0.0
+    pad_token_id = None
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -345,7 +352,6 @@ def yarn_linear_ramp_mask(min, max, dim):
 
 
 class YarnRotaryEmbedding(RotaryEmbedding):
-
     def __init__(
         self,
         dim,
@@ -522,9 +528,13 @@ class MoEGate(nn.Module):
         ### select top-k experts
         if self.topk_method == "noaux_tc":
             assert not self.training
-            scores_for_choice = scores.view(bsz * seq_len, -1) + self.e_score_correction_bias.unsqueeze(0)
+            scores_for_choice = scores.view(
+                bsz * seq_len, -1
+            ) + self.e_score_correction_bias.unsqueeze(0)
             group_scores = (
-                scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim = -1)
+                scores_for_choice.view(bsz * seq_len, self.n_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
             )  # [n, n_group]
             group_idx = torch.topk(
                 group_scores, k=self.topk_group, dim=-1, sorted=False
@@ -540,10 +550,10 @@ class MoEGate(nn.Module):
                 )
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
-            tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-            _, topk_idx = torch.topk(
-                tmp_scores, k=self.top_k, dim=-1, sorted=False
-            )
+            tmp_scores = scores_for_choice.masked_fill(
+                ~score_mask.bool(), 0.0
+            )  # [n, e]
+            _, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
             topk_weight = scores.gather(1, topk_idx)
         else:
             raise NotImplementedError(
@@ -554,9 +564,12 @@ class MoEGate(nn.Module):
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
-        topk_weight = topk_weight * self.routed_scaling_factor # must multiply the scaling factor
+        topk_weight = (
+            topk_weight * self.routed_scaling_factor
+        )  # must multiply the scaling factor
 
         return topk_idx, topk_weight
+
 
 class MoE(nn.Module):
     """
@@ -576,9 +589,7 @@ class MoE(nn.Module):
             self.experts = nn.ModuleList(
                 [
                     (
-                        MLP(
-                            config, intermediate_size=config.moe_intermediate_size
-                        )
+                        MLP(config, intermediate_size=config.moe_intermediate_size)
                         if i >= self.ep_rank * self.experts_per_rank
                         and i < (self.ep_rank + 1) * self.experts_per_rank
                         else None
@@ -592,9 +603,7 @@ class MoE(nn.Module):
             self.ep_rank = 0
             self.experts = nn.ModuleList(
                 [
-                    MLP(
-                        config, intermediate_size=config.moe_intermediate_size
-                    )
+                    MLP(config, intermediate_size=config.moe_intermediate_size)
                     for i in range(config.n_routed_experts)
                 ]
             )
@@ -945,9 +954,7 @@ class DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Attention(
-            config=config, layer_idx=layer_idx
-        )
+        self.self_attn = Attention(config=config, layer_idx=layer_idx)
 
         self.mlp = (
             MoE(config)
@@ -958,9 +965,7 @@ class DecoderLayer(nn.Module):
             )
             else MLP(config)
         )
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -1137,7 +1142,7 @@ class DeepseekV3Model(torch.nn.Module):
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
-        #self.post_init()
+        # self.post_init()
 
     def get_input_embeddings(self):
         return self.embed_tokens
