@@ -1,10 +1,16 @@
 #!/bin/bash
 
-if [ -z "${ENV_WORLD_SIZE}" ]; then
-      echo "write world_size : "
-      read  _ENV_WORLD_SIZE
-      export ENV_WORLD_SIZE="$_ENV_WORLD_SIZE"
-fi
+while getopts "w:" opt; do
+  case ${opt} in
+    w )
+      ENV_WORLD_SIZE=$OPTARG
+      echo "ENV_WORLD_SIZE: $ENV_WORLD_SIZE"
+      ;;
+    \? )
+      echo "잘못된 옵션: -$OPTARG" 1>&2
+      ;;
+  esac
+done
 
 
 DEBUG_TOML_PATH="./train_configs/debug_model.toml"
