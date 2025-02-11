@@ -99,7 +99,7 @@ def estimate_memory(job_config: JobConfig):
 
     # build model (using meta init)
     model_cls = train_spec.cls
-    model_config = train_spec.config
+    model_config = train_spec.config[job_config.model.flavor]
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. vocab size from tokenizer
