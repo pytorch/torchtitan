@@ -103,7 +103,7 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    train_spec = get_train_spec(job_config.model.name)
+    train_spec = get_train_spec(config.model.name)
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
