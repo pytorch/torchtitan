@@ -8,10 +8,11 @@
 
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Protocol, Tuple, Type
+from typing import Callable, Dict, List, Protocol, Tuple, Type, TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 
@@ -35,7 +36,16 @@ class ModelProtocol(Protocol):
     """
 
     @staticmethod
-    def from_model_args(self, args: BaseModelArgs) -> nn.Module: ...
+    def from_model_args(args: BaseModelArgs) -> nn.Module: ...
+
+
+OptimizersBuilder: TypeAlias = Callable[
+    [List[nn.Module], JobConfig], OptimizersContainer
+]
+OptimizerBuilderWrapper: TypeAlias = Callable[
+    [List[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
+]
+LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
 
 
 @dataclass
@@ -51,10 +61,8 @@ class ModelSpec:
     tokenizer: str
     parallelize_fn: Callable[[nn.Module], None]
     pipelining_fn: Callable[[nn.Module], Tuple[_PipelineSchedule, List[nn.Module]]]
-    build_optimizers_fn: Callable[[List[nn.Module], JobConfig], OptimizersContainer]
-    build_lr_schedulers_fn: Callable[
-        [List[nn.Module], JobConfig], LRSchedulersContainer
-    ]
+    build_optimizers_fn: OptimizersBuilder
+    build_lr_schedulers_fn: LRSchedulersBuilder
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.
@@ -67,6 +75,7 @@ def register_model_spec(model_spec: ModelSpec) -> None:
     global _model_specs
     if model_spec.name in _model_specs:
         raise ValueError(f"Model {model_spec.name} is already registered.")
+
     _model_specs[model_spec.name] = model_spec
 
 
@@ -75,3 +84,9 @@ def get_model_spec(name: str) -> ModelSpec:
     if name not in _model_specs:
         raise ValueError(f"Model {name} is not registered.")
     return _model_specs[name]
+
+
+def apply_to_model_specs(func: Callable[[ModelSpec], ModelSpec]) -> None:
+    global _model_specs
+    for name, model_spec in _model_specs.items():
+        _model_specs[name] = func(model_spec)
