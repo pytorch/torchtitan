@@ -17,6 +17,7 @@ from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
+from torchtitan.ft import init_ft_manager, set_ft_state_dict_fns
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.models import model_name_to_tokenizer
@@ -44,6 +45,10 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    device_module.set_device(device)
+    ft_manager = init_ft_manager(job_config)
+
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -54,9 +59,8 @@ def main(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        ft_manager=ft_manager,
     )
-    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
-    device_module.set_device(device)
     utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
@@ -186,7 +190,7 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = train_spec.build_optimizers_fn(model_parts, job_config)
+    optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
 
     train_state = TrainState()
@@ -199,7 +203,9 @@ def main(job_config: JobConfig):
         lr_schedulers=lr_schedulers,
         states={"train_state": train_state},
         job_config=job_config,
+        ft_manager=ft_manager,
     )
+    set_ft_state_dict_fns(ft_manager, checkpoint)
 
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
