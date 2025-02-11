@@ -30,10 +30,11 @@ from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_prof
 from torchtitan.utils import device_module, device_type
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF']='expandable_segments:True'
-os.environ['NCCL_BUFFSIZE'] = 2097152
+os.environ['NCCL_BUFFSIZE'] = '2097152'
 os.environ['NCCL_DEBUG'] = 'INFO'
-os.environ['FI_EFA_SET_CUDA_SYNC_MEMOPS'] = 0
-os.environ['CUDA_LAUNCH_BLOCKING'] = 0
+os.environ['FI_EFA_SET_CUDA_SYNC_MEMOPS'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
