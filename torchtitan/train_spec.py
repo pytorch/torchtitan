@@ -54,16 +54,12 @@ class TrainSpec:
     name: str
     cls: Type[nn.Module]
     config: Dict[str, BaseModelArgs]
-    # TODO: Add a ``build_dataloader_fn``
-    # As for now, this is a string. So it will have to be built-in to the
-    # TorchTitan library. A better way would be to have a dataloader class
-    # and a ``build_dataloader`` function that take job_config to consume
-    # the different dataloader and tokenizer configs.
-    tokenizer: str
     parallelize_fn: Callable[[nn.Module], None]
     pipelining_fn: Callable[[nn.Module], Tuple[_PipelineSchedule, List[nn.Module]]]
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
+
+    # TODO: Add a ``build_dataloader_fn``
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.

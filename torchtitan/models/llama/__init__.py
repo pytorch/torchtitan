@@ -6,9 +6,9 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.train_spec import TrainSpec, register_train_spec
 from torchtitan.models.llama.model import Transformer, TransformerModelArgs
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
+from torchtitan.train_spec import register_train_spec, TrainSpec
 
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
@@ -61,7 +61,6 @@ register_train_spec(
         name="llama3",
         cls=Transformer,
         config=llama3_configs,
-        tokenizer="tiktoken",
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,

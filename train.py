@@ -19,9 +19,10 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
-from torchtitan.model_spec import get_model_spec
+from torchtitan.models import model_name_to_tokenizer
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
+from torchtitan.train_spec import get_train_spec
 from torchtitan.utils import device_module, device_type, import_module_from_path
 
 
@@ -77,10 +78,10 @@ def main(job_config: JobConfig):
     utils.set_determinism(
         world_mesh, device, job_config.training.seed, job_config.training.deterministic
     )
-    model_spec = get_model_spec(job_config.model.name)
+    train_spec = get_train_spec(job_config.model.name)
 
     # build tokenizer
-    tokenizer_type = model_spec.tokenizer
+    tokenizer_type = model_name_to_tokenizer[train_spec.name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
     # build dataloader
     data_loader = build_hf_data_loader(
@@ -94,8 +95,8 @@ def main(job_config: JobConfig):
     )
 
     # build model (using meta init)
-    model_cls = model_spec.cls
-    model_config = model_spec.config[job_config.model.flavor]
+    model_cls = train_spec.cls
+    model_config = train_spec.config[job_config.model.flavor]
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. vocab size from tokenizer
@@ -105,7 +106,7 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(
-        f"Building {model_spec.name} {job_config.model.flavor} with {model_config}"
+        f"Building {train_spec.name} {job_config.model.flavor} with {model_config}"
     )
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
@@ -123,7 +124,7 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
     )
     logger.info(
-        f"{color.blue}Model {model_spec.name} {job_config.model.flavor} "
+        f"{color.blue}Model {train_spec.name} {job_config.model.flavor} "
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
 
@@ -151,7 +152,7 @@ def main(job_config: JobConfig):
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        pp_schedule, model_parts = model_spec.pipelining_fn(
+        pp_schedule, model_parts = train_spec.pipelining_fn(
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
@@ -162,14 +163,14 @@ def main(job_config: JobConfig):
         # optimizer, and checkpointing
         for m in model_parts:
             # apply SPMD-style PT-D techniques
-            model_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
+            train_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
             with torch.no_grad():
                 m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        model_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
+        train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
         with torch.no_grad():
             model.init_weights(buffer_device=buffer_device)
@@ -185,8 +186,8 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = model_spec.build_optimizers_fn(model_parts, job_config)
-    lr_schedulers = model_spec.build_lr_schedulers_fn(optimizers, job_config)
+    optimizers = train_spec.build_optimizers_fn(model_parts, job_config)
+    lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
 
     train_state = TrainState()
 
