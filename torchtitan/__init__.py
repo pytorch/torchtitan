@@ -8,5 +8,4 @@
 
 # Import the built-in models here so that the corresponding register_model_spec()
 # will be called.
-import torchtitan.models
-
+import torchtitan.models  # noqa: F401
