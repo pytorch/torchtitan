@@ -115,7 +115,7 @@ lr = 3e-4
 
 [training]
 batch_size = $ENV_WORLD_SIZE
-seq_len = 8192
+seq_len = 2048
 warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
 steps = 1000
