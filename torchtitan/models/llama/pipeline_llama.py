@@ -7,7 +7,7 @@
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
 import copy
-from typing import Callable, Union, Optional
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -18,10 +18,12 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
-from torchtitan.parallelisms.pipeline import (
-    build_pipeline_schedule, generate_split_points, stage_ids_this_rank,
-)
 from torchtitan.parallelisms import ParallelDims
+from torchtitan.parallelisms.pipeline import (
+    build_pipeline_schedule,
+    generate_split_points,
+    stage_ids_this_rank,
+)
 
 from .model import TransformerModelArgs
 

@@ -10,19 +10,19 @@ import pytest
 import torch
 import torch.nn as nn
 from torchtitan.config_manager import JobConfig
-from torchtitan.train_spec import (
-    apply_to_train_specs,
-    BaseModelArgs,
-    get_train_spec,
-    ModelProtocol,
-    TrainSpec,
-    register_train_spec,
-)
 from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.optimizer import (
     build_lr_schedulers,
     build_optimizers,
     OptimizersContainer,
+)
+from torchtitan.train_spec import (
+    apply_to_train_specs,
+    BaseModelArgs,
+    get_train_spec,
+    ModelProtocol,
+    register_train_spec,
+    TrainSpec,
 )
 
 

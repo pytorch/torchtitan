@@ -13,8 +13,9 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.train_spec import BaseModelArgs, ModelProtocol
+
 from torchtitan.models.norms import build_norm
+from torchtitan.train_spec import BaseModelArgs, ModelProtocol
 
 
 @dataclass
