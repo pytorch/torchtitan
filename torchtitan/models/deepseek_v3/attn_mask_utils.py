@@ -68,7 +68,8 @@ class AttentionMaskConverter:
 
         if self.sliding_window is not None and self.sliding_window <= 0:
             raise ValueError(
-                f"Make sure that when passing `sliding_window` that its value is a strictly positive integer, not `{self.sliding_window}`"
+                "Make sure that when passing `sliding_window` that its value is a strictly positive integer, "
+                f"not `{self.sliding_window}`"
             )
 
     def to_causal_4d(
@@ -126,7 +127,8 @@ class AttentionMaskConverter:
         if (input_shape[-1] > 1 or self.sliding_window is not None) and self.is_causal:
             if key_value_length is None:
                 raise ValueError(
-                    "This attention mask converter is causal. Make sure to pass `key_value_length` to correctly create a causal mask."
+                    "This attention mask converter is causal. Make sure to pass "
+                    "`key_value_length` to correctly create a causal mask."
                 )
 
             past_key_values_length = key_value_length - query_length
@@ -233,7 +235,8 @@ class AttentionMaskConverter:
         `expanded_mask` is [bsz, num_masks, tgt_seq_len, src_seq_len] or [bsz, tgt_seq_len, src_seq_len].
         `attention_mask` is [bsz, src_seq_len].
 
-        The dimension num_masks of `expanded_mask` is most often 1, but it can also be the number of heads in the case of alibi attention bias.
+        The dimension num_masks of `expanded_mask` is most often 1, but it can also be the number of heads in the case
+        of alibi attention bias.
 
         For example, if `expanded_mask` is (e.g. here left-padding case)
         ```

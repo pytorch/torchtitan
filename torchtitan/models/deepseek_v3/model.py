@@ -77,7 +77,8 @@ class ModelArgs:
         n_group (`int`, *optional*, defaults to None):
             Number of groups for routed experts.
         topk_group (`int`, *optional*, defaults to None):
-            Number of selected groups for each token(for each token, ensuring the selected experts is only within `topk_group` groups).
+            Number of selected groups for each token(for each token, ensuring the selected experts is only within
+            `topk_group` groups).
         num_experts_per_tok (`int`, *optional*, defaults to None):
             Number of selected experts, None means dense model.
         moe_layer_freq (`int`, *optional*, defaults to 1):
@@ -499,7 +500,7 @@ class MoEGate(nn.Module):
 
     def forward(self, hidden_states):
         bsz, seq_len, h = hidden_states.shape
-        ### compute gating score
+        # compute gating score
         hidden_states = hidden_states.view(-1, h)
         logits = F.linear(
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
@@ -511,7 +512,7 @@ class MoEGate(nn.Module):
                 f"insupportable scoring function for MoE gating: {self.scoring_func}"
             )
 
-        ### select top-k experts
+        # select top-k experts
         if self.topk_method == "noaux_tc":
             assert not self.training
             scores_for_choice = scores.view(
@@ -546,7 +547,7 @@ class MoEGate(nn.Module):
                 f"insupportable TopK function for MoE gating: {self.topk_method}"
             )
 
-        ### norm gate to sum 1
+        # norm gate to sum 1
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
@@ -936,9 +937,7 @@ class DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-    ) -> Tuple[
-        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
-    ]:
+    ) -> torch.Tensor:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
