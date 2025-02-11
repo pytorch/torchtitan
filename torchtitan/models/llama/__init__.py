@@ -6,19 +6,27 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.model_spec import ModelSpec, register_model_spec
-from torchtitan.models.llama.model import ModelArgs, Transformer
+from torchtitan.train_spec import TrainSpec, register_train_spec
+from torchtitan.models.llama.model import Transformer, TransformerModelArgs
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
 
-__all__ = ["parallelize_llama", "pipeline_llama", "ModelArgs", "Transformer"]
+__all__ = [
+    "parallelize_llama",
+    "pipeline_llama",
+    "TransformerModelArgs",
+    "Transformer",
+    "llama3_configs",
+]
 
 
 llama3_configs = {
-    "debugmodel": ModelArgs(dim=256, n_layers=8, n_heads=16, rope_theta=500000),
-    "8B": ModelArgs(
+    "debugmodel": TransformerModelArgs(
+        dim=256, n_layers=8, n_heads=16, rope_theta=500000
+    ),
+    "8B": TransformerModelArgs(
         dim=4096,
         n_layers=32,
         n_heads=32,
@@ -27,7 +35,7 @@ llama3_configs = {
         multiple_of=1024,
         rope_theta=500000,
     ),
-    "70B": ModelArgs(
+    "70B": TransformerModelArgs(
         dim=8192,
         n_layers=80,
         n_heads=64,
@@ -36,7 +44,7 @@ llama3_configs = {
         multiple_of=4096,
         rope_theta=500000,
     ),
-    "405B": ModelArgs(
+    "405B": TransformerModelArgs(
         dim=16384,
         n_layers=126,
         n_heads=128,
@@ -48,8 +56,8 @@ llama3_configs = {
 }
 
 
-register_model_spec(
-    ModelSpec(
+register_train_spec(
+    TrainSpec(
         name="llama3",
         cls=Transformer,
         config=llama3_configs,

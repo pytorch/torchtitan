@@ -7,7 +7,7 @@
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
 import copy
-from typing import Callable, Union
+from typing import Callable, Union, Optional
 
 import torch
 import torch.nn as nn
@@ -18,14 +18,12 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
-from torchtitan.parallelisms import (
-    build_pipeline_schedule,
-    generate_split_points,
-    ParallelDims,
-    stage_ids_this_rank,
+from torchtitan.parallelisms.pipeline import (
+    build_pipeline_schedule, generate_split_points, stage_ids_this_rank,
 )
+from torchtitan.parallelisms import ParallelDims
 
-from .model import ModelArgs
+from .model import TransformerModelArgs
 
 
 DeviceType = Union[int, str, torch.device]
@@ -37,7 +35,7 @@ def pipeline_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
-    model_config: ModelArgs,
+    model_config: TransformerModelArgs,
     loss_fn: Callable[..., torch.Tensor],
 ) -> tuple[_PipelineSchedule, list[nn.Module]]:
     stages, models = pipeline_llama_manual_split(
@@ -55,7 +53,7 @@ def pipeline_llama_manual_split(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
-    model_config: ModelArgs,
+    model_config: TransformerModelArgs,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API extracts one torch.nn.Module objects for the part of the model configured to run inside this stage.

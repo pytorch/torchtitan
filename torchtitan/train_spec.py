@@ -49,7 +49,7 @@ LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersCon
 
 
 @dataclass
-class ModelSpec:
+class TrainSpec:
     name: str
     cls: Type[nn.Module]
     config: Dict[str, BaseModelArgs]
@@ -68,25 +68,25 @@ class ModelSpec:
     # HuggingFace or other sources that have different FQN conventions.
 
 
-_model_specs = {}
+_train_specs = {}
 
 
-def register_model_spec(model_spec: ModelSpec) -> None:
-    global _model_specs
-    if model_spec.name in _model_specs:
-        raise ValueError(f"Model {model_spec.name} is already registered.")
+def register_train_spec(train_spec: TrainSpec) -> None:
+    global _train_specs
+    if train_spec.name in _train_specs:
+        raise ValueError(f"Model {train_spec.name} is already registered.")
 
-    _model_specs[model_spec.name] = model_spec
+    _train_specs[train_spec.name] = train_spec
 
 
-def get_model_spec(name: str) -> ModelSpec:
-    global _model_specs
-    if name not in _model_specs:
+def get_train_spec(name: str) -> TrainSpec:
+    global _train_specs
+    if name not in _train_specs:
         raise ValueError(f"Model {name} is not registered.")
-    return _model_specs[name]
+    return _train_specs[name]
 
 
-def apply_to_model_specs(func: Callable[[ModelSpec], ModelSpec]) -> None:
-    global _model_specs
-    for name, model_spec in _model_specs.items():
-        _model_specs[name] = func(model_spec)
+def apply_to_train_specs(func: Callable[[TrainSpec], TrainSpec]) -> None:
+    global _train_specs
+    for name, train_spec in _train_specs.items():
+        _train_specs[name] = func(train_spec)

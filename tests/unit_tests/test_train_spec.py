@@ -10,13 +10,13 @@ import pytest
 import torch
 import torch.nn as nn
 from torchtitan.config_manager import JobConfig
-from torchtitan.model_spec import (
-    apply_to_model_specs,
+from torchtitan.train_spec import (
+    apply_to_train_specs,
     BaseModelArgs,
-    get_model_spec,
+    get_train_spec,
     ModelProtocol,
-    ModelSpec,
-    register_model_spec,
+    TrainSpec,
+    register_train_spec,
 )
 from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.optimizer import (
@@ -49,10 +49,10 @@ def fake_build_optimizers(
     )
 
 
-class TestModelSpec:
-    def test_register_model_spec(self):
+class TestTrainSpec:
+    def test_register_train_spec(self):
         fake_config = {"fake": None}
-        spec = ModelSpec(
+        spec = TrainSpec(
             name="fake",
             cls=FakeModel,
             config=fake_config,
@@ -62,16 +62,16 @@ class TestModelSpec:
             build_optimizers_fn=build_optimizers,
             build_lr_schedulers_fn=build_lr_schedulers,
         )
-        register_model_spec(spec)
-        new_spec = get_model_spec("fake")
+        register_train_spec(spec)
+        new_spec = get_train_spec("fake")
         assert new_spec == spec
 
         with pytest.raises(ValueError):
-            new_spec = get_model_spec("fake2")
+            new_spec = get_train_spec("fake2")
 
     def test_optim_hook(self):
         fake_config = {"fake": None}
-        spec = ModelSpec(
+        spec = TrainSpec(
             name="fake2",
             cls=FakeModel,
             config=fake_config,
@@ -81,8 +81,8 @@ class TestModelSpec:
             build_optimizers_fn=fake_build_optimizers,
             build_lr_schedulers_fn=build_lr_schedulers,
         )
-        register_model_spec(spec)
-        new_spec = get_model_spec("fake2")
+        register_train_spec(spec)
+        new_spec = get_train_spec("fake2")
 
         # Demonstrate how to register a optimizer hook for all model specs
         hook_called = False
@@ -96,7 +96,7 @@ class TestModelSpec:
             nonlocal hook_called
             hook_called = True
 
-        def register_optimizer_hook_to_spec(spec: ModelSpec) -> ModelSpec:
+        def register_optimizer_hook_to_spec(spec: TrainSpec) -> TrainSpec:
             # Create a closure to capture the original spec.build_optimizers_fn
             original_build_optimizers_fn = spec.build_optimizers_fn
 
@@ -111,7 +111,7 @@ class TestModelSpec:
 
             spec.build_optimizers_fn = my_build_optimizer_fn
 
-        apply_to_model_specs(register_optimizer_hook_to_spec)
+        apply_to_train_specs(register_optimizer_hook_to_spec)
 
         model = new_spec.cls.from_model_args(BaseModelArgs())
         model_parts = [model]

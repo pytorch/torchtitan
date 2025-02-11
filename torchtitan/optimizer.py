@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import functools
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -17,6 +18,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
+
 from torchtitan.config_manager import JobConfig
 
 
@@ -71,8 +73,6 @@ class OptimizersContainer(Optimizer):
     def __init__(
         self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
     ) -> None:
-        # We need to call super().__init__() to initialize some necessary optimizer
-        # functionality such as hooks.
         all_params = []
         self.optimizers: List[Optimizer] = []
         self.model_parts = model_parts
@@ -124,6 +124,8 @@ class OptimizersContainer(Optimizer):
     def _post_init(
         self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]
     ) -> None:
+        # We need to call Optimizer.__init__() to initialize some necessary optimizer
+        # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
 
 
@@ -188,7 +190,7 @@ def build_optimizers(
     **Note**
     Users who want to customize the optimizer behavior can create their own
     ``OptimizersContainer`` subclass and ``build_optimizers``. Passing the
-    customized ``build_optimizers`` to ``ModelSpec`` will create the customized
+    customized ``build_optimizers`` to ``TrainSpec`` will create the customized
     ``OptimizersContainer``.
 
     Args:
@@ -273,9 +275,8 @@ class LRSchedulersContainer(Stateful):
         # that is immutable. As long as ``training.steps`` and ``training.warmup_steps``
         # in ``job_config`` remain unchanged when resuming from a checkpoint, this
         # approach is safe. We call ``copy()`` here to ensure extra safety.
-        # TODO: Should we deepcopy the state_dict?
         for scheduler in self.schedulers:
-            scheduler.load_state_dict(state_dict.copy())
+            scheduler.load_state_dict(copy.deepcopy(state_dict))
 
 
 def build_lr_schedulers(
@@ -289,7 +290,7 @@ def build_lr_schedulers(
     **Note**
     Users who want to customize the lr scheduler behavior can create their own
     ``LRSchedulersContainer`` subclass and ``build_lr_scheduler``. Passing the
-    customized ``build_lr_schedulers`` to ``ModelSpec`` will create the customized
+    customized ``build_lr_schedulers`` to ``TrainSpec`` will create the customized
     ``LRSchedulersContainer``.
 
 

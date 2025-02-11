@@ -13,12 +13,12 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.model_spec import BaseModelArgs, ModelProtocol
+from torchtitan.train_spec import BaseModelArgs, ModelProtocol
 from torchtitan.models.norms import build_norm
 
 
 @dataclass
-class ModelArgs(BaseModelArgs):
+class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
@@ -131,7 +131,7 @@ class Attention(nn.Module):
     Multi-head attention module.
 
     Args:
-        model_args (ModelArgs): Model configuration arguments.
+        model_args (TransformerModelArgs): Model configuration arguments.
 
     Attributes:
         n_kv_heads (int): Number of key and value heads.
@@ -145,7 +145,7 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: ModelArgs):
+    def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -265,7 +265,7 @@ class TransformerBlock(nn.Module):
 
     Args:
         layer_id (int): Identifier for the layer.
-        model_args (ModelArgs): Model configuration arguments.
+        model_args (TransformerModelArgs): Model configuration arguments.
 
     Attributes:
         n_heads (int): Number of attention heads.
@@ -279,7 +279,7 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: ModelArgs):
+    def __init__(self, layer_id: int, model_args: TransformerModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -337,10 +337,10 @@ class Transformer(nn.Module, ModelProtocol):
     Transformer Module
 
     Args:
-        model_args (ModelArgs): Model configuration arguments.
+        model_args (TransformerModelArgs): Model configuration arguments.
 
     Attributes:
-        model_args (ModelArgs): Model configuration arguments.
+        model_args (TransformerModelArgs): Model configuration arguments.
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
@@ -351,7 +351,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: ModelArgs):
+    def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -447,12 +447,12 @@ class Transformer(nn.Module, ModelProtocol):
         return output
 
     @classmethod
-    def from_model_args(cls, model_args: ModelArgs) -> "Transformer":
+    def from_model_args(cls, model_args: TransformerModelArgs) -> "Transformer":
         """
-        Initialize a Transformer model from a ModelArgs object.
+        Initialize a Transformer model from a TransformerModelArgs object.
 
         Args:
-            model_args (ModelArgs): Model configuration arguments.
+            model_args (TransformerModelArgs): Model configuration arguments.
 
         Returns:
             Transformer: Transformer model.
