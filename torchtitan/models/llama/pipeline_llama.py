@@ -13,7 +13,11 @@ import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-from torch.distributed.pipelining.schedules import _PipelineSchedule, get_schedule_class, ScheduleZBVZeroBubble
+from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
+    get_schedule_class,
+    ScheduleZBVZeroBubble,
+)
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
