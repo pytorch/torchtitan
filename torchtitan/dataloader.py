@@ -22,7 +22,7 @@ from torchtitan.datasets.tokenizer import Tokenizer
 class BaseDataLoader(Stateful, ABC):
     """Base class for all dataloaders.
 
-    This is used to enforce that all dataloaders have the two methods from ``Stateful``,
+    This is used to enforce that all dataloaders have the methods defined in ``Stateful``,
     ``state_dict()`` and ``load_state_dict()``.
     """
 
@@ -37,11 +37,18 @@ class BaseDataLoader(Stateful, ABC):
 
 
 class DPDataLoader(StatefulDataLoader, BaseDataLoader):
-    """Dataloader that is aware of data parallelism
+    """Dataloader that is aware of distributed data parallelism.
 
-    This dataloader is used to load data in a distributed fashion. It also utilizes
-    ``torchdata.stateful_dataloader.StatefulDataLoader`` to implement the necessary
+    This dataloader is used to load data in a distributed data parallel fashion. It also
+    utilizes ``torchdata.stateful_dataloader.StatefulDataLoader`` to implement the necessary
     methods such as ``__iter__``.
+
+    Args:
+        dataset (IterableDataset): The dataset to iterate over.
+        tokenizer (Tokenizer): The tokenizer to use to tokenize the dataset.
+        dp_rank: Data parallelism rank for this dataloader.
+        dp_world_size: The world size of the data parallelism.
+        batch_size: The batch size to use for each iteration.
     """
 
     def __init__(
@@ -111,4 +118,18 @@ class DataLoaderBuilder(Protocol):
         dp_rank: int,
         dp_world_size: int,
     ) -> BaseDataLoader:
+        """Function call
+
+        Args:
+            dataset_name (str): Name of the dataset to iterate over.
+            dataset_path (Optional[str]): Path to the dataset to load.
+            tokenizer_path (str): Path to the tokenizer to use.
+            batch_size (int): The batch size to use for each iteration.
+            seq_len (int): Sequence length for each batch.
+            dp_rank (int): Data parallelism rank for this dataloader.
+            dp_world_size (int): The world size of the data parallelism.
+
+        Returns:
+            BaseDataLoader: The dataloader.
+        """
         ...

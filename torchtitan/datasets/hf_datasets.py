@@ -14,9 +14,10 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
+from torchtitan.dataloader import DPDataLoader
+
 from torchtitan.datasets.tokenizer import build_tokenizer, Tokenizer
 from torchtitan.logging import logger
-from torchtitan.dataloader import DPDataLoader
 
 
 def _load_c4_dataset(dataset_path: str):

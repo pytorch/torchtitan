@@ -48,7 +48,6 @@ OptimizerBuilderWrapper: TypeAlias = Callable[
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
 
 
-
 @dataclass
 class TrainSpec:
     name: str
