@@ -102,10 +102,11 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
 
+        it = iter(self._data)
         for _ in range(self._sample_idx):
-            next(iter(self._data))
+            next(it)
 
-        return iter(self._data)
+        return it
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
