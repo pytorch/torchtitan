@@ -26,7 +26,7 @@ TORCH_DTYPE_MAP = {
 
 
 def string_list(raw_arg):
-    return raw_arg.split(",")
+    return [s.strip() for s in raw_arg.split(",") if s.strip()]
 
 
 class JobConfig:
@@ -529,6 +529,17 @@ class JobConfig:
             default=-1,
             help="Load the checkpoint at the specified step. If -1, load the latest checkpoint.",
         )
+        self.parser.add_argument(
+            "--checkpoint.exclude_from_loading",
+            type=string_list,
+            nargs="*",
+            default=[],
+            help="""
+                Exclude specific keys from being loaded from the checkpoint.
+                Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
+                This will load the model only, excluding the specified keys.
+            """,
+        )
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
@@ -636,6 +647,13 @@ class JobConfig:
             exp["pipeline_parallel_split_points"] = string_list(
                 exp["pipeline_parallel_split_points"]
             )
+        if (
+            "checkpoint" in args_dict
+            and "exclude_from_loading" in args_dict["checkpoint"]
+            and isinstance(args_dict["checkpoint"]["exclude_from_loading"], str)
+        ):
+            ckpt = args_dict["checkpoint"]
+            ckpt["exclude_from_loading"] = string_list(ckpt["exclude_from_loading"])
 
         # override args dict with cmd_args
         cmd_args_dict = self._args_to_two_level_dict(cmd_args)
@@ -682,6 +700,9 @@ class JobConfig:
                 # without this special case, type inference breaks here,
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
+                aux_parser.add_argument("--" + arg, type=string_list)
+            elif arg == "checkpoint.exclude_from_loading":
+                # similar to the case above
                 aux_parser.add_argument("--" + arg, type=string_list)
             else:
                 aux_parser.add_argument("--" + arg, type=type(val))
