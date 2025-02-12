@@ -99,13 +99,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._all_tokens: List[int] = []
 
     def _get_data_iter(self):
-        if self._sample_idx == 0:
-            return iter(self._data)
-
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
 
-        return iter(self._data.skip(self._sample_idx))
+        it = iter(self._data)
+
+        for _ in range(self._sample_idx):
+            next(self._data.next())
+
+        return it
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
@@ -113,6 +115,8 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         while True:
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
+                import logging
+                logging.warning(f"Rank{torch.distributed.get_rank()} {self._sample_idx} {sample}")
                 sample_text = self._text_processor(sample)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
