@@ -143,6 +143,18 @@ def build_test_list():
             [
                 [
                     "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
                 ],
@@ -417,6 +429,24 @@ def build_test_list():
             "Test always resharding after forward pass",
             "fsdp_reshard_always",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 10",
+                ],
+                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
+                # excluded during loading to avoid errors caused by mismatched dp_degree.
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--training.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
         ),
     ]
     return integration_tests_flavors

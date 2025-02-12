@@ -8,7 +8,7 @@
 
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Protocol, Tuple, Type, TypeAlias
+from typing import Callable, Dict, Protocol, Type, TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
@@ -36,15 +36,14 @@ class ModelProtocol(Protocol):
     """
 
     @staticmethod
-    def from_model_args(args: BaseModelArgs) -> nn.Module:
-        ...
+    def from_model_args(args: BaseModelArgs) -> nn.Module: ...
 
 
 OptimizersBuilder: TypeAlias = Callable[
-    [List[nn.Module], JobConfig], OptimizersContainer
+    [list[nn.Module], JobConfig], OptimizersContainer
 ]
 OptimizerBuilderWrapper: TypeAlias = Callable[
-    [List[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
+    [list[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
 ]
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
 
@@ -55,7 +54,9 @@ class TrainSpec:
     cls: Type[nn.Module]
     config: Dict[str, BaseModelArgs]
     parallelize_fn: Callable[[nn.Module], None]
-    pipelining_fn: Callable[[nn.Module], Tuple[_PipelineSchedule, List[nn.Module]]]
+    pipelining_fn: Callable[
+        [nn.Module], tuple[_PipelineSchedule, list[nn.Module], bool, bool]
+    ]
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
 

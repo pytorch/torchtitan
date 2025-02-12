@@ -157,8 +157,38 @@ class CheckpointManager:
         if not self.enable_checkpoint and self.ft_manager is None:
             return
 
-        self._initialize_states(
-            states, dataloader, model_parts, optimizers, lr_schedulers
+        """
+        Note: Pipeline Parallelism and Virtual Stages
+
+        1. even for simple PP schedules, there is a separate optimizer each PP rank.
+        rank0's optimizer would have a param_group[0] which refers to layers.0 in the original model.
+        rank1's would _also_ have a param_group[0], since it's index based, but referring to layers.1.
+        When saving, these collide and one of them is lost.  Then when reloading, only one stage can
+        restore its optimizer states, others will error.
+
+            The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
+            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerContainer.
+
+        2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
+        requiring us to reason about multiple 'optim' objects locally.
+
+            We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
+            into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
+            which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
+            support described in (1).
+
+        3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers with the assumption that
+        all lr_schedulers have the same state_dict.
+        """
+        self.states = states
+
+        self.states.update(
+            {
+                "model": ModelWrapper(model_parts),
+                "optimizer": optimizers,
+                "dataloader": dataloader,
+                "lr_scheduler": lr_schedulers,
+            }
         )
 
         async_mode = ckpt_config.async_mode.lower()
@@ -185,6 +215,7 @@ class CheckpointManager:
         self.keep_latest_k = ckpt_config.keep_latest_k
         self.model_weights_only = ckpt_config.model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
+        self.exclude_from_loading = ckpt_config.exclude_from_loading
 
         self.mp = None
         if async_mode == AsyncMode.DISABLED:
@@ -470,10 +501,17 @@ class CheckpointManager:
         }
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
+        states_to_load = {
+            k: v for k, v in states.items() if k not in self.exclude_from_loading
+        }
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
         dcp.load(
-            states,
+            states_to_load,
             checkpoint_id=self._create_checkpoint_id(step),
         )
+        states.update(states_to_load)
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
