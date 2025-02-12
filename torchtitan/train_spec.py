@@ -36,7 +36,8 @@ class ModelProtocol(Protocol):
     """
 
     @staticmethod
-    def from_model_args(args: BaseModelArgs) -> nn.Module: ...
+    def from_model_args(args: BaseModelArgs) -> nn.Module:
+        ...
 
 
 OptimizersBuilder: TypeAlias = Callable[
