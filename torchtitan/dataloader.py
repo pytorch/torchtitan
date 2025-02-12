@@ -74,7 +74,7 @@ class DPDataLoader(StatefulDataLoader, BaseDataLoader):
         return {
             # We don't have to use pickle as DCP will serialize the state_dict. However,
             # we have to keep this for backward compatibility.
-            self._rank_id: pickle.dumps(StatefulDataLoader(self).state_dict()),
+            self._rank_id: pickle.dumps(StatefulDataLoader.state_dict(self)),
             "world_size": self.dp_world_size,
         }
 
@@ -96,8 +96,8 @@ class DPDataLoader(StatefulDataLoader, BaseDataLoader):
         )
         # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
         # keep this for backward compatibility.
-        StatefulDataLoader(self).load_state_dict(
-            pickle.loads(state_dict[self._rank_id])
+        StatefulDataLoader.load_state_dict(
+            self, pickle.loads(state_dict[self._rank_id])
         )
 
 
