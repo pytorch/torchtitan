@@ -6,7 +6,6 @@
 
 import torch
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import build_tokenizer
 
 
 class TestDatasetCheckpointing:
