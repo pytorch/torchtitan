@@ -47,6 +47,6 @@ class TestDatasetCheckpointing:
             tokenizer_path="./tests/assets/test_tiktoken.model",
             batch_size=1,
             seq_len=1024,
-            world_size=4,
-            rank=0,
+            dp_world_size=4,
+            dp_rank=0,
         )
