@@ -6,6 +6,7 @@
 
 import enum
 import functools
+import gc
 import os
 import re
 import shutil
@@ -106,6 +107,12 @@ class SaveDone:
     pass
 
 
+@torch.no_grad()
+def save_with_gc(state, checkpoint_id):
+    dcp.save(state, checkpoint_id=checkpoint_id)
+    gc.collect(1)
+
+
 def checkpoint_mp(recv, send):
     init_logger()
     os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
@@ -125,7 +132,7 @@ def checkpoint_mp(recv, send):
             assert isinstance(obj, tuple)
             begin = time.monotonic()
             state, checkpoint_id = obj
-            dcp.save(state, checkpoint_id=checkpoint_id)
+            save_with_gc(state, checkpoint_id=checkpoint_id)
             logger.info(
                 "Finish saving the checkpoint in the background process in "
                 f"{time.monotonic() - begin:.2f} seconds."
@@ -274,7 +281,7 @@ class CheckpointManager:
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        dcp.save(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
         self.reset()
 
     def _should_save(self, curr_step: int, force: bool = False) -> bool:
@@ -372,7 +379,7 @@ class CheckpointManager:
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
         else:
-            dcp.save(self.states, checkpoint_id=checkpoint_id)
+            save_with_gc(state, checkpoint_id=checkpoint_id)
         self.reset()
         self._purge_stale_checkpoints()
 
@@ -451,6 +458,7 @@ class CheckpointManager:
         # bugfix from above: restore the original stateful objects,
         # whose states were already updated in-place by dcp.load()
         states.update(original_stateful_states)
+        gc.collect(1)
         return True
 
     def _purge_stale_checkpoints(self):
