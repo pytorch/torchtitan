@@ -13,8 +13,7 @@ import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-
-from torch.distributed.pipelining.schedules import _PipelineSchedule
+from torch.distributed.pipelining.schedules import _PipelineSchedule, get_schedule_class, ScheduleZBVZeroBubble
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
@@ -39,14 +38,23 @@ def pipeline_llama(
     device: DeviceType,
     model_config: TransformerModelArgs,
     loss_fn: Callable[..., torch.Tensor],
-) -> tuple[_PipelineSchedule, list[nn.Module]]:
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     stages, models = pipeline_llama_manual_split(
         model, pp_mesh, parallel_dims, job_config, device, model_config
     )
 
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
-    return pp_schedule, models
+    # This is used in the train loop to determine whether to pass in the input_ids and labels
+    has_first_stage = False
+    has_last_stage = False
+    for stage in stages:
+        if stage.is_first:
+            has_first_stage = True
+        if stage.is_last:
+            has_last_stage = True
+
+    return pp_schedule, models, has_first_stage, has_last_stage
 
 
 def pipeline_llama_manual_split(
@@ -112,7 +120,13 @@ def pipeline_llama_manual_split(
 
     stages = []
     models = []
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style="loop"):
+
+    schedule_class = get_schedule_class(
+        job_config.experimental.pipeline_parallel_schedule
+    )
+    style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
+
+    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
         start_layer = splits[stage_idx - 1] if stage_idx > 0 else None
         stop_layer = splits[stage_idx] if stage_idx < num_stages - 1 else None
         stage, model_chunk = _build_stage(
