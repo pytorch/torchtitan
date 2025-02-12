@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.dataloader import BaseDataLoader, DataLoaderBuilder
+from torchtitan.dataloader import DataLoaderBuilder
 from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 
 

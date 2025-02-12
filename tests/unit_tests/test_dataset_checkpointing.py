@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from torchtitan.datasets.hf_datasets import build_hf_data_loader
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import build_tokenizer
 
 
@@ -42,7 +42,7 @@ class TestDatasetCheckpointing:
         self, dataset_name, dataset_path, batch_size, seq_len, world_size, rank
     ):
         tokenizer = build_tokenizer("tiktoken", "./tests/assets/test_tiktoken.model")
-        return build_hf_data_loader(
+        return build_hf_dataloader(
             dataset_name=dataset_name,
             dataset_path=dataset_path,
             tokenizer=tokenizer,
