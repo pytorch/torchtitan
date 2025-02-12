@@ -6,14 +6,16 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
-from torchtitan.datasets.tokenizer import Tokenizer
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+
+from torchtitan.datasets.tokenizer import Tokenizer
 
 
 @dataclass
@@ -30,7 +32,8 @@ class BaseDataLoader(Stateful, ABC):
     batch_size: int
 
     @abstractmethod
-    def __iter__(self): ...
+    def __iter__(self):
+        ...
 
 
 class DPDataLoader(StatefulDataLoader, BaseDataLoader):
