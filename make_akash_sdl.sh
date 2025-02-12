@@ -69,7 +69,7 @@ pipeline_parallel_degree = $ENV_WORLD_SIZE
 enable_async_tensor_parallel = false
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
 interval = 10
@@ -118,7 +118,7 @@ batch_size = $ENV_WORLD_SIZE
 seq_len = 2048
 warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 100
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
@@ -130,10 +130,10 @@ context_parallel_degree = 1
 pipeline_parallel_degree = $ENV_WORLD_SIZE
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
-interval = 500
+interval = 50
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
@@ -182,7 +182,7 @@ batch_size = $ENV_WORLD_SIZE
 seq_len = 1024
 warmup_steps = 200  # lr scheduler warm up
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 100
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
@@ -196,10 +196,10 @@ context_parallel_degree = 1
 pipeline_parallel_degree = $ENV_WORLD_SIZE
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval_type = "steps"
-interval = 500
+interval = 50
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
