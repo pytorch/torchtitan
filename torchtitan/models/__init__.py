@@ -8,6 +8,3 @@
 # Import the built-in models here so that the corresponding register_model_spec()
 # will be called.
 import torchtitan.models.llama  # noqa: F401
-
-
-model_name_to_tokenizer = {"llama3": "tiktoken"}

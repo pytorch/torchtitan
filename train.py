@@ -15,12 +15,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.ft import init_ft_manager, set_ft_state_dict_fns
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
-from torchtitan.models import model_name_to_tokenizer
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.train_spec import get_train_spec
@@ -84,18 +82,15 @@ def main(job_config: JobConfig):
     )
     train_spec = get_train_spec(job_config.model.name)
 
-    # build tokenizer
-    tokenizer_type = model_name_to_tokenizer[train_spec.name]
-    tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
     # build dataloader
-    data_loader = build_hf_data_loader(
-        job_config.training.dataset,
-        job_config.training.dataset_path,
-        tokenizer,
-        job_config.training.batch_size,
-        job_config.training.seq_len,
-        dp_degree,
-        dp_rank,
+    dataloader = train_spec.build_dataloader_fn(
+        dataset_name=job_config.training.dataset,
+        dataset_path=job_config.training.dataset_path,
+        tokenizer_path=job_config.model.tokenizer_path,
+        batch_size=job_config.training.batch_size,
+        seq_len=job_config.training.seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_degree,
     )
 
     # build model (using meta init)
@@ -106,7 +101,7 @@ def main(job_config: JobConfig):
     # 2. vocab size from tokenizer
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = tokenizer.n_words
+    model_config.vocab_size = dataloader.tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(
@@ -202,7 +197,7 @@ def main(job_config: JobConfig):
 
     # load initial checkpoint
     checkpoint = CheckpointManager(
-        dataloader=data_loader,
+        dataloader=dataloader,
         model_parts=model_parts,
         optimizers=optimizers,
         lr_schedulers=lr_schedulers,
@@ -237,7 +232,7 @@ def main(job_config: JobConfig):
             }
             metric_logger.log(metrics, step=step)
 
-    data_iterator = iter(data_loader)
+    data_iterator = iter(dataloader)
 
     train_context = utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
