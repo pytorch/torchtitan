@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from io import BytesIO
 from multiprocessing import get_context
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -25,6 +25,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.checkpoint.storage import StorageReader, StorageWriter
 from torch.utils.data import DataLoader
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
@@ -106,7 +107,7 @@ class SaveDone:
     pass
 
 
-def checkpoint_mp(recv, send):
+def checkpoint_mp(recv, send, storage_writer):
     init_logger()
     os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
     os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
@@ -125,7 +126,11 @@ def checkpoint_mp(recv, send):
             assert isinstance(obj, tuple)
             begin = time.monotonic()
             state, checkpoint_id = obj
-            dcp.save(state, checkpoint_id=checkpoint_id)
+            dcp.save(
+                state,
+                checkpoint_id=checkpoint_id,
+                storage_writer=storage_writer,
+            )
             logger.info(
                 "Finish saving the checkpoint in the background process in "
                 f"{time.monotonic() - begin:.2f} seconds."
@@ -144,6 +149,8 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
+        storage_reader: Optional[StorageReader] = None,
+        storage_writer: Optional[StorageWriter] = None,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
@@ -185,7 +192,9 @@ class CheckpointManager:
             }
         )
 
-        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.folder = self._get_folder_from_job_config(job_config)
+        self.storage_reader = storage_reader
+        self.storage_writer = storage_writer
         self.interval_type = (
             IntervalType.SECONDS
             if ckpt_config.interval_type == "seconds"
@@ -219,6 +228,7 @@ class CheckpointManager:
                 args=(
                     self.mp_queue_send,
                     self.mp_queue_recv,
+                    self.storage_writer,
                 ),
                 daemon=True,
             )
@@ -234,6 +244,16 @@ class CheckpointManager:
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
 
+    def _get_folder_from_job_config(self, job_config: JobConfig) -> str:
+        """Construct self.folder from job config.
+
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+        return os.path.join(
+            job_config.job.dump_folder,
+            job_config.checkpoint.folder,
+        )
+
     def __del__(self):
         if self.enable_checkpoint and self.mp and self.mp.is_alive():
             self.mp_queue_send.put(Terminate())
@@ -243,6 +263,11 @@ class CheckpointManager:
         self.begin_time = time.monotonic()
 
     def _create_checkpoint_id(self, step: int) -> str:
+        """Convert step to checkpoint id acceptable by dcp.save.
+
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+
         return os.path.join(self.folder, f"step-{step}")
 
     def _save_last_step(self, curr_step: int) -> None:
@@ -274,7 +299,11 @@ class CheckpointManager:
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        dcp.save(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        dcp.save(
+            self.states,
+            checkpoint_id=self._create_checkpoint_id(curr_step),
+            storage_writer=self.storage_writer,
+        )
         self.reset()
 
     def _should_save(self, curr_step: int, force: bool = False) -> bool:
@@ -369,10 +398,17 @@ class CheckpointManager:
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
             self.async_future = dcp.async_save(
-                self.states, checkpoint_id=checkpoint_id, process_group=self.pg
+                self.states,
+                checkpoint_id=checkpoint_id,
+                process_group=self.pg,
+                storage_writer=self.storage_writer,
             )
         else:
-            dcp.save(self.states, checkpoint_id=checkpoint_id)
+            dcp.save(
+                self.states,
+                checkpoint_id=checkpoint_id,
+                storage_writer=self.storage_writer,
+            )
         self.reset()
         self._purge_stale_checkpoints()
 
@@ -402,24 +438,56 @@ class CheckpointManager:
             sync_func()
             self.staging = False
 
+    def _check_checkpoint_exitsts(self, step: int) -> bool:
+        """Check if a checkpoint has been fully written for the corresponding step.
+
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+
+        checkpoint_id = self._create_checkpoint_id(step)
+        metadata_probe = os.path.join(checkpoint_id, ".metadata")
+        return os.path.isfile(metadata_probe)
+
+    def _discover_checkpointed_steps(self) -> List[int]:
+        """List steps that have their corresponding directories created.
+
+        Failed checkpoints are also returned here,
+        existance of .metadata should be checked separately.
+
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+        if not os.path.isdir(self.folder):
+            return []
+
+        discovered_steps = []
+        for filename in os.listdir(self.folder):
+            match = re.search(r"step-(\d+)", filename)
+            if not match:
+                continue
+            step = int(match.group(1))
+            discovered_steps.append(step)
+        if not discovered_steps:
+            return None
+        return discovered_steps
+
+    def _find_last_saved_step(self) -> Optional[int]:
+        all_steps = self._discover_checkpointed_steps()
+        fully_written_steps = list(filter(self._check_checkpoint_exitsts, all_steps))
+
+        return max(fully_written_steps, default=None)
+
     def load(self, step: int = -1) -> bool:
         if not self.enable_checkpoint:
             return False
-        if not os.path.isdir(self.folder):
-            return False
-        if step != -1 and not os.path.isdir(self._create_checkpoint_id(step)):
-            return False
 
         if step == -1:
-            step_counts = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                metadata_probe = os.path.join(self.folder, filename, ".metadata")
-                if match and os.path.isfile(metadata_probe):
-                    step_counts.append(int(match.group(1)))
-            if not step_counts:
+            last_step = self._find_last_saved_step()
+            if last_step is None:
                 return False
-            step = max(step_counts)
+            step = last_step
+
+        if not self._check_checkpoint_exitsts(step):
+            return False
 
         # We won't have optimizer states to load, if we are loading a seed checkpoint
         states = {"model": self.states["model"]} if step == 0 else self.states
@@ -443,6 +511,7 @@ class CheckpointManager:
         dcp.load(
             states_to_load,
             checkpoint_id=self._create_checkpoint_id(step),
+            storage_reader=self.storage_reader,
         )
         states.update(states_to_load)
         logger.info(
@@ -453,17 +522,22 @@ class CheckpointManager:
         states.update(original_stateful_states)
         return True
 
+    def _remove_checkpoint(self, step: int) -> None:
+        """Remove a checkpoint for the given step.
+
+        Can be overriden for compatibility with custom storage_reader/storage_writer
+        """
+        path = self._create_checkpoint_id(step)
+
+        logger.info(f"Deleting old checkpoint {path}")
+        shutil.rmtree(path, ignore_errors=True)
+
     def _purge_stale_checkpoints(self):
         if self.keep_latest_k > 0:
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                path = os.path.join(self.folder, filename)
-                discovered_checkpoints.append((int(match.group(1)), path))
-
+            discovered_checkpoints = self._discover_checkpointed_steps()
             discovered_checkpoints.sort()
+
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
-            for _, path in to_delete:
-                logger.info(f"Deleting old checkpoint {path}")
-                shutil.rmtree(path, ignore_errors=True)
+            for step in to_delete:
+                self._remove_checkpoint(step)
