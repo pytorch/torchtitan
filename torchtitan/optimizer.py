@@ -177,8 +177,32 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         pass
 
 
+class FTOptimizersContainer(Optimizer):
+    def __init__(
+        self,
+        model_parts: List[nn.Module],
+        optimizer_kwargs: Dict[str, Any],
+        name: str,
+        ft_manager: Any,
+    ) -> None:
+        import torchft as ft
+
+        super().__init__()
+
+        # Force to initialize the optimizer state so that `optim.step()`
+        # won't be called by state_dict() and load_state_dict().
+        _ = {
+            k: v
+            for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
+            for k, v in sd.items()
+        }
+        self.optimizers = [ft.Optimizer(ft_manager, optim) for optim in self.optimizers]
+
+
 def build_optimizers(
-    model_parts: List[nn.Module], job_config: JobConfig
+    model_parts: List[nn.Module],
+    job_config: JobConfig,
+    ft_manager: Optional[Any] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -213,11 +237,14 @@ def build_optimizers(
         "foreach": not fused,
     }
 
-    return (
-        OptimizersContainer(model_parts, optimizer_kwargs, name)
-        if not optim_in_bwd
-        else OptimizersInBackwardContainer(model_parts, optimizer_kwargs, name)
-    )
+    if optim_in_bwd and ft_manager:
+        raise ValueError("TorchFT is not supported with optimizers in backward.")
+    elif optim_in_bwd:
+        return OptimizersInBackwardContainer(model_parts, optimizer_kwargs, name)
+    elif ft_manager:
+        return FTOptimizersContainer(model_parts, optimizer_kwargs, name, ft_manager)
+    else:
+        return OptimizersContainer(model_parts, optimizer_kwargs, name)
 
 
 class LRSchedulersContainer(Stateful):
