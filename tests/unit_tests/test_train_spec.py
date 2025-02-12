@@ -80,6 +80,7 @@ class TestTrainSpec:
             pipelining_fn=pipeline_llama,
             build_optimizers_fn=fake_build_optimizers,
             build_lr_schedulers_fn=build_lr_schedulers,
+            build_dataloader_fn=build_hf_dataloader,
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake2")
