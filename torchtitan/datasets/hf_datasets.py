@@ -103,6 +103,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             return iter([])
 
         it = iter(self._data)
+
         for _ in range(self._sample_idx):
             next(it)
 
