@@ -370,6 +370,10 @@ class CheckpointManager:
         begin = time.monotonic()
         checkpoint_id = self._create_checkpoint_id(curr_step)
         self._async_wait()
+        # This GC is called for async checkpoint as it is useless to do
+        # GC right after async_save -- the CPU memory is not able to be
+        # freed until _async_wait()
+        gc.collect(1)
         if force:
             self._save_last_step(curr_step)
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -379,7 +383,7 @@ class CheckpointManager:
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
         else:
-            save_with_gc(state, checkpoint_id=checkpoint_id)
+            save_with_gc(self.states, checkpoint_id=checkpoint_id)
         self.reset()
         self._purge_stale_checkpoints()
 
