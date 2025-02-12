@@ -42,29 +42,43 @@ class Float8Handler:
             return
         try:
             from torchao.float8 import Float8LinearConfig
+
+            # we should update this code after torchao exposes this publically
+            from torchao.float8.config import (
+                Float8LinearRecipeName,
+                recipe_name_to_linear_config,
+            )
         except ImportError as e:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
-        # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
-        enable_fsdp_float8_all_gather = (
-            parallel_dims.dp_shard_enabled
-            and float8_config.enable_fsdp_float8_all_gather
-        )
-        self.config = Float8LinearConfig(
-            enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-        )
-
         self.enabled = True
 
-        # for precompute_float8_dynamic_scale_for_fsdp
-        self.precompute_scale = (
-            enable_fsdp_float8_all_gather
-            and float8_config.precompute_float8_dynamic_scale_for_fsdp
-        )
+        if float8_config.recipe_name is not None:
+            # TODO(future PR): the recipe lookup by name is currently a private API, we'll need
+            # to expose it publically in torchao before a PR similar to this one can be
+            # landed in torchtitan
+            recipe = Float8LinearRecipeName(float8_config.recipe_name)
+            self.config = recipe_name_to_linear_config(recipe)
+            self.precompute_scale = False
+            logger.info(f"Float8 training active with recipe {recipe}")
 
-        logger.info("Float8 training active")
+        else:
+            # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
+            enable_fsdp_float8_all_gather = (
+                parallel_dims.dp_shard_enabled
+                and float8_config.enable_fsdp_float8_all_gather
+            )
+            self.config = Float8LinearConfig(
+                enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
+            )
+            # for precompute_float8_dynamic_scale_for_fsdp
+            self.precompute_scale = (
+                enable_fsdp_float8_all_gather
+                and float8_config.precompute_float8_dynamic_scale_for_fsdp
+            )
+            logger.info("Float8 tensorwise scaled training active")
 
     def convert_to_float8_training(self, model: nn.Module):
         """
