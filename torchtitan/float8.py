@@ -54,6 +54,7 @@ class Float8Handler:
         )
         self.config = Float8LinearConfig(
             enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
+            force_recompute_fp8_weight_in_bwd=parallel_dims.dp_shard_enabled
         )
 
         self.enabled = True
