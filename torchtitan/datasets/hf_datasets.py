@@ -9,15 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+
+from datasets import Dataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
-
-from datasets import Dataset, load_dataset
-from datasets.distributed import split_dataset_by_node
 
 
 def _load_c4_dataset(dataset_path: str):
@@ -99,13 +99,15 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._all_tokens: List[int] = []
 
     def _get_data_iter(self):
-        if self._sample_idx == 0:
-            return iter(self._data)
-
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
 
-        return iter(self._data.skip(self._sample_idx))
+        it = iter(self._data)
+
+        for _ in range(self._sample_idx):
+            next(self._data.next())
+
+        return it
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
