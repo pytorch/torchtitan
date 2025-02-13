@@ -163,11 +163,16 @@ class GarbageCollection:
         assert gc_freq > 0, "gc_freq must be a positive integer"
         self.gc_freq = gc_freq
         gc.disable()
-        gc.collect(1)
+        self.collect("Initial GC collection.")
 
     def run(self, step_count):
         if step_count > 1 and step_count % self.gc_freq == 0:
-            gc.collect(1)
+            self.collect("Peforming periodical GC collection.")
+
+    @staticmethod
+    def collect(reason: str):
+        logger.info(reason)
+        gc.collect(1)
 
 
 TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
