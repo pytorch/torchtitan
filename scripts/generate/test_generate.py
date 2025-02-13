@@ -26,13 +26,14 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan import utils
-
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.models import model_name_to_tokenizer
 from torchtitan.parallelisms import ParallelDims
+
+from torchtitan.train_spec import get_train_spec
 from torchtitan.utils import device_module, device_type
 
 # support running w/o installing as package
@@ -102,21 +103,21 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    model_name = config.model.name
+    train_spec = get_train_spec(config.model.name)
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
     tokenizer = build_tokenizer(
-        model_name_to_tokenizer[model_name], config.model.tokenizer_path
+        model_name_to_tokenizer[train_spec.name], config.model.tokenizer_path
     )
 
-    model_config = models_config[model_name][config.model.flavor]
+    model_config = train_spec.config[config.model.flavor]
     model_config.norm_type = config.model.norm_type
     model_config.max_seq_len = config.training.seq_len
     model_config.vocab_size = tokenizer.n_words
 
-    model_cls = model_name_to_cls[model_name]
+    model_cls = train_spec.cls
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")

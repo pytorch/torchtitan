@@ -22,21 +22,20 @@ from torchtitan.datasets import build_hf_data_loader, build_tokenizer
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.model_converter import build_model_converters
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
-from torchtitan.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.parallelisms import (
-    models_parallelize_fns,
-    models_pipelining_fns,
-    ParallelDims,
-)
+from torchtitan.models import model_name_to_tokenizer
+from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-from torchtitan.utils import device_module, device_type
+from torchtitan.train_spec import get_train_spec
+from torchtitan.utils import device_module, device_type, import_module_from_path
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
     init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
+
+    if job_config.experimental.custom_model_path:
+        import_module_from_path(job_config.experimental.custom_model_path)
 
     if job_config.job.print_args:
         logger.info(f"Running with args: {job_config.to_dict()}")
@@ -81,10 +80,10 @@ def main(job_config: JobConfig):
     utils.set_determinism(
         world_mesh, device, job_config.training.seed, job_config.training.deterministic
     )
-    model_name = job_config.model.name
+    train_spec = get_train_spec(job_config.model.name)
 
     # build tokenizer
-    tokenizer_type = model_name_to_tokenizer[model_name]
+    tokenizer_type = model_name_to_tokenizer[train_spec.name]
     tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
     # build dataloader
     data_loader = build_hf_data_loader(
@@ -98,8 +97,8 @@ def main(job_config: JobConfig):
     )
 
     # build model (using meta init)
-    model_cls = model_name_to_cls[model_name]
-    model_config = models_config[model_name][job_config.model.flavor]
+    model_cls = train_spec.cls
+    model_config = train_spec.config[job_config.model.flavor]
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. vocab size from tokenizer
@@ -108,7 +107,9 @@ def main(job_config: JobConfig):
     model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
-    logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
+    logger.info(
+        f"Building {train_spec.name} {job_config.model.flavor} with {model_config}"
+    )
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
@@ -124,7 +125,7 @@ def main(job_config: JobConfig):
         job_config.training.seq_len,
     )
     logger.info(
-        f"{color.blue}Model {model_name} {job_config.model.flavor} "
+        f"{color.blue}Model {train_spec.name} {job_config.model.flavor} "
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
 
@@ -152,7 +153,12 @@ def main(job_config: JobConfig):
     # apply parallelisms and initialization
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        pp_schedule, model_parts = models_pipelining_fns[model_name](
+        (
+            pp_schedule,
+            model_parts,
+            has_first_stage,
+            has_last_stage,
+        ) = train_spec.pipelining_fn(
             model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
         )
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
@@ -163,14 +169,14 @@ def main(job_config: JobConfig):
         # optimizer, and checkpointing
         for m in model_parts:
             # apply SPMD-style PT-D techniques
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
+            train_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
             m.to_empty(device=init_device)
             with torch.no_grad():
                 m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+        train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
         model.to_empty(device=init_device)
         with torch.no_grad():
             model.init_weights(buffer_device=buffer_device)
@@ -186,8 +192,8 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = build_optimizers(model_parts, job_config)
-    lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
+    optimizers = train_spec.build_optimizers_fn(model_parts, job_config)
+    lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
 
     train_state = TrainState()
 
@@ -286,22 +292,18 @@ def main(job_config: JobConfig):
 
             if parallel_dims.pp_enabled:
                 # Pipeline Parallel forward / backward inside step() call
-                is_last_stage = pp_mesh.get_local_rank() == pp_mesh.size() - 1
-
                 with train_context(optional_context_parallel_ctx):
-                    if pp_mesh.get_local_rank() == 0:
-                        pp_schedule.step(input_ids)
-                    elif is_last_stage:
-                        losses = []
-                        pp_schedule.step(target=labels, losses=losses)
+                    targets, losses = (labels, []) if has_last_stage else (None, None)
+                    if has_first_stage:
+                        pp_schedule.step(input_ids, target=targets, losses=losses)
                     else:
-                        pp_schedule.step()
+                        pp_schedule.step(target=targets, losses=losses)
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
                     torch.mean(torch.stack(losses)).to(device)
-                    if is_last_stage
+                    if has_last_stage
                     else torch.tensor([-1.0], device=device)
                 )
             else:
