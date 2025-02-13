@@ -26,9 +26,11 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
+
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
-from torchtitan.optimizer import OptimizersContainer, SchedulersContainer
+from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.utils import GarbageCollection
 
 
 class IntervalType(enum.Enum):
@@ -105,6 +107,12 @@ class SaveDone:
     pass
 
 
+@torch.no_grad()
+def save_with_gc(state, checkpoint_id):
+    dcp.save(state, checkpoint_id=checkpoint_id)
+    GarbageCollection.collect("GC collection invoked by checkpointer.")
+
+
 def checkpoint_mp(recv, send):
     init_logger()
     os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
@@ -124,7 +132,7 @@ def checkpoint_mp(recv, send):
             assert isinstance(obj, tuple)
             begin = time.monotonic()
             state, checkpoint_id = obj
-            dcp.save(state, checkpoint_id=checkpoint_id)
+            save_with_gc(state, checkpoint_id=checkpoint_id)
             logger.info(
                 "Finish saving the checkpoint in the background process in "
                 f"{time.monotonic() - begin:.2f} seconds."
@@ -140,7 +148,7 @@ class CheckpointManager:
         dataloader: DataLoader,
         model_parts: List[nn.Module],
         optimizers: OptimizersContainer,
-        lr_schedulers: SchedulersContainer,
+        lr_schedulers: LRSchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
     ) -> None:
@@ -273,7 +281,7 @@ class CheckpointManager:
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        dcp.save(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
         self.reset()
 
     def _should_save(self, curr_step: int, force: bool = False) -> bool:
@@ -362,16 +370,21 @@ class CheckpointManager:
         begin = time.monotonic()
         checkpoint_id = self._create_checkpoint_id(curr_step)
         self._async_wait()
+        # This GC is called for async checkpoint as it is useless to do
+        # GC right after async_save -- the CPU memory is not able to be
+        # freed until _async_wait()
         if force:
             self._save_last_step(curr_step)
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             self.async_future = dcp.async_save(
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
         else:
-            dcp.save(self.states, checkpoint_id=checkpoint_id)
+            save_with_gc(self.states, checkpoint_id=checkpoint_id)
         self.reset()
         self._purge_stale_checkpoints()
 
@@ -450,6 +463,7 @@ class CheckpointManager:
         # bugfix from above: restore the original stateful objects,
         # whose states were already updated in-place by dcp.load()
         states.update(original_stateful_states)
+        GarbageCollection.collect("GC collection for checkpoint loading.")
         return True
 
     def _purge_stale_checkpoints(self):

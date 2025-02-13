@@ -143,6 +143,18 @@ def build_test_list():
             [
                 [
                     "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
                 ],
