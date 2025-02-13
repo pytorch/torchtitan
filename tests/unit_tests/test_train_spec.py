@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_dataloader
-from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.optimizer import (
     build_lr_schedulers,
     build_optimizers,
