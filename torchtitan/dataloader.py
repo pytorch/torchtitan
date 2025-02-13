@@ -8,7 +8,6 @@
 
 import pickle
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Callable, TypeAlias
 
 from torch.distributed.checkpoint.stateful import Stateful
