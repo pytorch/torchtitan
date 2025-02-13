@@ -16,10 +16,8 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan import utils
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
-from torchtitan.models import model_name_to_tokenizer
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.train_spec import get_train_spec
@@ -83,8 +81,7 @@ def estimate_memory(job_config: JobConfig):
     model_name = job_config.model.name
 
     # build tokenizer
-    tokenizer_type = model_name_to_tokenizer[model_name]
-    tokenizer = build_tokenizer(tokenizer_type, job_config.model.tokenizer_path)
+    tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
 
     train_context = utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
