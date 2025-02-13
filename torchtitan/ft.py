@@ -1,8 +1,6 @@
 import importlib
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
-
-from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
+from typing import Optional
 
 from torchtitan.config_manager import JobConfig
 
