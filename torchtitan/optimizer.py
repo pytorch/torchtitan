@@ -6,7 +6,7 @@
 
 import copy
 import functools
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import torch
 import torch.nn as nn
@@ -177,7 +177,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         pass
 
 
-class FTOptimizersContainer(Optimizer):
+class FTOptimizersContainer(OptimizersContainer):
     def __init__(
         self,
         model_parts: List[nn.Module],
@@ -187,7 +187,7 @@ class FTOptimizersContainer(Optimizer):
     ) -> None:
         import torchft as ft
 
-        super().__init__()
+        super().__init__(model_parts, optimizer_kwargs, name)
 
         # Force to initialize the optimizer state so that `optim.step()`
         # won't be called by state_dict() and load_state_dict().
@@ -196,7 +196,16 @@ class FTOptimizersContainer(Optimizer):
             for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
             for k, v in sd.items()
         }
-        self.optimizers = [ft.Optimizer(ft_manager, optim) for optim in self.optimizers]
+        self.optimizers = [
+            ft.Optimizer(ft_manager.manager, optim) for optim in self.optimizers
+        ]
+        self.cache_state_dict: Dict[str, Any] = {}
+
+    def init_cache_state_dict(self) -> None:
+        self.cache_state_dict = super().state_dict()
+
+    def state_dict(self) -> Dict[str, Any]:
+        return self.cache_state_dict
 
 
 def build_optimizers(

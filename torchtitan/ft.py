@@ -1,4 +1,5 @@
 import importlib
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
@@ -13,7 +14,13 @@ else:
     has_torchft = False
 
 
-def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
+@dataclass
+class FTManager:
+    manager: ft.Manager
+    replicate_group_size: int
+
+
+def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
     """
     Initialize the FT manager for the given job.
     """
@@ -33,26 +40,4 @@ def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
         replica_id=f"torchtitan_ft_{job.experimental.ft_replica_group_id}",
     )
 
-    return manager
-
-
-def set_ft_state_dict_fns(manager: Optional["ft.Manager"], ckpt_manager) -> None:
-    """
-    Set the state dict for the given manager.
-    """
-    if manager is None:
-        return
-
-    def state_dict():
-        ret = {}
-        for k, v in ckpt_manager.staging_results().items():
-            if k in {"model", "optimizer", "lr_schedulers"}:
-                ret[k] = v
-        return ret
-
-    def load_state_dict(state_dict):
-        assert state_dict is not None
-        for k, v in state_dict.items():
-            ckpt_manager.states[k].load_state_dict(v)
-
-    manager.set_state_dict_fns(load_state_dict, state_dict)
+    return FTManager(manager, job.experimental.ft_replica_group_size)

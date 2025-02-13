@@ -16,7 +16,7 @@ from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.float8 import Float8Handler
-from torchtitan.ft import init_ft_manager, set_ft_state_dict_fns
+from torchtitan.ft import init_ft_manager
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.parallelisms import ParallelDims
@@ -205,7 +205,6 @@ def main(job_config: JobConfig):
         job_config=job_config,
         ft_manager=ft_manager,
     )
-    set_ft_state_dict_fns(ft_manager, checkpoint)
 
     if job_config.checkpoint.create_seed_checkpoint:
         assert (
@@ -244,8 +243,6 @@ def main(job_config: JobConfig):
     data_loading_times = []
     time_last_log = time.perf_counter()
     device_memory_monitor.reset_peak_stats()
-
-    checkpoint.reset()
 
     # train loop
     logger.info(

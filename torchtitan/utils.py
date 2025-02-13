@@ -41,8 +41,9 @@ device_type, device_module = get_device_info()
 
 def dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
     if isinstance(mesh, ft.process_group._FlattenDeviceMesh):
-        torch.distributed.all_reduce(x, group=mesh.managed_mesh.replicate_pg)
-        # x = funcol.all_reduce(x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg)
+        x = funcol.all_reduce(
+            x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg
+        )
         mesh = mesh.managed_mesh.mesh
 
     if isinstance(x, DTensor):
@@ -416,14 +417,13 @@ def clip_grad_norm_(
         # If only using PP, total_norm will be a local tensor.
         mesh = total_norm._spec.mesh
         if isinstance(mesh, ft.process_group.ManagedDeviceMesh):
-            # The gradients along the replicated dim has been reduced.
+            # The gradients along the replicated dim has already been reduced.
             # So we don't need another reducution beforing removing the
             # replicate dimension
             local_tensor = total_norm.to_local()
             placements = list(copy.copy(total_norm._spec.placements))
             placements.pop(mesh.replicate_dim)
-            mesh = mesh.mesh
-            total_norm = DTensor.from_local(local_tensor, mesh, placements)
+            total_norm = DTensor.from_local(local_tensor, mesh.mesh, placements)
 
         total_norm = total_norm.full_tensor()
 

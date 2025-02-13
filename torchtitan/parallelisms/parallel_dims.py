@@ -74,7 +74,7 @@ class ParallelDims:
                 mesh_shape=dims,
                 mesh_dim_names=names,
                 replicate_dim=names.index("dp_replicate"),
-                manager=self.ft_manager,
+                manager=self.ft_manager.manager,
             )
 
         # Create all the submesh here to ensure all required process groups are
