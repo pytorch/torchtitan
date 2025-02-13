@@ -56,15 +56,12 @@ def parallelize_llama(
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
-        enable_float8 = (
-            "float8" in job_config.model.converters
-            and job_config.float8.enable_float8_linear
-        )
+        enable_float8_linear = "float8" in job_config.model.converters
         apply_tp(
             model,
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
-            enable_float8=enable_float8,
+            enable_float8=enable_float8_linear,
             enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
         )
 

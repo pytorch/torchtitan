@@ -54,4 +54,3 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 mode = 'full'
 
 [float8]
-enable_float8_linear = false

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.float8 import Float8Handler
+from torchtitan.float8 import Float8Converter
 from torchtitan.model_converter import build_model_converters, ModelConvertersContainer
 from torchtitan.parallelisms import ParallelDims
 
@@ -41,4 +41,4 @@ def test_build_model_converters_float8_converter():
     model_converters = build_model_converters(config, parallel_dims)
     assert isinstance(model_converters, ModelConvertersContainer)
     assert len(model_converters.converters) == 1
-    assert isinstance(model_converters.converters[0], Float8Handler)
+    assert isinstance(model_converters.converters[0], Float8Converter)

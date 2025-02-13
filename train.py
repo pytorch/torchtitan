@@ -10,9 +10,6 @@ from datetime import timedelta
 
 import torch
 
-# Import to register Float8Handler.
-import torchtitan.float8  # noqa: F401
-
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan import utils

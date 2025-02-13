@@ -17,7 +17,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan import utils
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
-from torchtitan.float8 import Float8Handler
+from torchtitan.float8 import Float8Converter
 from torchtitan.logging import init_logger, logger
 from torchtitan.models import model_name_to_tokenizer
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
@@ -121,7 +121,7 @@ def estimate_memory(job_config: JobConfig):
             model = model_cls.from_model_args(model_config)
 
         # a no-op hander if float8 is not enabled
-        float8_handler = Float8Handler(job_config, parallel_dims)
+        float8_handler = Float8Converter(job_config, parallel_dims)
         # swap to Float8Linear based on float8 configs
         float8_handler.convert_to_float8_training(model)
 
