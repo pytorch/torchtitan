@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import init_logger, logger
 from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.utils import GarbageCollection
 
 
 class IntervalType(enum.Enum):
@@ -110,7 +111,7 @@ class SaveDone:
 @torch.no_grad()
 def save_with_gc(state, checkpoint_id):
     dcp.save(state, checkpoint_id=checkpoint_id)
-    gc.collect(1)
+    GarbageCollection.collect("GC collection invoked by checkpointer.")
 
 
 def checkpoint_mp(recv, send):
@@ -373,12 +374,13 @@ class CheckpointManager:
         # This GC is called for async checkpoint as it is useless to do
         # GC right after async_save -- the CPU memory is not able to be
         # freed until _async_wait()
-        gc.collect(1)
         if force:
             self._save_last_step(curr_step)
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
             self.async_future = dcp.async_save(
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
