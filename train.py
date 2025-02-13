@@ -430,7 +430,15 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
-    config = JobConfig()
-    config.parse_args()
-    main(config)
-    torch.distributed.destroy_process_group()
+    for root_size in [8, 16, 32, 64, 128, 256]:
+        os.environ["TORCH_NCCL_RANKS_PER_ROOT"] = str(root_size)
+        start = time.perf_counter()
+        torch.distributed.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        torch.distributed.barrier()
+        end = time.perf_counter()
+        torch.distributed.destroy_process_group()
+        print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
+    # config = JobConfig()
+    # config.parse_args()
+    # main(config)
