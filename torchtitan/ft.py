@@ -25,8 +25,13 @@ class FTManager:
 
 
 def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
-    """
-    Initialize the FT manager for the given job.
+    """Initialize the FT manager if TorchFT is enabled.
+
+    Args:
+        job (JobConfig): The job configuration.
+
+    Returns:
+        Optional[FTManager]: The FT manager if TorchFT is enabled, otherwise None.
     """
     if not job.experimental.enable_torchft:
         return None

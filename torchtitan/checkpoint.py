@@ -142,6 +142,44 @@ def checkpoint_mp(recv, send):
 
 
 class CheckpointManager:
+    """This class manages the checkpointing logic for the TorchTitan trainer.
+
+
+    Note: Pipeline Parallelism and Virtual Stages
+
+    1. even for simple PP schedules, there is a separate optimizer each PP rank.
+    rank0's optimizer would have a param_group[0] which refers to layers.0 in the original
+    model.  rank1's would _also_ have a param_group[0], since it's index based, but
+    referring to layers.1.  When saving, these collide and one of them is lost.  Then when
+    reloading, only one stage can restore its optimizer states, others will error.
+
+        The solution to this problem is optimizer flattening: it landed in #127071 and is
+        enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to DCP
+        functions called in the OptimizerContainer.
+
+    2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
+    challenge (1) by also requiring us to reason about multiple 'optim' objects locally.
+
+        We solve this in the Model and Optimizer wrapper classes by flattening the state dicts
+        from each object into one state dict before saving/loading. We rely on the individual
+        state_dicts to not collide, which is gauranteed for the model by correct pipeline
+        splitting and for the optimizer by the flattening support described in (1).
+
+    3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
+    with the assumption that all lr_schedulers have the same state_dict.
+
+
+    Args:
+        dataloader (DataLoader): The dataloader used to load the data.
+        model_parts (List[nn.Module]): List of model parts to be optimized.
+        optimizers (OptimizersContainer): The optimizers used to optimize the model.
+        lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
+        states (Dict[str, Any]): The states that need to be saved, other than the
+            previous 4 components.
+        job_config (JobConfig): The job config used to configure the checkpointing.
+        ft_manager (Optional[FTManager]): The FTManager from TorchFT.
+    """
+
     def __init__(
         self,
         dataloader: DataLoader,
@@ -181,29 +219,6 @@ class CheckpointManager:
         if not self.enable_checkpoint and self.ft_manager is None:
             return
 
-        """
-        Note: Pipeline Parallelism and Virtual Stages
-
-        1. even for simple PP schedules, there is a separate optimizer each PP rank.
-        rank0's optimizer would have a param_group[0] which refers to layers.0 in the original model.
-        rank1's would _also_ have a param_group[0], since it's index based, but referring to layers.1.
-        When saving, these collide and one of them is lost.  Then when reloading, only one stage can
-        restore its optimizer states, others will error.
-
-            The solution to this problem is optimizer flattening: it landed in #127071 and is enabled in TorchTitan
-            by passing the 'flatten_optimizer_state_dict' kwarg to DCP functions called in the OptimizerContainer.
-
-        2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds challenge (1) by also
-        requiring us to reason about multiple 'optim' objects locally.
-
-            We solve this in the Model and Optimizer wrapper classes by flattening the state dicts from each object
-            into one state dict before saving/loading. We rely on the individual state_dicts to not collide,
-            which is gauranteed for the model by correct pipeline splitting and for the optimizer by the flattening
-            support described in (1).
-
-        3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers with the assumption that
-        all lr_schedulers have the same state_dict.
-        """
         self.states = states
 
         self.states.update(
@@ -265,11 +280,19 @@ class CheckpointManager:
             self.mp.join()
 
     def save(self, curr_step: int, force: bool = False) -> None:
-        """
-        force = True will force the checkpoint to be saved, even if the interval
-        has not been reached.
+        """Save the checkpoint for the current step.
+
+        This function will save the checkpoint for the current step. If ``force`` is
+        true, it will save the checkpoint even if the interval has not been reached.
         This only happens when train_state.step == job_config.training.steps, or
         for initial seed checkpoint.
+
+        Args:
+            curr_step (int): The current step.
+            force (bool, optional): Whether to force save the checkpoint. Defaults to False.
+
+        Returns:
+            None
         """
         if not self._should_save(curr_step, force):
             return
@@ -306,6 +329,19 @@ class CheckpointManager:
             time.sleep(1)
 
     def load(self, step: int = -1) -> bool:
+        """Load the checkpoint for the given step.
+
+        This function will load the checkpoint for the given step. If ``step`` is -1, it
+        will load the latest checkpoint. If the checkpoint does not exist, it will return
+        False and load nothing.
+
+        Args:
+            step (int, optional): The step to load the checkpoint for. Defaults to -1.
+
+        Returns:
+            bool: Whether the checkpoint was loaded successfully.
+        """
+
         if not self.enable_checkpoint or not os.path.isdir(self.folder):
             return False
 
@@ -344,6 +380,11 @@ class CheckpointManager:
         return True
 
     def maybe_wait_for_staging(self) -> None:
+        """Wait for the staging to finish if it is enabled.
+
+        This function will wait for staging to finish. The staging is only enabled
+        with ``async_checkpoint_with_pinned_memory``.
+        """
         if self.enable_staging and self.staging:
             if not self.staging_stream.query():
                 self.staging_stream.synchronize()
@@ -362,55 +403,6 @@ class CheckpointManager:
                 # self.my_thread = threading.Thread(target=func).start()
                 sync_func()
                 self.sending_to_checkpoint_mp = False
-
-    def _initialize_states(
-        self,
-        states: Dict[str, Any],
-        dataloader: DataLoader,
-        model_parts: List[nn.Module],
-        optimizers: OptimizersContainer,
-        lr_schedulers: LRSchedulersContainer,
-    ) -> None:
-        """
-        Note: Pipeline Parallelism and Virtual Stages
-
-        1. Even for simple PP schedules, there is a separate optimizer each PP rank.
-        rank0's optimizer would have a param_group[0] which refers to layers.0 in the
-        original model. rank1's would _also_ have a param_group[0], since it's index based,
-        but referring to layers.1.
-        When saving, these collide and one of them is lost.  Then when reloading, only one
-        stage can restore its optimizer states, others will error.
-
-            The solution to this problem is optimizer flattening: it landed in #127071
-            and is enabled in TorchTitan by passing the 'flatten_optimizer_state_dict'
-            kwarg to DCP functions called in the OptimizerContainer.
-
-        2. With complex PP schedules, we have multiple model chunks per pp rank. This
-        compounds challenge (1) by also requiring us to reason about multiple 'optim'
-        objects locally.
-
-            We solve this in the Model and Optimizer wrapper classes by flattening the
-            state dicts from each object into one state dict before saving/loading.
-            We rely on the individual state_dicts to not collide, which is gauranteed for
-            the model by correct pipeline splitting and for the optimizer by the flattening
-            support described in (1).
-
-        3. LR schedulers also index model states like optimizers and would need to be
-        flattened properly to support resharding. Unfortunately, the implementations of
-        different lr_schedulers do not follow a clear pattern like optimizers do, so it's
-        hard to write a generic 'flattener' utility.
-
-            TODO: This is currently unsolved and needs a fix.
-        """
-        self.states = states
-        self.states.update(
-            {
-                "model": ModelWrapper(model_parts),
-                "optimizer": optimizers,
-                "dataloader": dataloader,
-                "lr_scheduler": lr_schedulers,
-            }
-        )
 
     def _create_checkpoint_id(self, step: int) -> str:
         return os.path.join(self.folder, f"step-{step}")
