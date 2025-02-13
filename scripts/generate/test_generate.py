@@ -27,10 +27,8 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan import utils
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_tokenizer
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor
-from torchtitan.models import model_name_to_tokenizer
 from torchtitan.parallelisms import ParallelDims
 
 from torchtitan.train_spec import get_train_spec
