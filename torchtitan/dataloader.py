@@ -30,7 +30,7 @@ class BaseDataLoader(Stateful, ABC):
         ...
 
 
-class DPDataLoader(StatefulDataLoader, BaseDataLoader):
+class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
 
     This dataloader is used to load data in a distributed data parallel fashion. It also
