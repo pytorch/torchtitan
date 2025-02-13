@@ -16,7 +16,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.dataloader import ParallelAwareDataloader
 
-from torchtitan.datasets.tokenizer import build_tokenizer, Tokenizer
+from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
 
@@ -145,7 +145,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 def build_hf_dataloader(
     dataset_name: str,
     dataset_path: Optional[str],
-    tokenizer_path: str,
+    tokenizer: Tokenizer,
     batch_size: int,
     seq_len: int,
     dp_rank: int,
@@ -153,7 +153,6 @@ def build_hf_dataloader(
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
-    tokenizer = build_tokenizer("tiktoken", tokenizer_path)
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,
@@ -167,7 +166,6 @@ def build_hf_dataloader(
 
     return ParallelAwareDataloader(
         dataset=hf_ds,
-        tokenizer=tokenizer,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,

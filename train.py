@@ -83,10 +83,11 @@ def main(job_config: JobConfig):
     train_spec = get_train_spec(job_config.model.name)
 
     # build dataloader
+    tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
     dataloader = train_spec.build_dataloader_fn(
         dataset_name=job_config.training.dataset,
         dataset_path=job_config.training.dataset_path,
-        tokenizer_path=job_config.model.tokenizer_path,
+        tokenizer=tokenizer,
         batch_size=job_config.training.batch_size,
         seq_len=job_config.training.seq_len,
         dp_rank=dp_rank,
@@ -101,7 +102,7 @@ def main(job_config: JobConfig):
     # 2. vocab size from tokenizer
     # 3. max_seq_len base on inputs
     model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = dataloader.tokenizer.n_words
+    model_config.vocab_size = tokenizer.n_words
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(
