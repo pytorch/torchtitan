@@ -464,7 +464,7 @@ class CheckpointManager:
         # bugfix from above: restore the original stateful objects,
         # whose states were already updated in-place by dcp.load()
         states.update(original_stateful_states)
-        gc.collect(1)
+        GarbageCollection.collect("GC collection for checkpoint loading.")
         return True
 
     def _purge_stale_checkpoints(self):
