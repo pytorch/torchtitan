@@ -430,7 +430,8 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
-    for root_size in [8, 16, 32, 64, 128, 256]:
+    # The first one is just for warm up.
+    for root_size in [128, 8, 16, 32, 64, 128, 256]:
         os.environ["TORCH_NCCL_RANKS_PER_ROOT"] = str(root_size)
         start = time.perf_counter()
         torch.distributed.init_process_group(backend="nccl")
