@@ -14,7 +14,7 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
-from torchtitan.dataloader import DPDataLoader
+from torchtitan.dataloader import ParallelAwareDataloader
 
 from torchtitan.datasets.tokenizer import build_tokenizer, Tokenizer
 from torchtitan.logging import logger
@@ -151,7 +151,7 @@ def build_hf_dataloader(
     dp_rank: int,
     dp_world_size: int,
     infinite: bool = True,
-) -> DPDataLoader:
+) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     tokenizer = build_tokenizer("tiktoken", tokenizer_path)
 
@@ -165,7 +165,7 @@ def build_hf_dataloader(
         infinite=infinite,
     )
 
-    return DPDataLoader(
+    return ParallelAwareDataloader(
         dataset=hf_ds,
         tokenizer=tokenizer,
         dp_rank=dp_rank,
