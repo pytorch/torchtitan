@@ -10,6 +10,9 @@ from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
 
+__all__ = ["build_tokenizer", "TikTokenizer"]
+
+
 def build_tokenizer(tokenizer_type: str, tokenizer_path: str) -> Tokenizer:
     logger.info(f"Building {tokenizer_type} tokenizer locally from {tokenizer_path}")
     if tokenizer_type == "tiktoken":

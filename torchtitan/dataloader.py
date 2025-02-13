@@ -15,8 +15,6 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from torchtitan.datasets.tokenizer import Tokenizer
-
 
 class BaseDataLoader(Stateful, ABC):
     """Base class for all dataloaders.
@@ -39,13 +37,11 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
 
     Args:
         dataset (IterableDataset): The dataset to iterate over.
-        tokenizer (Tokenizer): The tokenizer to use to tokenize the dataset.
         dp_rank: Data parallelism rank for this dataloader.
         dp_world_size: The world size of the data parallelism.
         batch_size: The batch size to use for each iteration.
     """
 
-    tokenizer: Tokenizer
     dp_rank: int
     dp_world_size: int
     batch_size: int
@@ -53,7 +49,6 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     def __init__(
         self,
         dataset: IterableDataset,
-        tokenizer: Tokenizer,
         dp_rank: int,
         dp_world_size: int,
         batch_size: int,
@@ -61,7 +56,6 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.batch_size = batch_size
-        self.tokenizer = tokenizer
         super().__init__(dataset, batch_size)
         self._rank_id = f"dp_rank_{dp_rank}"
 
