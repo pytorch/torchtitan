@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from threading import local
 import time
 from datetime import timedelta
 
@@ -463,3 +462,4 @@ if __name__ == "__main__":
     # config = JobConfig()
     # config.parse_args()
     # main(config)
+    # torch.distributed.destroy_process_group()
