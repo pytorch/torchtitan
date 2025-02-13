@@ -6,7 +6,6 @@
 
 import enum
 import functools
-import gc
 import os
 import re
 import shutil
