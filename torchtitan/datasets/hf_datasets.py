@@ -15,7 +15,6 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
 from torchtitan.dataloader import ParallelAwareDataloader
-
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
@@ -99,13 +98,13 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._all_tokens: list[int] = []
 
     def _get_data_iter(self):
-        if self._sample_idx == 0:
-            return iter(self._data)
-
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
 
-        return iter(self._data.skip(self._sample_idx))
+        it = iter(self._data)
+        for _ in range(self._sample_idx):
+            next(it)
+        return it
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
