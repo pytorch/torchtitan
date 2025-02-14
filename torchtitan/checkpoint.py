@@ -239,7 +239,7 @@ class CheckpointManager:
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
-        if async_mode == AsyncMode.ASYNC:
+        if async_mode == AsyncMode.ASYNC or self.ft_manager:
             self.pg = dist.new_group(backend="gloo")
 
         self.keep_latest_k = ckpt_config.keep_latest_k
@@ -294,11 +294,14 @@ class CheckpointManager:
         Returns:
             None
         """
+        begin = time.monotonic()
+
         if not self._should_save(curr_step, force):
+            if self.ft_manager:
+                self._ft_save(curr_step)
             return
 
         logger.info("Saving the checkpoint (or staging if async is enabled).")
-        begin = time.monotonic()
 
         if not self.ft_manager or self.ft_manager.manager.participating_rank() == 0:
             checkpoint_id = self._create_checkpoint_id(curr_step)
@@ -325,8 +328,7 @@ class CheckpointManager:
                 f"in {time.monotonic() - begin:.2f} seconds."
             )
         elif self.ft_manager:
-            logger.info("Waiting for TorchFT replicated group 0 to save the checkpoint")
-            time.sleep(1)
+            self._ft_save(curr_step)
 
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
@@ -346,32 +348,22 @@ class CheckpointManager:
             return False
 
         if step == -1:
-            step_counts = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                metadata_probe = os.path.join(self.folder, filename, ".metadata")
-                if match and os.path.isfile(metadata_probe):
-                    step_counts.append(int(match.group(1)))
-            if not step_counts:
+            step = self._find_load_step()
+            if step == -1:
                 return False
-            step = max(step_counts)
 
-        checkpoint_id = self._create_checkpoint_id(step)
+        if self.ft_manager:
+            checkpoint_id = self._create_ft_checkpoint_id(step)
+        else:
+            checkpoint_id = self._create_checkpoint_id(step)
         if not os.path.isdir(checkpoint_id):
             return False
 
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
 
-        # For the first step, we will only load the model weights.
-        states = {"model": self.states["model"]} if step == 0 else self.states
-        states_to_load = {
-            k: v for k, v in states.items() if k not in self.exclude_from_loading
-        }
-        for exclude_key in self.exclude_from_loading:
-            if exclude_key not in states:
-                raise ValueError(f"{exclude_key} not found in state_dict.")
-        dcp.load(states_to_load, checkpoint_id=checkpoint_id)
+        states = self._states_to_load(checkpoint_id)
+        dcp.load(states, checkpoint_id=checkpoint_id)
         GarbageCollection.collect("GC collection for checkpoint loading.")
 
         logger.info(
@@ -404,8 +396,51 @@ class CheckpointManager:
                 sync_func()
                 self.sending_to_checkpoint_mp = False
 
+    def _find_load_step(self) -> str:
+        pattern = r"step-(\d+)"
+        if self.ft_manager:
+            pattern = f"replica-{self.ft_manager.replica_id}-" + pattern
+        step_counts = []
+        for filename in os.listdir(self.folder):
+            match = re.search(pattern, filename)
+            metadata_probe = os.path.join(self.folder, filename, ".metadata")
+            if match and os.path.isfile(metadata_probe):
+                step_counts.append(int(match.group(1)))
+        if not step_counts:
+            return -1
+        return max(step_counts)
+
     def _create_checkpoint_id(self, step: int) -> str:
         return os.path.join(self.folder, f"step-{step}")
+
+    def _create_ft_checkpoint_id(self, step: int) -> str:
+        replica_id = self.ft_manager.replica_id
+        return os.path.join(self.folder, f"ft-replica-{replica_id}-step-{step}")
+
+    def _ft_save(self, step: int) -> None:
+        begin = time.monotonic()
+        self._async_wait()
+        checkpoint_id = self._create_ft_checkpoint_id(step)
+        states = {"dataloader": self.states["dataloader"]}
+        self.async_future = dcp.async_save(
+            states, checkpoint_id=checkpoint_id, process_group=self.pg
+        )
+        logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
+
+    def _states_to_load(self, step: int) -> Dict[str, Any]:
+        # For the first step, we will only load the model weights.
+        if self.ft_manager:
+            states = {"dataloader": self.states["dataloader"]}
+            return states
+        else:
+            states = {"model": self.states["model"]} if step == 0 else self.states
+            states_to_load = {
+                k: v for k, v in states.items() if k not in self.exclude_from_loading
+            }
+            for exclude_key in self.exclude_from_loading:
+                if exclude_key not in states:
+                    raise ValueError(f"{exclude_key} not found in state_dict.")
+            return states_to_load
 
     def _save_last_step(self, curr_step: int) -> None:
         # We only consider saving weights only at the end of the training. So
@@ -442,11 +477,13 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return False
 
-        if not force:
-            if curr_step % self.interval == 0:
-                return False
+        if force:
+            return True
 
-        return True
+        if curr_step % self.interval == 0:
+            return True
+
+        return False
 
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:

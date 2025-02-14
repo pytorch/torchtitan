@@ -21,7 +21,8 @@ else:
 @dataclass
 class FTManager:
     manager: ft.Manager
-    replicate_group_size: int
+    replica_id: int
+    group_size: int
 
 
 def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
@@ -46,7 +47,11 @@ def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
         load_state_dict=None,
         state_dict=None,
         use_async_quorum=True,
-        replica_id=f"torchtitan_ft_{job.experimental.ft_replica_group_id}",
+        replica_id=f"torchtitan_ft_{job.experimental.ft_replica_id}",
     )
 
-    return FTManager(manager, job.experimental.ft_replica_group_size)
+    return FTManager(
+        manager,
+        job.experimental.ft_replica_id,
+        job.experimental.ft_group_size,
+    )
