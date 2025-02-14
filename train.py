@@ -457,8 +457,9 @@ if __name__ == "__main__":
             torch.distributed.destroy_process_group()
             delta += (end - start)
             print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
+        if warmup:
+            print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
         warmup = True
-        print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
     # config = JobConfig()
     # config.parse_args()
     # main(config)
