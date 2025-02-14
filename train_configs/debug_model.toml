@@ -26,7 +26,7 @@ flavor = "debugmodel"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./tests/assets/test_tiktoken.model"
-converters = ""
+# converters = "float8"
 
 [optimizer]
 name = "AdamW"
@@ -62,3 +62,7 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = 'selective'  # ['none', 'selective', 'full']
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false

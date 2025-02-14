@@ -602,15 +602,6 @@ class JobConfig:
 
         # float8 configs
         self.parser.add_argument(
-            "--float8.enable_float8_linear",
-            action="store_true",
-            help="""
-                If true, swaps `torch.nn.Linear` with `Float8Linear`.
-                This feature requires you to install 'torchao' which can be found
-                here: https://github.com/pytorch/ao
-            """,
-        )
-        self.parser.add_argument(
             "--float8.enable_fsdp_float8_all_gather",
             action="store_true",
             help="Whether enable float8 all-gather in FSDP",
