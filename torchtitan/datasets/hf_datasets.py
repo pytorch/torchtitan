@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import pickle
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -14,8 +13,8 @@ from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
-from torchdata.stateful_dataloader import StatefulDataLoader
 
+from torchtitan.dataloader import ParallelAwareDataloader
 from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.logging import logger
 
@@ -25,7 +24,7 @@ def _load_c4_dataset(dataset_path: str):
     return load_dataset(dataset_path, name="en", split="train", streaming=True)
 
 
-def _process_c4_text(sample: Dict[str, Any]) -> str:
+def _process_c4_text(sample: dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
     return sample["text"]
 
@@ -75,8 +74,8 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         dataset_path: Optional[str],
         tokenizer: Tokenizer,
         seq_len: int = 2048,
-        world_size: int = 1,
-        rank: int = 0,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
         infinite: bool = False,
     ) -> None:
         # Force lowercase for consistent comparison
@@ -88,7 +87,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
-        self._data = split_dataset_by_node(ds, rank, world_size)
+        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._tokenizer = tokenizer
         self.seq_len = seq_len
         self.infinite = infinite
@@ -96,7 +95,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_tokens: List[int] = []
+        self._all_tokens: list[int] = []
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
@@ -142,56 +141,31 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
 
 
-class DPAwareDataLoader(StatefulDataLoader, Stateful):
-    """
-    A wrapper around the StatefulDataLoader that ensures that the state is stored only once per DP rank.
-    """
-
-    def __init__(
-        self, dp_rank: int, hf_ds: IterableDataset, batch_size: int, world_size: int
-    ):
-        super().__init__(hf_ds, batch_size)
-        self._dp_rank = dp_rank
-        self._rank_id = f"dp_rank_{dp_rank}"
-        # Data loader resharding is not yet supported, so we need to store the world size to compare during loading
-        # raise error if dp_word_size does not match.
-        self._world_size = world_size
-
-    def state_dict(self) -> Dict[str, Any]:
-        # Store state only for dp rank to avoid replicating the same state across other dimensions
-        return {
-            self._rank_id: pickle.dumps(super().state_dict()),
-            "world_size": self._world_size,
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # State being empty is valid
-        if not state_dict:
-            return
-
-        if self._rank_id not in state_dict:
-            logger.warning(
-                f"DataLoader state is empty for dp rank {self._dp_rank}, expected key {self._rank_id}"
-            )
-            return
-        assert (
-            self._world_size == state_dict["world_size"]
-        ), "dp_degree is inconsistent before and after checkpoint, dataloader resharding is not supported yet."
-        super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
-
-
-def build_hf_data_loader(
+def build_hf_dataloader(
     dataset_name: str,
     dataset_path: Optional[str],
     tokenizer: Tokenizer,
     batch_size: int,
     seq_len: int,
-    world_size: int,
-    rank: int,
+    dp_rank: int,
+    dp_world_size: int,
     infinite: bool = True,
-):
+) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
+
     hf_ds = HuggingFaceDataset(
-        dataset_name, dataset_path, tokenizer, seq_len, world_size, rank, infinite
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=infinite,
     )
-    return DPAwareDataLoader(rank, hf_ds, batch_size=batch_size, world_size=world_size)
+
+    return ParallelAwareDataloader(
+        dataset=hf_ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+    )
