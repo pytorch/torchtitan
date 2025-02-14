@@ -5,9 +5,5 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import build_tokenizer
 
-__all__ = [
-    "build_hf_dataloader",
-    "build_tokenizer",
-]
+__all__ = ["build_hf_dataloader"]

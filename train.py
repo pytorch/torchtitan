@@ -84,6 +84,8 @@ def main(job_config: JobConfig):
 
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
+    dp_degree = dp_world_size * job_config.experimental.ft_replica_group_id + dp_degree
+    dp_world_size = dp_world_size * job_config.experimental.ft_replica_group_size
     dataloader = train_spec.build_dataloader_fn(
         dataset_name=job_config.training.dataset,
         dataset_path=job_config.training.dataset_path,
