@@ -430,7 +430,37 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
-    config = JobConfig()
-    config.parse_args()
-    main(config)
-    torch.distributed.destroy_process_group()
+    warmup = False
+    from torch._C._distributed_c10d import _DEFAULT_PG_NCCL_TIMEOUT, PrefixStore
+    # The first one is just for warm up.
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    global_rank = int(os.environ["RANK"])
+    index = 0
+    rendezvous_iterator = torch.distributed.rendezvous(
+        "env://", global_rank, world_size, timeout=_DEFAULT_PG_NCCL_TIMEOUT
+    )
+    tcp_store, rank, world_size = next(rendezvous_iterator)
+    tcp_store.set_timeout(_DEFAULT_PG_NCCL_TIMEOUT)
+    for root_size in [128, 8, 16, 32, 64, 128, 256]:
+        os.environ["TORCH_NCCL_RANKS_PER_ROOT"] = str(root_size)
+        iter_size = 5 if warmup else 1
+        delta = 0.0
+        for i in range(iter_size):
+            start = time.perf_counter()
+            store = PrefixStore(f"default_pg_{index}", tcp_store)
+            index += 1
+            torch.distributed.init_process_group(store=store, backend="nccl", world_size=world_size, rank=global_rank)
+            torch.cuda.set_device(local_rank)
+            torch.distributed.barrier()
+            end = time.perf_counter()
+            torch.distributed.destroy_process_group()
+            delta += (end - start)
+            print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
+        if warmup:
+            print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
+        warmup = True
+    # config = JobConfig()
+    # config.parse_args()
+    # main(config)
+    # torch.distributed.destroy_process_group()
