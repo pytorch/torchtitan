@@ -6,14 +6,15 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-
 from dataclasses import dataclass
-from typing import Callable, Dict, Protocol, Type, TypeAlias
+from typing import Callable, Protocol, Type, TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config_manager import JobConfig
+from torchtitan.dataloader import DataLoaderBuilder
+from torchtitan.datasets.tokenizer import Tokenizer
 from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 
 
@@ -53,15 +54,15 @@ LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersCon
 class TrainSpec:
     name: str
     cls: Type[nn.Module]
-    config: Dict[str, BaseModelArgs]
+    config: dict[str, BaseModelArgs]
     parallelize_fn: Callable[[nn.Module], None]
     pipelining_fn: Callable[
         [nn.Module], tuple[_PipelineSchedule, list[nn.Module], bool, bool]
     ]
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
-
-    # TODO: Add a ``build_dataloader_fn``
+    build_dataloader_fn: DataLoaderBuilder
+    tokenizer_cls: Type[Tokenizer]
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.

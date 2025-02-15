@@ -99,7 +99,7 @@ def set_determinism(
         # seeds for unique SPMD groups
         seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
-        seed = seed_tensor.view(torch.uint64).item()
+        seed = seed_tensor.to("cpu").view(torch.uint64).item()
 
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.

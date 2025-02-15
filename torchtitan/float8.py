@@ -20,6 +20,7 @@ import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
+from torchtitan.model_converter import ModelConverter, register_model_converter
 from torchtitan.parallelisms import ParallelDims
 
 
@@ -28,13 +29,11 @@ def _is_sm89_or_later():
     return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
 
 
-class Float8Handler:
+class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
         float8_config = job_config.float8
-        if not float8_config.enable_float8_linear:
-            return
         if not _is_sm89_or_later():
             logger.warning(
                 "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
@@ -66,6 +65,12 @@ class Float8Handler:
         )
 
         logger.info("Float8 training active")
+
+    def convert(self, model: nn.Module):
+        return self.convert_to_float8_training(model)
+
+    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+        return self.precompute_float8_dynamic_scale_for_fsdp(model)
 
     def convert_to_float8_training(self, model: nn.Module):
         """
@@ -103,3 +108,6 @@ class Float8Handler:
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             precompute_float8_dynamic_scale_for_fsdp(m)
+
+
+register_model_converter(Float8Converter, "float8")
