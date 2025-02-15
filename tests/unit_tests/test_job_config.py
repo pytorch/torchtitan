@@ -187,6 +187,15 @@ class TestJobConfig:
                 config.checkpoint.exclude_from_loading == cmdline_splits
             ), config.checkpoint.exclude_from_loading
 
+    def test_job_config_model_converters_split(self):
+        config = JobConfig()
+        config.parse_args([])
+        assert config.model.converters == []
+
+        config = JobConfig()
+        config.parse_args(["--model.converters", "float8,mxfp"])
+        assert config.model.converters == ["float8", "mxfp"]
+
     def test_print_help(self):
         config = JobConfig()
         parser = config.parser
