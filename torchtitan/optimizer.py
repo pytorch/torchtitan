@@ -21,6 +21,10 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.config_manager import JobConfig
 
+from torchtitan.model_converter import ModelConvertersContainer
+
+
+OptimizerPostHook = Optimizer.OptimizerPostHook
 
 __all__ = [
     "OptimizersContainer",
@@ -127,6 +131,15 @@ class OptimizersContainer(Optimizer):
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
+
+    def register_model_converters_post_hook(
+        self, model_converters: ModelConvertersContainer
+    ):
+        """Register the step post hook of model converters."""
+        for m, opt in zip(self.model_parts, self.optimizers):
+            opt.register_step_post_hook(
+                lambda *args, **kwargs: model_converters.post_optimizer_hook(m)
+            )
 
 
 class OptimizersInBackwardContainer(OptimizersContainer):

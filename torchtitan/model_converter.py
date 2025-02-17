@@ -68,6 +68,7 @@ class ModelConvertersContainer(ModelConverter):
         for mh in self.converters:
             mh.convert(model)
 
+    # TODO: change to `model: nn.Module` as we are not passing list of model parts anymore?
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
         for mh in self.converters:
             mh.post_optimizer_hook(model)
