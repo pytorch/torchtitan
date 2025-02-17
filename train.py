@@ -188,6 +188,13 @@ def main(job_config: JobConfig):
     optimizers = train_spec.build_optimizers_fn(model_parts, job_config)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
 
+    # Post-optimizer model converters hook.
+    # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
+    # it issues a single all-reduce for all parameters at once for better performance
+
+    # QUESTION: can we still issue a single all-reduce in case of PP? Should we?
+    optimizers.register_model_converters_post_hook(model_converters)
+
     train_state = TrainState()
 
     # load initial checkpoint
@@ -325,7 +332,7 @@ def main(job_config: JobConfig):
             # Post-optimizer model converters hook.
             # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            model_converters.post_optimizer_hook(model_parts)
+            # model_converters.post_optimizer_hook(model_parts)
 
             # log metrics
             if (
