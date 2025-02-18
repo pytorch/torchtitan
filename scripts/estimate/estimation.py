@@ -19,9 +19,10 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_tokenizer
 from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
-from torchtitan.models import model_name_to_cls, model_name_to_tokenizer, models_config
+from torchtitan.models import model_name_to_tokenizer
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.parallelisms import models_parallelize_fns, ParallelDims
+from torchtitan.parallelisms import ParallelDims
+from torchtitan.train_spec import get_train_spec
 
 
 def estimate_memory(job_config: JobConfig):
@@ -74,6 +75,8 @@ def estimate_memory(job_config: JobConfig):
         "fake", rank=int(os.environ["LOCAL_RANK"]), world_size=world_size, store=store
     )
 
+    train_spec = get_train_spec(job_config.model.name)
+
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
@@ -95,8 +98,8 @@ def estimate_memory(job_config: JobConfig):
         )
 
     # build model (using meta init)
-    model_cls = model_name_to_cls[model_name]
-    model_config = models_config[model_name][job_config.model.flavor]
+    model_cls = train_spec.cls
+    model_config = train_spec.config[job_config.model.flavor]
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. vocab size from tokenizer
@@ -112,7 +115,7 @@ def estimate_memory(job_config: JobConfig):
     ):
 
         logger.info(
-            f"Building {model_name} {job_config.model.flavor} with {model_config}"
+            f"Building {train_spec.name} {job_config.model.flavor} with {model_config}"
         )
         with torch.device("meta"):
             model = model_cls.from_model_args(model_config)
@@ -123,7 +126,7 @@ def estimate_memory(job_config: JobConfig):
         float8_handler.convert_to_float8_training(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
+        train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
 
         model.to_empty(device="cuda")
         if not active_fake_mode():

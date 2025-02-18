@@ -4,25 +4,40 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import os
-from typing import List, Tuple
+from typing import Callable
 
 from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
     _PipelineScheduleRuntime,
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
+from torch.distributed.pipelining.stage import PipelineStage
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
-from torchtitan.models.llama.model import ModelArgs
 
 
+__all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_rank"]
+
+
+# TODO: It's unclear if this API is general enough to be used by other models.
+# If not, we should move it to a Transformer-specific directory.
 def generate_split_points(
-    job_config: JobConfig, pp_dim: int, model_config: ModelArgs
-) -> List[str]:
+    job_config: JobConfig, pp_dim: int, num_layers: int
+) -> list[str]:
     """
     Generate a default split point based on the number of layers and
     pipeline parallel dimension.
+
+    Args:
+        job_config (JobConfig): The job configuration.
+        pp_dim (int): The pipeline parallel dimension.
+        num_layers (int): The number of layers in the model.
+
+    Returns:
+        list[str]: A list of split point FQNs.
     """
 
     schedule_class = get_schedule_class(
@@ -39,7 +54,6 @@ def generate_split_points(
             f"Unsupported pipeline schedule: {job_config.experimental.pipeline_parallel_schedule}"
         )
     total_stages = pp_dim * num_stages_per_rank
-    num_layers = model_config.n_layers
     if total_stages > num_layers:
         raise ValueError("Total stages cannot be greater than the number of layers")
 
@@ -60,13 +74,25 @@ def generate_split_points(
                 current_layer += base_interval
         splits.append("layers." + str(current_layer))
     logger.info(
-        f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} \
-This may be sub-optimal as the number of layers per stage may be unbalanced."
+        f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} "
+        "This may be sub-optimal as the number of layers per stage may be unbalanced."
     )
     return splits
 
 
-def build_pipeline_schedule(job_config, stages, loss_fn):
+def build_pipeline_schedule(
+    job_config: JobConfig, stages: list[PipelineStage], loss_fn: Callable
+) -> _PipelineSchedule:
+    """Builds a pipeline schedule for the given job configuration and stages.
+
+    Args:
+        job_config (JobConfig): The job configuration.
+        stages (list[PipelineStage]): The stages to be scheduled.
+        loss_fn (Callable): The loss function.
+
+    Returns:
+        _PipelineSchedule: The pipeline schedule for the given stages.
+    """
     pp_schedule_csv = job_config.experimental.pipeline_parallel_schedule_csv
 
     # Validate that pp_schedule_csv is a valid path
@@ -89,8 +115,8 @@ def build_pipeline_schedule(job_config, stages, loss_fn):
         n_microbatches = num_total_stages
     elif n_microbatches < num_total_stages:
         logger.warning(
-            f"Number of microbatches ({n_microbatches}) is less than the total number \
-of stages ({num_total_stages}) which may result in a bubble in the pipeline."
+            f"Number of microbatches ({n_microbatches}) is less than the total number "
+            f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
     # validate that the batch size is divisible by the number of microbatches otherwise we'll hang or error during training
@@ -106,8 +132,8 @@ of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         loss_fn=loss_fn,
     )
     logger.info(
-        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} \
-with {n_microbatches} microbatches and {num_total_stages} stages."
+        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} "
+        f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:
@@ -115,8 +141,10 @@ with {n_microbatches} microbatches and {num_total_stages} stages."
             PipelineScheduleSingle,
             PipelineScheduleMulti,
             _PipelineScheduleRuntime,
-        ], "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), \
-            and _PipelineScheduleRuntime support csv schedules"
+        ], (
+            "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
+            "and _PipelineScheduleRuntime support csv schedules"
+        )
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
@@ -125,7 +153,7 @@ with {n_microbatches} microbatches and {num_total_stages} stages."
 # TODO(whc) should this be a utility inside torch.pipelining?
 def stage_ids_this_rank(
     pp_rank: int, pp_size: int, num_stages: int, style: str = "loop"
-) -> Tuple[int]:
+) -> tuple[int]:
     """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
     assert (
         num_stages % pp_size == 0

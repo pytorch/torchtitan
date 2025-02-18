@@ -33,7 +33,7 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.logging import logger
-from torchtitan.parallelisms.parallel_dims import ParallelDims
+from torchtitan.parallelisms import ParallelDims
 
 
 def parallelize_llama(
