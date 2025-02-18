@@ -7,25 +7,28 @@
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
 import copy
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
     get_schedule_class,
     ScheduleZBVZeroBubble,
 )
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
-from torchtitan.models.llama.model import ModelArgs
-from torchtitan.parallelisms.parallel_dims import ParallelDims
-from torchtitan.parallelisms.pipelining_utils import (
+from torchtitan.parallelisms import ParallelDims
+from torchtitan.parallelisms.pipeline import (
     build_pipeline_schedule,
     generate_split_points,
     stage_ids_this_rank,
 )
+
+from .model import TransformerModelArgs
 
 
 DeviceType = Union[int, str, torch.device]
@@ -37,9 +40,9 @@ def pipeline_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
-    model_config: ModelArgs,
+    model_config: TransformerModelArgs,
     loss_fn: Callable[..., torch.Tensor],
-):
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     stages, models = pipeline_llama_manual_split(
         model, pp_mesh, parallel_dims, job_config, device, model_config
     )
@@ -64,8 +67,8 @@ def pipeline_llama_manual_split(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
-    model_config: ModelArgs,
-):
+    model_config: TransformerModelArgs,
+) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API extracts one torch.nn.Module objects for the part of the model configured to run inside this stage.
 
@@ -79,10 +82,16 @@ def pipeline_llama_manual_split(
 
     splits = (
         job_config.experimental.pipeline_parallel_split_points
-        or generate_split_points(job_config, parallel_dims.pp, model_config)
+        or generate_split_points(job_config, parallel_dims.pp, model_config.n_layers)
     )
 
-    def _build_stage(stage_idx, start_layer, stop_layer, is_first=False, is_last=False):
+    def _build_stage(
+        stage_idx: int,
+        start_layer: Optional[str],
+        stop_layer: Optional[str],
+        is_first: bool = False,
+        is_last: bool = False,
+    ) -> tuple[PipelineStage, nn.Module]:
         model = copy.deepcopy(whole_model)
         if not is_first:
             model.tok_embeddings = None
