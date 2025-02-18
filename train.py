@@ -360,6 +360,7 @@ def main(job_config: JobConfig):
                 # For its definition and calculation, please refer to the PaLM paper:
                 # https://arxiv.org/abs/2204.02311
                 mfu = 100 * num_flop_per_token * tps / gpu_peak_flops
+                tflops = num_flop_per_token * tps / 1e12
 
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = sum(data_loading_times) / len(data_loading_times)
@@ -371,6 +372,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "throughput(tps)": tps,
+                    "tflops": tflops,
                     "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
@@ -385,11 +387,12 @@ def main(job_config: JobConfig):
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
-                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.red}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
+                    f"{color.cyan}tflops: {tflops:,.2f}  "
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 
