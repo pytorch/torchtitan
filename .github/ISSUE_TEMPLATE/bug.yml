@@ -14,9 +14,9 @@ body:
     label: Versions
     description: |
       Please include the following information if relevant:
-      1. Please attach your .toml config file and command line overrides.
-      2. Please confirm if your issue can be reproduced on the latest PyTorch nightly, including torch and torchao.
-      3. Other relevant information if you work on a fork.
+      1. Please confirm if your issue can be reproduced on the latest PyTorch nightly, including torch and torchao.
+      2. Please attach your .toml config file and command line overrides.
+      3. Other relevant information, e.g. runnable code snippet, if you modify torchtitan or work on a fork.
   validations:
     required: true
 - type: markdown
