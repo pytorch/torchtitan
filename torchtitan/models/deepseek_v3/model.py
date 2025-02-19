@@ -569,6 +569,7 @@ class MoE(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
 
         if hasattr(config, "ep_size") and config.ep_size > 1:
+            # ep_size is the number of ranks in expert dimension
             assert config.ep_size == dist.get_world_size()
             self.ep_size = config.ep_size
             self.experts_per_rank = config.n_routed_experts // config.ep_size
@@ -604,6 +605,7 @@ class MoE(nn.Module):
     def forward(self, hidden_states):
         identity = hidden_states
         orig_shape = hidden_states.shape
+        # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         if not self.training:
@@ -614,9 +616,12 @@ class MoE(nn.Module):
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
+        # [seq_len, n_routed_experts]
         cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        # Fill 1 to the selected experts
         cnts.scatter_(1, topk_ids, 1)
         tokens_per_expert = cnts.sum(dim=0)
+        # Token indices for each expert
         idxs = topk_ids.view(-1).argsort()
         sorted_tokens = x[idxs // topk_ids.shape[1]]
         sorted_tokens_shape = sorted_tokens.shape
