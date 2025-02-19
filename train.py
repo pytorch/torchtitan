@@ -123,11 +123,7 @@ def main(job_config: JobConfig):
     )
 
     # loss function to be shared by Pipeline Parallel and SPMD training
-    def loss_fn(pred, labels):
-        return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1).float(), labels.flatten(0, 1)
-        )
-
+    loss_fn = train_spec.loss_fn
     # TODO: compiling loss function causes CUDA errors, turning off for now
     # if job_config.training.compile:
     #     loss_fn = torch.compile(loss_fn)
