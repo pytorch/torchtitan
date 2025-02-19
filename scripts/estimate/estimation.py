@@ -9,15 +9,16 @@ import gc
 import os
 
 import torch
+
+import torchtitan.float8  # noqa
 from torch._guards import active_fake_mode
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
 from torch.testing._internal.distributed.fake_pg import FakeStore
-
 from torchtitan import utils
 from torchtitan.config_manager import JobConfig
-from torchtitan.float8 import Float8Handler
 from torchtitan.logging import init_logger, logger
+from torchtitan.model_converter import build_model_converters
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.train_spec import get_train_spec
@@ -117,10 +118,9 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             model = model_cls.from_model_args(model_config)
 
-        # a no-op hander if float8 is not enabled
-        float8_handler = Float8Handler(job_config, parallel_dims)
-        # swap to Float8Linear based on float8 configs
-        float8_handler.convert_to_float8_training(model)
+        # Build the collection of model converters. No-op if `model.converters` empty
+        model_converters = build_model_converters(job_config, parallel_dims)
+        model_converters.convert(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
@@ -170,9 +170,10 @@ def estimate_memory(job_config: JobConfig):
                 # optimizer step
                 optimizers.step()
                 lr_schedulers.step()
-                # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+                # Post-optimizer model converters hook.
+                # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
                 # it issues a single all-reduce for all parameters at once for better performance
-                float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+                model_converters.post_optimizer_hook(model)
                 optimizers.zero_grad()
                 print(f"Peak Memory at iter: {iter_idx}")
                 fsdp_memtracker.display_snapshot("peak", units="MiB", tabulate=True)
