@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.logging import logger
 from torchtitan.parallelisms import ParallelDims
@@ -143,8 +144,7 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        wandb_metrics["step"] = step
-        self.wandb.log(wandb_metrics)
+        self.wandb.log(wandb_metrics, step=step)
 
     def close(self) -> None:
         if self.wandb.run is not None:

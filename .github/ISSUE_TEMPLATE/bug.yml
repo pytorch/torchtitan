@@ -1,0 +1,25 @@
+name: Bug Report
+description: Create a report to help us reproduce and fix the bug
+
+body:
+- type: textarea
+  attributes:
+    label: Bug description
+    description: |
+      Please provide a clear and concise description of what the bug is.
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Versions
+    description: |
+      Please include the following information if relevant:
+      1. Please confirm if your issue can be reproduced on the latest PyTorch nightly, including torch and torchao.
+      2. Please attach your .toml config file and command line overrides.
+      3. Other relevant information, e.g. runnable code snippet, if you modify torchtitan or work on a fork.
+  validations:
+    required: true
+- type: markdown
+  attributes:
+    value: >
+      Thanks for submitting the bug report!

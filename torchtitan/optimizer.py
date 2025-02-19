@@ -207,6 +207,14 @@ class FTOptimizersContainer(OptimizersContainer):
     def state_dict(self) -> Dict[str, Any]:
         return self.cache_state_dict
 
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        # We have to invalidate the `cache_state_dict` because optimizer uses
+        # assign instead of copy when doing `load_state_dict()`. Without
+        # invalidating the `cache_state_dict`, there will be memory leakage.
+        self.cache_state_dict = {}
+        super().load_state_dict(state_dict)
+        self.init_cache_state_dict()
+
 
 def build_optimizers(
     model_parts: List[nn.Module],

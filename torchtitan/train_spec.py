@@ -36,8 +36,8 @@ class ModelProtocol(Protocol):
     required by the TorchTitan trainer.
     """
 
-    @staticmethod
-    def from_model_args(args: BaseModelArgs) -> nn.Module:
+    @classmethod
+    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
         ...
 
 

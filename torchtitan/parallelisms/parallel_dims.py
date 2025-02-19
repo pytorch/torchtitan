@@ -86,7 +86,7 @@ class ParallelDims:
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
 
-        if self.dp_replicate_enabled or ft_manager is not None:
+        if self.dp_replicate_enabled or self.ft_manager is not None:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:

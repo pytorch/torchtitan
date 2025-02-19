@@ -15,10 +15,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.float8 import Float8Handler
 from torchtitan.ft import init_ft_manager
 from torchtitan.logging import init_logger, logger
 from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
+from torchtitan.model_converter import build_model_converters
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.train_spec import get_train_spec
@@ -113,10 +113,9 @@ def main(job_config: JobConfig):
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
 
-    # a no-op hander if float8 is not enabled
-    float8_handler = Float8Handler(job_config, parallel_dims)
-    # swap to Float8Linear based on float8 configs
-    float8_handler.convert_to_float8_training(model)
+    # Build the collection of model converters. No-op if `model.converters` empty
+    model_converters = build_model_converters(job_config, parallel_dims)
+    model_converters.convert(model)
 
     # log model size
     model_param_count = utils.get_num_params(model)
@@ -329,9 +328,10 @@ def main(job_config: JobConfig):
             optimizers.step()
             lr_schedulers.step()
 
-            # calculate float8 dynamic amax/scale for all-parameter for FSDP2
+            # Post-optimizer model converters hook.
+            # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
             # it issues a single all-reduce for all parameters at once for better performance
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model_parts)
+            model_converters.post_optimizer_hook(model_parts)
 
             # log metrics
             if (
@@ -366,6 +366,7 @@ def main(job_config: JobConfig):
                 # For its definition and calculation, please refer to the PaLM paper:
                 # https://arxiv.org/abs/2204.02311
                 mfu = 100 * num_flop_per_token * tps / gpu_peak_flops
+                tflops = num_flop_per_token * tps / 1e12
 
                 time_end_to_end = time_delta / job_config.metrics.log_freq
                 time_data_loading = sum(data_loading_times) / len(data_loading_times)
@@ -377,6 +378,7 @@ def main(job_config: JobConfig):
                     "loss_metrics/global_avg_loss": global_avg_loss,
                     "loss_metrics/global_max_loss": global_max_loss,
                     "throughput(tps)": tps,
+                    "tflops": tflops,
                     "mfu(%)": mfu,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
@@ -391,11 +393,12 @@ def main(job_config: JobConfig):
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
-                    f"{color.cyan}step: {train_state.step:2}  "
+                    f"{color.red}step: {train_state.step:2}  "
                     f"{color.green}loss: {global_avg_loss:7.4f}  "
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
+                    f"{color.cyan}tflops: {tflops:,.2f}  "
                     f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 
