@@ -272,8 +272,10 @@ def init_distributed(job_config):
     )
 
 
-def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
+def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False, exclude_frozen: bool = False) -> int:
     num_params = sum(p.numel() for p in model.parameters())
+    if exclude_frozen:
+        num_params -= sum(p.numel() for p in model.parameters() if not p.requires_grad)
     if exclude_embedding:
         num_params -= sum(p.numel() for p in model.tok_embeddings.parameters())
     return num_params

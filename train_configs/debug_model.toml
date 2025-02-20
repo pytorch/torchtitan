@@ -27,6 +27,7 @@ norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./tests/assets/test_tiktoken.model"
 # converters = "float8"
+# frozen_modules = "tok_embeddings,layers.0.attention"
 
 [optimizer]
 name = "AdamW"
