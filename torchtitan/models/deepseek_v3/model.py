@@ -570,6 +570,7 @@ class MoE(nn.Module):
 
         if hasattr(config, "ep_size") and config.ep_size > 1:
             # ep_size is the number of ranks in expert dimension
+            print("Using EP size: ", config.ep_size)
             assert config.ep_size == dist.get_world_size()
             self.ep_size = config.ep_size
             self.experts_per_rank = config.n_routed_experts // config.ep_size
@@ -638,6 +639,7 @@ class MoE(nn.Module):
                 .numpy()
                 .tolist()
             )
+            # Received tokens from all other ranks
             gathered_tokens = sorted_tokens.new_empty(
                 tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
             )
@@ -1250,15 +1252,21 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         return reordered_past
 
 
-# Single process run:
-# ``python model.py``
-if __name__ == "__main__":
-    device = torch.device("cuda")
-    model_args = ModelArgs()
-    model_args.num_hidden_layers //= 16
+# Run full model, activate MoE layers
+def run_full_model():
+    rank = dist.get_rank()
+    device = torch.device("cuda", rank)
+    model_args = ModelArgs(
+        num_hidden_layers=2,
+        first_k_dense_replace=1,
+        ep_size=dist.get_world_size(),
+    )
+    print(model_args)
+
     # Instantiate model
     with device:
         model = DeepseekV3Model(model_args)
+        model.eval()
 
     # Test forward
     bs = 2
@@ -1266,3 +1274,12 @@ if __name__ == "__main__":
     x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
     y = model(x)
     print(y.shape)
+
+
+if __name__ == "__main__":
+    dist.init_process_group("nccl")
+
+    # torchrun --standalone --nproc-per-node 2 model.py
+    run_full_model()
+
+    dist.destroy_process_group()
