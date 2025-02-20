@@ -133,6 +133,9 @@ class WandBLogger(BaseLogger):
         self.wandb = wandb
         self.tag = tag
 
+        # Create logging directory if not existing
+        os.makedirs(base_log_dir, exist_ok=True)
+
         self.wandb.init(
             project="torchtitan",
             dir=log_dir,

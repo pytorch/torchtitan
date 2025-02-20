@@ -233,7 +233,7 @@ class JobConfig:
 
         # training configs
         self.parser.add_argument(
-            "--training.dataset", type=str, default="c4_mini", help="Dataset to use"
+            "--training.dataset", type=str, default="c4_test", help="Dataset to use"
         )
         self.parser.add_argument(
             "--training.dataset_path",
