@@ -563,7 +563,8 @@ class JobConfig:
             default=0,
             help="""
                 Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
-                0 is the default value.
+                0 is the default value. k cannot be 1 as the last one may be in the process of being
+                saved. As a result, the metadata of the last one may not be ready yet.
             """,
         )
         self.parser.add_argument(
