@@ -177,7 +177,9 @@ class ModelArgs:
     attention_bias: bool = False
     attention_dropout: float = 0.0
     pad_token_id = None
+    # Added for symmetric memory
     use_symm_mem: bool = False
+    max_seq_len: int = 4096
 
 
 class RMSNorm(nn.Module):
@@ -607,6 +609,34 @@ class MoE(nn.Module):
             self.shared_experts = MLP(
                 config=config, intermediate_size=intermediate_size
             )
+        self.has_symm_mem = False
+
+    def setup_symm_mem(self, dtype, device):
+        if self.has_symm_mem:
+            # Symmetric memory is already set up
+            return
+
+        assert self.config.ep_size > 1, "Symmetric memory is only effective when EP size > 1"
+        # Input buffer for DP-to-EP shuffle
+        self.dp_to_ep_buf = symm_mem.empty(
+            self.config.max_seq_len * self.num_experts_per_tok,  # seq len * top k (flattened)
+            self.config.hidden_size,  # hidden dim
+            dtype=dtype,
+            device=device
+        )
+        # Number of tokens to send to EP peers, aka. input splits
+        self.input_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=device)
+        # Number of tokens to receive from EP peers, aka. output splits
+        self.output_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=device)
+        # Input buffer for EP-to-DP shuffle
+        self.ep_to_dp_buf = symm_mem.empty(
+            # worst case, all tokens are routed to one EP rank
+            self.dp_to_ep_buf.shape[0] * self.ep_size,
+            self.config.hidden_size,  # hidden dim
+            dtype=dtype,
+            device=device
+        )
+        self.has_symm_mem = True
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -704,6 +734,10 @@ class MoE(nn.Module):
 
     @torch.no_grad()
     def moe_symm_mem(self, x, topk_ids, topk_weight):
+        if not self.has_symm_mem:
+            # Set up symmetric memory for the first time, then reuse it
+            self.setup_symm_mem(x.dtype, x.device)
+
         # [seq_len, n_routed_experts]
         cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
         # Fill 1 to the selected experts
@@ -711,21 +745,22 @@ class MoE(nn.Module):
         tokens_per_expert = cnts.sum(dim=0)
         # Token indices for each expert
         idxs = topk_ids.view(-1).argsort()
-        # TODO: add symm_mem.empty_like(x)
         sorted_tokens_shape = idxs.shape + x.shape[1:]
-        sorted_tokens = symm_mem.empty(sorted_tokens_shape, dtype=x.dtype, device=x.device)
+        # Take necessary space from the `dp_to_ep_buf` symm mem
+        sorted_tokens = torch.narrow(self.dp_to_ep_buf, 0, 0, idxs.shape[0])
+        assert sorted_tokens.shape == sorted_tokens_shape
         # Use `out=` to avoid copy, equivalent to:
         # `sorted_tokens = x[idxs // topk_ids.shape[1]]`
         torch.index_select(x, 0, idxs // topk_ids.shape[1], out=sorted_tokens)
         if self.ep_size > 1:
-            tokens_per_ep_rank = symm_mem.empty(self.ep_size, dtype=torch.int64, device=tokens_per_expert.device)
-            torch.sum(tokens_per_expert.view(self.ep_size, -1), dim=1, out=tokens_per_ep_rank)
+            # Sum the tokens over local experts, then we get tokens per EP rank,
+            # which is the input splits
+            torch.sum(tokens_per_expert.view(self.ep_size, -1), dim=1, out=self.input_splits)
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
             dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=tokens_per_expert_group.device)
-            torch.sum(tokens_per_expert_group.view(self.ep_size, -1), dim=1, out=output_splits)
+            torch.sum(tokens_per_expert_group.view(self.ep_size, -1), dim=1, out=self.output_splits)
             # Received tokens from all other ranks
             gathered_tokens = sorted_tokens.new_empty(
                 tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
@@ -737,7 +772,7 @@ class MoE(nn.Module):
                 gathered_tokens,
                 received,
                 sorted_tokens,
-                tokens_per_ep_rank,  # input splits
+                self.input_splits,
             )
             tokens_per_expert_post_gather = tokens_per_expert_group.view(
                 self.ep_size, self.experts_per_rank
@@ -766,13 +801,8 @@ class MoE(nn.Module):
 
         outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
         if self.ep_size > 1:
-            big_buf = symm_mem.empty(
-                sorted_tokens_shape[0] * self.ep_size,  # worst case
-                *sorted_tokens_shape[1:],
-                dtype=outs.dtype,
-                device=outs.device
-            )
-            new_x = torch.narrow(big_buf, 0, 0, outs.shape[0])
+            # Take necessary space from `ep_to_dp_buf` symm mem
+            new_x = torch.narrow(self.ep_to_dp_buf, 0, 0, outs.shape[0])
             new_x[gatherd_idxs] = outs
             gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
             # EP to DP token shuffle
@@ -780,7 +810,7 @@ class MoE(nn.Module):
                 gathered_tokens,
                 received,  # unused
                 new_x,
-                output_splits,
+                self.output_splits,
             )
             outs = gathered_tokens
 
