@@ -620,7 +620,7 @@ class MoE(nn.Module):
             self.config.ep_size > 1
         ), "Symmetric memory is only effective when EP size > 1"
         # Input buffer for DP-to-EP shuffle
-        self.dp_to_ep_buf = symm_mem.empty(
+        self.token_send_buf = symm_mem.empty(
             self.config.max_seq_len
             * self.num_experts_per_tok,  # seq len * top k (flattened)
             self.config.hidden_size,  # hidden dim
@@ -636,9 +636,9 @@ class MoE(nn.Module):
             self.ep_size, dtype=torch.int64, device=device
         )
         # Input buffer for EP-to-DP shuffle
-        self.ep_to_dp_buf = symm_mem.empty(
+        self.token_gather_buf = symm_mem.empty(
             # worst case, all tokens are routed to one EP rank
-            self.dp_to_ep_buf.shape[0] * self.ep_size,
+            self.token_send_buf.shape[0] * self.ep_size,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
@@ -671,8 +671,8 @@ class MoE(nn.Module):
         # Token indices for each expert
         idxs = topk_ids.view(-1).argsort()
         sorted_tokens_shape = idxs.shape + x.shape[1:]
-        # Take necessary space from the `dp_to_ep_buf` symm mem
-        sorted_tokens = torch.narrow(self.dp_to_ep_buf, 0, 0, idxs.shape[0])
+        # Take necessary space from the `token_send_buf` symm mem
+        sorted_tokens = self.token_send_buf[: idxs.shape[0]]
         assert sorted_tokens.shape == sorted_tokens_shape
         # Use `out=` to avoid copy, equivalent to:
         # `sorted_tokens = x[idxs // topk_ids.shape[1]]`
@@ -692,19 +692,17 @@ class MoE(nn.Module):
                 dim=1,
                 out=self.output_splits,
             )
-            # Received tokens from all other ranks
-            gathered_tokens = sorted_tokens.new_empty(
-                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
-            )
-            # Total received tokens of current rank; unused
+            # Total received tokens of current rank
             received = torch.empty(1, dtype=torch.int64, device=x.device)
             # DP to EP token shuffle
             on_device_all_to_all_v(
-                gathered_tokens,
+                self.token_gather_buf,
                 received,
                 sorted_tokens,
                 self.input_splits,
             )
+            # Received tokens from all other ranks. TODO: use mask instead
+            gathered_tokens = self.token_gather_buf[:received]
             tokens_per_expert_post_gather = tokens_per_expert_group.view(
                 self.ep_size, self.experts_per_rank
             ).sum(dim=0)
@@ -732,8 +730,8 @@ class MoE(nn.Module):
 
         outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
         if self.ep_size > 1:
-            # Take necessary space from `ep_to_dp_buf` symm mem
-            new_x = torch.narrow(self.ep_to_dp_buf, 0, 0, outs.shape[0])
+            # Take necessary space from `token_gather_buf` symm mem
+            new_x = self.token_gather_buf[: outs.shape[0]]
             new_x[gatherd_idxs] = outs
             gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
             # EP to DP token shuffle
