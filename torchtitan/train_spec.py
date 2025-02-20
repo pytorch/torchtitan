@@ -45,9 +45,6 @@ class ModelProtocol(Protocol):
 OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig], OptimizersContainer
 ]
-OptimizerBuilderWrapper: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
-]
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
 LossFunction: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
