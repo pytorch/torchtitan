@@ -209,6 +209,16 @@ class JobConfig:
                 which can be found here: https://github.com/pytorch/ao
             """,
         )
+        self.parser.add_argument(
+            "--model.frozen_modules",
+            type=string_list,
+            nargs="+",
+            default=[],
+            help="""
+                Comma separated list of modules's FQN to be frozen inside the model. For example:
+                --model.frozen_modules=`tok_embeddings,layers.0.attention`
+            """,
+        )
 
         # optimizer configs
         self.parser.add_argument(

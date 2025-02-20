@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from operator import attrgetter
 import os
 import time
 from datetime import timedelta
@@ -105,6 +106,22 @@ def main(job_config: JobConfig):
     )
     with torch.device("meta"):
         model = model_cls.from_model_args(model_config)
+        for module_name in job_config.model.frozen_modules:
+            try:
+                module = attrgetter(module_name)(model)
+                num_params = 0
+                for param in module.parameters():
+                    param.requires_grad = False
+                    num_params += param.numel()
+                logger.info(
+                    f"{color.red}Freezing {num_params:,} parameters in {color.magenta}model.{module_name}.{color.reset}"
+                )
+            except AttributeError:
+                logger.warning(
+                    f"""Module {color.magenta}{module_name}{color.reset} is set to be frozen but it does not exist in the model.
+                     Make sure the module name is a valid submodule like `tok_embeddings, layers.0.attention` etc.
+                    """
+                )
 
     # Build the collection of model converters. No-op if `model.converters` empty
     model_converters = build_model_converters(job_config, parallel_dims)
@@ -112,6 +129,11 @@ def main(job_config: JobConfig):
 
     # log model size
     model_param_count = utils.get_num_params(model)
+    model_trainable_param_count = utils.get_num_params(model, exclude_frozen=True)
+    if model_trainable_param_count != model_param_count:
+        trainable_log_str = f"{color.green}of which {model_trainable_param_count:,} parameters are trainable"
+    else:
+        trainable_log_str = f"{color.green}all are trainable."
     num_flop_per_token = utils.get_num_flop_per_token(
         utils.get_num_params(model, exclude_embedding=True),
         model_config,
@@ -119,7 +141,7 @@ def main(job_config: JobConfig):
     )
     logger.info(
         f"{color.blue}Model {train_spec.name} {job_config.model.flavor} "
-        f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+        f"{color.red}size: {model_param_count:,} total parameters {trainable_log_str}{color.reset}"
     )
 
     # loss function to be shared by Pipeline Parallel and SPMD training
