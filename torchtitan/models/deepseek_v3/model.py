@@ -41,6 +41,8 @@ from attn_mask_utils import _prepare_4d_causal_attention_mask
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
+import torch.distributed._symmetric_memory as symm_mem
+from symm_mem_recipes import on_device_all_to_all_v
 
 @dataclass
 class ModelArgs:
@@ -175,6 +177,7 @@ class ModelArgs:
     attention_bias: bool = False
     attention_dropout: float = 0.0
     pad_token_id = None
+    use_symm_mem: bool = False
 
 
 class RMSNorm(nn.Module):
@@ -609,7 +612,9 @@ class MoE(nn.Module):
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        if not self.training:
+        if self.config.use_symm_mem:
+            y = self.moe_symm_mem(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+        else:
             y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
@@ -647,6 +652,96 @@ class MoE(nn.Module):
             dist.all_to_all(
                 list(gathered_tokens.split(output_splits)),
                 list(sorted_tokens.split(input_split_sizes)),
+            )
+            tokens_per_expert_post_gather = tokens_per_expert_group.view(
+                self.ep_size, self.experts_per_rank
+            ).sum(dim=0)
+            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
+            s = 0
+            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
+                gatherd_idxs[s : s + k] = i % self.experts_per_rank
+                s += k
+            gatherd_idxs = gatherd_idxs.argsort()
+            sorted_tokens = gathered_tokens[gatherd_idxs]
+            tokens_per_expert = tokens_per_expert_post_gather
+        tokens_per_expert = tokens_per_expert.cpu().numpy()
+
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            end_idx = start_idx + num_tokens
+            if num_tokens == 0:
+                continue
+            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+        if self.ep_size > 1:
+            new_x = torch.empty_like(outs)
+            new_x[gatherd_idxs] = outs
+            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
+            dist.all_to_all(
+                list(gathered_tokens.split(input_split_sizes)),
+                list(new_x.split(output_splits)),
+            )
+            outs = gathered_tokens
+
+        new_x = torch.empty_like(outs)
+        new_x[idxs] = outs
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(new_x.dtype)
+        )
+        return final_out
+
+    @torch.no_grad()
+    def moe_symm_mem(self, x, topk_ids, topk_weight):
+        # [seq_len, n_routed_experts]
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        # Fill 1 to the selected experts
+        cnts.scatter_(1, topk_ids, 1)
+        tokens_per_expert = cnts.sum(dim=0)
+        # Token indices for each expert
+        idxs = topk_ids.view(-1).argsort()
+        # TODO: add symm_mem.empty_like(x)
+        sorted_tokens_shape = idxs.shape + x.shape[1:]
+        sorted_tokens = symm_mem.empty(sorted_tokens_shape, dtype=x.dtype, device=x.device)
+        # Use `out=` to avoid copy, equivalent to:
+        # `sorted_tokens = x[idxs // topk_ids.shape[1]]`
+        torch.index_select(x, 0, idxs // topk_ids.shape[1], out=sorted_tokens)
+        if self.ep_size > 1:
+            tokens_per_ep_rank = symm_mem.empty(self.ep_size, dtype=tokens_per_expert.dtype, device=tokens_per_expert.device)
+            torch.sum(tokens_per_expert.view(self.ep_size, -1), dim=1, out=tokens_per_ep_rank)
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
+            output_splits = (
+                tokens_per_expert_group.view(self.ep_size, -1)
+                .sum(1)
+                .cpu()
+                .numpy()
+                .tolist()
+            )
+            # Received tokens from all other ranks
+            gathered_tokens = sorted_tokens.new_empty(
+                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
+            )
+            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
+            # Total received tokens of current rank; unused
+            received = torch.empty(1, dtype=torch.int64, device=x.device)
+            # DP to EP token shuffle
+            on_device_all_to_all_v(
+                gathered_tokens,
+                received,
+                sorted_tokens,
+                tokens_per_ep_rank,
             )
             tokens_per_expert_post_gather = tokens_per_expert_group.view(
                 self.ep_size, self.experts_per_rank
@@ -1252,14 +1347,15 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         return reordered_past
 
 
-# Run full model, activate MoE layers
+# Run full model
 def run_full_model():
     rank = dist.get_rank()
     device = torch.device("cuda", rank)
     model_args = ModelArgs(
         num_hidden_layers=2,
-        first_k_dense_replace=1,
-        ep_size=dist.get_world_size(),
+        first_k_dense_replace=1,  # activate MoE layers
+        ep_size=dist.get_world_size(),  # activate Expert Parallel
+        use_symm_mem=True,  # enable symmetric memory for all-to-all
     )
     print(model_args)
 
@@ -1276,10 +1372,10 @@ def run_full_model():
     print(y.shape)
 
 
+# torchrun --standalone --nproc-per-node 2 model.py
 if __name__ == "__main__":
     dist.init_process_group("nccl")
 
-    # torchrun --standalone --nproc-per-node 2 model.py
     run_full_model()
 
     dist.destroy_process_group()
