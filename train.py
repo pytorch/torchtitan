@@ -21,7 +21,7 @@ from torchtitan.model_converter import build_model_converters
 from torchtitan.parallelisms import ParallelDims
 from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from torchtitan.train_spec import get_train_spec
-from torchtitan.utils import device_module, device_type, import_module_from_path
+
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -30,7 +30,7 @@ def main(job_config: JobConfig):
     logger.info(f"Starting job: {job_config.job.description}")
 
     if job_config.experimental.custom_model_path:
-        import_module_from_path(job_config.experimental.custom_model_path)
+        utils.import_module_from_path(job_config.experimental.custom_model_path)
 
     if job_config.job.print_args:
         logger.info(f"Running with args: {job_config.to_dict()}")
@@ -52,6 +52,7 @@ def main(job_config: JobConfig):
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
     )
+    device_module, device_type = utils.device_module, utils.device_type
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     device_module.set_device(device)
     utils.init_distributed(job_config)
@@ -80,13 +81,10 @@ def main(job_config: JobConfig):
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
     dataloader = train_spec.build_dataloader_fn(
-        dataset_name=job_config.training.dataset,
-        dataset_path=job_config.training.dataset_path,
-        tokenizer=tokenizer,
-        batch_size=job_config.training.batch_size,
-        seq_len=job_config.training.seq_len,
-        dp_rank=dp_rank,
         dp_world_size=dp_degree,
+        dp_rank=dp_rank,
+        tokenizer=tokenizer,
+        job_config=job_config,
     )
 
     # build model (using meta init)

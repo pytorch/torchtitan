@@ -7,7 +7,7 @@
 import torch
 
 
-def cross_entropy_loss(pred, labels):
+def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Common cross-entropy loss function for Transformer models training."""
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(), labels.flatten(0, 1)
@@ -15,4 +15,4 @@ def cross_entropy_loss(pred, labels):
 
 
 # TODO: compiling loss function causes CUDA errors, turning off for now
-# cross_entropy_loss = torch.compile(cross_entropy_loss)
+# compiled_cross_entropy_loss = torch.compile(cross_entropy_loss)
