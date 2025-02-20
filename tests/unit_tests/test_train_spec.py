@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.loss import cross_entropy_loss
 from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.optimizer import (
     build_lr_schedulers,
@@ -64,6 +65,7 @@ class TestTrainSpec:
             build_lr_schedulers_fn=build_lr_schedulers,
             build_dataloader_fn=build_hf_dataloader,
             tokenizer_cls=TikTokenizer,
+            loss_fn=cross_entropy_loss,
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake")
@@ -84,6 +86,7 @@ class TestTrainSpec:
             build_lr_schedulers_fn=build_lr_schedulers,
             build_dataloader_fn=build_hf_dataloader,
             tokenizer_cls=TikTokenizer,
+            loss_fn=cross_entropy_loss,
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake2")

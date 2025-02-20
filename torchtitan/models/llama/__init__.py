@@ -8,6 +8,7 @@
 
 from torchtitan.datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.loss import cross_entropy_loss
 from torchtitan.models.llama.model import Transformer, TransformerModelArgs
 from torchtitan.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.train_spec import register_train_spec, TrainSpec
@@ -69,5 +70,6 @@ register_train_spec(
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
         tokenizer_cls=TikTokenizer,
+        loss_fn=cross_entropy_loss,
     )
 )
