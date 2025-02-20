@@ -89,12 +89,6 @@ def estimate_memory(job_config: JobConfig):
         job_config.experimental.enable_compiled_autograd,
     )
 
-    # loss fn can be shared by pipeline-parallel or non-pp execution
-    def loss_fn(pred, labels):
-        return torch.nn.functional.cross_entropy(
-            pred.flatten(0, 1).float(), labels.flatten(0, 1)
-        )
-
     # build model (using meta init)
     model_cls = train_spec.cls
     model_config = train_spec.config[job_config.model.flavor]
@@ -159,7 +153,7 @@ def estimate_memory(job_config: JobConfig):
                 # train step
                 with train_context():
                     pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
+                    loss = train_spec.loss_fn(pred, labels)
                     del pred
                     loss.backward()
 

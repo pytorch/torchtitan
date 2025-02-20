@@ -122,12 +122,6 @@ def main(job_config: JobConfig):
         f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
     )
 
-    # loss function to be shared by Pipeline Parallel and SPMD training
-    loss_fn = train_spec.loss_fn
-    # TODO: compiling loss function causes CUDA errors, turning off for now
-    # if job_config.training.compile:
-    #     loss_fn = torch.compile(loss_fn)
-
     # move sharded model to CPU/GPU and initialize weights via DTensor
     if job_config.checkpoint.create_seed_checkpoint:
         init_device = "cpu"
@@ -148,7 +142,13 @@ def main(job_config: JobConfig):
             has_first_stage,
             has_last_stage,
         ) = train_spec.pipelining_fn(
-            model, pp_mesh, parallel_dims, job_config, device, model_config, loss_fn
+            model,
+            pp_mesh,
+            parallel_dims,
+            job_config,
+            device,
+            model_config,
+            train_spec.loss_fn,
         )
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
         del model
@@ -299,7 +299,7 @@ def main(job_config: JobConfig):
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
                     pred = model(input_ids)
-                    loss = loss_fn(pred, labels)
+                    loss = train_spec.loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
                     del pred

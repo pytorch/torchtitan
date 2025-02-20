@@ -49,7 +49,7 @@ OptimizerBuilderWrapper: TypeAlias = Callable[
     [list[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
 ]
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
-LossFn: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+LossFunction: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass
@@ -65,7 +65,7 @@ class TrainSpec:
     build_lr_schedulers_fn: LRSchedulersBuilder
     build_dataloader_fn: DataLoaderBuilder
     tokenizer_cls: Type[Tokenizer]
-    loss_fn: LossFn
+    loss_fn: LossFunction
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.

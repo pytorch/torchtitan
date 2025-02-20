@@ -460,10 +460,3 @@ class Transformer(nn.Module, ModelProtocol):
 
         """
         return cls(model_args)
-
-
-def loss_cross_entropy(pred, labels):
-    """Common cross-entropy loss function for Transformer models training."""
-    return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(), labels.flatten(0, 1)
-    )
