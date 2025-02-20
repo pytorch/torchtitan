@@ -51,8 +51,5 @@ build-backend = "setuptools.build_meta"
 where = [""]
 include = ["torchtitan*"]
 
-[tool.setuptools.package-data]
-recipes = ["train_configs/*.toml"]
-
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks

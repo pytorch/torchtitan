@@ -9,18 +9,22 @@ import time
 from datetime import timedelta
 
 import torch
-
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan import utils
 from torchtitan.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_device_memory_monitor, build_metric_logger
-from torchtitan.model_converter import build_model_converters
-from torchtitan.parallelisms import ParallelDims
-from torchtitan.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
-from torchtitan.train_spec import get_train_spec
+
+from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.protocols.model_converter import build_model_converters
+from torchtitan.protocols.train_spec import get_train_spec
+
+from torchtitan.tools import utils
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.metrics import build_device_memory_monitor, build_metric_logger
+from torchtitan.tools.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_profiling,
+)
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
@@ -55,7 +59,7 @@ def main(job_config: JobConfig):
     device_module, device_type = utils.device_module, utils.device_type
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     device_module.set_device(device)
-    utils.init_distributed(job_config)
+    dist_utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
     gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
@@ -73,7 +77,7 @@ def main(job_config: JobConfig):
         pp_mesh = world_mesh["pp"]
 
     # Set random seed, and maybe enable deterministic mode (mainly for debugging, expect perf loss)
-    utils.set_determinism(
+    dist_utils.set_determinism(
         world_mesh, device, job_config.training.seed, job_config.training.deterministic
     )
     train_spec = get_train_spec(job_config.model.name)
@@ -227,7 +231,7 @@ def main(job_config: JobConfig):
 
     data_iterator = iter(dataloader)
 
-    train_context = utils.get_train_context(
+    train_context = dist_utils.get_train_context(
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
@@ -272,7 +276,7 @@ def main(job_config: JobConfig):
             # apply context parallelism if cp is enabled
             # ensure CP handles the separate freqs_cis buffer for each pp stage
             optional_context_parallel_ctx = (
-                utils.create_context_parallel_ctx(
+                dist_utils.create_context_parallel_ctx(
                     cp_mesh=world_mesh["cp"],
                     cp_buffers=[input_ids, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
@@ -310,7 +314,7 @@ def main(job_config: JobConfig):
                     loss.backward()
 
             # clip gradients
-            utils.clip_grad_norm_(
+            dist_utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],
                 job_config.training.max_norm,
                 foreach=True,
@@ -334,8 +338,8 @@ def main(job_config: JobConfig):
                 ):
                     loss = loss.detach()
                     global_avg_loss, global_max_loss = (
-                        utils.dist_mean(loss, world_mesh["dp_cp"]),
-                        utils.dist_max(loss, world_mesh["dp_cp"]),
+                        dist_utils.dist_mean(loss, world_mesh["dp_cp"]),
+                        dist_utils.dist_max(loss, world_mesh["dp_cp"]),
                     )
                 else:
                     global_avg_loss = global_max_loss = loss.item()
@@ -409,7 +413,7 @@ def main(job_config: JobConfig):
             # reduce timeout after first train step for faster signal
             # (assuming lazy init and compilation are finished)
             if train_state.step == 1:
-                utils.set_pg_timeouts(
+                dist_utils.set_pg_timeouts(
                     timeout=timedelta(seconds=job_config.comm.train_timeout_seconds),
                     world_mesh=world_mesh,
                 )

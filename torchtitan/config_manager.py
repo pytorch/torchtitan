@@ -16,7 +16,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtitan.logging import logger
+from torchtitan.tools.logging import logger
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,

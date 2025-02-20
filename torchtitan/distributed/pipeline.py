@@ -16,7 +16,7 @@ from torch.distributed.pipelining.schedules import (
 from torch.distributed.pipelining.stage import PipelineStage
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging import logger
+from torchtitan.tools.logging import logger
 
 
 __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_rank"]

@@ -27,10 +27,10 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.logging import init_logger, logger
-from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
-from torchtitan.utils import GarbageCollection
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.utils import GarbageCollection
 
 
 class IntervalType(enum.Enum):
