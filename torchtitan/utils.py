@@ -12,6 +12,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Generator, Iterable, List, Optional, Set, Union
@@ -179,8 +180,9 @@ class GarbageCollection:
 
     @staticmethod
     def collect(reason: str):
-        logger.info(reason)
+        begin = time.monotonic()
         gc.collect(1)
+        logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
 TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"

@@ -10,8 +10,11 @@ authors = [
 ]
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
+    # Stateful Dataloader
+    "torchdata>=0.8.0",
+
     # Hugging Face integrations
-    "datasets>=2.19.0",
+    "datasets>=2.21.0",
 
     # Tokenization
     "blobfile",

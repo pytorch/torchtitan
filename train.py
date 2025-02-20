@@ -194,6 +194,12 @@ def main(job_config: JobConfig):
     # build optimizer after applying parallelisms to the model
     optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
+    # Post optimizer step model converters hook.
+    # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
+    # where it issues a single all-reduce for all parameters at once for better performance
+    optimizers.register_step_post_hook(
+        lambda *args, **kwargs: model_converters.post_optimizer_hook(model_parts)
+    )
 
     train_state = TrainState()
 
@@ -327,11 +333,6 @@ def main(job_config: JobConfig):
             checkpoint.maybe_wait_for_staging()
             optimizers.step()
             lr_schedulers.step()
-
-            # Post-optimizer model converters hook.
-            # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
-            # it issues a single all-reduce for all parameters at once for better performance
-            model_converters.post_optimizer_hook(model_parts)
 
             # log metrics
             if (
