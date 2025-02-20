@@ -492,7 +492,9 @@ class MoEGate(nn.Module):
         )
         if self.topk_method == "noaux_tc":
             self.e_score_correction_bias = nn.Parameter(
-                torch.empty((self.n_routed_experts))
+                # Changed from torch.empty to torch.rand to avoid non-even
+                # distribution for runs without actual weigths
+                torch.rand((self.n_routed_experts))
             )
         self.reset_parameters()
 
@@ -716,24 +718,18 @@ class MoE(nn.Module):
         # `sorted_tokens = x[idxs // topk_ids.shape[1]]`
         torch.index_select(x, 0, idxs // topk_ids.shape[1], out=sorted_tokens)
         if self.ep_size > 1:
-            tokens_per_ep_rank = symm_mem.empty(self.ep_size, dtype=tokens_per_expert.dtype, device=tokens_per_expert.device)
+            tokens_per_ep_rank = symm_mem.empty(self.ep_size, dtype=torch.int64, device=tokens_per_expert.device)
             torch.sum(tokens_per_expert.view(self.ep_size, -1), dim=1, out=tokens_per_ep_rank)
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
             dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1)
-                .sum(1)
-                .cpu()
-                .numpy()
-                .tolist()
-            )
+            output_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=tokens_per_expert_group.device)
+            torch.sum(tokens_per_expert_group.view(self.ep_size, -1), dim=1, out=output_splits)
             # Received tokens from all other ranks
             gathered_tokens = sorted_tokens.new_empty(
                 tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
             )
-            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
             # Total received tokens of current rank; unused
             received = torch.empty(1, dtype=torch.int64, device=x.device)
             # DP to EP token shuffle
@@ -741,7 +737,7 @@ class MoE(nn.Module):
                 gathered_tokens,
                 received,
                 sorted_tokens,
-                tokens_per_ep_rank,
+                tokens_per_ep_rank,  # input splits
             )
             tokens_per_expert_post_gather = tokens_per_expert_group.view(
                 self.ep_size, self.experts_per_rank
@@ -770,12 +766,21 @@ class MoE(nn.Module):
 
         outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
         if self.ep_size > 1:
-            new_x = torch.empty_like(outs)
+            big_buf = symm_mem.empty(
+                sorted_tokens_shape[0] * self.ep_size,  # worst case
+                *sorted_tokens_shape[1:],
+                dtype=outs.dtype,
+                device=outs.device
+            )
+            new_x = torch.narrow(big_buf, 0, 0, outs.shape[0])
             new_x[gatherd_idxs] = outs
             gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-            dist.all_to_all(
-                list(gathered_tokens.split(input_split_sizes)),
-                list(new_x.split(output_splits)),
+            # EP to DP token shuffle
+            on_device_all_to_all_v(
+                gathered_tokens,
+                received,  # unused
+                new_x,
+                output_splits,
             )
             outs = gathered_tokens
 
@@ -1068,18 +1073,6 @@ class DecoderLayer(nn.Module):
         return hidden_states
 
 
-def _init_weights(self, module):
-    std = self.config.initializer_range
-    if isinstance(module, nn.Linear):
-        module.weight.data.normal_(mean=0.0, std=std)
-        if module.bias is not None:
-            module.bias.data.zero_()
-    elif isinstance(module, nn.Embedding):
-        module.weight.data.normal_(mean=0.0, std=std)
-        if module.padding_idx is not None:
-            module.weight.data[module.padding_idx].zero_()
-
-
 DeepseekV3_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
@@ -1176,7 +1169,18 @@ class DeepseekV3Model(torch.nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Initialize weights and apply final processing
-        # self.post_init()
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
 
     def forward(
         self,
