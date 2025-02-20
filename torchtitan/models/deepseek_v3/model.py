@@ -34,15 +34,16 @@ import numpy as np
 
 import torch
 import torch.distributed as dist
+
+import torch.distributed._symmetric_memory as symm_mem
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
+from symm_mem_recipes import on_device_all_to_all_v
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
-import torch.distributed._symmetric_memory as symm_mem
-from symm_mem_recipes import on_device_all_to_all_v
 
 @dataclass
 class ModelArgs:
@@ -178,7 +179,6 @@ class ModelArgs:
     attention_dropout: float = 0.0
     pad_token_id = None
     # Added for symmetric memory
-    use_symm_mem: bool = False
     max_seq_len: int = 4096
 
 
@@ -616,25 +616,32 @@ class MoE(nn.Module):
             # Symmetric memory is already set up
             return
 
-        assert self.config.ep_size > 1, "Symmetric memory is only effective when EP size > 1"
+        assert (
+            self.config.ep_size > 1
+        ), "Symmetric memory is only effective when EP size > 1"
         # Input buffer for DP-to-EP shuffle
         self.dp_to_ep_buf = symm_mem.empty(
-            self.config.max_seq_len * self.num_experts_per_tok,  # seq len * top k (flattened)
+            self.config.max_seq_len
+            * self.num_experts_per_tok,  # seq len * top k (flattened)
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
-            device=device
+            device=device,
         )
         # Number of tokens to send to EP peers, aka. input splits
-        self.input_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=device)
+        self.input_splits = symm_mem.empty(
+            self.ep_size, dtype=torch.int64, device=device
+        )
         # Number of tokens to receive from EP peers, aka. output splits
-        self.output_splits = symm_mem.empty(self.ep_size, dtype=torch.int64, device=device)
+        self.output_splits = symm_mem.empty(
+            self.ep_size, dtype=torch.int64, device=device
+        )
         # Input buffer for EP-to-DP shuffle
         self.ep_to_dp_buf = symm_mem.empty(
             # worst case, all tokens are routed to one EP rank
             self.dp_to_ep_buf.shape[0] * self.ep_size,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
-            device=device
+            device=device,
         )
         self.has_symm_mem = True
 
@@ -644,9 +651,7 @@ class MoE(nn.Module):
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        if self.config.use_symm_mem:
-            y = self.moe_symm_mem(hidden_states, topk_idx, topk_weight).view(*orig_shape)
-        else:
+        if not self.training:
             y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
@@ -654,86 +659,6 @@ class MoE(nn.Module):
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
-        # [seq_len, n_routed_experts]
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-        # Fill 1 to the selected experts
-        cnts.scatter_(1, topk_ids, 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        # Token indices for each expert
-        idxs = topk_ids.view(-1).argsort()
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        sorted_tokens_shape = sorted_tokens.shape
-        if self.ep_size > 1:
-            tokens_per_ep_rank = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1)
-                .sum(1)
-                .cpu()
-                .numpy()
-                .tolist()
-            )
-            # Received tokens from all other ranks
-            gathered_tokens = sorted_tokens.new_empty(
-                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
-            )
-            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
-            dist.all_to_all(
-                list(gathered_tokens.split(output_splits)),
-                list(sorted_tokens.split(input_split_sizes)),
-            )
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank
-            ).sum(dim=0)
-            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
-            s = 0
-            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
-                gatherd_idxs[s : s + k] = i % self.experts_per_rank
-                s += k
-            gatherd_idxs = gatherd_idxs.argsort()
-            sorted_tokens = gathered_tokens[gatherd_idxs]
-            tokens_per_expert = tokens_per_expert_post_gather
-        tokens_per_expert = tokens_per_expert.cpu().numpy()
-
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-            expert_out = expert(tokens_for_this_expert)
-            outputs.append(expert_out)
-            start_idx = end_idx
-
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        if self.ep_size > 1:
-            new_x = torch.empty_like(outs)
-            new_x[gatherd_idxs] = outs
-            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-            dist.all_to_all(
-                list(gathered_tokens.split(input_split_sizes)),
-                list(new_x.split(output_splits)),
-            )
-            outs = gathered_tokens
-
-        new_x = torch.empty_like(outs)
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(new_x.dtype)
-        )
-        return final_out
-
-    @torch.no_grad()
-    def moe_symm_mem(self, x, topk_ids, topk_weight):
         if not self.has_symm_mem:
             # Set up symmetric memory for the first time, then reuse it
             self.setup_symm_mem(x.dtype, x.device)
@@ -755,12 +680,18 @@ class MoE(nn.Module):
         if self.ep_size > 1:
             # Sum the tokens over local experts, then we get tokens per EP rank,
             # which is the input splits
-            torch.sum(tokens_per_expert.view(self.ep_size, -1), dim=1, out=self.input_splits)
+            torch.sum(
+                tokens_per_expert.view(self.ep_size, -1), dim=1, out=self.input_splits
+            )
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
             dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            torch.sum(tokens_per_expert_group.view(self.ep_size, -1), dim=1, out=self.output_splits)
+            torch.sum(
+                tokens_per_expert_group.view(self.ep_size, -1),
+                dim=1,
+                out=self.output_splits,
+            )
             # Received tokens from all other ranks
             gathered_tokens = sorted_tokens.new_empty(
                 tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
@@ -1389,7 +1320,6 @@ def run_full_model():
         num_hidden_layers=2,
         first_k_dense_replace=1,  # activate MoE layers
         ep_size=dist.get_world_size(),  # activate Expert Parallel
-        use_symm_mem=True,  # enable symmetric memory for all-to-all
     )
     print(model_args)
 
