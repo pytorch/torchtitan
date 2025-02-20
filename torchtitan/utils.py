@@ -170,9 +170,10 @@ class GarbageCollection:
             self.collect("Peforming periodical GC collection.")
 
     @staticmethod
-    def collect(reason: str):
+    def collect(reason: str, level: int = 1):
+        reason = f"GC LEVEL[{level}]: {reason}"
         logger.info(reason)
-        gc.collect(1)
+        gc.collect(level)
 
 
 TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"

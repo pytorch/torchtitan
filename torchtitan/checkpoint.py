@@ -110,7 +110,7 @@ class SaveDone:
 @torch.no_grad()
 def save_with_gc(state, checkpoint_id):
     dcp.save(state, checkpoint_id=checkpoint_id)
-    GarbageCollection.collect("GC collection invoked by checkpointer.")
+    GarbageCollection.collect("GC collection invoked by checkpointer.", level=2)
 
 
 def checkpoint_mp(recv, send):
@@ -376,10 +376,10 @@ class CheckpointManager:
         if force:
             self._save_last_step(curr_step)
         elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollection.collect("GC collection invoked by checkpointer.", level=2)
             self._async_with_pinned_memory(checkpoint_id)
         elif self.async_mode == AsyncMode.ASYNC:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollection.collect("GC collection invoked by checkpointer.", level=2)
             self.async_future = dcp.async_save(
                 self.states, checkpoint_id=checkpoint_id, process_group=self.pg
             )
@@ -463,7 +463,7 @@ class CheckpointManager:
         # bugfix from above: restore the original stateful objects,
         # whose states were already updated in-place by dcp.load()
         states.update(original_stateful_states)
-        GarbageCollection.collect("GC collection for checkpoint loading.")
+        GarbageCollection.collect("GC collection for checkpoint loading.", level=2)
         return True
 
     def _purge_stale_checkpoints(self):
