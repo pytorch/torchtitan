@@ -12,7 +12,7 @@ import time
 import torch
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging import logger
+from torchtitan.tools.logging import logger
 
 # the number of warmup steps before the active step in each profiling cycle
 WARMUP = 3

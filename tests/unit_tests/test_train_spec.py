@@ -9,17 +9,17 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import TikTokenizer
-from torchtitan.loss import cross_entropy_loss
-from torchtitan.models.llama import parallelize_llama, pipeline_llama
-from torchtitan.optimizer import (
+from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.optimizer import (
     build_lr_schedulers,
     build_optimizers,
     OptimizersContainer,
 )
-from torchtitan.train_spec import (
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets import build_hf_dataloader
+from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.models.llama import parallelize_llama, pipeline_llama
+from torchtitan.protocols.train_spec import (
     apply_to_train_specs,
     BaseModelArgs,
     get_train_spec,
@@ -30,8 +30,8 @@ from torchtitan.train_spec import (
 
 
 class FakeModel(ModelProtocol):
-    @staticmethod
-    def from_model_args(args: BaseModelArgs) -> nn.Module:
+    @classmethod
+    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
         return nn.Linear(8, 8)
 
 

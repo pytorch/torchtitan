@@ -25,8 +25,8 @@ from typing import (
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
-from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
-from torchtitan.logging import logger
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.tools.logging import logger
 
 
 class TikTokenizer(Tokenizer):

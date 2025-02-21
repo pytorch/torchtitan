@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
-from torchtitan.datasets.tokenizer.tokenizer import Tokenizer
 
 
-__all__ = ["Tokenizer", "TikTokenizer"]
+__all__ = ["TikTokenizer"]

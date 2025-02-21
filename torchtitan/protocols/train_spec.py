@@ -12,11 +12,10 @@ from typing import Callable, Protocol, Type, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
-
+from torchtitan.components.dataloader import DataLoaderBuilder
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.dataloader import DataLoaderBuilder
-from torchtitan.datasets.tokenizer import Tokenizer
-from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 
 
 @dataclass
