@@ -495,7 +495,9 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--checkpoint.interval",
-            type=int, default=500, help="Checkpointing interval in steps.",
+            type=int,
+            default=500,
+            help="Checkpointing interval in steps.",
         )
         self.parser.add_argument(
             "--checkpoint.model_weights_only",
