@@ -39,15 +39,20 @@ from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.utils import GarbageCollection
 
 
-class CheckpointState(str, enum.Enum):
-    MODEL = "model"
-    OPTIMIZER = "optimizer"
-    LR_SCHEDULER = "lr_scheduler"
-    DATALOADER = "dataloader"
-    TRAIN_STATE = "train_state"
+class MyStrEnum(str, enum.Enum):
+    # StrEnum is doing a better job. But it is not ready until 3.11.
+    def __str__(self) -> str:
+        return str.__str__(self)
 
 
-class AsyncMode(str, enum.Enum):
+MODEL = "model"
+OPTIMIZER = "optimizer"
+LR_SCHEDULER = "lr_scheduler"
+DATALOADER = "dataloader"
+TRAIN_STATE = "train_state"
+
+
+class AsyncMode(MyStrEnum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
@@ -274,10 +279,10 @@ class CheckpointManager:
         self.states = states
         self.states.update(
             {
-                CheckpointState.MODEL: ModelWrapper(model_parts),
-                CheckpointState.OPTIMIZER: optimizers,
-                CheckpointState.DATALOADER: dataloader,
-                CheckpointState.LR_SCHEDULER: lr_schedulers,
+                MODEL: ModelWrapper(model_parts),
+                OPTIMIZER: optimizers,
+                DATALOADER: dataloader,
+                LR_SCHEDULER: lr_schedulers,
             }
         )
         self.ft_states = {CheckpointState.DATALOADER: dataloader}
@@ -552,11 +557,7 @@ class CheckpointManager:
             Dict[str, Any]: The states to load for the given step.
         """
         # For the first step, we will only load the model weights.
-        states = (
-            {CheckpointState.MODEL: self.states[CheckpointState.MODEL]}
-            if step == 0
-            else self.states
-        )
+        states = {MODEL: self.states[MODEL]} if step == 0 else self.states
         states_to_load = {
             k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
@@ -579,7 +580,7 @@ class CheckpointManager:
             #      'tok_embeddings.weight':...,
             #      'layers.0.attention.wq.weight': ...
             # }.
-            self.states = self.states[CheckpointState.MODEL].state_dict()
+            self.states = self.states[MODEL].state_dict()
 
             # For now, we will manually pop the freqs_cis buffer, as we made this permanent
             # temporarily and we don't want to include it in the exported state_dict.
