@@ -1,4 +1,3 @@
-import copy
 import os
 import shutil
 import tempfile
