@@ -208,7 +208,10 @@ def build_metric_logger(
         base_log_dir = os.path.join(
             base_log_dir, f"rank_{torch.distributed.get_rank()}"
         )
-
+    
+    # Create logging directory
+    os.makedirs(base_log_dir, exist_ok=True)
+    
     # Create loggers in priority order
     if metrics_config.enable_wandb:
         logger.debug("Attempting to create WandB logger")
