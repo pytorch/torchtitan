@@ -494,16 +494,8 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--checkpoint.interval_type",
-            type=str,
-            default="steps",
-            help="Checkpointing interval unit of measurement ['step', 'seconds']",
-        )
-        self.parser.add_argument(
             "--checkpoint.interval",
-            type=int,
-            default=500,
-            help="Checkpointing interval, in steps or seconds depending on --checkpoint.interval_type",
+            type=int, default=500, help="Checkpointing interval in steps.",
         )
         self.parser.add_argument(
             "--checkpoint.model_weights_only",
