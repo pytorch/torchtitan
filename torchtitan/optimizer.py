@@ -27,18 +27,44 @@ __all__ = [
     "LRSchedulersContainer",
     "build_optimizers",
     "build_lr_schedulers",
+    "register_optimizer",
 ]
+
+
+_registry_optimizers_cls: Dict[str, type[Optimizer]] = {}
+"""Registry of optimizers available for training.
+"""
+
+
+def register_optimizer(optimizer_cls: type[Optimizer], name: str):
+    """Register a PyTorch optimizer class which can then be used in a training configuration."""
+    assert (
+        name not in _registry_optimizers_cls
+    ), f"An optimizer '{name}' is already registered."
+    assert issubclass(
+        optimizer_cls, Optimizer
+    ), "Can only register a PyTorch compatible optimizer."
+    _registry_optimizers_cls[name] = optimizer_cls
+
+
+def get_optimizer(name: str) -> type[Optimizer]:
+    """Get a registered optimizer (class)"""
+    if name not in _registry_optimizers_cls:
+        raise NotImplementedError(f"Optimizer '{name}' not registered.")
+    return _registry_optimizers_cls[name]
+
+
+# Register some standard PyTorch optimizers.
+register_optimizer(torch.optim.SGD, "SGD")
+register_optimizer(torch.optim.Adam, "Adam")
+register_optimizer(torch.optim.AdamW, "AdamW")
 
 
 def _create_optimizer(
     parameters: Iterable[nn.Parameter], optimizer_kwargs: Dict[str, Any], name: str
 ) -> Optimizer:
-    if name == "Adam":
-        return torch.optim.Adam(parameters, **optimizer_kwargs)
-    elif name == "AdamW":
-        return torch.optim.AdamW(parameters, **optimizer_kwargs)
-    else:
-        raise NotImplementedError(f"Optimizer {name} not added.")
+    optimizer_cls = get_optimizer(name)
+    return optimizer_cls(parameters, **optimizer_kwargs)
 
 
 class OptimizersContainer(Optimizer):
