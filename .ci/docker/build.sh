@@ -34,6 +34,7 @@ docker build \
   --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
   --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
+  --shm-size=1g \
   -f "${OS}"/Dockerfile \
   "$@" \
   .
