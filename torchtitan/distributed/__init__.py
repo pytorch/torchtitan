@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from torchtitan.parallelisms.parallel_dims import ParallelDims
+from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 __all__ = ["ParallelDims"]
