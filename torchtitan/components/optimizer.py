@@ -204,15 +204,20 @@ def build_optimizers(
         )
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
-    fused = job_config.optimizer.fused
-    if job_config.optimizer.disable_fused:
-        fused = False
+
+    optim_implementation = job_config.optimizer.implementation
+    assert optim_implementation in ["fused", "foreach", "for-loop"]
+
+    fused = optim_implementation == "fused"
+    foreach = optim_implementation == "foreach"
+    print(f"Using {optim_implementation} implementation for optimizer")
+    print(f"{foreach=}, {fused=}")
     optimizer_kwargs = {
         "lr": lr,
         "betas": (0.9, 0.95),
         "weight_decay": 0.1,
         "fused": fused,
-        "foreach": not fused,
+        "foreach": foreach,
     }
 
     return (
