@@ -210,8 +210,7 @@ def build_optimizers(
 
     fused = optim_implementation == "fused"
     foreach = optim_implementation == "foreach"
-    print(f"Using {optim_implementation} implementation for optimizer")
-    print(f"{foreach=}, {fused=}")
+
     optimizer_kwargs = {
         "lr": lr,
         "betas": (0.9, 0.95),
