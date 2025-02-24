@@ -205,6 +205,8 @@ def build_optimizers(
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
     fused = job_config.optimizer.fused
+    if job_config.optimizer.disable_fused:
+        fused = False
     optimizer_kwargs = {
         "lr": lr,
         "betas": (0.9, 0.95),

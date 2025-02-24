@@ -224,6 +224,11 @@ class JobConfig:
             help="Whether the fused implementation(CUDA only) is used.",
         )
         self.parser.add_argument(
+            "--optimizer.disable_fused",
+            action="store_true",
+            help="Whether the fused implementation(CUDA only) is used.",
+        )
+        self.parser.add_argument(
             "--optimizer.early_step_in_backward",
             action="store_true",
             help="""
