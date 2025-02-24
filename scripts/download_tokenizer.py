@@ -42,13 +42,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repo_id",
         type=str,
-        default="meta-llama/Meta-Llama-3-8B",
-        help="Repository ID to download from. default to Llama-3-8B",
+        default="meta-llama/Meta-Llama-3.1-8B",
+        help="Repository ID to download from. default to Llama-3.1-8B",
     )
     parser.add_argument(
         "--tokenizer_path",
         type=str,
-        default="",
+        default="original",
         help="the tokenizer.model path relative to repo_id",
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_dir",
         type=str,
-        default="torchtitan/datasets/tokenizer/",
+        default="assets/tokenizer/",
         help="local directory to save the tokenizer.model",
     )
 

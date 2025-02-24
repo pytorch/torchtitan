@@ -48,6 +48,7 @@ Our guiding principles when building `torchtitan`:
 10. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
 11. All options easily configured via [toml files](torchtitan/models/llama/train_configs/)
 12. [Helper scripts](scripts/) to
+    - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
     - estimate FSDP/HSDP memory usage without materializing the model
     - run distributed inference with Tensor Parallel
@@ -84,14 +85,14 @@ Once you have confirmed access, you can run the following command to download th
 # Get your HF token from https://huggingface.co/settings/tokens
 
 # Llama 3.1 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
+python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
 ```
 
 ### Start a training run
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama/train_configs/llama3_8b.toml" ./run_llama_train.sh
+CONFIG_FILE="./torchtitan/models/llama/train_configs/llama3_8b.toml" ./run_train.sh
 ```
 
 ### Multi-Node Training

@@ -8,11 +8,11 @@
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.datasets import build_hf_dataloader
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import TikTokenizer
-from torchtitan.models.llama.model import Transformer, TransformerModelArgs
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
+from .model import Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama
 from .pipeline_llama import pipeline_llama
 
