@@ -192,7 +192,11 @@ class CheckpointManager:
             }
         )
 
-        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.folder = os.path.join(
+            job_config.job.dump_folder,
+            ckpt_config.folder,
+            f"{job_config.model.name}_{job_config.model.flavor}",
+        )
         self.interval_type = (
             IntervalType.SECONDS
             if ckpt_config.interval_type == "seconds"
