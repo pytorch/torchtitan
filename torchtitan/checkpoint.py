@@ -33,7 +33,6 @@ from torch.utils.data import DataLoader
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 
-from torchtitan.ft import FTManager
 from torchtitan.logging import init_logger, logger
 from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.utils import GarbageCollection
@@ -229,7 +228,7 @@ class CheckpointManager:
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous 4 components.
         job_config (JobConfig): The job config used to configure the checkpointing.
-        ft_manager (Optional[FTManager]): The FTManager from TorchFT.
+        ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
     """
 
     def __init__(
@@ -240,7 +239,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
-        ft_manager: Optional[FTManager] = None,
+        ft_manager: Optional["ft.Manager"] = None,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
@@ -253,10 +252,10 @@ class CheckpointManager:
                 ret = {}
                 for k, v in self.states.items():
                     if k in {
-                        CheckpointState.MODEL,
-                        CheckpointState.OPTIMIZER,
-                        CheckpointState.LR_SCHEDULER,
-                        CheckpointState.TRAIN_STATE,
+                        MODEL,
+                        OPTIMIZER,
+                        LR_SCHEDULER,
+                        TRAIN_STATE,
                     }:
                         ret[k] = v.state_dict()
                 return ret
@@ -266,7 +265,8 @@ class CheckpointManager:
                 for k, v in state_dict.items():
                     self.states[k].load_state_dict(v)
 
-            ft_manager.manager.set_state_dict_fns(load_state_dict, state_dict)
+            ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+        self.ft_replica_id = job_config.experimental.ft_replica_id
 
         async_mode = ckpt_config.async_mode.lower()
         self.enable_staging = (
@@ -285,7 +285,7 @@ class CheckpointManager:
                 LR_SCHEDULER: lr_schedulers,
             }
         )
-        self.ft_states = {CheckpointState.DATALOADER: dataloader}
+        self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False
         self.sending_to_checkpoint_mp = False
@@ -383,7 +383,7 @@ class CheckpointManager:
             return
 
         begin = time.monotonic()
-        if not self.ft_manager or self.ft_manager.manager.participating_rank() == 0:
+        if not self.ft_manager or self.ft_manager.participating_rank() == 0:
             logger.info("Saving the checkpoint (or staging if async is enabled).")
             checkpoint_id = self._create_checkpoint_id(curr_step)
             self._async_wait()
@@ -410,8 +410,10 @@ class CheckpointManager:
                 f"in {time.monotonic() - begin:.2f} seconds."
             )
         elif self.ft_manager:
-            logger.info("Waiting for replica 0 to save checkpoint.")
-            time.sleep(1)
+            logger.info(
+                "Replica %d doesn't save checkpoint.",
+                self.ft_manager.participating_rank(),
+            )
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
@@ -515,7 +517,7 @@ class CheckpointManager:
         return max(step_counts)
 
     def _ft_folder(self) -> str:
-        return os.path.join(self.folder, f"ft-replicat-{self.ft_manager.replica_id}")
+        return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         folder = folder if folder else self.folder
@@ -565,7 +567,7 @@ class CheckpointManager:
             if exclude_key not in states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
         if self.ft_manager:
-            states_to_load.pop(CheckpointState.DATALOADER)
+            states_to_load.pop(DATALOADER)
         return states_to_load
 
     def _save_last_step(self, curr_step: int) -> None:
@@ -650,7 +652,7 @@ class CheckpointManager:
     def _purge_stale_checkpoints(self):
         if (
             self.keep_latest_k > 0
-            and self.ft_manager.manager.participating_rank() == 0
+            and self.ft_manager.participating_rank() == 0
             and dist.get_rank() == 0
             and os.path.isdir(self.folder)
         ):

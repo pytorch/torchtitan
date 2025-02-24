@@ -25,7 +25,7 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
-    ft_manager: Optional[Any]
+    ft_manager: Optional["ft.Manager"]
 
     def __post_init__(self):
         self._validate()
@@ -74,7 +74,7 @@ class ParallelDims:
                 mesh_shape=dims,
                 mesh_dim_names=names,
                 replicate_dim=names.index("dp_replicate"),
-                manager=self.ft_manager.manager,
+                manager=self.ft_manager,
             )
 
         # Create all the submesh here to ensure all required process groups are

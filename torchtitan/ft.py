@@ -18,21 +18,14 @@ else:
     has_torchft = False
 
 
-@dataclass
-class FTManager:
-    manager: ft.Manager
-    replica_id: int
-    group_size: int
-
-
-def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
+def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
     """Initialize the FT manager if TorchFT is enabled.
 
     Args:
         job (JobConfig): The job configuration.
 
     Returns:
-        Optional[FTManager]: The FT manager if TorchFT is enabled, otherwise None.
+        Optional[ft.Manager]: The FT manager if TorchFT is enabled, otherwise None.
     """
     if not job.experimental.enable_torchft:
         return None
@@ -41,17 +34,11 @@ def init_ft_manager(job: JobConfig) -> Optional[FTManager]:
         raise ImportError("torchft is not installed. Please install it.")
 
     pg = ft.ProcessGroupBabyNCCL()
-    manager = ft.Manager(
+    return ft.Manager(
         pg=pg,
         min_replica_size=1,
         load_state_dict=None,
         state_dict=None,
         use_async_quorum=True,
         replica_id=f"torchtitan_ft_{job.experimental.ft_replica_id}",
-    )
-
-    return FTManager(
-        manager,
-        job.experimental.ft_replica_id,
-        job.experimental.ft_group_size,
     )

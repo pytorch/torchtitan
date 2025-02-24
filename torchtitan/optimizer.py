@@ -183,7 +183,7 @@ class FTOptimizersContainer(OptimizersContainer):
         model_parts: List[nn.Module],
         optimizer_kwargs: Dict[str, Any],
         name: str,
-        ft_manager: Any,
+        ft_manager: Optional["ft.Manager"],
     ) -> None:
         import torchft as ft
 
@@ -197,7 +197,7 @@ class FTOptimizersContainer(OptimizersContainer):
             for k, v in sd.items()
         }
         self.optimizers = [
-            ft.Optimizer(ft_manager.manager, optim) for optim in self.optimizers
+            ft.Optimizer(ft_manager, optim) for optim in self.optimizers
         ]
         self.cache_state_dict: Dict[str, Any] = {}
 
@@ -219,7 +219,7 @@ class FTOptimizersContainer(OptimizersContainer):
 def build_optimizers(
     model_parts: List[nn.Module],
     job_config: JobConfig,
-    ft_manager: Optional[Any] = None,
+    ft_manager: Optional["ft.Manager"] = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
