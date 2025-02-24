@@ -244,6 +244,26 @@ def main(job_config: JobConfig):
 
     checkpoint.reset()
 
+    import contextlib
+    from torch.distributed.fsdp import FSDPModule
+    fsdp_modules: list[FSDPModule] = []
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if isinstance(module, FSDPModule):
+                fsdp_modules.append(module)
+
+    @contextlib.contextmanager
+    def no_sync(fsdp_modules: list[FSDPModule]):
+        for fsdp_module in fsdp_modules:
+            fsdp_module.set_requires_gradient_sync(False)
+            fsdp_module.set_reshard_after_backward(False)
+        try:
+            yield
+        finally:
+            for fsdp_module in fsdp_modules:
+                fsdp_module.set_requires_gradient_sync(True)
+                fsdp_module.set_reshard_after_backward(True)
+
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "
@@ -305,13 +325,27 @@ def main(job_config: JobConfig):
                 )
             else:
                 # Non-PP forward / backward
+                microbatch_size = 1
+                mb_input_ids = torch.split(input_ids, microbatch_size, dim=0)
+                mb_labels = torch.split(labels, microbatch_size, dim=0)
+                logger.info(
+                    f"Split input into {len(mb_input_ids)} microbatches of size {microbatch_size}"
+                )
                 with train_context(optional_context_parallel_ctx):
-                    pred = model(input_ids)
-                    loss = train_spec.loss_fn(pred, labels)
-                    # pred.shape=(bs, seq_len, vocab_size)
-                    # need to free to before bwd to avoid peaking memory
-                    del pred
-                    loss.backward()
+                    for mb_idx, (input_ids, labels) in enumerate(
+                        zip(mb_input_ids, mb_labels, strict=True)
+                    ):
+                        is_last_mb = (mb_idx == len(mb_input_ids) - 1)
+                        sync_ctx = (
+                            no_sync(fsdp_modules=fsdp_modules)
+                            if not is_last_mb
+                            else contextlib.nullcontext()
+                        )
+                        pred = model(input_ids)
+                        loss = train_spec.loss_fn(pred, labels)
+                        del pred
+                        with sync_ctx:
+                            loss.backward()
 
             # clip gradients
             dist_utils.clip_grad_norm_(
