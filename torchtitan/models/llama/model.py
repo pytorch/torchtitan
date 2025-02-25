@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.norms import build_norm
-from torchtitan.train_spec import BaseModelArgs, ModelProtocol
+from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
 
 @dataclass

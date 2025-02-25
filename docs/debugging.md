@@ -2,7 +2,7 @@
 
 Launch training job with the following command (or alternatively set configs in toml files)
 ```
-CONFIG_FILE="./train_configs/debug_model.toml" ./run_llama_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
+CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
 ```
 * `--profiling.enable_memory_snapshot`: to enable memory profiling
 * `--profiling.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
