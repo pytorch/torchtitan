@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import copy
 import math
 import os
 from datetime import timedelta
@@ -17,11 +18,22 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from torchtitan.ft import has_torchft
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
+if has_torchft:
+    import torchft as ft
+
 
 def _dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
+    if has_torchft:
+        if isinstance(mesh, ft.process_group._FlattenDeviceMesh):
+            x = funcol.all_reduce(
+                x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg
+            )
+            mesh = mesh.managed_mesh.mesh
+
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
         x = x.full_tensor()
@@ -286,6 +298,17 @@ def clip_grad_norm_(
     if isinstance(total_norm, DTensor):
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
+        mesh = total_norm._spec.mesh
+        if has_torchft:
+            if isinstance(mesh, ft.process_group.ManagedDeviceMesh):
+                # The gradients along the replicated dim has already been reduced.
+                # So we don't need another reducution beforing removing the
+                # replicate dimension
+                local_tensor = total_norm.to_local()
+                placements = list(copy.copy(total_norm._spec.placements))
+                placements.pop(mesh.replicate_dim)
+                total_norm = DTensor.from_local(local_tensor, mesh.mesh, placements)
+
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:

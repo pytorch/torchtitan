@@ -14,6 +14,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+
+from torchtitan.ft import init_ft_manager
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
 
@@ -43,6 +45,10 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    device_module.set_device(device)
+    ft_manager = init_ft_manager(job_config)
+
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
     parallel_dims = ParallelDims(
@@ -53,10 +59,8 @@ def main(job_config: JobConfig):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        ft_manager=ft_manager,
     )
-    device_module, device_type = utils.device_module, utils.device_type
-    device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
-    device_module.set_device(device)
     dist_utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
@@ -82,6 +86,8 @@ def main(job_config: JobConfig):
 
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
+    dp_rank = dp_degree * job_config.experimental.ft_replica_id + dp_rank
+    dp_degree = dp_degree * job_config.experimental.ft_group_size
     dataloader = train_spec.build_dataloader_fn(
         dp_world_size=dp_degree,
         dp_rank=dp_rank,
@@ -181,7 +187,7 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = train_spec.build_optimizers_fn(model_parts, job_config)
+    optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
     # Post optimizer step model converters hook.
     # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -200,6 +206,7 @@ def main(job_config: JobConfig):
         lr_schedulers=lr_schedulers,
         states={"train_state": train_state},
         job_config=job_config,
+        ft_manager=ft_manager,
     )
 
     if job_config.checkpoint.create_seed_checkpoint:

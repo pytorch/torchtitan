@@ -62,9 +62,17 @@ class DummyJob:
 
 
 @dataclass
+class DummyExperimental:
+    ft_replica_id = 0
+    ft_group_size = 1
+
+
+@dataclass
 class DummyJobConfig:
     checkpoint: DummyCheckpointConfig = field(default_factory=DummyCheckpointConfig)
     job: DummyJob = field(default_factory=DummyJob)
+    experimental: DummyExperimental = field(default_factory=DummyExperimental)
+    ft_manager = None
 
 
 # Dummy instances to supply as constructor arguments.

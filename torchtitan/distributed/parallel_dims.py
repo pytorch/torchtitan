@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Optional
 
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -24,6 +25,7 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
+    ft_manager: Optional["ft.Manager"] = None
 
     def __post_init__(self):
         self._validate()
@@ -56,13 +58,24 @@ class ParallelDims:
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
         ):
-            if d > 1:
+            if d > 1 or (name == "dp_replicate" and self.ft_manager is not None):
                 dims.append(d)
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         names = tuple(names)
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        if self.ft_manager is None:
+            mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        else:
+            from torchft.process_group import ft_init_device_mesh
+
+            mesh = ft_init_device_mesh(
+                device_type=device_type,
+                mesh_shape=dims,
+                mesh_dim_names=names,
+                replicate_dim=names.index("dp_replicate"),
+                manager=self.ft_manager,
+            )
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
@@ -73,7 +86,7 @@ class ParallelDims:
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
 
-        if self.dp_replicate_enabled:
+        if self.dp_replicate_enabled or self.ft_manager is not None:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
@@ -101,7 +114,7 @@ class ParallelDims:
 
     @property
     def dp_replicate_enabled(self):
-        return self.dp_replicate > 1
+        return self.dp_replicate > 1 or self.ft_manager is not None
 
     @property
     def dp_shard_enabled(self):

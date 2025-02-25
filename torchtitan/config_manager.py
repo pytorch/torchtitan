@@ -661,6 +661,30 @@ class JobConfig:
             action="store_true",
         )
 
+        self.parser.add_argument(
+            "--experimental.enable_torchft",
+            action="store_true",
+            help="Enable TorchFT integration.",
+        )
+
+        self.parser.add_argument(
+            "--experimental.ft_replica_id",
+            type=int,
+            default=0,
+            help="The TorchFT replica ID of this run.",
+        )
+
+        self.parser.add_argument(
+            "--experimental.ft_group_size",
+            type=int,
+            default=1,
+            help="""
+                The number of TorchFT replicate groups. This number will be used for
+                dataloader to split the dataset across the replicate groups and FSDP
+                dimension.
+            """,
+        )
+
     def to_dict(self):
         return self.args_dict
 

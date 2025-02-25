@@ -22,6 +22,7 @@ def build_parallel_dims(job_config, world_size):
         pp=job_config.experimental.pipeline_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        ft_manager=None,
     )
     return parallel_dims
 
