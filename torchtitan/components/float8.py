@@ -19,9 +19,12 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging import logger
-from torchtitan.model_converter import ModelConverter, register_model_converter
-from torchtitan.parallelisms import ParallelDims
+from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.model_converter import (
+    ModelConverter,
+    register_model_converter,
+)
+from torchtitan.tools.logging import logger
 
 
 def _is_sm89_or_later():
