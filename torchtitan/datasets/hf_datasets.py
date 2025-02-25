@@ -14,9 +14,10 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
-from torchtitan.dataloader import ParallelAwareDataloader
-from torchtitan.datasets.tokenizer import Tokenizer
-from torchtitan.logging import logger
+from torchtitan.components.dataloader import ParallelAwareDataloader
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
+from torchtitan.tools.logging import logger
 
 
 def _load_c4_dataset(dataset_path: str):
@@ -142,16 +143,17 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
 
 def build_hf_dataloader(
-    dataset_name: str,
-    dataset_path: Optional[str],
-    tokenizer: Tokenizer,
-    batch_size: int,
-    seq_len: int,
-    dp_rank: int,
     dp_world_size: int,
+    dp_rank: int,
+    tokenizer: Tokenizer,
+    job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
+    dataset_name = job_config.training.dataset
+    dataset_path = job_config.training.dataset_path
+    batch_size = job_config.training.batch_size
+    seq_len = job_config.training.seq_len
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,
