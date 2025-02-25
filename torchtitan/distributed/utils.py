@@ -6,8 +6,6 @@
 
 import contextlib
 import copy
-import gc
-import importlib
 import math
 import os
 from datetime import timedelta
@@ -20,9 +18,9 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from torchtitan.ft import has_torchft
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
-from torchtitan.ft import has_torchft
 
 if has_torchft:
     import torchft as ft

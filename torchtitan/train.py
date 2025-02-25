@@ -14,6 +14,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+
+from torchtitan.ft import init_ft_manager
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
 
@@ -24,8 +26,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-
-from torchtitan.ft import init_ft_manager
 
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html

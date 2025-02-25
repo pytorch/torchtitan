@@ -645,9 +645,9 @@ class CheckpointManager:
     def _purge_stale_checkpoints(self):
         if (
             self.keep_latest_k > 0
-            and self.ft_manager.participating_rank() == 0
             and dist.get_rank() == 0
             and os.path.isdir(self.folder)
+            and (not self.ft_manager or self.ft_manager.participating_rank() == 0)
         ):
             discovered_checkpoints = []
             for filename in os.listdir(self.folder):

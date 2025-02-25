@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Any, Optional
+from typing import Optional
 
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -25,7 +25,7 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
-    ft_manager: Optional["ft.Manager"]
+    ft_manager: Optional["ft.Manager"] = None
 
     def __post_init__(self):
         self._validate()

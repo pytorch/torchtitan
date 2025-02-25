@@ -196,9 +196,7 @@ class FTOptimizersContainer(OptimizersContainer):
             for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
             for k, v in sd.items()
         }
-        self.optimizers = [
-            ft.Optimizer(ft_manager, optim) for optim in self.optimizers
-        ]
+        self.optimizers = [ft.Optimizer(ft_manager, optim) for optim in self.optimizers]
         self.cache_state_dict: Dict[str, Any] = {}
 
     def init_cache_state_dict(self) -> None:
