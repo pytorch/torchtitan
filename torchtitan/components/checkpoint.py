@@ -35,12 +35,6 @@ from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersCon
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 
 
-class MyStrEnum(str, enum.Enum):
-    # StrEnum is doing a better job. But it is not ready until 3.11.
-    def __str__(self) -> str:
-        return str.__str__(self)
-
-
 MODEL = "model"
 OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
@@ -48,7 +42,7 @@ DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
 
 
-class AsyncMode(MyStrEnum):
+class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
