@@ -15,7 +15,7 @@ from unittest import mock
 
 import torch
 
-from torchtitan.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint import CheckpointManager
 
 
 def fake_dcp_save(state, checkpoint_id):
@@ -96,10 +96,10 @@ class TestCheckpointManager(unittest.TestCase):
         shutil.rmtree(self.temp_dir)
 
     @mock.patch(
-        "torchtitan.checkpoint.get_model_state_dict",
+        "torchtitan.components.checkpoint.get_model_state_dict",
         side_effect=fake_get_model_state_dict,
     )
-    @mock.patch("torchtitan.checkpoint.dcp.save", side_effect=fake_dcp_save)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
     def test_save(self, *_):
         """Test that calling save() writes a checkpoint file to disk."""
         job_config = DummyJobConfig(job=self.dummy_job)
@@ -125,11 +125,11 @@ class TestCheckpointManager(unittest.TestCase):
         )
 
     @mock.patch(
-        "torchtitan.checkpoint.get_model_state_dict",
+        "torchtitan.components.checkpoint.get_model_state_dict",
         side_effect=fake_get_model_state_dict,
     )
-    @mock.patch("torchtitan.checkpoint.dcp.load", side_effect=fake_dcp_load)
-    @mock.patch("torchtitan.checkpoint.dcp.save", side_effect=fake_dcp_save)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load", side_effect=fake_dcp_load)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
     def test_load(self, *_):
         """Test that load() properly reads the checkpoint file from disk and restores state."""
         job_config = DummyJobConfig(job=self.dummy_job)
@@ -158,12 +158,12 @@ class TestCheckpointManager(unittest.TestCase):
             "The state was not correctly restored after loading.",
         )
 
-    @mock.patch("torchtitan.checkpoint.dist.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dist.get_rank", return_value=0)
     @mock.patch(
-        "torchtitan.checkpoint.get_model_state_dict",
+        "torchtitan.components.checkpoint.get_model_state_dict",
         side_effect=fake_get_model_state_dict,
     )
-    @mock.patch("torchtitan.checkpoint.dcp.save", side_effect=fake_dcp_save)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
     def test_purge_stale_checkpoints_rank_zero(self, *_):
         """
         Test that when keep_latest_k is 3 and dist.get_rank() returns 0, stale checkpoints
@@ -202,12 +202,12 @@ class TestCheckpointManager(unittest.TestCase):
                 os.path.exists(self._checkpoint_id(step)), "The checkpointis purged."
             )
 
-    @mock.patch("torchtitan.checkpoint.dist.get_rank", return_value=1)
+    @mock.patch("torchtitan.components.checkpoint.dist.get_rank", return_value=1)
     @mock.patch(
-        "torchtitan.checkpoint.get_model_state_dict",
+        "torchtitan.components.checkpoint.get_model_state_dict",
         side_effect=fake_get_model_state_dict,
     )
-    @mock.patch("torchtitan.checkpoint.dcp.save", side_effect=fake_dcp_save)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
     def test_purge_stale_checkpoints_rank_nonzero(self, *_):
         """
         Test that when dist.get_rank() returns a non-zero value, the purge logic does not
@@ -236,12 +236,14 @@ class TestCheckpointManager(unittest.TestCase):
                 os.path.exists(self._checkpoint_id(step)), "The checkpointis purged."
             )
 
-    @mock.patch("torchtitan.checkpoint.dist.new_group")
+    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
-        "torchtitan.checkpoint.get_model_state_dict",
+        "torchtitan.components.checkpoint.get_model_state_dict",
         side_effect=fake_get_model_state_dict,
     )
-    @mock.patch("torchtitan.checkpoint.dcp.async_save", side_effect=fake_async_save)
+    @mock.patch(
+        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+    )
     def test_async_save_calls_async_wait(self, *_):
         """
         Test that in async mode (AsyncMode.ASYNC), calling save() twice correctly waits
