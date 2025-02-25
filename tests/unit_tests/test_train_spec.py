@@ -47,8 +47,8 @@ def fake_build_optimizers(
     }
     return OptimizersContainer(
         model_parts=model_parts,
+        optimizer_cls=torch.optim.Adam,
         optimizer_kwargs=optimizer_kwargs,
-        name="Adam",
     )
 
 
