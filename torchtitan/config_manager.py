@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import os
 import sys
 from collections import defaultdict
 from typing import Tuple, Union
@@ -193,7 +194,7 @@ class JobConfig:
         self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
-            default="./torchtitan/datasets/tokenizer/tokenizer.model",
+            default="./assets/tokenizer/original/tokenizer.model",
             help="Tokenizer path",
         )
         self.parser.add_argument(
@@ -705,10 +706,21 @@ class JobConfig:
         return args_dict
 
     def _validate_config(self) -> None:
-        # TODO: Add more mandatory validations
-        assert self.model.name
-        assert self.model.flavor
-        assert self.model.tokenizer_path
+        # TODO: temporary mitigation of BC breaking change in
+        #       tokenizer default path, need to remove later
+        if not os.path.exists(self.model.tokenizer_path):
+            logger.warning(
+                f"Tokenizer path {self.model.tokenizer_path} does not exist!"
+            )
+            old_tokenizer_path = (
+                "torchtitan/datasets/tokenizer/original/tokenizer.model"
+            )
+            if os.path.exists(old_tokenizer_path):
+                self.model.tokenizer_path = old_tokenizer_path
+                logger.warning(
+                    f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
+                    "Please update your config."
+                )
 
     def _get_string_list_argument_names(self) -> list[str]:
         """Get the parser argument names of type `string_list`."""
