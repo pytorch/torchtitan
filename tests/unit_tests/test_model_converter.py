@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.float8 import Float8Converter
 from torchtitan.config_manager import JobConfig
-from torchtitan.float8 import Float8Converter
-from torchtitan.model_converter import build_model_converters, ModelConvertersContainer
-from torchtitan.parallelisms import ParallelDims
+from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.model_converter import (
+    build_model_converters,
+    ModelConvertersContainer,
+)
 
 
 def build_parallel_dims(job_config, world_size):
