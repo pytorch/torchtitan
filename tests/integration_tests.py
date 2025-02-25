@@ -267,11 +267,12 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name Adam --optimizer.fused",
-                    "--optimizer.name AdamW --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.implementation foreach",
                 ]
             ],
-            "Fused Optimizer Test",
+            "Foreach Optimizer Test",
+            "optimizer_foreach",
+            ngpu=2,
         ),
         OverrideDefinitions(
             [

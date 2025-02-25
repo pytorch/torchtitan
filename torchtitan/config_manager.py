@@ -219,9 +219,17 @@ class JobConfig:
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
-            "--optimizer.fused",
-            action="store_true",
-            help="Whether the fused implementation(CUDA only) is used.",
+            "--optimizer.implementation",
+            type=str,
+            default="fused",
+            choices=["for-loop", "foreach", "fused"],
+            help="""
+            Specify which optimizer implementation to use:
+            - 'fused': Use fused implementation (CUDA only) for best performance.
+            - 'foreach': Use some horizontal fusion of tensors for better performance.
+            - 'for-loop': Use the default implementation for the optimizer (slowest).
+            - more info: https://pytorch.org/docs/stable/optim.html
+            """,
         )
         self.parser.add_argument(
             "--optimizer.early_step_in_backward",
