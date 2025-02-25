@@ -9,6 +9,7 @@ import importlib
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -43,8 +44,9 @@ class GarbageCollection:
 
     @staticmethod
     def collect(reason: str):
-        logger.info(reason)
+        begin = time.monotonic()
         gc.collect(1)
+        logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
 def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
