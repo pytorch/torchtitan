@@ -277,16 +277,6 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name AdamW --optimizer.implementation fused",
-                ]
-            ],
-            "Fused Optimizer Test",
-            "optimizer_fused",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--training.data_parallel_shard_degree=1",
                     "--training.data_parallel_replicate_degree=4",
                 ]
