@@ -267,11 +267,12 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name Adam --optimizer.fused",
-                    "--optimizer.name AdamW --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.implementation foreach",
                 ]
             ],
-            "Fused Optimizer Test",
+            "Foreach Optimizer Test",
+            "optimizer_foreach",
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -464,7 +465,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         if test_name == "fsdp2_memory_estimation":
@@ -522,7 +523,9 @@ def run_tests(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument("--config_dir", default="./train_configs")
+    parser.add_argument(
+        "--config_dir", default="./torchtitan/models/llama/train_configs"
+    )
     parser.add_argument(
         "--test",
         default="all",

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import os
 import sys
 from collections import defaultdict
 from typing import Tuple, Union
@@ -16,7 +17,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from torchtitan.logging import logger
+from torchtitan.tools.logging import logger
 
 TORCH_DTYPE_MAP = {
     "float16": torch.float16,
@@ -193,7 +194,7 @@ class JobConfig:
         self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
-            default="./torchtitan/datasets/tokenizer/tokenizer.model",
+            default="./assets/tokenizer/original/tokenizer.model",
             help="Tokenizer path",
         )
         self.parser.add_argument(
@@ -218,9 +219,17 @@ class JobConfig:
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
-            "--optimizer.fused",
-            action="store_true",
-            help="Whether the fused implementation(CUDA only) is used.",
+            "--optimizer.implementation",
+            type=str,
+            default="fused",
+            choices=["for-loop", "foreach", "fused"],
+            help="""
+            Specify which optimizer implementation to use:
+            - 'fused': Use fused implementation (CUDA only) for best performance.
+            - 'foreach': Use some horizontal fusion of tensors for better performance.
+            - 'for-loop': Use the default implementation for the optimizer (slowest).
+            - more info: https://pytorch.org/docs/stable/optim.html
+            """,
         )
         self.parser.add_argument(
             "--optimizer.early_step_in_backward",
@@ -233,7 +242,7 @@ class JobConfig:
 
         # training configs
         self.parser.add_argument(
-            "--training.dataset", type=str, default="c4_mini", help="Dataset to use"
+            "--training.dataset", type=str, default="c4_test", help="Dataset to use"
         )
         self.parser.add_argument(
             "--training.dataset_path",
@@ -705,10 +714,21 @@ class JobConfig:
         return args_dict
 
     def _validate_config(self) -> None:
-        # TODO: Add more mandatory validations
-        assert self.model.name
-        assert self.model.flavor
-        assert self.model.tokenizer_path
+        # TODO: temporary mitigation of BC breaking change in
+        #       tokenizer default path, need to remove later
+        if not os.path.exists(self.model.tokenizer_path):
+            logger.warning(
+                f"Tokenizer path {self.model.tokenizer_path} does not exist!"
+            )
+            old_tokenizer_path = (
+                "torchtitan/datasets/tokenizer/original/tokenizer.model"
+            )
+            if os.path.exists(old_tokenizer_path):
+                self.model.tokenizer_path = old_tokenizer_path
+                logger.warning(
+                    f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
+                    "Please update your config."
+                )
 
     def _get_string_list_argument_names(self) -> list[str]:
         """Get the parser argument names of type `string_list`."""
