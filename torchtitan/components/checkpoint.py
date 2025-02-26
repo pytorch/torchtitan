@@ -363,12 +363,13 @@ class CheckpointManager:
         )
 
     def __del__(self):
-        if self.enable_checkpoint and self.mp and self.mp.is_alive():
-            self.mp_queue_send.put(Terminate())
-            self.mp.join()
-        if self.purge_thread and self.purge_thread.is_alive():
-            self.purge_queue.put(Terminate())
-            self.purge_thread.join()
+        if self.enable_checkpoint
+            if self.mp and self.mp.is_alive():
+                self.mp_queue_send.put(Terminate())
+                self.mp.join()
+            if self.purge_thread and self.purge_thread.is_alive():
+                self.purge_queue.put(Terminate())
+                self.purge_thread.join()
 
     @torch.no_grad()
     def save(self, curr_step: int, force: bool = False) -> None:
