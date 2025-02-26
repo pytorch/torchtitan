@@ -11,9 +11,8 @@ from datetime import timedelta
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.checkpoint import CheckpointManager, TrainState
+from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.config_manager import JobConfig
-
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
@@ -30,7 +29,6 @@ from torchtitan.tools.profiling import (
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
 def main(job_config: JobConfig):
-    init_logger()
     logger.info(f"Starting job: {job_config.job.description}")
 
     if job_config.experimental.custom_model_path:
@@ -427,6 +425,7 @@ def main(job_config: JobConfig):
 
 
 if __name__ == "__main__":
+    init_logger()
     config = JobConfig()
     config.parse_args()
     main(config)

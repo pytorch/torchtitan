@@ -16,7 +16,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
 )
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_hf_dataloader
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import TikTokenizer
 from torchtitan.models.llama import parallelize_llama, pipeline_llama
 from torchtitan.protocols.train_spec import (
@@ -47,8 +47,8 @@ def fake_build_optimizers(
     }
     return OptimizersContainer(
         model_parts=model_parts,
+        optimizer_cls=torch.optim.Adam,
         optimizer_kwargs=optimizer_kwargs,
-        name="Adam",
     )
 
 
