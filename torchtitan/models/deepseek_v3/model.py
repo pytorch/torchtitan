@@ -575,9 +575,10 @@ class MoE(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        if hasattr(config, "ep_size") and config.ep_size > 1:
+        if config.ep_size > 1:
             # ep_size is the number of ranks in expert dimension
-            print("Using EP size: ", config.ep_size)
+            # TODO: remove this assert after we move EP to one of the group
+            # dimensions
             assert config.ep_size == dist.get_world_size()
             self.ep_size = config.ep_size
             self.experts_per_rank = config.n_routed_experts // config.ep_size
@@ -1313,7 +1314,8 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
 # Run full model
 def run_full_model():
     rank = dist.get_rank()
-    device = torch.device("cuda", rank)
+    device_count = torch.cuda.device_count()
+    device = torch.device("cuda", rank % device_count)
     model_args = ModelArgs(
         num_hidden_layers=2,
         first_k_dense_replace=1,  # activate MoE layers
