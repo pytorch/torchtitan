@@ -210,6 +210,14 @@ class JobConfig:
                 which can be found here: https://github.com/pytorch/ao
             """,
         )
+        self.parser.add_argument(
+            "--model.print_after_conversion",
+            action="store_true",
+            help="""
+            If true, model definition will be printed to stdout after all model
+            converters have been applied.
+            """,
+        )
 
         # optimizer configs
         self.parser.add_argument(

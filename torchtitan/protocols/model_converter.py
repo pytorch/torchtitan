@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 
 class ModelConverter(Protocol):
@@ -63,10 +64,13 @@ class ModelConvertersContainer(ModelConverter):
         self.converters = [
             mh_cls(job_config, parallel_dims) for mh_cls in converter_classes
         ]
+        self.print_after_conversion = job_config.model.print_after_conversion
 
     def convert(self, model: nn.Module):
         for mh in self.converters:
             mh.convert(model)
+        if self.print_after_conversion:
+            logger.info(f"Model definion after conversion:\n\n{model}\n\n")
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
         for mh in self.converters:
