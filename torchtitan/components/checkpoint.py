@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from io import BytesIO
 from multiprocessing import get_context
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -36,6 +36,9 @@ from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
 
+if TYPE_CHECKING:
+    import torchft as ft
+
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -51,7 +54,7 @@ class AsyncMode(str, enum.Enum):
 
 
 # TODO: move this out from checkpoint.py and merge it with the trainer.py
-# We probably want to create a Trainer objecta.
+# We probably want to create a Trainer object.
 @dataclass
 class TrainState(Stateful):
     step: int = 0
@@ -200,6 +203,8 @@ class CheckpointManager:
         The solution to this problem is optimizer flattening: it landed in #127071 and is
         enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to DCP
         functions called in the OptimizerContainer.
+        See PR #127071 (https://github.com/pytorch/pytorch/pull/127071) for the example of
+        a flattening state_dict.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
     challenge (1) by also requiring us to reason about multiple 'optim' objects locally.
@@ -212,6 +217,19 @@ class CheckpointManager:
     3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
     with the assumption that all lr_schedulers have the same state_dict.
 
+    Note: TorchFT checkpointing flow
+
+    There are two types of checkpoints: when TorchFT is enabled: 1) the full perisistent
+    checkpoint, 2) the per-replica checkpoint.
+
+    The full perisistent checkpoint is saved by the replica with
+    ``ft_manager.participating_rank() == 0``. It contains everything including the model,
+    optimizer, lr_scheduler, dataloader, and train_state. Right now the full perisistent
+    checkpoint is loaded by all replicas. However, we can optimize it to only load if
+    there are no other alive replicas.
+
+    The per-replica checkpoint contains only the dataloader and is saved/loaded by all
+    replicas to/from the its own folder. The folder name is prefixed with the ft_replica_id.
 
     Args:
         dataloader (DataLoader): The dataloader used to load the data.
@@ -488,7 +506,7 @@ class CheckpointManager:
 
         Args:
             folder (str, optional): The folder to find the checkpoint for. If ``folder``
-                is "", then ``self.folder`` will be used.
+            is "", then ``self.folder`` will be used.
 
         Returns:
             int: The step to load the checkpoint for.

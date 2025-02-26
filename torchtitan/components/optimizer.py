@@ -19,6 +19,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
+from torchtitan.components.ft import has_torchft
 from torchtitan.config_manager import JobConfig
 
 
@@ -28,6 +29,10 @@ __all__ = [
     "build_optimizers",
     "build_lr_schedulers",
 ]
+
+
+if has_torchft:
+    import torchft as ft
 
 
 def _create_optimizer(
@@ -185,8 +190,6 @@ class FTOptimizersContainer(OptimizersContainer):
         name: str,
         ft_manager: Optional["ft.Manager"],
     ) -> None:
-        import torchft as ft
-
         super().__init__(model_parts, optimizer_kwargs, name)
 
         # Force to initialize the optimizer state so that `optim.step()`

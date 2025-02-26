@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -14,6 +14,10 @@ from torchtitan.tools.logging import logger
 
 
 __all__ = ["ParallelDims"]
+
+
+if TYPE_CHECKING:
+    import torchft as ft
 
 
 @dataclass

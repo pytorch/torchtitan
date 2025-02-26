@@ -12,10 +12,10 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
+from torchtitan.components.ft import init_ft_manager
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
-from torchtitan.ft import init_ft_manager
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
 
@@ -45,6 +45,7 @@ def main(job_config: JobConfig):
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
+    device_module, device_type = utils.device_module, utils.device_type
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
     device_module.set_device(device)
     ft_manager = init_ft_manager(job_config)

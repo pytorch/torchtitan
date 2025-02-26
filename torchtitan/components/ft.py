@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
-from dataclasses import dataclass
 from typing import Optional
 
 from torchtitan.config_manager import JobConfig
@@ -33,10 +32,14 @@ def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
     if not has_torchft:
         raise ImportError("torchft is not installed. Please install it.")
 
+    if job.experimental.ft_min_replica_size < 1:
+        raise ValueError("At least one FT replica is required.")
+
     pg = ft.ProcessGroupBabyNCCL()
+
     return ft.Manager(
         pg=pg,
-        min_replica_size=1,
+        min_replica_size=job.experimental.ft_min_replica_size,
         load_state_dict=None,
         state_dict=None,
         use_async_quorum=True,

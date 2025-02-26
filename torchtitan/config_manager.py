@@ -685,6 +685,13 @@ class JobConfig:
             """,
         )
 
+        self.parser.add_argument(
+            "--experimental.ft_min_replica_size",
+            type=int,
+            default=1,
+            help="The minimum number of FT replica for each step.",
+        )
+
     def to_dict(self):
         return self.args_dict
 
