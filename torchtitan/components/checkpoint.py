@@ -314,7 +314,7 @@ class CheckpointManager:
         )
 
     def __del__(self):
-        if self.enable_checkpoint
+        if self.enable_checkpoint:
             if self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
