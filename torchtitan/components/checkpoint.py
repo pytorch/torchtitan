@@ -51,7 +51,7 @@ class AsyncMode(str, enum.Enum):
 
 
 # TODO: move this out from checkpoint.py and merge it with the trainer.py
-# We probably want to create a Trainer objecta.
+# We probably want to create a Trainer object.
 @dataclass
 class TrainState(Stateful):
     step: int = 0
@@ -200,6 +200,8 @@ class CheckpointManager:
         The solution to this problem is optimizer flattening: it landed in #127071 and is
         enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to DCP
         functions called in the OptimizerContainer.
+        See PR #127071 (https://github.com/pytorch/pytorch/pull/127071) for the example of
+        a flattening state_dict.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
     challenge (1) by also requiring us to reason about multiple 'optim' objects locally.
@@ -443,7 +445,7 @@ class CheckpointManager:
 
         Args:
             folder (str, optional): The folder to find the checkpoint for. If ``folder``
-                is "", then ``self.folder`` will be used.
+            is "", then ``self.folder`` will be used.
 
         Returns:
             int: The step to load the checkpoint for.
