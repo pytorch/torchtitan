@@ -503,16 +503,10 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--checkpoint.interval_type",
-            type=str,
-            default="steps",
-            help="Checkpointing interval unit of measurement ['step', 'seconds']",
-        )
-        self.parser.add_argument(
             "--checkpoint.interval",
             type=int,
             default=500,
-            help="Checkpointing interval, in steps or seconds depending on --checkpoint.interval_type",
+            help="Checkpointing interval in steps.",
         )
         self.parser.add_argument(
             "--checkpoint.model_weights_only",
@@ -572,7 +566,8 @@ class JobConfig:
             default=0,
             help="""
                 Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
-                0 is the default value.
+                0 is the default value. k cannot be 1 as the last one may be in the process of being
+                saved. As a result, the metadata of the last one may not be ready yet.
             """,
         )
         self.parser.add_argument(

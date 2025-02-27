@@ -20,7 +20,6 @@ In your torchtitan training config, ensure that `enable_checkpoint` is set to Tr
 [checkpoint]
 enable_checkpoint = true
 folder = "checkpoint"
-interval_type = "steps"
 interval = 500
 ```
 
@@ -47,7 +46,6 @@ export_dtype = "bfloat16"
 [checkpoint]
 enable_checkpoint = true
 folder = "checkpoint"
-interval_type = "steps"
 interval = 10
 load_step = 5
 model_weights_only = true
