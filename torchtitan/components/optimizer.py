@@ -94,13 +94,13 @@ class OptimizersContainer(Optimizer):
     def __len__(self) -> int:
         return len(self.optimizers)
 
-    def step(self) -> None:
+    def step(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
-            optimizer.step()
+            optimizer.step(*args, **kwargs)
 
-    def zero_grad(self) -> None:
+    def zero_grad(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
-            optimizer.zero_grad()
+            optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> Dict[str, Any]:
         func = functools.partial(
@@ -199,8 +199,9 @@ class FTOptimizersContainer(OptimizersContainer):
             for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
             for k, v in sd.items()
         }
-        self.optimizers = [ft.Optimizer(ft_manager, optim) for optim in self.optimizers]
         self.cache_state_dict: Dict[str, Any] = {}
+        self._ft_optimizer = ft.Optimizer(ft_manager, self)
+        self._call_from_ft: bool = False
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
@@ -215,6 +216,32 @@ class FTOptimizersContainer(OptimizersContainer):
         self.cache_state_dict = {}
         super().load_state_dict(state_dict)
         self.init_cache_state_dict()
+
+    def step(self, *args, **kwargs) -> None:
+        """Calling the correct step() depending on the caller.
+
+        TorchFT's OptimizerWrapper.step() is designed to be callled only once
+        per train step per ft.Manager regardless how many optimizers are used.
+        Hence we will need to appropriately dispatch the call.
+        """
+        if self._call_from_ft:
+            super().step(*args, **kwargs)
+        else:
+            self._call_from_ft = True
+            self._ft_optimizer.step(*args, **kwargs)
+            self._call_from_ft = False
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        """Calling the correct zero_grad() depending on the caller.
+
+        Check the comment in ``step()``.
+        """
+        if self._call_from_ft:
+            super().zero_grad(*args, **kwargs)
+        else:
+            self._call_from_ft = True
+            self._ft_optimizer.zero_grad(*args, **kwargs)
+            self._call_from_ft = False
 
 
 def build_optimizers(
