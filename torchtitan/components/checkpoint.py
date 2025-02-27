@@ -254,7 +254,7 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.ft_manager = ft_manager
+        self.ft_manager = ft_manager.manager if ft_manager.enabled else None
 
         if self.ft_manager:
             optimizers.init_cache_state_dict()
@@ -276,7 +276,7 @@ class CheckpointManager:
                 for k, v in state_dict.items():
                     self.states[k].load_state_dict(v)
 
-            ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+            self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
         self.ft_replica_id = job_config.experimental.ft_replica_id
 
         async_mode = ckpt_config.async_mode.lower()

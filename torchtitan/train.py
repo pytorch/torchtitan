@@ -47,6 +47,7 @@ def main(job_config: JobConfig):
 
     device_module, device_type = utils.device_module, utils.device_type
     device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+    # Device has to be set before creating TorchFT manager.
     device_module.set_device(device)
     ft_manager = init_ft_manager(job_config)
 
@@ -87,8 +88,11 @@ def main(job_config: JobConfig):
 
     # build dataloader
     tokenizer = train_spec.tokenizer_cls(job_config.model.tokenizer_path)
-    dp_rank = dp_degree * job_config.experimental.ft_replica_id + dp_rank
-    dp_degree = dp_degree * job_config.experimental.ft_group_size
+
+    # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
+    # dataloader must be changed.
+    dp_rank = ft_manager.get_dp_rank(dp_degree, dp_rank)
+    dp_degree = ft_manager.get_dp_degree(dp_degree)
     dataloader = train_spec.build_dataloader_fn(
         dp_world_size=dp_degree,
         dp_rank=dp_rank,

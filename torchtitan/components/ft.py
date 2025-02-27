@@ -17,7 +17,34 @@ else:
     has_torchft = False
 
 
-def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
+class FTManager:
+    def __init__(
+        self,
+        manager: Optional["ft.Manager"],
+        group_size: int = 1,
+        replica_id: int = 0,
+    ) -> None:
+        self._manager = manager
+        self.group_size = group_size
+        self.replica_id = replica_id
+
+    @property
+    def enabled(self) -> bool:
+        return self._manager is not None
+
+    @property
+    def manager(self) -> "ft.Manager":
+        assert self._manager is not None
+        return self._manager
+
+    def get_dp_rank(self, dp_degree: int, dp_rank: int) -> int:
+        return dp_degree * self.replica_id + dp_rank
+
+    def get_dp_degree(self, dp_degree: int) -> int:
+        return dp_degree * self.group_size
+
+
+def init_ft_manager(job: JobConfig) -> FTManager:
     """Initialize the FT manager if TorchFT is enabled.
 
     Args:
@@ -27,7 +54,7 @@ def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
         Optional[ft.Manager]: The FT manager if TorchFT is enabled, otherwise None.
     """
     if not job.experimental.enable_torchft:
-        return None
+        return FTManager(None)
 
     if not has_torchft:
         raise ImportError("torchft is not installed. Please install it.")
@@ -37,11 +64,15 @@ def init_ft_manager(job: JobConfig) -> Optional["ft.Manager"]:
 
     pg = ft.ProcessGroupBabyNCCL()
 
-    return ft.Manager(
-        pg=pg,
-        min_replica_size=job.experimental.ft_min_replica_size,
-        load_state_dict=None,
-        state_dict=None,
-        use_async_quorum=True,
-        replica_id=f"torchtitan_ft_{job.experimental.ft_replica_id}",
+    return FTManager(
+        ft.Manager(
+            pg=pg,
+            min_replica_size=job.experimental.ft_min_replica_size,
+            load_state_dict=None,
+            state_dict=None,
+            use_async_quorum=True,
+            replica_id=f"torchtitan_ft_{job.experimental.ft_replica_id}",
+        ),
+        group_size=job.experimental.ft_group_size,
+        replica_id=job.experimental.ft_replica_id,
     )

@@ -20,7 +20,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
-from torchtitan.components.ft import has_torchft
+from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 
 
@@ -188,7 +188,7 @@ class FTOptimizersContainer(OptimizersContainer):
         model_parts: List[nn.Module],
         optimizer_cls: type[T],
         optimizer_kwargs: Dict[str, Any],
-        ft_manager: Optional["ft.Manager"],
+        ft_manager: "ft.Manager",
     ) -> None:
         super().__init__(model_parts, optimizer_cls, optimizer_kwargs)
 
@@ -247,7 +247,7 @@ class FTOptimizersContainer(OptimizersContainer):
 def build_optimizers(
     model_parts: List[nn.Module],
     job_config: JobConfig,
-    ft_manager: Optional["ft.Manager"] = None,
+    ft_manager: FTManager,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -296,15 +296,15 @@ def build_optimizers(
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]
 
-    if optim_in_bwd and ft_manager:
+    if optim_in_bwd and ft_manager.enabled:
         raise ValueError("TorchFT is not supported with optimizers in backward.")
     elif optim_in_bwd:
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
         )
-    elif ft_manager:
+    elif ft_manager.enabled:
         return FTOptimizersContainer(
-            model_parts, optimizer_cls, optimizer_kwargs, ft_manager
+            model_parts, optimizer_cls, optimizer_kwargs, ft_manager.manager
         )
     else:
         return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
