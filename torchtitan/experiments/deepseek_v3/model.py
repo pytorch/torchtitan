@@ -42,8 +42,6 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 from symm_mem_recipes import on_device_all_to_all_v
 from torch import nn
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 from torch.nn import CrossEntropyLoss
 
 
@@ -1360,6 +1358,13 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         return reordered_past
 
 
+# Start of testing part
+# torchrun --standalone --nproc-per-node 4 model.py
+
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+
+
 # Run full model
 def run_full_model(
     mesh: DeviceMesh,
@@ -1416,7 +1421,6 @@ def run_full_model(
         print(y.shape)
 
 
-# torchrun --standalone --nproc-per-node 4 model.py
 if __name__ == "__main__":
     mesh = dist.init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "ep"))
 
