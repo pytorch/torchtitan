@@ -7,7 +7,7 @@
 import copy
 import functools
 
-from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Generic, List, TypeVar
 
 import torch
 import torch.nn as nn

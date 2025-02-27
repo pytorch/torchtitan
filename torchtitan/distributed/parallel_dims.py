@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from torch.distributed.device_mesh import init_device_mesh
 from torchtitan.tools.logging import logger
