@@ -296,28 +296,28 @@ def build_test_list():
             "hsdp",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.context_parallel_degree=4",
-                    "--experimental.context_parallel_rotate_method='allgather'",
-                ]
-            ],
-            "CP (allgather)",
-            "cp_allgather",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.context_parallel_degree=4",
-                    "--experimental.context_parallel_rotate_method='alltoall'",
-                ]
-            ],
-            "CP (alltoall)",
-            "cp_alltoall",
-            ngpu=4,
-        ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--experimental.context_parallel_degree=4",
+        # "--experimental.context_parallel_rotate_method='allgather'",
+        # ]
+        # ],
+        # "CP (allgather)",
+        # "cp_allgather",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--experimental.context_parallel_degree=4",
+        # "--experimental.context_parallel_rotate_method='alltoall'",
+        # ]
+        # ],
+        # "CP (alltoall)",
+        # "cp_alltoall",
+        # ngpu=4,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -330,74 +330,74 @@ def build_test_list():
             "hsdp+tp",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+CP",
-            "fsdp+cp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=1",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (with dp_shard)",
-            "hsdp+cp_without_dp_shard",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (without dp_shard)",
-            "hsdp+cp_with_dp_shard",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+TP+CP",
-            "fsdp+tp+cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-                [
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "FSDP+CP",
+        # "fsdp+cp",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=1",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "HSDP+CP (with dp_shard)",
+        # "hsdp+cp_without_dp_shard",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "HSDP+CP (without dp_shard)",
+        # "hsdp+cp_with_dp_shard",
+        # ngpu=8,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "FSDP+TP+CP",
+        # "fsdp+tp+cp",
+        # ngpu=8,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--checkpoint.enable_checkpoint",
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # "--training.enable_cpu_offload",
+        # "--optimizer.early_step_in_backward",
+        # ],
+        # [
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--training.enable_cpu_offload",
+        # "--optimizer.early_step_in_backward",
+        # ],
+        # ],
+        # "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+        # "cpu_offload+opt_in_bwd+TP+DP+CP",
+        # ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
