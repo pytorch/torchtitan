@@ -181,6 +181,11 @@ class ModelArgs:
     pad_token_id = None
     # Added for symmetric memory
     max_seq_len: int = 4096
+    # Added for pipeline parallel
+    stage_idx: int = 0
+    num_stages: int = 1
+    # Added for expert parallel
+    ep_rank: int = 0
 
 
 class RMSNorm(nn.Module):
@@ -1134,13 +1139,18 @@ class DeepseekV3Model(torch.nn.Module):
 
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, self.padding_idx
-        )
+        ) if config.stage_idx == 0 else None
 
         self.layers = torch.nn.ModuleDict()
-        for layer_id in range(config.num_hidden_layers):
+        layers_per_stage = config.num_hidden_layers // config.num_stages
+
+        for layer_id in range(
+            layers_per_stage * config.stage_idx,
+            layers_per_stage * (config.stage_idx + 1),
+        ):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.stage_idx == config.num_stages - 1 else None
 
         # Initialize weights and apply final processing
         self.apply(self._init_weights)
@@ -1325,6 +1335,9 @@ def run_full_model(
         num_hidden_layers=2,
         first_k_dense_replace=1,  # activate MoE layers
         ep_size=mesh["ep"].size(),  # activate Expert Parallel
+        ep_rank=mesh["ep"].get_local_rank(),
+        num_stages=mesh["pp"].size(),  # activate Pipeline Parallel
+        stage_idx=mesh["pp"].get_local_rank(),
     )
     print(model_args)
 
