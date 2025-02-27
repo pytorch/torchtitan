@@ -182,6 +182,7 @@ class ModelArgs:
     max_seq_len: int = 4096
     # Added for pipeline parallel
     num_stages: int = 1
+    stage_idx: int = 0
 
 
 # Get model parallel subgroup by name:
@@ -1157,14 +1158,15 @@ class DeepseekV3Model(torch.nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        # Get my pipeline stage id
-        stage_idx = get_pp_rank()
-        assert stage_idx < config.num_stages, f"Stage {stage_idx} is not in the model"
-        print(f"Creating model stage {stage_idx} of {config.num_stages}")
+        # Creating model parts related to my stage
+        assert (
+            config.stage_idx < config.num_stages
+        ), f"Stage {config.stage_idx} is not in the model"
+        print(f"Creating model stage {config.stage_idx} of {config.num_stages}")
 
         self.embed_tokens = (
             nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-            if stage_idx == 0
+            if config.stage_idx == 0
             else None
         )
 
@@ -1172,14 +1174,14 @@ class DeepseekV3Model(torch.nn.Module):
         layers_per_stage = config.num_hidden_layers // config.num_stages
 
         for layer_id in range(
-            layers_per_stage * stage_idx,
-            layers_per_stage * (stage_idx + 1),
+            layers_per_stage * config.stage_idx,
+            layers_per_stage * (config.stage_idx + 1),
         ):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
 
         self.norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            if stage_idx == config.num_stages - 1
+            if config.stage_idx == config.num_stages - 1
             else None
         )
 
@@ -1385,6 +1387,7 @@ def run_full_model(
         first_k_dense_replace=1,  # activate MoE layers
         ep_size=ep_size,  # activate Expert Parallel
         num_stages=pp_size,  # activate Pipeline Parallel
+        stage_idx=pp_rank,  # pipeline stage id
     )
     print(model_args)
 
