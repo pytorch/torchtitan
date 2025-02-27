@@ -6,7 +6,8 @@
 
 import copy
 import functools
-from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from typing import Any, Callable, Dict, Generic, Iterable, List, Optional, TypeVar
 
 import torch
 import torch.nn as nn
@@ -35,18 +36,10 @@ if has_torchft:
     import torchft as ft
 
 
-def _create_optimizer(
-    parameters: Iterable[nn.Parameter], optimizer_kwargs: Dict[str, Any], name: str
-) -> Optimizer:
-    if name == "Adam":
-        return torch.optim.Adam(parameters, **optimizer_kwargs)
-    elif name == "AdamW":
-        return torch.optim.AdamW(parameters, **optimizer_kwargs)
-    else:
-        raise NotImplementedError(f"Optimizer {name} not added.")
+T = TypeVar("T", bound=Optimizer)
 
 
-class OptimizersContainer(Optimizer):
+class OptimizersContainer(Optimizer, Generic[T]):
     """A container for multiple optimizers.
 
     This class is used to wrap multiple optimizers into a single object that can be
@@ -72,18 +65,21 @@ class OptimizersContainer(Optimizer):
         name (str): Name of the optimizers.
     """
 
-    optimizers: List[Optimizer]
+    optimizers: List[T]
     model_parts: List[nn.Module]
 
     def __init__(
-        self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
+        self,
+        model_parts: List[nn.Module],
+        optimizer_cls: type[T],
+        optimizer_kwargs: Dict[str, Any],
     ) -> None:
         all_params = []
-        self.optimizers: List[Optimizer] = []
+        self.optimizers: List[T] = []
         self.model_parts = model_parts
         for model in self.model_parts:
             params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(_create_optimizer(params, optimizer_kwargs, name))
+            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
             all_params.extend(params)
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
@@ -124,7 +120,10 @@ class OptimizersContainer(Optimizer):
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(
             self.optimizers
-        ), "Must pass one optimizer per model part or per param if using OptimizersInBackwardContainer"
+        ), (
+            "Must pass one optimizer per model part or per param if "
+            "using OptimizersInBackwardContainer."
+        )
 
     def _post_init(
         self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]
@@ -144,7 +143,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
     """
 
     def __init__(
-        self, model_parts: List[nn.Module], optimizer_kwargs: Dict[str, Any], name: str
+        self,
+        model_parts: List[nn.Module],
+        optimizer_cls: type[T],
+        optimizer_kwargs: Dict[str, Any],
     ) -> None:
         all_params = []
         self.model_parts = model_parts
@@ -153,7 +155,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         for model in self.model_parts:
             for p in model.parameters():
                 if p.requires_grad:
-                    optim_dict[p] = _create_optimizer([p], optimizer_kwargs, name)
+                    optim_dict[p] = optimizer_cls([p], **optimizer_kwargs)
                 all_params.append(p)
 
         def optim_hook(param) -> None:
@@ -186,11 +188,11 @@ class FTOptimizersContainer(OptimizersContainer):
     def __init__(
         self,
         model_parts: List[nn.Module],
+        optimizer_cls: type[T],
         optimizer_kwargs: Dict[str, Any],
-        name: str,
         ft_manager: Optional["ft.Manager"],
     ) -> None:
-        super().__init__(model_parts, optimizer_kwargs, name)
+        super().__init__(model_parts, optimizer_cls, optimizer_kwargs)
 
         # Force to initialize the optimizer state so that `optim.step()`
         # won't be called by state_dict() and load_state_dict().
@@ -288,14 +290,22 @@ def build_optimizers(
         "foreach": foreach,
     }
 
+    optimizer_classes = {
+        "Adam": torch.optim.Adam,
+        "AdamW": torch.optim.AdamW,
+    }
+    if name not in optimizer_classes:
+        raise NotImplementedError(f"Optimizer {name} not added.")
+    optimizer_cls = optimizer_classes[name]
+
     if optim_in_bwd and ft_manager:
         raise ValueError("TorchFT is not supported with optimizers in backward.")
     elif optim_in_bwd:
-        return OptimizersInBackwardContainer(model_parts, optimizer_kwargs, name)
+        return OptimizersInBackwardContainer(model_parts, optimizer_cls, optimizer_kwargs)
     elif ft_manager:
-        return FTOptimizersContainer(model_parts, optimizer_kwargs, name, ft_manager)
+        return FTOptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs, ft_manager)
     else:
-        return OptimizersContainer(model_parts, optimizer_kwargs, name)
+        return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
 
 class LRSchedulersContainer(Stateful):
