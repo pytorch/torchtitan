@@ -49,25 +49,46 @@ class Float8Converter(ModelConverter):
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
-        # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
-        enable_fsdp_float8_all_gather = (
-            parallel_dims.dp_shard_enabled
-            and float8_config.enable_fsdp_float8_all_gather
-        )
-        self.config = Float8LinearConfig(
-            enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-            force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
-        )
+        if float8_config.recipe_name is not None and not hasattr(
+            Float8LinearConfig, "from_recipe_name"
+        ):
+            logger.warning(
+                "Failed to swap to Float8Linear with recipe lookup because the torchao version "
+                + "is too old, please install torchao v0.9.0 or later and try again",
+            )
+            return
 
         self.enabled = True
 
-        # for precompute_float8_dynamic_scale_for_fsdp
-        self.precompute_scale = (
-            enable_fsdp_float8_all_gather
-            and float8_config.precompute_float8_dynamic_scale_for_fsdp
-        )
+        if float8_config.recipe_name is not None:
+            assert (
+                not float8_config.enable_fsdp_float8_all_gather
+            ), "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
+            assert (
+                not float8_config.force_recompute_fp8_weight_in_bwd
+            ), "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
+            self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
+            self.precompute_scale = False
+            logger.info(
+                f"Float8 training active with recipe {float8_config.recipe_name}"
+            )
 
-        logger.info("Float8 training active")
+        else:
+            # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
+            enable_fsdp_float8_all_gather = (
+                parallel_dims.dp_shard_enabled
+                and float8_config.enable_fsdp_float8_all_gather
+            )
+            self.config = Float8LinearConfig(
+                enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
+                force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
+            )
+            # for precompute_float8_dynamic_scale_for_fsdp
+            self.precompute_scale = (
+                enable_fsdp_float8_all_gather
+                and float8_config.precompute_float8_dynamic_scale_for_fsdp
+            )
+            logger.info("Float8 tensorwise scaled training active")
 
     def convert(self, model: nn.Module):
         return self.convert_to_float8_training(model)
