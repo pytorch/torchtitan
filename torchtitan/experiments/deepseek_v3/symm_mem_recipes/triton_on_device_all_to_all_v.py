@@ -129,14 +129,15 @@ def on_device_all_to_all_v(
     BLOCKS_PER_REMOTE_RANK=8,
     UNROLL_FACTOR: int = 8,
     BLOCK_SIZE: int = 16384,
+    group: dist.ProcessGroup = dist.group.WORLD,
 ):
     assert output.dim() == 2, f"{output.shape}"
     assert input.dim() == 2, f"{input.shape}"
     assert output.shape[1] == input.shape[1]
 
     dim = output.shape[1]
-    input_hdl = symm_mem.rendezvous(input, group=dist.group.WORLD)
-    split_sizes_hdl = symm_mem.rendezvous(split_sizes, group=dist.group.WORLD)
+    input_hdl = symm_mem.rendezvous(input, group=group)
+    split_sizes_hdl = symm_mem.rendezvous(split_sizes, group=group)
 
     num_blocks = input_hdl.world_size * BLOCKS_PER_REMOTE_RANK
     kernel = on_device_all_to_all_v_kernel[(num_blocks, 1, 1)](
