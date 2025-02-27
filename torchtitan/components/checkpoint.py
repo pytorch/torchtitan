@@ -250,7 +250,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: Dict[str, Any],
         job_config: JobConfig,
-        ft_manager: Optional["ft.Manager"] = None,
+        ft_manager: FTManager,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint

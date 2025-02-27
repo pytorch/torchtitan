@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from torch.distributed.device_mesh import init_device_mesh
-from torchtitan.tools.logging import logger
+
 from torchtitan.components.ft import FTManager
+from torchtitan.tools.logging import logger
 
 
 __all__ = ["ParallelDims"]
