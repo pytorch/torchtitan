@@ -42,8 +42,9 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 from symm_mem_recipes import on_device_all_to_all_v
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 from torch.nn import CrossEntropyLoss
-from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
 
 
 @dataclass
@@ -182,10 +183,23 @@ class ModelArgs:
     # Added for symmetric memory
     max_seq_len: int = 4096
     # Added for pipeline parallel
-    stage_idx: int = 0
     num_stages: int = 1
-    # Added for expert parallel
-    ep_rank: int = 0
+
+
+# Get model parallel subgroup by name:
+# e.g. "pp", "ep", None
+def get_group(dim_name: Optional[str] = None) -> dist.ProcessGroup:
+    glob = torch.distributed.device_mesh._mesh_resources.get_current_mesh()
+    return glob.get_group(dim_name)
+
+
+# Get my pipeline parallel rank
+def get_pp_rank() -> int:
+    try:
+        group = get_group("pp")
+        return group.rank()
+    except Exception:
+        return 0
 
 
 class RMSNorm(nn.Module):
@@ -582,12 +596,12 @@ class MoE(nn.Module):
 
         if config.ep_size > 1:
             # ep_size is the number of ranks in expert dimension
-            # TODO: remove this assert after we move EP to one of the group
-            # dimensions
-            assert config.ep_size == dist.get_world_size()
+            self.ep_group = get_group("ep")
+            assert config.ep_size == self.ep_group.size()
             self.ep_size = config.ep_size
+            self.ep_rank = self.ep_group.rank()
+            print(f"Creating EP rank {self.ep_rank} of {self.ep_size}")
             self.experts_per_rank = config.n_routed_experts // config.ep_size
-            self.ep_rank = dist.get_rank()
             self.experts = nn.ModuleList(
                 [
                     (
@@ -691,12 +705,18 @@ class MoE(nn.Module):
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
-            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
             torch.sum(
                 tokens_per_expert_group.view(self.ep_size, -1),
                 dim=1,
                 out=self.output_splits,
             )
+            # print(
+            #     f"EP rank {self.ep_rank} receives {self.output_splits} tokens"
+            #     f"EP rank {self.ep_rank} sends {self.input_splits} tokens"
+            # )
             # Total received tokens of current rank
             received = torch.empty(1, dtype=torch.int64, device=x.device)
             # DP to EP token shuffle
@@ -705,6 +725,7 @@ class MoE(nn.Module):
                 received,
                 sorted_tokens,
                 self.input_splits,
+                group=self.ep_group,
             )
             # Received tokens from all other ranks. TODO: use mask instead
             gathered_tokens = self.token_gather_buf[:received]
@@ -745,6 +766,7 @@ class MoE(nn.Module):
                 received,  # unused
                 new_x,
                 self.output_splits,
+                group=self.ep_group,
             )
             outs = gathered_tokens
 
@@ -1137,20 +1159,31 @@ class DeepseekV3Model(torch.nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx
-        ) if config.stage_idx == 0 else None
+        # Get my pipeline stage id
+        stage_idx = get_pp_rank()
+        assert stage_idx < config.num_stages, f"Stage {stage_idx} is not in the model"
+        print(f"Creating model stage {stage_idx} of {config.num_stages}")
+
+        self.embed_tokens = (
+            nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+            if stage_idx == 0
+            else None
+        )
 
         self.layers = torch.nn.ModuleDict()
         layers_per_stage = config.num_hidden_layers // config.num_stages
 
         for layer_id in range(
-            layers_per_stage * config.stage_idx,
-            layers_per_stage * (config.stage_idx + 1),
+            layers_per_stage * stage_idx,
+            layers_per_stage * (stage_idx + 1),
         ):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.stage_idx == config.num_stages - 1 else None
+        self.norm = (
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if stage_idx == config.num_stages - 1
+            else None
+        )
 
         # Initialize weights and apply final processing
         self.apply(self._init_weights)
@@ -1173,7 +1206,9 @@ class DeepseekV3Model(torch.nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         # Embedding
-        hidden_states = self.embed_tokens(tokens) if self.embed_tokens is not None else tokens
+        hidden_states = (
+            self.embed_tokens(tokens) if self.embed_tokens is not None else tokens
+        )
 
         # decoder layers
         for decoder_layer in self.layers.values():
@@ -1183,7 +1218,9 @@ class DeepseekV3Model(torch.nn.Module):
                 position_ids=position_ids,
             )
 
-        hidden_states = self.norm(hidden_states) if self.norm is not None else hidden_states
+        hidden_states = (
+            self.norm(hidden_states) if self.norm is not None else hidden_states
+        )
         return hidden_states
 
 
@@ -1331,33 +1368,59 @@ def run_full_model(
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
 
+    pp_mesh = mesh["pp"]
+    ep_mesh = mesh["ep"]
+    pp_rank = pp_mesh.get_local_rank()
+    ep_rank = ep_mesh.get_local_rank()
+    pp_size = pp_mesh.size()
+    ep_size = ep_mesh.size()
+
     model_args = ModelArgs(
-        num_hidden_layers=2,
+        num_hidden_layers=3,
         first_k_dense_replace=1,  # activate MoE layers
-        ep_size=mesh["ep"].size(),  # activate Expert Parallel
-        ep_rank=mesh["ep"].get_local_rank(),
-        num_stages=mesh["pp"].size(),  # activate Pipeline Parallel
-        stage_idx=mesh["pp"].get_local_rank(),
+        ep_size=ep_size,  # activate Expert Parallel
+        num_stages=pp_size,  # activate Pipeline Parallel
     )
     print(model_args)
 
     # Instantiate model
-    with device:
+    with device, mesh:
         model = DeepseekV3Model(model_args)
         model.eval()
 
-    # Test forward
+    # Example inputs
     bs = 2
+    microbatches = 2
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
-    y = model(x)
-    print(y.shape)
+
+    # Create pipeline stage
+    stage = PipelineStage(
+        model,
+        pp_rank,
+        pp_size,
+        device,
+        group=pp_mesh.get_group(),
+    )
+
+    # Create pipeline schedule
+    pp_schedule = ScheduleGPipe(stage, microbatches)
+
+    # Run forward
+    if pp_rank == 0:
+        y = pp_schedule.step(x)
+    else:
+        y = pp_schedule.step()
+
+    if pp_rank == pp_size - 1:
+        print(y.shape)
 
 
 # torchrun --standalone --nproc-per-node 4 model.py
 if __name__ == "__main__":
-    mesh = dist.init_device_mesh("cuda", (1, 4), mesh_dim_names=("pp", "ep"))
+    mesh = dist.init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "ep"))
 
-    run_full_model(mesh)
+    with torch.no_grad():
+        run_full_model(mesh)
 
     dist.destroy_process_group()
