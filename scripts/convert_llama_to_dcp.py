@@ -10,9 +10,8 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as DCP
-
-from torchtitan.logging import init_logger, logger
 from torchtitan.models.llama.model import precompute_freqs_cis
+from torchtitan.tools.logging import init_logger, logger
 
 
 @torch.inference_mode()

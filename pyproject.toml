@@ -10,8 +10,11 @@ authors = [
 ]
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
+    # Stateful Dataloader
+    "torchdata>=0.8.0",
+
     # Hugging Face integrations
-    "datasets>=2.19.0",
+    "datasets>=2.21.0",
 
     # Tokenization
     "blobfile",
@@ -47,9 +50,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = [""]
 include = ["torchtitan*"]
-
-[tool.setuptools.package-data]
-recipes = ["train_configs/*.toml"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks

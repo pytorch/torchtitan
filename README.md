@@ -46,8 +46,9 @@ Our guiding principles when building `torchtitan`:
 8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
 9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 10. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-11. All options easily configured via [toml files](train_configs/)
+11. All options easily configured via [toml files](torchtitan/models/llama/train_configs/)
 12. [Helper scripts](scripts/) to
+    - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
     - estimate FSDP/HSDP memory usage without materializing the model
     - run distributed inference with Tensor Parallel
@@ -58,11 +59,11 @@ We report [performance](docs/performance.md) on up to 512 GPUs, and verify [loss
 
 You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
 * [train.py](train.py) - the main training loop and high-level setup code
-* [torchtitan/parallelisms/parallelize_llama.py](torchtitan/parallelisms/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
-* [torchtitan/parallelisms/pipeline_llama.py](torchtitan/parallelisms/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
-* [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
-* [torchtitan/float8.py](torchtitan/float8.py) - utils for applying Float8 techniques
 * [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama 3.1 model definition
+* [torchtitan/models/llama/parallelize_llama.py](torchtitan/models/llama/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
+* [torchtitan/models/llama/pipeline_llama.py](torchtitan/models/llama/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
+* [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
+* [torchtitan/components/float8.py](torchtitan/components/float8.py) - utils for applying Float8 techniques
 
 
 ## Installation
@@ -72,6 +73,7 @@ git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124 --force-reinstall
+pip install -e .
 ```
 
 ### Downloading a tokenizer
@@ -84,14 +86,14 @@ Once you have confirmed access, you can run the following command to download th
 # Get your HF token from https://huggingface.co/settings/tokens
 
 # Llama 3.1 tokenizer.model
-python torchtitan/datasets/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
+python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
 ```
 
 ### Start a training run
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_llama_train.sh
+CONFIG_FILE="./torchtitan/models/llama/train_configs/llama3_8b.toml" ./run_train.sh
 ```
 
 ### Multi-Node Training

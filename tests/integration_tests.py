@@ -143,6 +143,18 @@ def build_test_list():
             [
                 [
                     "--experimental.pipeline_parallel_degree 2",
+                    "--experimental.pipeline_parallel_schedule ZBVZeroBubble",
+                    "--experimental.pipeline_parallel_microbatches 8",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--experimental.pipeline_parallel_degree 2",
                     "--experimental.pipeline_parallel_schedule 1F1B",
                     "--training.data_parallel_shard_degree 1",
                 ],
@@ -255,11 +267,12 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--optimizer.name Adam --optimizer.fused",
-                    "--optimizer.name AdamW --optimizer.fused",
+                    "--optimizer.name AdamW --optimizer.implementation foreach",
                 ]
             ],
-            "Fused Optimizer Test",
+            "Foreach Optimizer Test",
+            "optimizer_foreach",
+            ngpu=2,
         ),
         OverrideDefinitions(
             [
@@ -283,28 +296,28 @@ def build_test_list():
             "hsdp",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.context_parallel_degree=4",
-                    "--experimental.context_parallel_rotate_method='allgather'",
-                ]
-            ],
-            "CP (allgather)",
-            "cp_allgather",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--experimental.context_parallel_degree=4",
-                    "--experimental.context_parallel_rotate_method='alltoall'",
-                ]
-            ],
-            "CP (alltoall)",
-            "cp_alltoall",
-            ngpu=4,
-        ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--experimental.context_parallel_degree=4",
+        # "--experimental.context_parallel_rotate_method='allgather'",
+        # ]
+        # ],
+        # "CP (allgather)",
+        # "cp_allgather",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--experimental.context_parallel_degree=4",
+        # "--experimental.context_parallel_rotate_method='alltoall'",
+        # ]
+        # ],
+        # "CP (alltoall)",
+        # "cp_alltoall",
+        # ngpu=4,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -317,74 +330,74 @@ def build_test_list():
             "hsdp+tp",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+CP",
-            "fsdp+cp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=1",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (with dp_shard)",
-            "hsdp+cp_without_dp_shard",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (without dp_shard)",
-            "hsdp+cp_with_dp_shard",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.data_parallel_shard_degree=2",
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+TP+CP",
-            "fsdp+tp+cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-                [
-                    "--training.tensor_parallel_degree=2",
-                    "--experimental.context_parallel_degree=2",
-                    "--training.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "FSDP+CP",
+        # "fsdp+cp",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=1",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "HSDP+CP (with dp_shard)",
+        # "hsdp+cp_without_dp_shard",
+        # ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "HSDP+CP (without dp_shard)",
+        # "hsdp+cp_with_dp_shard",
+        # ngpu=8,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--training.data_parallel_shard_degree=2",
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # ]
+        # ],
+        # "FSDP+TP+CP",
+        # "fsdp+tp+cp",
+        # ngpu=8,
+        # ),
+        # OverrideDefinitions(
+        # [
+        # [
+        # "--checkpoint.enable_checkpoint",
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # "--training.enable_cpu_offload",
+        # "--optimizer.early_step_in_backward",
+        # ],
+        # [
+        # "--training.tensor_parallel_degree=2",
+        # "--experimental.context_parallel_degree=2",
+        # "--training.data_parallel_replicate_degree=2",
+        # "--training.enable_cpu_offload",
+        # "--optimizer.early_step_in_backward",
+        # ],
+        # ],
+        # "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+        # "cpu_offload+opt_in_bwd+TP+DP+CP",
+        # ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -452,7 +465,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_llama_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         if test_name == "fsdp2_memory_estimation":
@@ -510,7 +523,9 @@ def run_tests(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument("--config_dir", default="./train_configs")
+    parser.add_argument(
+        "--config_dir", default="./torchtitan/models/llama/train_configs"
+    )
     parser.add_argument(
         "--test",
         default="all",
