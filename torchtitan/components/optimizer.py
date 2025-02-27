@@ -118,9 +118,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
         list(map(func, self.model_parts, self.optimizers))
 
     def _validate_length(self, expected_length: int) -> None:
-        assert expected_length == len(
-            self.optimizers
-        ), (
+        assert expected_length == len(self.optimizers), (
             "Must pass one optimizer per model part or per param if "
             "using OptimizersInBackwardContainer."
         )
@@ -301,9 +299,13 @@ def build_optimizers(
     if optim_in_bwd and ft_manager:
         raise ValueError("TorchFT is not supported with optimizers in backward.")
     elif optim_in_bwd:
-        return OptimizersInBackwardContainer(model_parts, optimizer_cls, optimizer_kwargs)
+        return OptimizersInBackwardContainer(
+            model_parts, optimizer_cls, optimizer_kwargs
+        )
     elif ft_manager:
-        return FTOptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs, ft_manager)
+        return FTOptimizersContainer(
+            model_parts, optimizer_cls, optimizer_kwargs, ft_manager
+        )
     else:
         return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
