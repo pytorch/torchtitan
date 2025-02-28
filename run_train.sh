@@ -19,7 +19,10 @@ if [ $# -ne 0 ]; then
     overrides="$*"
 fi
 
+TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
+
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 torchtitan/train.py --job.config_file ${CONFIG_FILE} $overrides

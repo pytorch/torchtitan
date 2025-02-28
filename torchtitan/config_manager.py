@@ -680,6 +680,44 @@ class JobConfig:
             action="store_true",
         )
 
+        self.parser.add_argument(
+            "--fault_tolerance.enable",
+            action="store_true",
+            help="""
+                Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
+                And --fault_tolerance.data_parallel_replicate_degree should be 1 and
+                --fault_tolerance.group_size will be used to control the maximum
+                replicate group size as the replicate group size is dynamic.
+
+                Note that this is still an experimental feature.
+            """,
+        )
+
+        self.parser.add_argument(
+            "--fault_tolerance.replica_id",
+            type=int,
+            default=0,
+            help="The TorchFT replica ID of this run.",
+        )
+
+        self.parser.add_argument(
+            "--fault_tolerance.group_size",
+            type=int,
+            default=0,
+            help="""
+                The number of TorchFT replicate groups. This number will be used for
+                dataloader to split the dataset across the replicate groups and FSDP
+                dimension
+            """,
+        )
+
+        self.parser.add_argument(
+            "--fault_tolerance.min_replica_size",
+            type=int,
+            default=1,
+            help="The minimum number of FT replica for each step.",
+        )
+
     def to_dict(self):
         return self.args_dict
 
