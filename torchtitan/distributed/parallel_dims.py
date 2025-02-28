@@ -6,10 +6,10 @@
 
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Callable
 
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from torchtitan.components.ft import FTManager
 from torchtitan.tools.logging import logger
 
 
@@ -25,7 +25,6 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
-    ft_manager: FTManager
 
     def __post_init__(self):
         self._validate()
@@ -51,31 +50,29 @@ class ParallelDims:
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
 
-    def build_mesh(self, device_type):
+    def build_mesh(self, device_type: str) -> DeviceMesh:
         dims = []
         names = []
         for d, name in zip(
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
         ):
-            if d > 1 or (name == "dp_replicate" and self.ft_manager.enabled):
+            if d > 1:
                 dims.append(d)
                 names.append(name)
 
+        return self._build_mesh(device_type, dims, names, init_device_mesh)
+
+    def _build_mesh(
+        self,
+        device_type: str,
+        dims: list[int],
+        names: list[str],
+        init_device_mesh_fn: Callable,
+    ) -> DeviceMesh:
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         names = tuple(names)
-        if self.ft_manager.enabled:
-            mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
-        else:
-            from torchft.process_group import ft_init_device_mesh
-
-            mesh = ft_init_device_mesh(
-                device_type=device_type,
-                mesh_shape=dims,
-                mesh_dim_names=names,
-                replicate_dim=names.index("dp_replicate"),
-                manager=self.ft_manager.manager,
-            )
+        mesh = init_device_mesh_fn(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
@@ -86,7 +83,7 @@ class ParallelDims:
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
 
-        if self.dp_replicate_enabled or self.ft_manager.enabled:
+        if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
@@ -114,7 +111,7 @@ class ParallelDims:
 
     @property
     def dp_replicate_enabled(self):
-        return self.dp_replicate > 1 or self.ft_manager.enabled
+        return self.dp_replicate > 1
 
     @property
     def dp_shard_enabled(self):

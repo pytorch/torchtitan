@@ -12,7 +12,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
-from torchtitan.components.ft import init_ft_manager
+from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
@@ -53,16 +53,27 @@ def main(job_config: JobConfig):
 
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
-    parallel_dims = ParallelDims(
-        dp_shard=job_config.training.data_parallel_shard_degree,
-        dp_replicate=job_config.training.data_parallel_replicate_degree,
-        cp=job_config.experimental.context_parallel_degree,
-        tp=job_config.training.tensor_parallel_degree,
-        pp=job_config.experimental.pipeline_parallel_degree,
-        world_size=world_size,
-        enable_loss_parallel=not job_config.training.disable_loss_parallel,
-        ft_manager=ft_manager,
-    )
+    if not ft_manager.enabled:
+        parallel_dims = ParallelDims(
+            dp_shard=job_config.training.data_parallel_shard_degree,
+            dp_replicate=job_config.training.data_parallel_replicate_degree,
+            cp=job_config.experimental.context_parallel_degree,
+            tp=job_config.training.tensor_parallel_degree,
+            pp=job_config.experimental.pipeline_parallel_degree,
+            world_size=world_size,
+            enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        )
+    else:
+        parallel_dims = FTParallelDims(
+            dp_shard=job_config.training.data_parallel_shard_degree,
+            dp_replicate=job_config.training.data_parallel_replicate_degree,
+            cp=job_config.experimental.context_parallel_degree,
+            tp=job_config.training.tensor_parallel_degree,
+            pp=job_config.experimental.pipeline_parallel_degree,
+            world_size=world_size,
+            enable_loss_parallel=not job_config.training.disable_loss_parallel,
+            ft_manager=ft_manager,
+        )
     dist_utils.init_distributed(job_config)
     # initialize device memory monitor and get peak flops for MFU calculation
     device_memory_monitor = build_device_memory_monitor()
@@ -91,8 +102,8 @@ def main(job_config: JobConfig):
 
     # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
     # dataloader must be changed.
-    dp_rank = ft_manager.get_dp_rank(dp_degree, dp_rank)
-    dp_degree = ft_manager.get_dp_degree(dp_degree)
+    if ft_manager.enabled:
+        dp_degree, dp_rank = ft_manager.get_dp_info(dp_degree, dp_rank)
     dataloader = train_spec.build_dataloader_fn(
         dp_world_size=dp_degree,
         dp_rank=dp_rank,
