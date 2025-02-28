@@ -25,6 +25,11 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+os.environ['PYTORCH_CUDA_ALLOC_CONF']='expandable_segments:True'
+os.environ['NCCL_BUFFSIZE'] = '2097152'
+os.environ['NCCL_DEBUG'] = 'INFO'
+os.environ['FI_EFA_SET_CUDA_SYNC_MEMOPS'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
 # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
 @record
@@ -150,7 +155,10 @@ def main(job_config: JobConfig):
             model_config,
             train_spec.loss_fn,
         )
-        model_parts = [ m.half() for m in model_parts ]
+        
+        # 수정
+        # model_parts = [ m.half() for m in model_parts ]
+        
         # when PP is enabled, `model` obj is no longer used after this point, model_parts is used instead
         del model
 
@@ -172,8 +180,11 @@ def main(job_config: JobConfig):
             model.init_weights(buffer_device=buffer_device)
         model.train()
 
-        model_parts = [model.half()]
+        # 수정
+        # model_parts = [model.half()]
 
+        model_parts = [ model ]
+        
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
         f"{device_type.upper()} memory usage for model: "
@@ -256,6 +267,7 @@ def main(job_config: JobConfig):
         job_config, global_step=train_state.step
     ) as memory_profiler:
         while train_state.step < job_config.training.steps:
+            torch.cuda.empty_cache()
             train_state.step += 1
             gc_handler.run(train_state.step)
 
