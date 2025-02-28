@@ -112,7 +112,7 @@ def run_tests(args):
     integration_tests_flavors = build_test_list()
 
     if args.ngpu < 8:
-        logger.inf(f"Skipping TorchFT integration tests as we need 8 GPUs.")
+        logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return
 
     for config_file in os.listdir(args.config_dir):

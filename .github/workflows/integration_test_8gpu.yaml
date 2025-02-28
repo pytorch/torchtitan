@@ -48,7 +48,6 @@ jobs:
         # This allows us to verify the case where users don't have TorchFT installed.
         # TorchFT is not the mandatory package because it requires Rust and is still
         # under early development stage.
-        sudo apt install protobuf-compiler libprotobuf-dev
         curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
         pip install maturin
         git clone https://github.com/pytorch/torchft
@@ -56,4 +55,3 @@ jobs:
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         python ./tests/ft_integration_tests.py artifacts-to-be-uploaded --ngpu 8
         killall -9 torchft_lighthouse
-
