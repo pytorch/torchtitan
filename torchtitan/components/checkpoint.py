@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from io import BytesIO
 from multiprocessing import get_context
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -35,9 +35,6 @@ from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersCon
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
-
-if TYPE_CHECKING:
-    import torchft as ft
 
 
 MODEL = "model"
