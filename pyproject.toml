@@ -3,7 +3,7 @@
 name = "torchtitan"
 description = "A native-PyTorch library for large scale LLM training"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     { name = "PyTorch Team", email = "packages@pytorch.org" },
