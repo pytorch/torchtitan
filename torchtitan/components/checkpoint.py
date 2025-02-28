@@ -308,7 +308,11 @@ class CheckpointManager:
         self.cpu_offload_state_dict = None
         self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
 
-        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.folder = os.path.join(
+            job_config.job.dump_folder,
+            ckpt_config.folder,
+            f"{job_config.model.name}_{job_config.model.flavor}",
+        )
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.ASYNC or self.ft_manager:

@@ -13,7 +13,7 @@ set -e
 NGPU=${NGPU:-"1"}
 LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama/train_configs/debug_model.toml"}
-CHECKPOINT_DIR=${CHECKPOINT_DIR:-"./outputs/checkpoint/"}
+CHECKPOINT_DIR=${CHECKPOINT_DIR:-"./outputs/checkpoint/llama3_debugmodel/"}
 PROMPT=${PROMPT:-""}
 
 overrides=()

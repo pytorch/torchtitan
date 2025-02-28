@@ -485,7 +485,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         if test_name == "test_generate" and idx == 1:
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
+                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/llama3_{test_flavor.model_flavor}/step-10 "
                 "PROMPT='What is the meaning of life?' "
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             )
