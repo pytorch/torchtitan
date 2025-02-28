@@ -62,16 +62,16 @@ class DummyJob:
 
 
 @dataclass
-class DummyExperimental:
-    ft_replica_id = 0
-    ft_group_size = 1
+class DummyFaultTolerance:
+    replica_id = 0
+    group_size = 1
 
 
 @dataclass
 class DummyJobConfig:
     checkpoint: DummyCheckpointConfig = field(default_factory=DummyCheckpointConfig)
     job: DummyJob = field(default_factory=DummyJob)
-    experimental: DummyExperimental = field(default_factory=DummyExperimental)
+    fault_tolerance: DummyFaultTolerance = field(default_factory=DummyFaultTolerance)
     ft_manager = None
 
 
