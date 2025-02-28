@@ -111,6 +111,8 @@ class TestCheckpointManager(unittest.TestCase):
     def test_save(self, *_):
         """Test that calling save() writes a checkpoint file to disk."""
         job_config = DummyJobConfig(job=self.dummy_job)
+        ft_manager = mock.Mock()
+        ft_manager.enabled = False
         manager = CheckpointManager(
             dummy_dataloader,
             dummy_model_parts,
@@ -118,6 +120,7 @@ class TestCheckpointManager(unittest.TestCase):
             dummy_lr_schedulers,
             {"trainer": self.trainer_state},
             job_config,
+            ft_manager,
         )
         step = 20
         manager.save(curr_step=step, force=True)
@@ -141,6 +144,8 @@ class TestCheckpointManager(unittest.TestCase):
     def test_load(self, *_):
         """Test that load() properly reads the checkpoint file from disk and restores state."""
         job_config = DummyJobConfig(job=self.dummy_job)
+        ft_manager = mock.Mock()
+        ft_manager.enabled = False
         manager = CheckpointManager(
             dummy_dataloader,
             dummy_model_parts,
@@ -148,6 +153,7 @@ class TestCheckpointManager(unittest.TestCase):
             dummy_lr_schedulers,
             {"trainer": self.trainer_state},
             job_config,
+            ft_manager,
         )
         step = 30
         manager.save(curr_step=step, force=True)
@@ -179,6 +185,8 @@ class TestCheckpointManager(unittest.TestCase):
         """
         job_config = DummyJobConfig(job=self.dummy_job)
         job_config.checkpoint.keep_latest_k = 3
+        ft_manager = mock.Mock()
+        ft_manager.enabled = False
         manager = CheckpointManager(
             dummy_dataloader,
             dummy_model_parts,
@@ -186,6 +194,7 @@ class TestCheckpointManager(unittest.TestCase):
             dummy_lr_schedulers,
             {"trainer": self.trainer_state},
             job_config,
+            ft_manager,
         )
         steps = [10, 20, 30, 40, 50]
         for s in steps:
@@ -223,6 +232,8 @@ class TestCheckpointManager(unittest.TestCase):
         """
         job_config = DummyJobConfig(job=self.dummy_job)
         job_config.checkpoint.keep_latest_k = 3
+        ft_manager = mock.Mock()
+        ft_manager.enabled = False
         manager = CheckpointManager(
             dummy_dataloader,
             dummy_model_parts,
@@ -230,6 +241,7 @@ class TestCheckpointManager(unittest.TestCase):
             dummy_lr_schedulers,
             {"trainer": self.trainer_state},
             job_config,
+            ft_manager,
         )
         steps = [10, 20, 30, 40, 50]
         for s in steps:
@@ -260,6 +272,8 @@ class TestCheckpointManager(unittest.TestCase):
         # Set async_mode to "async" in the job configuration.
         job_config = DummyJobConfig(job=self.dummy_job)
         job_config.checkpoint.async_mode = "async"
+        ft_manager = mock.Mock()
+        ft_manager.enabled = False
         manager = CheckpointManager(
             dummy_dataloader,
             dummy_model_parts,
@@ -267,6 +281,7 @@ class TestCheckpointManager(unittest.TestCase):
             dummy_lr_schedulers,
             {"trainer": self.trainer_state},
             job_config,
+            ft_manager,
         )
         # First save: should schedule an async save.
         manager.save(curr_step=10, force=False)
