@@ -27,7 +27,6 @@
 # limitations under the License.
 """ PyTorch DeepSeek model."""
 import math
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
@@ -40,149 +39,9 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
+from model_config import ModelArgs
 from symm_mem_recipes import on_device_all_to_all_v
 from torch import nn
-from torch.nn import CrossEntropyLoss
-
-
-@dataclass
-class ModelArgs:
-    r"""
-    This is the configuration class to store the configuration of a [`DeepseekV3Model`]. It is used to instantiate an DeepSeek
-    model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
-    defaults will yield a similar configuration to that of the DeepSeek-V3.
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
-    Args:
-        vocab_size (`int`, *optional*, defaults to 129280):
-            Vocabulary size of the Deep model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`DeepseekV3Model`]
-        hidden_size (`int`, *optional*, defaults to 4096):
-            Dimension of the hidden representations.
-        intermediate_size (`int`, *optional*, defaults to 11008):
-            Dimension of the MLP representations.
-        moe_intermediate_size (`int`, *optional*, defaults to 1407):
-            Dimension of the MoE representations.
-        num_hidden_layers (`int`, *optional*, defaults to 32):
-            Number of hidden layers in the Transformer decoder.
-        num_nextn_predict_layers (`int`, *optional*, defaults to 1):
-            Number of nextn predict layers in the DeepSeekV3 Model.
-        num_attention_heads (`int`, *optional*, defaults to 32):
-            Number of attention heads for each attention layer in the Transformer decoder.
-        n_shared_experts (`int`, *optional*, defaults to None):
-            Number of shared experts, None means dense model.
-        n_routed_experts (`int`, *optional*, defaults to None):
-            Number of routed experts, None means dense model.
-        routed_scaling_factor (`float`, *optional*, defaults to 1.0):
-            Scaling factor or routed experts.
-        topk_method (`str`, *optional*, defaults to `gready`):
-            Topk method used in routed gate.
-        n_group (`int`, *optional*, defaults to None):
-            Number of groups for routed experts.
-        topk_group (`int`, *optional*, defaults to None):
-            Number of selected groups for each token(for each token, ensuring the selected experts is only within
-            `topk_group` groups).
-        num_experts_per_tok (`int`, *optional*, defaults to None):
-            Number of selected experts, None means dense model.
-        moe_layer_freq (`int`, *optional*, defaults to 1):
-            The frequency of the MoE layer: one expert layer for every `moe_layer_freq - 1` dense layers.
-        first_k_dense_replace (`int`, *optional*, defaults to 0):
-            Number of dense layers in shallow layers(embed->dense->dense->...->dense->moe->moe...->lm_head).
-                                                            \--k dense layers--/
-        norm_topk_prob (`bool`, *optional*, defaults to False):
-            Whether to normalize the weights of the routed experts.
-        scoring_func (`str`, *optional*, defaults to 'softmax'):
-            Method of computing expert weights.
-        aux_loss_alpha (`float`, *optional*, defaults to 0.001):
-            Auxiliary loss weight coefficient.
-        seq_aux = (`bool`, *optional*, defaults to True):
-            Whether to compute the auxiliary loss for each individual sample.
-        num_key_value_heads (`int`, *optional*):
-            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
-            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1 the model will use Multi Query Attention (MQA) otherwise GQA is used. When
-            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
-            by meanpooling all the original heads within that group. For more details checkout [this
-            paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to
-            `num_attention_heads`.
-        hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
-            The non-linear activation function (function or string) in the decoder.
-        max_position_embeddings (`int`, *optional*, defaults to 2048):
-            The maximum sequence length that this model might ever be used with.
-        initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
-        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
-            The epsilon used by the rms normalization layers.
-        use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models). Only
-            relevant if `config.is_decoder=True`.
-        pad_token_id (`int`, *optional*):
-            Padding token id.
-        bos_token_id (`int`, *optional*, defaults to 1):
-            Beginning of stream token id.
-        eos_token_id (`int`, *optional*, defaults to 2):
-            End of stream token id.
-        pretraining_tp (`int`, *optional*, defaults to 1):
-            Experimental feature. Tensor parallelism rank used during pretraining. Please refer to [this
-            document](https://huggingface.co/docs/transformers/parallelism) to understand more about it. This value is
-            necessary to ensure exact reproducibility of the pretraining results. Please refer to [this
-            issue](https://github.com/pytorch/pytorch/issues/76232).
-        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
-            Whether to tie weight embeddings
-        rope_theta (`float`, *optional*, defaults to 10000.0):
-            The base period of the RoPE embeddings.
-        rope_scaling (`Dict`, *optional*):
-            Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports two scaling
-            strategies: linear and dynamic. Their scaling factor must be a float greater than 1. The expected format is
-            `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
-        attention_bias (`bool`, defaults to `False`, *optional*, defaults to `False`):
-            Whether to use a bias in the query, key, value and output projection layers during self-attention.
-        attention_dropout (`float`, *optional*, defaults to 0.0):
-            The dropout ratio for the attention probabilities.
-    """
-
-    vocab_size: int = 129280
-    hidden_size: int = 7168
-    intermediate_size: int = 18432
-    moe_intermediate_size: int = 2048
-    num_hidden_layers: int = 61
-    num_nextn_predict_layers: int = 1
-    num_attention_heads: int = 128
-    num_key_value_heads: int = 128
-    n_shared_experts: int = 1
-    n_routed_experts: int = 256
-    ep_size: int = 1
-    routed_scaling_factor: float = 2.5
-    kv_lora_rank: int = 512
-    q_lora_rank: int = 1536
-    qk_rope_head_dim: int = 64
-    v_head_dim: int = 128
-    qk_nope_head_dim: int = 128
-    topk_method: str = "noaux_tc"
-    n_group: int = 8
-    topk_group: int = 4
-    num_experts_per_tok: int = 8
-    moe_layer_freq: int = 1
-    first_k_dense_replace: int = 3
-    norm_topk_prob: bool = True
-    scoring_func: str = "sigmoid"
-    aux_loss_alpha: float = 0.001
-    seq_aux: bool = True
-    hidden_act: str = "silu"
-    max_position_embeddings: int = 4096
-    initializer_range: float = 0.02
-    rms_norm_eps: float = 1e-6
-    rope_theta: float = 10000.0
-    rope_scaling = None
-    attention_bias: bool = False
-    attention_dropout: float = 0.0
-    pad_token_id = None
-    # Added for symmetric memory
-    max_seq_len: int = 4096
-    # Added for pipeline parallel
-    num_stages: int = 1
-    stage_idx: int = 0
 
 
 # Get model parallel subgroup by name:
@@ -190,15 +49,6 @@ class ModelArgs:
 def get_group(dim_name: Optional[str] = None) -> dist.ProcessGroup:
     glob = torch.distributed.device_mesh._mesh_resources.get_current_mesh()
     return glob.get_group(dim_name)
-
-
-# Get my pipeline parallel rank
-def get_pp_rank() -> int:
-    try:
-        group = get_group("pp")
-        return group.rank()
-    except Exception:
-        return 0
 
 
 class RMSNorm(nn.Module):
@@ -286,7 +136,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
 
-# Copied from transformers.models.llama.modeling_llama.LlamaDynamicNTKScalingRotaryEmbedding with Llama->DeepseekV3
+# Copied from transformers.models.llama.modeling_llama.LlamaDynamicNTKScalingRotaryEmbedding with Llama->Deepseek
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with Dynamic NTK scaling. Credits to the Reddit users /u/bloc97 and /u/emozilla"""
 
@@ -533,6 +383,8 @@ class MoEGate(nn.Module):
         )
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
+        elif self.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1, dtype=torch.float32)
         else:
             raise NotImplementedError(
                 f"insupportable scoring function for MoE gating: {self.scoring_func}"
@@ -567,6 +419,10 @@ class MoEGate(nn.Module):
             )  # [n, e]
             _, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
             topk_weight = scores.gather(1, topk_idx)
+        elif self.topk_method == "greedy":
+            topk_weight, topk_idx = torch.topk(
+                scores, k=self.top_k, dim=-1, sorted=False
+            )
         else:
             raise NotImplementedError(
                 f"insupportable TopK function for MoE gating: {self.topk_method}"
@@ -599,7 +455,6 @@ class MoE(nn.Module):
             assert config.ep_size == self.ep_group.size()
             self.ep_size = config.ep_size
             self.ep_rank = self.ep_group.rank()
-            print(f"Creating EP rank {self.ep_rank} of {self.ep_size}")
             self.experts_per_rank = config.n_routed_experts // config.ep_size
             self.experts = nn.ModuleList(
                 [
@@ -677,7 +532,7 @@ class MoE(nn.Module):
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
-        if not self.has_symm_mem:
+        if self.ep_size > 1 and (not self.has_symm_mem):
             # Set up symmetric memory for the first time, then reuse it
             self.setup_symm_mem(x.dtype, x.device)
 
@@ -753,7 +608,10 @@ class MoE(nn.Module):
             outputs.append(expert_out)
             start_idx = end_idx
 
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+        # len(outputs) == 0 means no tokens routed to this EP rank.
+        # `sorted_tokens` would have shape [0, hidden_dim], we use it so that
+        # `outs` is an empty tensor with shape [0, hidden_dim]
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens
         if self.ep_size > 1:
             # Take necessary space from `token_gather_buf` symm mem
             new_x = self.token_gather_buf[: outs.shape[0]]
@@ -1074,7 +932,7 @@ class DecoderLayer(nn.Module):
         return hidden_states
 
 
-DeepseekV3_INPUTS_DOCSTRING = r"""
+Deepseek_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -1144,7 +1002,7 @@ DeepseekV3_INPUTS_DOCSTRING = r"""
 """
 
 
-class DeepseekV3Model(torch.nn.Module):
+class DeepseekModel(torch.nn.Module):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DecoderLayer`]
 
@@ -1224,38 +1082,32 @@ class DeepseekV3Model(torch.nn.Module):
         return hidden_states
 
 
-class DeepseekV3ForCausalLM(torch.nn.Module):
+class DeepseekForCausalLM(torch.nn.Module):
     def __init__(self, config):
-        super().__init__(config)
-        self.model = DeepseekV3Model(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        super().__init__()
+        self.model = DeepseekModel(config)
+        self.lm_head = (
+            nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            if config.stage_idx == config.num_stages - 1
+            else None
+        )
 
         # Initialize weights and apply final processing
         # self.post_init()
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
+        tokens: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
     ) -> Tuple:
         r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, transformers.,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, transformers., config.vocab_size]`.
-
-        Returns:
-
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, DeepseekV3ForCausalLM
+        >>> from transformers import AutoTokenizer, DeepseekForCausalLM
 
-        >>> model = DeepseekV3ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = DeepseekForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1267,29 +1119,15 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         hidden_states = self.model(
-            input_ids=input_ids,
+            tokens,
             attention_mask=attention_mask,
             position_ids=position_ids,
         )
 
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
-
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
-        output = (logits,)
-        return (loss,) + output if loss is not None else output
+        logits = (
+            self.lm_head(hidden_states) if self.lm_head is not None else hidden_states
+        )
+        return logits
 
     def prepare_inputs_for_generation(
         self,
@@ -1358,76 +1196,3 @@ class DeepseekV3ForCausalLM(torch.nn.Module):
                 ),
             )
         return reordered_past
-
-
-# Start of testing part
-# torchrun --standalone --nproc-per-node 4 model.py
-
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-
-
-# Run full model
-def run_full_model(
-    mesh: DeviceMesh,
-):
-    rank = dist.get_rank()
-    device_count = torch.cuda.device_count()
-    device = torch.device("cuda", rank % device_count)
-
-    pp_mesh = mesh["pp"]
-    ep_mesh = mesh["ep"]
-    pp_rank = pp_mesh.get_local_rank()
-    ep_rank = ep_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
-    ep_size = ep_mesh.size()
-
-    model_args = ModelArgs(
-        num_hidden_layers=3,
-        first_k_dense_replace=1,  # activate MoE layers
-        ep_size=ep_size,  # activate Expert Parallel
-        num_stages=pp_size,  # activate Pipeline Parallel
-        stage_idx=pp_rank,  # pipeline stage id
-    )
-    print(model_args)
-
-    # Instantiate model
-    with device, mesh:
-        model = DeepseekV3Model(model_args)
-        model.eval()
-
-    # Example inputs
-    bs = 2
-    microbatches = 2
-    seqlen = 128
-    x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
-
-    # Create pipeline stage
-    stage = PipelineStage(
-        model,
-        pp_rank,
-        pp_size,
-        device,
-        group=pp_mesh.get_group(),
-    )
-
-    # Create pipeline schedule
-    pp_schedule = ScheduleGPipe(stage, microbatches)
-
-    # Run forward
-    if pp_rank == 0:
-        y = pp_schedule.step(x)
-    else:
-        y = pp_schedule.step()
-
-    if pp_rank == pp_size - 1:
-        print(y.shape)
-
-
-if __name__ == "__main__":
-    mesh = dist.init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "ep"))
-
-    with torch.no_grad():
-        run_full_model(mesh)
-
-    dist.destroy_process_group()
