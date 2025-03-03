@@ -8,7 +8,7 @@ description = "Llama 3 405B training"
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 5
 
 [metrics]
 log_freq = 10
