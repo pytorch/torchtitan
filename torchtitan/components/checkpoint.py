@@ -457,7 +457,7 @@ class CheckpointManager:
 
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
-        states = self._states_to_load(checkpoint_id)
+        states = self._states_to_load(step)
         dcp.load(states, checkpoint_id=checkpoint_id)
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
