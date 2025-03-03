@@ -1,0 +1,2 @@
+transformers >=4.49.0
+sentencepiece >=0.2.0
