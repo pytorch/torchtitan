@@ -466,19 +466,19 @@ if __name__ == "__main__":
         iter_size = 10
         delta = 0.0
         for i in range(iter_size):
-                start = time.perf_counter()
-                store = PrefixStore(f"default_pg_{index}", tcp_store)
-                index += 1
-                torch.distributed.init_process_group(store=store, backend="nccl", world_size=world_size, rank=global_rank)
-                torch.cuda.set_device(local_rank)
-                with maybe_enable_profiling(
-                    config, global_step=i
-                ) as torch_profiler:
-                    torch.distributed.barrier()
-                end = time.perf_counter()
-                torch.distributed.destroy_process_group()
-                delta += (end - start)
-                print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
+            start = time.perf_counter()
+            store = PrefixStore(f"default_pg_{index}", tcp_store)
+            index += 1
+            torch.cuda.set_device(local_rank)
+            torch.distributed.init_process_group(store=store, backend="nccl", world_size=world_size, rank=global_rank)
+            with maybe_enable_profiling(
+                config, global_step=i
+            ) as torch_profiler:
+                torch.distributed.barrier()
+            end = time.perf_counter()
+            torch.distributed.destroy_process_group()
+            delta += (end - start)
+            print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
         if warmup:
             print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
         warmup = True
