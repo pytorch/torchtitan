@@ -44,6 +44,15 @@ def main(job_config: JobConfig):
 
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
+    torch._inductor.config.reorder_for_compute_comm_overlap = (
+        job_config.experimental.reorder_for_compute_comm_overlap
+    )
+    torch._inductor.config.reorder_for_compute_comm_overlap_passes = (
+        job_config.experimental.reorder_for_compute_comm_overlap_passes
+    )
+    torch._inductor.config.reorder_prefetch_limit = (
+        job_config.experimental.reorder_prefetch_limit
+    )
 
     # init distributed
     world_size = int(os.environ["WORLD_SIZE"])
@@ -107,7 +116,10 @@ def main(job_config: JobConfig):
     model_config.max_seq_len = job_config.training.seq_len
 
     logger.info(f"Building {model_name} {job_config.model.flavor} with {model_config}")
-    with torch.device("meta"):
+    # NOTE(lty): the current torch_spmd prototype doesn't compose with meta init
+    # so we init on CPU, apply parallelism, and then move to GPU
+    # with torch.device("meta"):
+    with torch.device("cpu"):
         model = model_cls.from_model_args(model_config)
 
     # a no-op hander if float8 is not enabled
@@ -162,17 +174,26 @@ def main(job_config: JobConfig):
         # optimizer, and checkpointing
         for m in model_parts:
             # apply SPMD-style PT-D techniques
-            models_parallelize_fns[model_name](m, world_mesh, parallel_dims, job_config)
-            m.to_empty(device=init_device)
-            with torch.no_grad():
-                m.init_weights(buffer_device=buffer_device)
+            m = models_parallelize_fns[model_name](
+                m, world_mesh, parallel_dims, job_config
+            )
+            # NOTE(lty): move from CPU to GPU after applying FSDP2/torch_spmd parallelisms
+            # The original code related to meta init is commented out below
+            m.to("cuda")
+
+            # m.to_empty(device=init_device)
+            # with torch.no_grad():
+            # m.init_weights(buffer_device=buffer_device)
             m.train()
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-        models_parallelize_fns[model_name](model, world_mesh, parallel_dims, job_config)
-        model.to_empty(device=init_device)
-        with torch.no_grad():
-            model.init_weights(buffer_device=buffer_device)
+        model = models_parallelize_fns[model_name](
+            model, world_mesh, parallel_dims, job_config
+        )
+        # model.to_empty(device=init_device)
+        model.to("cuda")
+        # with torch.no_grad():
+        # model.init_weights(buffer_device=buffer_device)
         model.train()
 
         model_parts = [model]

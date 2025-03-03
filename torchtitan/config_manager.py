@@ -303,6 +303,34 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--experimental.torch_spmd",
+            default=False,
+            action="store_true",
+            help="Whether to use the experimental torch_spmd style parallelism",
+        )
+        self.parser.add_argument(
+            "--experimental.reorder_for_compute_comm_overlap",
+            default=False,
+            action="store_true",
+            help="Whether to enable inductor comm reordering passes",
+        )
+        self.parser.add_argument(
+            "--experimental.reorder_for_compute_comm_overlap_passes",
+            type=string_list,
+            nargs="+",
+            default=[
+                "sink_waits",
+                "reorder_comms_preserving_peak_memory",
+            ],
+            help="sequence of passes (names of functions inside _inductor.comms) to call",
+        )
+        self.parser.add_argument(
+            "--experimental.reorder_prefetch_limit",
+            type=int,
+            default=None,
+            help="How many ops to allow moving any individual collective, default of None means unlimited",
+        )
+        self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
             action="store_true",
             help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
@@ -648,6 +676,18 @@ class JobConfig:
                 exp["pipeline_parallel_split_points"]
             )
         if (
+            "experimental" in args_dict
+            and "reorder_for_compute_comm_overlap_passes" in args_dict["experimental"]
+            and isinstance(
+                args_dict["experimental"]["reorder_for_compute_comm_overlap_passes"],
+                str,
+            )
+        ):
+            exp = args_dict["experimental"]
+            exp["reorder_for_compute_comm_overlap_passes"] = string_list(
+                exp["reorder_for_compute_comm_overlap_passes"]
+            )
+        if (
             "checkpoint" in args_dict
             and "exclude_from_loading" in args_dict["checkpoint"]
             and isinstance(args_dict["checkpoint"]["exclude_from_loading"], str)
@@ -700,6 +740,8 @@ class JobConfig:
                 # without this special case, type inference breaks here,
                 # since the inferred type is just 'list' and it ends up flattening
                 # e.g. from ["layers.0", "layers.1"] into ["l", "a", "y", "e", "r", "s", ".0", ...]
+                aux_parser.add_argument("--" + arg, type=string_list)
+            elif arg == "experimental.reorder_for_compute_comm_overlap_passes":
                 aux_parser.add_argument("--" + arg, type=string_list)
             elif arg == "checkpoint.exclude_from_loading":
                 # similar to the case above
