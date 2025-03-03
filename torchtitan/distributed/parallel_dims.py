@@ -6,10 +6,11 @@
 
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Callable
 
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from torchtitan.logging import logger
+from torchtitan.tools.logging import logger
 
 
 __all__ = ["ParallelDims"]
@@ -49,7 +50,7 @@ class ParallelDims:
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
 
-    def build_mesh(self, device_type):
+    def build_mesh(self, device_type: str) -> DeviceMesh:
         dims = []
         names = []
         for d, name in zip(
@@ -60,9 +61,18 @@ class ParallelDims:
                 dims.append(d)
                 names.append(name)
 
+        return self._build_mesh(device_type, dims, names, init_device_mesh)
+
+    def _build_mesh(
+        self,
+        device_type: str,
+        dims: list[int],
+        names: list[str],
+        init_device_mesh_fn: Callable,
+    ) -> DeviceMesh:
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         names = tuple(names)
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        mesh = init_device_mesh_fn(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:

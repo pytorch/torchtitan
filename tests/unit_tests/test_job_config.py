@@ -19,7 +19,12 @@ class TestJobConfig:
 
     def test_job_config_file(self):
         config = JobConfig()
-        config.parse_args(["--job.config_file", "./train_configs/debug_model.toml"])
+        config.parse_args(
+            [
+                "--job.config_file",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
+            ]
+        )
         assert config.training.steps == 10
 
     def test_job_file_does_not_exist(self):
@@ -38,7 +43,7 @@ class TestJobConfig:
         config.parse_args(
             [
                 "--job.config_file",
-                "./train_configs/debug_model.toml",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
                 "--job.dump_folder",
                 "/tmp/test_tt/",
             ]
@@ -56,7 +61,7 @@ class TestJobConfig:
         config.parse_args(
             [
                 "--job.config_file",
-                "./train_configs/debug_model.toml",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
             ]
         )
         assert config.experimental.pipeline_parallel_split_points == []
@@ -66,7 +71,7 @@ class TestJobConfig:
         config.parse_args(
             [
                 "--job.config_file",
-                "./train_configs/debug_model.toml",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
                 "--experimental.pipeline_parallel_split_points",
                 f"{cmdline_split_str}",
             ]
@@ -127,7 +132,7 @@ class TestJobConfig:
         config.parse_args(
             [
                 "--job.config_file",
-                "./train_configs/debug_model.toml",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
             ]
         )
         assert config.checkpoint.exclude_from_loading == []
@@ -137,7 +142,7 @@ class TestJobConfig:
         config.parse_args(
             [
                 "--job.config_file",
-                "./train_configs/debug_model.toml",
+                "./torchtitan/models/llama/train_configs/debug_model.toml",
                 "--checkpoint.exclude_from_loading",
                 f"{cmdline_split_str}",
             ]
@@ -186,6 +191,15 @@ class TestJobConfig:
             assert (
                 config.checkpoint.exclude_from_loading == cmdline_splits
             ), config.checkpoint.exclude_from_loading
+
+    def test_job_config_model_converters_split(self):
+        config = JobConfig()
+        config.parse_args([])
+        assert config.model.converters == []
+
+        config = JobConfig()
+        config.parse_args(["--model.converters", "float8,mxfp"])
+        assert config.model.converters == ["float8", "mxfp"]
 
     def test_print_help(self):
         config = JobConfig()

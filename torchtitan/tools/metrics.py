@@ -11,10 +11,11 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.config_manager import JobConfig
-from torchtitan.logging import logger
-from torchtitan.parallelisms import ParallelDims
-from torchtitan.utils import device_module, device_type
+from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_module, device_type
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -132,8 +133,11 @@ class WandBLogger(BaseLogger):
         self.wandb = wandb
         self.tag = tag
 
+        # Create logging directory
+        os.makedirs(log_dir, exist_ok=True)
+
         self.wandb.init(
-            project="torchtitan",
+            project=os.getenv("WANDB_PROJECT", "torchtitan"),
             dir=log_dir,
         )
         logger.info("WandB logging enabled")
@@ -143,8 +147,7 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        wandb_metrics["step"] = step
-        self.wandb.log(wandb_metrics)
+        self.wandb.log(wandb_metrics, step=step)
 
     def close(self) -> None:
         if self.wandb.run is not None:

@@ -3,15 +3,18 @@
 name = "torchtitan"
 description = "A native-PyTorch library for large scale LLM training"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     { name = "PyTorch Team", email = "packages@pytorch.org" },
 ]
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
+    # Stateful Dataloader
+    "torchdata>=0.8.0",
+
     # Hugging Face integrations
-    "datasets>=2.19.0",
+    "datasets>=2.21.0",
 
     # Tokenization
     "blobfile",
@@ -47,9 +50,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = [""]
 include = ["torchtitan*"]
-
-[tool.setuptools.package-data]
-recipes = ["train_configs/*.toml"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
