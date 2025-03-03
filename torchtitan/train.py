@@ -461,14 +461,14 @@ if __name__ == "__main__":
     tcp_store.set_timeout(_DEFAULT_PG_NCCL_TIMEOUT)
     config = JobConfig()
     config.parse_args()
-    with maybe_enable_profiling(
-        config, global_step=train_state.step
-    ) as torch_profiler:
-        for root_size in [128, 128]:
-            os.environ["TORCH_NCCL_RANKS_PER_ROOT"] = str(root_size)
-            iter_size = 5 if warmup else 1
-            delta = 0.0
-            for i in range(iter_size):
+    for root_size in [128]:
+        os.environ["TORCH_NCCL_RANKS_PER_ROOT"] = str(root_size)
+        iter_size = 10
+        delta = 0.0
+        for i in range(iter_size):
+            with maybe_enable_profiling(
+                config, global_step=i
+            ) as torch_profiler:
                 start = time.perf_counter()
                 store = PrefixStore(f"default_pg_{index}", tcp_store)
                 index += 1
@@ -479,8 +479,8 @@ if __name__ == "__main__":
                 torch.distributed.destroy_process_group()
                 delta += (end - start)
                 print(f"Time to init process group: {end - start:.6f} seconds for {root_size} ranks per roots")
-            if warmup:
-                print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
-            warmup = True
+        if warmup:
+            print(f"Average time to init process group: {delta / float(iter_size):.6f} seconds for {root_size} ranks per roots")
+        warmup = True
     # main(config)
     # torch.distributed.destroy_process_group()
