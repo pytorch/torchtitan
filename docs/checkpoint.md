@@ -20,7 +20,6 @@ In your torchtitan training config, ensure that `enable_checkpoint` is set to Tr
 [checkpoint]
 enable_checkpoint = true
 folder = "checkpoint"
-interval_type = "steps"
 interval = 500
 ```
 
@@ -47,7 +46,6 @@ export_dtype = "bfloat16"
 [checkpoint]
 enable_checkpoint = true
 folder = "checkpoint"
-interval_type = "steps"
 interval = 10
 load_step = 5
 model_weights_only = true
@@ -84,5 +82,5 @@ A seed checkpoint does initialization of the model on a single CPU, and can be l
 To create a seed checkpoint, use the same model config as you use for training.
 e.g.
 ```bash
-NGPU=1 CONFIG=<path_to_model_config> ./run_llama_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --training.data_parallel_replicate_degree 1 --training.data_parallel_shard_degree 1 --training.tensor_parallel_degree 1 --experimental.pipeline_parallel_degree 1 --experimental.context_parallel_degree 1
+NGPU=1 CONFIG=<path_to_model_config> ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --training.data_parallel_replicate_degree 1 --training.data_parallel_shard_degree 1 --training.tensor_parallel_degree 1 --experimental.pipeline_parallel_degree 1 --experimental.context_parallel_degree 1
 ```

@@ -17,24 +17,21 @@ import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from torch.distributed._tensor import Replicate
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import Replicate
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     RowwiseParallel,
 )
 
-from torchtitan import utils
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets import build_tokenizer
-from torchtitan.logging import init_logger, logger
-from torchtitan.metrics import build_device_memory_monitor
-from torchtitan.models import model_name_to_tokenizer
-from torchtitan.parallelisms import ParallelDims
-
-from torchtitan.train_spec import get_train_spec
-from torchtitan.utils import device_module, device_type
+from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.protocols.train_spec import get_train_spec
+from torchtitan.tools import utils
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.metrics import build_device_memory_monitor
+from torchtitan.tools.utils import device_module, device_type
 
 # support running w/o installing as package
 wd = Path(__file__).parent.parent.resolve()
@@ -108,10 +105,7 @@ def test_generate(
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
-    tokenizer = build_tokenizer(
-        model_name_to_tokenizer[train_spec.name], config.model.tokenizer_path
-    )
-
+    tokenizer = train_spec.tokenizer_cls(config.model.tokenizer_path)
     model_config = train_spec.config[config.model.flavor]
     model_config.norm_type = config.model.norm_type
     model_config.max_seq_len = config.training.seq_len
@@ -126,7 +120,7 @@ def test_generate(
     world_mesh = None
     # Init distributed env
     if world_size > 1:
-        utils.init_distributed(config)
+        dist_utils.init_distributed(config)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,
@@ -143,7 +137,7 @@ def test_generate(
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
         apply_tp_minus_sp(model, world_mesh["tp"])
 
-    utils.set_determinism(world_mesh, device, seed, deterministic)
+    dist_utils.set_determinism(world_mesh, device, seed, deterministic)
 
     # materalize model
     model.to_empty(device=device_type)

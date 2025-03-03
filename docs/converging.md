@@ -35,11 +35,11 @@ If the technique is not a parallelism
 
 ## Example
 
-This is a series of loss-converging tests covering both parallelisms and training optimizations.
+This is a series of loss-converging tests on Llama 3.1, covering both parallelisms and training optimizations.
 Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `torchtitan`.
 
 ### Setup
-- Base config: [train_configs/llama3_8b.toml](../train_configs/llama3_8b.toml)
+- Base config: [torchtitan/models/llama/train_configs/llama3_8b.toml](../torchtitan/models/llama/train_configs/llama3_8b.toml)
 - `training.batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
 - `training.data_parallel_shard_degree = 8`, resulting in global batch size 32
 - `training.steps = 3000`, `training.warmup_steps = 600`
@@ -47,7 +47,7 @@ Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `tor
 | Parallelism | Techniques | Remarks |
 | ----- | ----- | ----- |
 | FSDP 8 | default | 1D control set |
-| FSDP 8, TP 2, PP 2 | torch.compile, Float8, async TP | 3D test set |
+| FSDP 8, TP 2, PP 2 | torch.compile, Float8, async TP, Interleaved 1F1B | 3D test set |
 | FSDP 8, TP 2, CP 2, PP 2 | torch.compile, Float8, async TP, Interleaved 1F1B | 4D test set |
 | FSDP 8, CP 8 | default | to verify CP with a larger degree |
 

@@ -6,15 +6,16 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-
 from dataclasses import dataclass
-from typing import Callable, Dict, Protocol, Type, TypeAlias
+from typing import Callable, Protocol, Type, TypeAlias
 
+import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
-
+from torchtitan.components.dataloader import DataLoaderBuilder
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.optimizer import LRSchedulersContainer, OptimizersContainer
 
 
 @dataclass
@@ -35,33 +36,32 @@ class ModelProtocol(Protocol):
     required by the TorchTitan trainer.
     """
 
-    @staticmethod
-    def from_model_args(args: BaseModelArgs) -> nn.Module:
+    @classmethod
+    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
         ...
 
 
 OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig], OptimizersContainer
 ]
-OptimizerBuilderWrapper: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, OptimizersContainer], OptimizersContainer
-]
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
+LossFunction: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass
 class TrainSpec:
     name: str
     cls: Type[nn.Module]
-    config: Dict[str, BaseModelArgs]
+    config: dict[str, BaseModelArgs]
     parallelize_fn: Callable[[nn.Module], None]
     pipelining_fn: Callable[
         [nn.Module], tuple[_PipelineSchedule, list[nn.Module], bool, bool]
     ]
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
-
-    # TODO: Add a ``build_dataloader_fn``
+    build_dataloader_fn: DataLoaderBuilder
+    tokenizer_cls: Type[Tokenizer]
+    loss_fn: LossFunction
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.
