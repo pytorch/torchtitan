@@ -10,7 +10,9 @@ from loss import cross_entropy_loss_hf
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
-from torchtitan.experiments.train_llama_hf.dataset import build_hf_dataloader
+from torchtitan.experiments.train_llama_hf.dataset import (
+    build_pos_included_hf_dataloader,
+)
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .parallelize_llama import parallelize_llama
@@ -25,7 +27,7 @@ register_train_spec(
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_hf_dataloader,
+        build_dataloader_fn=build_pos_included_hf_dataloader,
         tokenizer_cls=AutoTokenizer,
         loss_fn=cross_entropy_loss_hf,
     )
