@@ -50,11 +50,11 @@ jobs:
         # TorchFT is not the mandatory package because it requires Rust and is still
         # under early development stage.
         echo "curl"
-        #curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+        curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
         echo "install maturin"
-        #pip install maturin
+        pip install maturin
         echo "clone torchft "
-        #git clone https://github.com/pytorch/torchft
+        git clone https://github.com/pytorch/torchft
         echo "pip install torchft"
         #pushd torchft; pip install .; popd
         echo "torchft_lighthouse"
