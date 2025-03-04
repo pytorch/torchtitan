@@ -574,11 +574,12 @@ class JobConfig:
         self.parser.add_argument(
             "--checkpoint.keep_latest_k",
             type=int,
-            default=0,
+            default=10,
             help="""
                 Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
-                0 is the default value. k cannot be 1 as the last one may be in the process of being
-                saved. As a result, the metadata of the last one may not be ready yet.
+                K cannot be 1 as the last one may be in the process of being saved. As a result,
+                the metadata of the last one may not be ready yet. The default value is 10 to avoid
+                filling up the disk.
             """,
         )
         self.parser.add_argument(
