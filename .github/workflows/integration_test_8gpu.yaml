@@ -56,7 +56,7 @@ jobs:
         echo "clone torchft "
         git clone https://github.com/pytorch/torchft
         echo "pip install torchft"
-        #pushd torchft; pip install .; popd
+        pushd torchft; pip install .; popd
         echo "torchft_lighthouse"
         #RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         echo "ft_integration_test"
