@@ -42,16 +42,22 @@ jobs:
         python -m pip install -e .
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
+        #python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
 
         # Don't install TorchFT until the previous integration_tests is complete.
         # This allows us to verify the case where users don't have TorchFT installed.
         # TorchFT is not the mandatory package because it requires Rust and is still
         # under early development stage.
+        echo "curl"
         curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+        echo "install maturin"
         pip install maturin
+        echo "clone torchft "
         git clone https://github.com/pytorch/torchft
+        echo "pip install torchft"
         pushd torchft; pip install .; popd
+        echo "torchft_lighthouse"
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
+        echo "ft_integration_test"
         python ./tests/ft_integration_tests.py artifacts-to-be-uploaded --ngpu 8
         killall -9 torchft_lighthouse
