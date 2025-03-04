@@ -21,7 +21,8 @@ dependencies = [
     "tiktoken",
 
     # Miscellaneous
-    "tomli>=1.1.0"
+    "tomli>=1.1.0",
+    "fsspec"
 ]
 dynamic = ["version"]
 
