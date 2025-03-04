@@ -6,3 +6,4 @@ tiktoken
 blobfile
 tabulate
 wandb
+fsspec
