@@ -73,6 +73,7 @@ git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124 --force-reinstall
+[For AMD GPU] pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --force-reinstall
 pip install -e .
 ```
 
