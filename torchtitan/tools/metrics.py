@@ -56,16 +56,16 @@ class DeviceMemoryMonitor:
     def get_peak_stats(self):
         device_info = device_module.memory_stats(self.device)
 
-        max_active = device_info["active_bytes.all.peak"]
+        max_active = device_info.get("active_bytes.all.peak", -1)
         max_active_gib = self._to_gib(max_active)
         max_active_pct = self._to_pct(max_active)
 
-        max_reserved = device_info["reserved_bytes.all.peak"]
+        max_reserved = device_info.get("reserved_bytes.all.peak", -1)
         max_reserved_gib = self._to_gib(max_reserved)
         max_reserved_pct = self._to_pct(max_reserved)
 
-        num_retries = device_info["num_alloc_retries"]
-        num_ooms = device_info["num_ooms"]
+        num_retries = device_info.get("num_alloc_retries", -1)
+        num_ooms = device_info.get("num_ooms", -1)
 
         if num_retries > 0:
             logger.warning(
