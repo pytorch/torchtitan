@@ -25,6 +25,7 @@ converters = "float8"
 [optimizer]
 name = "AdamW"
 lr = 8e-5
+eps = 1e-8
 
 [training]
 batch_size = 2
