@@ -6,7 +6,6 @@
 
 import copy
 import functools
-
 from typing import Any, Callable, Dict, Generic, List, TypeVar
 
 import torch
@@ -22,7 +21,6 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
-
 
 __all__ = [
     "OptimizersContainer",
@@ -273,6 +271,7 @@ def build_optimizers(
         )
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
+    eps = job_config.optimizer.eps
 
     optim_implementation = job_config.optimizer.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
@@ -282,6 +281,7 @@ def build_optimizers(
 
     optimizer_kwargs = {
         "lr": lr,
+        "eps": eps,
         "betas": (0.9, 0.95),
         "weight_decay": 0.1,
         "fused": fused,
