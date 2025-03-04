@@ -114,7 +114,7 @@ def get_peak_flops(device_name: str) -> int:
         # MI325X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html
         return 1300e12
     elif "MI250X" in device_name:
-        # data from https://www.amd.com/en/products/accelerators/instinct/mi200/mi250.html
+        # data from https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html (per GCD)
         return 191.5e12
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
