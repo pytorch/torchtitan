@@ -610,6 +610,11 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return False
 
+        # Force saving a checkpoint at step 1 to fail fast if checkpointer is
+        # compatible with the cluster.
+        if curr_step == 1:
+            return True
+
         if force:
             return True
 
