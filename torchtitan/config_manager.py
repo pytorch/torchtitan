@@ -227,6 +227,9 @@ class JobConfig:
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
+            "--optimizer.eps", type=float, default=1e-8, help="Epsilon value to use"
+        )
+        self.parser.add_argument(
             "--optimizer.implementation",
             type=str,
             default="fused",
