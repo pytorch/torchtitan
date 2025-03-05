@@ -349,6 +349,13 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--training.disable_tb_from_scratch",
+            action="store_false",
+            help="""
+                Whether to log tb from scratch for each checkpoint load. We have seen this feature
+                could lead to nccl watchdog timeout issue. This flag is to disable this feature.""",
+        )
+        self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
             action="store_true",
             help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
