@@ -242,7 +242,7 @@ def main(job_config: JobConfig):
     # plot losses loaded from checkpoint (if any) to TensorBoard
     # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
     #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
-    if train_state.step > 0:
+    if train_state.step and not job_config.disable_tb_from_scratch > 0:
         for idx, step in enumerate(train_state.log_steps):
             metrics = {
                 "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
