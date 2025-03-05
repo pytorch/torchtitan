@@ -12,6 +12,7 @@ pip install -r extra_requirements.txt
 
 ### Test loading HF weights
 
+NOTE: you need to have internet connection to download the weights.
 ```bash
 pytest test_loading_hf_weights.py
 ```
