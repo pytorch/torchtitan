@@ -350,7 +350,7 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.disable_tb_from_scratch",
-            action="store_false",
+            action="store_true",
             help="""
                 Whether to log tb from scratch for each checkpoint load. We have seen this feature
                 could lead to nccl watchdog timeout issue. This flag is to disable this feature.""",
