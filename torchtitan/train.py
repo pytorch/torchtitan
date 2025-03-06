@@ -404,7 +404,7 @@ def main(job_config: JobConfig):
                 }
                 for i_sched, lr_sched in enumerate(lr_schedulers):
                     for i_group, lr in enumerate(lr_sched.get_last_lr()):
-                        metrics |= { f"lr/scheduler_{i_sched}/group_{i_group}": lr}
+                        metrics[f"lr_scheduler/{i_sched}/group_{i_group}"] = lr
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
