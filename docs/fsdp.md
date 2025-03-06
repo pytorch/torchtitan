@@ -45,6 +45,8 @@ def fully_shard(
 | `forward_prefetch` | not yet implemented |
 | `limit_all_gathers` | removed |
 | `use_orig_params` | removed |
+| `no_sync` | `set_requires_gradient_sync` |
+| `ignored_modules`, `ignored_states` | `ignored_params` |
 
 - `fully_shard(module)` is similar to `FullyShardedDataParallel(module)`, constructing one communication bucket from `module.parameters()` except those already assigned to a nested `fully_shard`/`FullyShardedDataParallel` call.
     - `fully_shard(module)` adds an `FSDPState` object on `module`, accessible via `fully_shard.state(module)`, instead of being an `nn.Module` wrapper. This is done via the `@contract` decorator.
@@ -71,7 +73,7 @@ def fully_shard(
   - FSDP2 always moves managed parameters/buffers to the `mesh`'s corresponding device, removing the need for `device_id`. For example, if `mesh.device_type` is `"cuda"`, then FSDP2 uses the current CUDA device.
   - FSDP2 uses a new memory management system that preserves communication/computation overlap while achieving deterministic and lower memory usage than FSDP1. This system does not require any CPU synchronization, so there is no need for `limit_all_gathers`.
   - FSDP2 always "uses the original parameters" since there is no more `FlatParameter`, removing the need for `use_orig_params`.
-- How to implement `ignored_modules`/`ignored_states` and `forward_prefetch` in FSDP2 is under discussion.
+- How to implement `forward_prefetch` in FSDP2 is under discussion.
 
 | FSDP1 | FSDP2 |
 | ----- | ----- |
