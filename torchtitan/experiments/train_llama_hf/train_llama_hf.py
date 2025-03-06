@@ -307,11 +307,11 @@ def main(job_config: JobConfig):
             # apply context parallelism if cp is enabled
             # ensure CP handles the separate freqs_cis buffer for each pp stage
             optional_context_parallel_ctx = (
-                utils.create_context_parallel_ctx(
+                dist_utils.create_context_parallel_ctx(
                     cp_mesh=world_mesh["cp"],
-                    cp_buffers=[input_ids, labels, position_ids],
+                    cp_buffers=[input_ids, position_ids, labels],
                     cp_seq_dims=[1, 1, 1],
-                    cp_no_restore_buffers={input_ids, labels},
+                    cp_no_restore_buffers={input_ids, position_ids, labels},
                     cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
                 )
                 if parallel_dims.cp_enabled
@@ -344,7 +344,7 @@ def main(job_config: JobConfig):
             else:
                 # Non-PP forward / backward
                 with train_context(optional_context_parallel_ctx):
-                    pred = model(input_ids)
+                    pred = model(input_ids, position_ids=position_ids)
                     loss = train_spec.loss_fn(pred, labels)
                     # pred.shape=(bs, seq_len, vocab_size)
                     # need to free to before bwd to avoid peaking memory
