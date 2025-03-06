@@ -356,9 +356,63 @@ def main(job_config: JobConfig):
                 else:
                     global_avg_loss = global_max_loss = loss.item()
 
-                metrics_processor.log(
-                    train_state.step, global_avg_loss, global_max_loss
+                # update train state
+                train_state.log_steps.append(train_state.step)
+                train_state.global_avg_losses.append(global_avg_loss)
+                train_state.global_max_losses.append(global_max_loss)
+
+                time_delta = time.perf_counter() - time_last_log
+
+                last_lr = lr_schedulers.schedulers[0].get_last_lr()[0]
+                # tokens per second per device, abbreviated as tps
+                tps = ntokens_since_last_log / (
+                    time_delta * parallel_dims.non_data_parallel_size
                 )
+                # model FLOPS utilization
+                # For its definition and calculation, please refer to the PaLM paper:
+                # https://arxiv.org/abs/2204.02311
+                mfu = 100 * num_flop_per_token * tps / gpu_peak_flops
+                tflops = num_flop_per_token * tps / 1e12
+
+                time_end_to_end = time_delta / job_config.metrics.log_freq
+                time_data_loading = sum(data_loading_times) / len(data_loading_times)
+                time_data_loading_pct = 100 * sum(data_loading_times) / time_delta
+
+                device_mem_stats = device_memory_monitor.get_peak_stats()
+
+                metrics = {
+                    "loss_metrics/global_avg_loss": global_avg_loss,
+                    "loss_metrics/global_max_loss": global_max_loss,
+                    "throughput(tps)": tps,
+                    "tflops": tflops,
+                    "mfu(%)": mfu,
+                    "optim/learning_rate": last_lr,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
+                    "time_metrics/data_loading(%)": time_data_loading_pct,
+                    "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+                    "memory/max_active(%)": device_mem_stats.max_active_pct,
+                    "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+                    "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+                    "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+                    "memory/num_ooms": device_mem_stats.num_ooms,
+                }
+                metric_logger.log(metrics, step=train_state.step)
+
+                logger.info(
+                    f"{color.red}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}tps: {round(tps):,}  "
+                    f"{color.cyan}lr: {last_lr:.4e}  "
+                    f"{color.magenta}tflops: {tflops:,.2f} mfu: {mfu:.2f}%{color.reset}"
+                )
+
+                ntokens_since_last_log = 0
+                data_loading_times.clear()
+                time_last_log = time.perf_counter()
+                device_memory_monitor.reset_peak_stats()
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
