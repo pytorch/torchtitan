@@ -6,9 +6,11 @@
 
 import copy
 import functools
+import math
 from typing import Any, Callable, Dict, Generic, List, TypeVar
 
 import torch
+
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
@@ -389,10 +391,11 @@ def build_lr_schedulers(
             lr_schedulers.
     """
     warmup_steps = int(job_config.training.warmup_steps)
-    decay_steps = float(max(1, job_config.training.steps - warmup_steps))
+    training_steps = job_config.training.steps
+    min_lr_ratio = job_config.optimizer.min_lr_ratio
 
     def linear_warmup_linear_decay(
-        warmup_steps: int, decay_steps: int, current_step: int
+        current_step: int, warmup_steps: int, min_lr_ratio: float
     ) -> float:
         """Computes linear warmup followed by linear decay.
 
@@ -400,6 +403,7 @@ def build_lr_schedulers(
         a multiplicative factor to adjust the learning rate to
         create the desired schedule.
         """
+        decay_steps = float(max(1, training_steps - warmup_steps))
         if current_step < warmup_steps:
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
@@ -410,8 +414,76 @@ def build_lr_schedulers(
             # linear decay
             normalized_step = decay_steps - (current_step - warmup_steps)
             curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
+            curr_adjustment = curr_adjustment * (1 - min_lr_ratio) + min_lr_ratio
 
         return curr_adjustment
 
-    lr_lambda = functools.partial(linear_warmup_linear_decay, warmup_steps, decay_steps)
+    def linear_warmup_cosine_decay(
+        current_step: int, warmup_steps: int, min_lr_ratio: float = 0.0
+    ):
+        decay_steps = float(max(1, training_steps - warmup_steps))
+        if current_step < warmup_steps:
+            # linear warmup
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            curr_adjustment = float(current_step / (warmup_steps + 1))
+        else:
+            # cosine decay
+            progress = (current_step - warmup_steps) / decay_steps
+            curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            curr_adjustment = min_lr_ratio + (1 - min_lr_ratio) * curr_adjustment
+
+        return curr_adjustment
+
+    def linear_warmup_stable_decay(
+        current_step: int,
+        warmup_steps: int,
+        decay_ratio: float = 0.1,
+        min_lr_ratio: float = 0.0,
+        decay_type: str = "sqrt",
+    ):
+        warmup_stable_steps = training_steps * (1 - decay_ratio)
+        decay_steps = float(max(1, training_steps - warmup_stable_steps))
+        if current_step < warmup_steps:
+            # linear warmup
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            curr_adjustment = float(current_step / (warmup_steps + 1))
+        elif current_step < warmup_stable_steps:
+            curr_adjustment = 1.0
+        else:
+            progress = float(current_step - warmup_stable_steps) / decay_steps
+            if decay_type == "linear":
+                curr_adjustment = 1 - progress
+            elif decay_type == "sqrt":
+                curr_adjustment = 1 - math.sqrt(progress)
+            elif decay_type == "cosine":
+                curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            else:
+                raise ValueError(
+                    f"decay type {decay_type} is not in ['linear', 'sqrt', 'cosine']"
+                )
+            curr_adjustment = min_lr_ratio + (1 - min_lr_ratio) * curr_adjustment
+        return curr_adjustment
+
+    if job_config.optimizer.scheduler == "linear":
+        lr_lambda = functools.partial(
+            linear_warmup_linear_decay,
+            warmup_steps=warmup_steps,
+            min_lr_ratio=min_lr_ratio,
+        )
+    elif job_config.optimizer.scheduler == "cosine":
+        lr_lambda = functools.partial(
+            linear_warmup_cosine_decay,
+            warmup_steps=warmup_steps,
+            min_lr_ratio=min_lr_ratio,
+        )
+    elif job_config.optimizer.scheduler == "wsd":
+        lr_lambda = functools.partial(
+            linear_warmup_stable_decay,
+            warmup_steps=warmup_steps,
+            min_lr_ratio=min_lr_ratio,
+        )
+    else:
+        raise ValueError(f"Scheduler {job_config.optimizer.scheduler} not supported")
     return LRSchedulersContainer(optimizers, lr_lambda)

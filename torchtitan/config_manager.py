@@ -234,7 +234,25 @@ class JobConfig:
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
+            "--optimizer.min_lr_ratio",
+            type=float,
+            default=0.0,
+            help="Min lr ratio for lr scheduler",
+        )
+        self.parser.add_argument(
             "--optimizer.eps", type=float, default=1e-8, help="Epsilon value to use"
+        )
+        self.parser.add_argument(
+            "--optimizer.scheduler",
+            type=str,
+            default="linear",
+            choices=["linear", "cosine", "wsd"],
+            help="""
+            Learning rate scheduler to use during training:
+            - 'linear': Linear scheduler that linearly decays learning rate from initial to final value
+            - 'cosine': Cosine annealing scheduler that smoothly decays learning rate following a cosine curve
+            - 'wsd': Warmup-Stable-Decay scheduler that follows warmup, stable, and decay phases (see https://arxiv.org/abs/2404.06395)
+            """,
         )
         self.parser.add_argument(
             "--optimizer.implementation",

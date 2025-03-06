@@ -26,6 +26,8 @@ tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
 name = "AdamW"
 lr = 3e-4
 eps = 1e-8
+scheduler = "linear"
+min_lr_ratio = 0.0
 
 [training]
 batch_size = 1
