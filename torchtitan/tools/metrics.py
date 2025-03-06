@@ -154,18 +154,31 @@ class WandBLogger(BaseLogger):
             self.wandb.finish()
 
 
-def _get_metrics_rank(parallel_dims: ParallelDims) -> int:
+def _get_metrics_rank(
+    parallel_dims: ParallelDims,
+    job_config: JobConfig,
+) -> int:
     """
-    Returns global rank 0 in non-pipeline-parallel configs, and returns the global
-    rank of the 0th rank in the last pipeline stage when pipeline parallelism is enabled.
+    Determines which rank should log metrics.
+
+    Returns:
+       int: The rank responsible for logging metrics:
+            - Rank 0 for non-pipeline-parallel configs
+            - Rank 0 for pipeline-parallel 'ZBVZeroBubble' schedule
+            - The first rank of the last pipeline stage for other pipeline-parallel schedules
     """
-    if parallel_dims.pp_enabled:
-        world_size = parallel_dims.world_size
-        pp_size = parallel_dims.pp
-        metrics_log_rank = (world_size // pp_size) * (pp_size - 1)
-    else:
-        metrics_log_rank = 0
-    return metrics_log_rank
+    # Early return for non-pipeline-parallel configurations
+    if not parallel_dims.pp_enabled:
+        return 0
+
+    # V Block Schedules return loss on rank 0
+    if job_config.experimental.pipeline_parallel_schedule == "ZBVZeroBubble":
+        return 0
+
+    # Calculate first rank of the last pipeline stage
+    world_size = parallel_dims.world_size
+    pp_size = parallel_dims.pp
+    return (world_size // pp_size) * (pp_size - 1)
 
 
 def build_metric_logger(
@@ -190,7 +203,7 @@ def build_metric_logger(
     # Determine if this rank should log
     should_log = has_logging_enabled
     if metrics_config.rank_0_only and should_log:
-        metrics_rank = _get_metrics_rank(parallel_dims)
+        metrics_rank = _get_metrics_rank(parallel_dims, job_config)
         should_log = torch.distributed.get_rank() == metrics_rank
 
     logger.debug(
