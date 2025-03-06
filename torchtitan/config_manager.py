@@ -166,6 +166,13 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
+            "--metrics.disable_logging_from_checkpoint",
+            action="store_true",
+            help="""
+                Whether to log metrics from scratch for each checkpoint load. We have seen this feature
+                leading to nccl watchdog timeout issue when testing with tb. This flag disables it.""",
+        )
+        self.parser.add_argument(
             "--metrics.enable_wandb",
             action="store_true",
             help="Whether to log metrics to Weights & Biases",
@@ -347,13 +354,6 @@ class JobConfig:
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
             """,
-        )
-        self.parser.add_argument(
-            "--training.disable_tb_from_scratch",
-            action="store_true",
-            help="""
-                Whether to log tb from scratch for each checkpoint load. We have seen this feature
-                could lead to nccl watchdog timeout issue. This flag is to disable this feature.""",
         )
         self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",
