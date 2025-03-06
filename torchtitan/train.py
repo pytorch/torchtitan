@@ -402,6 +402,9 @@ def main(job_config: JobConfig):
                     "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
+                for i_sched, lr_sched in enumerate(lr_schedulers):
+                    for i_group, lr in enumerate(lr_sched.get_last_lr()):
+                        metrics |= { f"lr/scheduler_{i_sched}/group_{i_group}": lr}
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(
