@@ -27,6 +27,7 @@ from torchtitan.protocols.train_spec import (
     register_train_spec,
     TrainSpec,
 )
+from torchtitan.tools.metrics import metric_processor
 
 
 class FakeModel(ModelProtocol):
@@ -66,6 +67,7 @@ class TestTrainSpec:
             build_dataloader_fn=build_hf_dataloader,
             tokenizer_cls=TikTokenizer,
             loss_fn=cross_entropy_loss,
+            metric_processor_fn=metric_processor,
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake")
@@ -87,6 +89,7 @@ class TestTrainSpec:
             build_dataloader_fn=build_hf_dataloader,
             tokenizer_cls=TikTokenizer,
             loss_fn=cross_entropy_loss,
+            metric_processor_fn=metric_processor,
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake2")

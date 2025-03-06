@@ -7,7 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, Type, TypeAlias
+from typing import Any, Callable, Dict, Protocol, Type, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -62,6 +62,7 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     tokenizer_cls: Type[Tokenizer]
     loss_fn: LossFunction
+    metric_processor_fn: Callable[Dict[str, Any], Dict[str, Any]]
 
     # TODO: Add a FQN convert fn to allow users to load checkpoints from
     # HuggingFace or other sources that have different FQN conventions.

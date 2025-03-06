@@ -245,9 +245,10 @@ def main(job_config: JobConfig):
     if train_state.step > 0 and not job_config.metrics.disable_logging_from_checkpoint:
         for idx, step in enumerate(train_state.log_steps):
             metrics = {
-                "train/avg_loss_AVG": train_state.global_avg_losses[idx],
-                "train/max_loss_MAX": train_state.global_max_losses[idx],
+                "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
+                "loss_metrics/global_max_loss": train_state.global_max_losses[idx],
             }
+            metrics = train_spec.metric_processor_fn(metrics)
             metric_logger.log(metrics, step=step)
 
     data_iterator = iter(dataloader)
@@ -396,8 +397,8 @@ def main(job_config: JobConfig):
                 )
 
                 metrics = {
-                    "train/avg_loss_AVG": global_avg_loss,
-                    "train/max_loss_MAX": global_max_loss,
+                    "loss_metrics/global_avg_loss": global_avg_loss,
+                    "loss_metrics/global_max_loss": global_max_loss,
                     "optim/lr": curr_lr,
                     "throughput(tps)": tps,
                     "tflops": tflops,
@@ -412,6 +413,7 @@ def main(job_config: JobConfig):
                     "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
                     "memory/num_ooms": device_mem_stats.num_ooms,
                 }
+                metrics = train_spec.metric_processor_fn(metrics)
                 metric_logger.log(metrics, step=train_state.step)
 
                 logger.info(

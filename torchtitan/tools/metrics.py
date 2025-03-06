@@ -96,6 +96,11 @@ def build_device_memory_monitor():
     return device_memory_monitor
 
 
+def metric_processor(metrics: Dict[str, Any]):
+    # by default no processing.
+    return metrics
+
+
 class BaseLogger:
     """Logger that does nothing, used when logging is disabled."""
 

@@ -11,6 +11,7 @@ from torchtitan.components.optimizer import build_lr_schedulers, build_optimizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer import TikTokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.tools.metrics import metric_processor
 
 from .model import Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama
@@ -71,5 +72,6 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         tokenizer_cls=TikTokenizer,
         loss_fn=cross_entropy_loss,
+        metric_processor_fn=metric_processor,
     )
 )
