@@ -29,7 +29,6 @@ from torchtitan.distributed.pipeline import (
 )
 from torchtitan.tools.logging import logger
 
-
 DeviceType = Union[int, str, torch.device]
 
 
@@ -87,8 +86,10 @@ def patch_llama_forward(model: nn.Module):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # decoder layers
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        # decoder layers, ok since ModuleDict is ordered
+        for decoder_layer in list(self.layers.values())[
+            : self.config.num_hidden_layers
+        ]:
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -217,6 +218,10 @@ def pipeline_llama(
     model_config: PretrainedConfig,
     loss_fn: Callable[..., torch.Tensor],
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    logger.info("Changing model.model.layers to nn.ModuleDict")
+    model.model.layers = nn.ModuleDict(
+        {str(i): layer for i, layer in enumerate(model.model.layers)}
+    )
     logger.info(
         "Patching Llama forward method for pipeline parallelism, it will disable some features of orignal HF model"
     )
@@ -277,20 +282,14 @@ def pipeline_llama_manual_split(
             model.model.embed_tokens = None
 
         drop_layers = start_layer is not None
-        del_indexes = []
-        for i in range(len(model.model.layers)):
+        for name in list(model.model.layers.keys()):
             # we keep layers in a contiguous region between start (inclusive) and stop (exclusive)
-            if f"layers.{i}" == start_layer:
+            if f"layers.{name}" == start_layer:
                 drop_layers = False
-            if f"layers.{i}" == stop_layer:
+            if f"layers.{name}" == stop_layer:
                 drop_layers = True
             if drop_layers:
-                del_indexes.append(i)
-
-        # delete layers in reverse order to avoid index shifting
-        del_indexes.reverse()
-        for i in del_indexes:
-            del model.model.layers[i]
+                del model.model.layers[name]
 
         if not is_last:
             model.model.norm = None

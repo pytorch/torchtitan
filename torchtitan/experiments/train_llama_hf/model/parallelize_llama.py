@@ -167,7 +167,11 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for transformer_block in model.model.layers:
+    if isinstance(model.model.layers, nn.ModuleDict):
+        transformer_blocks = model.model.layers.values()
+    else:
+        transformer_blocks = model.model.layers
+    for transformer_block in transformer_blocks:
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
@@ -260,8 +264,12 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    if isinstance(model.model.layers, nn.ModuleDict):
+        layer_items = [(int(k), v) for (k, v) in model.model.layers.items()]
+    else:
+        layer_items = list(enumerate(model.model.layers))
 
-    for layer_id, transformer_block in enumerate(model.model.layers):
+    for layer_id, transformer_block in layer_items:
         if reshard_after_forward_policy == "always":
             reshard_after_forward = True
         elif reshard_after_forward_policy == "never":
@@ -274,7 +282,7 @@ def apply_fsdp(
             else:
                 # As an optimization, do not reshard after forward for the last
                 # transformer block since FSDP would prefetch it immediately
-                reshard_after_forward = int(layer_id) < len(model.model.layers) - 1
+                reshard_after_forward = layer_id < len(layer_items) - 1
         else:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."

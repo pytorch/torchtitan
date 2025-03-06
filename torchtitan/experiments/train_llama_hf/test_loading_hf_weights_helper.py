@@ -16,13 +16,13 @@ from torchtitan.experiments.train_llama_hf.hf_weights_utils import (
     normalize_state_dict_key,
 )
 
+from torchtitan.experiments.train_llama_hf.loss import cross_entropy_loss_hf
+
 from torchtitan.experiments.train_llama_hf.model.parallelize_llama import (
     apply_fsdp,
     apply_tp,
 )
-from torchtitan.experiments.train_llama_hf.model.pipeline_llama import (
-    pipeline_llama_manual_split,
-)
+from torchtitan.experiments.train_llama_hf.model.pipeline_llama import pipeline_llama
 
 
 def main(job_config: JobConfig):
@@ -52,13 +52,14 @@ def main(job_config: JobConfig):
     # apply parallelisms
     if parallel_dims.pp_enabled:
         # apply PT-D Pipeline Parallel
-        _, model_parts = pipeline_llama_manual_split(
+        _, model_parts, _, _ = pipeline_llama(
             model,
             world_mesh["pp"],
             parallel_dims,
             job_config,
             device,
             model_config,
+            loss_fn=cross_entropy_loss_hf,
         )
     else:
         model_parts = [model]

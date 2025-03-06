@@ -6,13 +6,13 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from loss import cross_entropy_loss_hf
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
 from torchtitan.experiments.train_llama_hf.dataset import (
     build_pos_included_hf_dataloader,
 )
+from torchtitan.experiments.train_llama_hf.loss import cross_entropy_loss_hf
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .parallelize_llama import parallelize_llama
