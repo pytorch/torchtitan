@@ -28,6 +28,12 @@ class ParallelDims:
 
     def __post_init__(self):
         self._validate()
+        if self.pp_enabled:
+            logger.warning(
+                "For most PP schedules, the loss is only returned on the last PP rank instead of the first rank. "
+                "Change your launch env variable LOG_RANK=... to last rank if the displayed loss is always -1.0. "
+                "Note that this only impact the console. Metrics trackers still log the correct loss values."
+            )
 
     def _validate(self):
         dp_replicate, dp_shard, cp, tp, pp = (
