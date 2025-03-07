@@ -562,26 +562,22 @@ class MoE(nn.Module):
             dist.all_to_all_single(
                 tokens_per_expert_group, tokens_per_expert, group=self.ep_group
             )
-            torch.sum(
-                tokens_per_expert_group.view(self.ep_size, -1),
-                dim=1,
-                out=self.output_splits,
-            )
-            # print(
-            #     f"EP rank {self.ep_rank} receives {self.output_splits} tokens"
-            #     f"EP rank {self.ep_rank} sends {self.input_splits} tokens"
-            # )
-            # Total received tokens of current rank
-            received = torch.empty(1, dtype=torch.int64, device=x.device)
             # DP to EP token shuffle
             on_device_all_to_all_v(
                 self.token_gather_buf,
-                received,
+                self.output_splits,
                 sorted_tokens,
                 self.input_splits,
                 group=self.ep_group,
             )
+            # Output splits sanity check
+            # expected_splits = torch.sum(
+            #     tokens_per_expert_group.view(self.ep_size, -1),
+            #     dim=1,
+            # )
+            # torch.testing.assert_close(self.output_splits, expected_splits)
             # Received tokens from all other ranks. TODO: use mask instead
+            received = self.output_splits.sum().item()
             gathered_tokens = self.token_gather_buf[:received]
             tokens_per_expert_post_gather = tokens_per_expert_group.view(
                 self.ep_size, self.experts_per_rank
@@ -617,10 +613,11 @@ class MoE(nn.Module):
             new_x = self.token_gather_buf[: outs.shape[0]]
             new_x[gatherd_idxs] = outs
             gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
+            received_splits = torch.empty_like(self.input_splits)  # unused
             # EP to DP token shuffle
             on_device_all_to_all_v(
                 gathered_tokens,
-                received,  # unused
+                received_splits,  # unused
                 new_x,
                 self.output_splits,
                 group=self.ep_group,
