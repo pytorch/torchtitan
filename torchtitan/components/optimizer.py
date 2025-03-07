@@ -396,7 +396,7 @@ def build_lr_schedulers(
     lr_decay_type = job_config.optimizer.lr_decay_type
     lr_min = job_config.optimizer.lr_min
 
-    def lr_decay_fn(
+    def linear_warmup_stable_decay(
         current_step: int,
         warmup_steps: int,
         lr_decay_ratio: Union[float, None],
@@ -448,7 +448,7 @@ def build_lr_schedulers(
         return curr_adjustment
 
     lr_lambda = functools.partial(
-        lr_decay_fn,
+        linear_warmup_stable_decay,
         warmup_steps=warmup_steps,
         lr_decay_ratio=lr_decay_ratio,
         lr_decay_type=lr_decay_type,
