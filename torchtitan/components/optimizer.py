@@ -7,7 +7,7 @@
 import copy
 import functools
 import math
-from typing import Any, Callable, Dict, Generic, List, TypeVar
+from typing import Any, Callable, Dict, Generic, List, TypeVar, Union
 
 import torch
 
@@ -399,7 +399,7 @@ def build_lr_schedulers(
     def lr_decay_fn(
         current_step: int,
         warmup_steps: int,
-        lr_decay_ratio: float,
+        lr_decay_ratio: Union[float, None],
         lr_decay_type: str,
         lr_min: float,
     ):
@@ -419,7 +419,10 @@ def build_lr_schedulers(
         If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
         to ensure the learning rate does not drop below this minimum value.
         """
-        warmup_stable_steps = training_steps * (1 - lr_decay_ratio)
+        if lr_decay_ratio is None:
+            warmup_stable_steps = warmup_steps
+        else:
+            warmup_stable_steps = training_steps * (1 - lr_decay_ratio)
         if current_step < warmup_steps:
             # linear warmup
             # 0-indexed step, hence + 1 adjustments

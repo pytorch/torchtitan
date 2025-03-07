@@ -236,11 +236,15 @@ class JobConfig:
         self.parser.add_argument(
             "--optimizer.lr_decay_ratio",
             type=float,
-            default=0.1,
+            default=None,
             help="""
-            The ratio of the learning rate decay period.
+            Controls the proportion of the training steps allocated to the learning rate decay phase.
 
-            If specified, the learning rate decay will only occur during the last `lr_decay_ratio` portion of the total training steps.
+            If `None`, the learning rate will begin decaying immediately after the warmup period.
+            Otherwise, the learning rate will remain stable after the warmup period and
+            only start decaying during the last `lr_decay_ratio` portion of the total training steps.
+
+            This is known as the Warmup-Stable-Decay (WSD) schedule, as described in https://arxiv.org/abs/2404.06395.
             """,
         )
         self.parser.add_argument(
