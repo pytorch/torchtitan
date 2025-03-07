@@ -55,9 +55,9 @@ def _exchange_row_offsets(
 @triton.jit
 def on_device_all_to_all_v_kernel(
     output_ptr,
-    received_ptr,
+    output_splits_ptr,
     input_ptrs,
-    split_sizes_ptrs,
+    input_splits_ptr,
     signal_pad_ptrs,
     dim: tl.constexpr,  # Separate dim for easier vectorization
     rank: tl.constexpr,
@@ -73,11 +73,13 @@ def on_device_all_to_all_v_kernel(
     block_offset = tl.program_id(0) % BLOCKS_PER_REMOTE_RANK
 
     input_row_offset, output_row_offset, num_rows = _exchange_row_offsets(
-        split_sizes_ptrs, rank, world_size, BLOCKS_PER_REMOTE_RANK
+        input_splits_ptr, rank, world_size, BLOCKS_PER_REMOTE_RANK
     )
 
-    if tl.program_id(0) == tl.num_programs(0) - 1:
-        tl.store(received_ptr, output_row_offset + num_rows)
+    output_splits_ptr = output_splits_ptr.to(tl.pointer_type(tl.uint64))
+    if block_offset == 0:
+        # Update output_splits
+        tl.store(output_splits_ptr + remote_rank, num_rows)
 
     input_ptr = (
         tl.load(input_ptrs.to(tl.pointer_type(tl.uint64)) + remote_rank).to(
@@ -123,13 +125,13 @@ def on_device_all_to_all_v_kernel(
 
 def on_device_all_to_all_v(
     output: torch.Tensor,
-    received: torch.Tensor,
+    output_splits: torch.Tensor,
     input: torch.Tensor,
-    split_sizes: torch.Tensor,
+    input_splits: torch.Tensor,
+    group: dist.ProcessGroup = dist.group.WORLD,
     BLOCKS_PER_REMOTE_RANK=8,
     UNROLL_FACTOR: int = 8,
     BLOCK_SIZE: int = 16384,
-    group: dist.ProcessGroup = dist.group.WORLD,
 ):
     assert output.dim() == 2, f"{output.shape}"
     assert input.dim() == 2, f"{input.shape}"
@@ -137,14 +139,14 @@ def on_device_all_to_all_v(
 
     dim = output.shape[1]
     input_hdl = symm_mem.rendezvous(input, group=group)
-    split_sizes_hdl = symm_mem.rendezvous(split_sizes, group=group)
+    input_splits_hdl = symm_mem.rendezvous(input_splits, group=group)
 
     num_blocks = input_hdl.world_size * BLOCKS_PER_REMOTE_RANK
     kernel = on_device_all_to_all_v_kernel[(num_blocks, 1, 1)](
         output,
-        received,
+        output_splits,
         input_hdl.buffer_ptrs_dev,
-        split_sizes_hdl.buffer_ptrs_dev,
+        input_splits_hdl.buffer_ptrs_dev,
         input_hdl.signal_pad_ptrs_dev,
         dim=dim,
         rank=input_hdl.rank,
