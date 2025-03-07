@@ -234,25 +234,39 @@ class JobConfig:
             "--optimizer.lr", type=float, default=8e-4, help="Learning rate to use"
         )
         self.parser.add_argument(
-            "--optimizer.min_lr_ratio",
+            "--optimizer.lr_decay_ratio",
+            type=float,
+            default=0.1,
+            help="""
+            The ratio of the learning rate decay period.
+
+            If specified, the learning rate decay will only occur during the last `lr_decay_ratio` portion of the total training steps.
+            """,
+        )
+        self.parser.add_argument(
+            "--optimizer.lr_decay_type",
+            type=str,
+            default="linear",
+            choices=["linear", "sqrt", "cosine"],
+            help="""
+            Learning rate decay type to use during training:
+            - 'linear': linearly decays learning rate from initial to final value
+            - 'sqrt': decays learning rate following a 1 minus square root curve
+            - 'cosine': smoothly decays learning rate following a cosine curve
+            """,
+        )
+        self.parser.add_argument(
+            "--optimizer.lr_min",
             type=float,
             default=0.0,
-            help="Min lr ratio for lr scheduler",
+            help="""
+            Min lr ratio for lr scheduler.
+
+            If provided, the range of decay factor is scaled from 1 to `lr_min` to ensure the learning rate does not drop below `lr * lr_min`.
+            """,
         )
         self.parser.add_argument(
             "--optimizer.eps", type=float, default=1e-8, help="Epsilon value to use"
-        )
-        self.parser.add_argument(
-            "--optimizer.scheduler",
-            type=str,
-            default="linear",
-            choices=["linear", "cosine", "wsd"],
-            help="""
-            Learning rate scheduler to use during training:
-            - 'linear': Linear scheduler that linearly decays learning rate from initial to final value
-            - 'cosine': Cosine annealing scheduler that smoothly decays learning rate following a cosine curve
-            - 'wsd': Warmup-Stable-Decay scheduler that follows warmup, stable, and decay phases (see https://arxiv.org/abs/2404.06395)
-            """,
         )
         self.parser.add_argument(
             "--optimizer.implementation",
