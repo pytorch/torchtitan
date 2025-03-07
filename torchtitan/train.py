@@ -13,6 +13,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
+from torchtitan.components.metrics import build_metrics_logger
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
@@ -21,7 +22,6 @@ from torchtitan.protocols.train_spec import get_train_spec
 
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.components.metrics import build_metrics_logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
@@ -126,7 +126,11 @@ def main(job_config: JobConfig):
     model_converters.convert(model)
 
     # metrics logging
-    build_metrics_logger_fn = build_metrics_logger if train_spec.build_metrics_logger_fn is None else traiin_spec.build_metrics_logger_fn
+    build_metrics_logger_fn = (
+        build_metrics_logger
+        if train_spec.build_metrics_logger_fn is None
+        else train_spec.build_metrics_logger_fn
+    )
     metrics_logger = build_metrics_logger_fn(job_config, parallel_dims)
     color = metrics_logger.color
 
