@@ -191,7 +191,7 @@ def main(job_config: JobConfig):
             m.train()
 
         # confirm that user will be able to view loss metrics on the console
-        ensure_pp_loss_visible(parallel_dims, job_config)
+        ensure_pp_loss_visible(parallel_dims, job_config, color)
 
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
