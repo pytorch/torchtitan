@@ -360,6 +360,14 @@ class JobConfig:
                 of stages.  Stages per rank are inferred from split points degree, and schedule.""",
         )
         self.parser.add_argument(
+            "--experimental.pipeline_parallel_batch_split_dim",
+            type=int,
+            default=0,
+            help="""
+                The dimension to split the batch on for pipeline parallelism. Defaults to 0 (batch dimension), but can
+                also be set to 1 (sequence dimension).""",
+        )
+        self.parser.add_argument(
             "--experimental.pipeline_parallel_split_points",
             type=string_list,
             nargs="+",
