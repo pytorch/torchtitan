@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -251,6 +251,14 @@ def _build_metric_logger(
 
 
 class MetricsLogger:
+    """Metrics logger that logs metrics to TensorBoard or WandB.
+
+    Args:
+        job_config (JobConfig): Job configuration.
+        parallel_dims (ParallelDims): Parallel dimensions.
+        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+    """
+
     logger: BaseLogger
     parallel_dims: ParallelDims
     job_config: JobConfig
@@ -356,4 +364,13 @@ class MetricsLogger:
 def build_metrics_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ) -> MetricsLogger:
+    """Create a metrics logger.
+    Args:
+        job_config (JobConfig): Job configuration.
+        parallel_dims (ParallelDims): Parallel dimensions.
+        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+
+    Returns:
+        MetricsLogger: A metrics logger.
+    """
     return MetricsLogger(job_config, parallel_dims, tag)
