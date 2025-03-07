@@ -399,9 +399,9 @@ def build_lr_schedulers(
     def lr_decay_fn(
         current_step: int,
         warmup_steps: int,
-        lr_decay_ratio: float = 0.1,
-        lr_decay_type: str = "sqrt",
-        lr_min: float = 0.0,
+        lr_decay_ratio: float,
+        lr_decay_type: str,
+        lr_min: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -412,9 +412,9 @@ def build_lr_schedulers(
         to adjust the learning rate to create the desired schedule.
 
         We offer three types of learning rate decay schedules:
-        1. `linear`: decreases linearly from 1 to 0 over the decay period.
-        2. `sqrt`: decreases as 1 minus the square root of the decay progress.
-        3. `cosine`: follows a cosine curve, decreasing according to the values of the half-period of the cosine function.
+        1. `linear`: decays linearly from 1 to 0 over the decay period.
+        2. `sqrt`: decays as 1 minus the square root of the decay progress.
+        3. `cosine`: follows a cosine curve, decaying according to the values of the half-period of the cosine function.
 
         If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
         to ensure the learning rate does not drop below this minimum value.
