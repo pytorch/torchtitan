@@ -264,6 +264,7 @@ class MetricsLogger:
 
     num_flop_per_token: int
     optimizers: Optional[OptimizersContainer]
+    lr_schedulers: Optional[LRSchedulersContainer]
 
     def __init__(
         self,
@@ -291,6 +292,7 @@ class MetricsLogger:
         # These variables have to be set later as they depend on other components or model.
         self.num_flop_per_token = -1
         self.optimizers = None
+        self.lr_schedulers = None
 
     def log(self, step: int, global_avg_loss: float, global_max_loss: float):
         assert self.num_flop_per_token > 0, "num_flop_per_token must be set"
