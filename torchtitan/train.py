@@ -370,7 +370,6 @@ def main(job_config: JobConfig):
 
                 time_delta = time.perf_counter() - time_last_log
 
-                last_lr = lr_schedulers.schedulers[0].get_last_lr()[0]
                 # tokens per second per device, abbreviated as tps
                 tps = ntokens_since_last_log / (
                     time_delta * parallel_dims.non_data_parallel_size
@@ -393,7 +392,6 @@ def main(job_config: JobConfig):
                     "throughput(tps)": tps,
                     "tflops": tflops,
                     "mfu(%)": mfu,
-                    "optim/learning_rate": last_lr,
                     "time_metrics/end_to_end(s)": time_end_to_end,
                     "time_metrics/data_loading(s)": time_data_loading,
                     "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -412,8 +410,8 @@ def main(job_config: JobConfig):
                     f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
                     f"({device_mem_stats.max_reserved_pct:.2f}%)  "
                     f"{color.blue}tps: {round(tps):,}  "
-                    f"{color.cyan}lr: {last_lr:.4e}  "
-                    f"{color.magenta}tflops: {tflops:,.2f} mfu: {mfu:.2f}%{color.reset}"
+                    f"{color.cyan}tflops: {tflops:,.2f}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
                 )
 
                 ntokens_since_last_log = 0
