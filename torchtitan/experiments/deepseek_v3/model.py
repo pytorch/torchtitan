@@ -568,7 +568,7 @@ class MoE(nn.Module):
                 self.output_splits,
                 sorted_tokens,
                 self.input_splits,
-                group=self.ep_group,
+                self.ep_group,
             )
             # Output splits sanity check
             # expected_splits = torch.sum(
@@ -620,7 +620,7 @@ class MoE(nn.Module):
                 received_splits,  # unused
                 new_x,
                 self.output_splits,
-                group=self.ep_group,
+                self.ep_group,
             )
             outs = gathered_tokens
 
