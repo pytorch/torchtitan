@@ -271,8 +271,6 @@ def main(job_config: JobConfig):
     time_last_log = time.perf_counter()
     device_memory_monitor.reset_peak_stats()
 
-    # ensure
-
     # train loop
     logger.info(
         f"Training starts at step {train_state.step + 1}, "

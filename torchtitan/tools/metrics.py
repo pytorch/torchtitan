@@ -199,7 +199,6 @@ def _get_metrics_rank(
             - Rank 0 for pipeline-parallel 'ZBVZeroBubble' schedule
             - The first rank of the last pipeline stage for other pipeline-parallel schedules
     """
-
     # Early return for non-pipeline-parallel configurations
     if not parallel_dims.pp_enabled:
         return 0
