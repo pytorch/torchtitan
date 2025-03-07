@@ -240,10 +240,6 @@ def main(job_config: JobConfig):
 
     checkpoint.load(step=job_config.checkpoint.load_step)
 
-    # plot losses loaded from checkpoint (if any) to TensorBoard
-    # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
-    #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
-
     data_iterator = iter(dataloader)
 
     train_context = dist_utils.get_train_context(
@@ -340,6 +336,10 @@ def main(job_config: JobConfig):
                 train_state.step == 1
                 or train_state.step % job_config.metrics.log_freq == 0
             ):
+                # NOTE: Loss info after the last log step before checkpoint saving will
+                # not be ploted. This can be avoided by setting checkpoint.interval to
+                # be a multiple of metrics.log_freq
+
                 if (
                     parallel_dims.dp_replicate_enabled
                     or parallel_dims.dp_shard_enabled
