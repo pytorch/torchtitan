@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import Color, device_module, device_type
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -152,6 +152,38 @@ class WandBLogger(BaseLogger):
     def close(self) -> None:
         if self.wandb.run is not None:
             self.wandb.finish()
+
+
+def ensure_pp_loss_visible(
+    parallel_dims: ParallelDims, job_config: JobConfig, color: Color
+) -> None:
+    """
+    Ensures that the loss is visible on the console for pipeline-parallel training.
+
+    For pipeline-parallel training, the loss is only visible on the last pipeline stage.
+    This function checks if the appropriate rank is included in the LOG_RANK environment
+    variable and warns if it's not.
+    """
+
+    # V Block Schedules return loss on rank 0
+    if job_config.experimental.pipeline_parallel_schedule == "ZBVZeroBubble":
+        return
+
+    # Calculate the rank where loss is visible (first rank of the last pipeline stage)
+    world_size = parallel_dims.world_size
+    pp_size = parallel_dims.pp
+    loss_visible_rank = (world_size // pp_size) * (pp_size - 1)
+
+    # Check if the loss-visible rank is included in LOG_RANK environment variable
+    env_logged_ranks = os.environ.get("LOG_RANK", "").split(",")
+    if env_logged_ranks == [""]:
+        env_logged_ranks = []
+
+    if str(loss_visible_rank) not in env_logged_ranks:
+        logger.warning(
+            f"{color.red}Pipeline parallel loss is not visible. "
+            f"Add {color.yellow}rank {loss_visible_rank}{color.red} to LOG_RANK environment variable in run_train.sh.{color.reset}"
+        )
 
 
 def _get_metrics_rank(
