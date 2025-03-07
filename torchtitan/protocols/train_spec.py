@@ -7,15 +7,15 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, Type, TypeAlias, Optional
+from typing import Callable, Optional, Protocol, Type, TypeAlias
 
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.metrics import MetricsLogger
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.components.metrics import MetricsLogger
 from torchtitan.config_manager import JobConfig
 
 
