@@ -86,6 +86,3 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
         # keep this for backward compatibility.
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
-
-
-DataLoaderBuilder: TypeAlias = Callable[[...], BaseDataLoader]
