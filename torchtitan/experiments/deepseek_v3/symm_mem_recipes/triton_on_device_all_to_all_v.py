@@ -123,7 +123,7 @@ def on_device_all_to_all_v_kernel(
     return
 
 
-def on_device_all_to_all_v(
+def _on_device_all_to_all_v(
     output: torch.Tensor,
     output_splits: torch.Tensor,
     input: torch.Tensor,
@@ -158,3 +158,34 @@ def on_device_all_to_all_v(
     )
     # log_triton_kernel(kernel)
     return output
+
+
+class OnDeviceAllToAllV(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        output: torch.Tensor,
+        output_splits: torch.Tensor,
+        input: torch.Tensor,
+        input_splits: torch.Tensor,
+        group: dist.ProcessGroup = dist.group.WORLD,
+    ):
+        _on_device_all_to_all_v(output, output_splits, input, input_splits, group=group)
+        ctx.save_for_backward(output_splits)
+        ctx.group = group
+        ctx.input_shape = input.shape
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_output_splits = ctx.saved_tensors
+        grad_input_splits = torch.empty_like(grad_output_splits)
+        grad_input = grad_output.new_empty(*ctx.input_shape)
+        _on_device_all_to_all_v(
+            grad_input, grad_input_splits, grad_output, grad_output_splits, group=group
+        )
+        return None, None, grad_input, None, None
+
+
+# Alias
+on_device_all_to_all_v = OnDeviceAllToAllV.apply
