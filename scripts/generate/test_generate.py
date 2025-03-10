@@ -24,13 +24,13 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     RowwiseParallel,
 )
+from torchtitan.components.metrics import build_device_memory_monitor
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.tools.metrics import build_device_memory_monitor
 from torchtitan.tools.utils import device_module, device_type
 
 # support running w/o installing as package

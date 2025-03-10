@@ -8,7 +8,7 @@
 
 import pickle
 from abc import ABC, abstractmethod
-from typing import Any, Callable, TypeAlias
+from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -86,6 +86,3 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
         # keep this for backward compatibility.
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
-
-
-DataLoaderBuilder: TypeAlias = Callable[[...], BaseDataLoader]

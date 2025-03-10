@@ -166,13 +166,6 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--metrics.disable_logging_from_checkpoint",
-            action="store_true",
-            help="""
-                Whether to log metrics from scratch for each checkpoint load. We have seen this feature
-                leading to nccl watchdog timeout issue when testing with tb. This flag disables it.""",
-        )
-        self.parser.add_argument(
             "--metrics.enable_wandb",
             action="store_true",
             help="Whether to log metrics to Weights & Biases",
