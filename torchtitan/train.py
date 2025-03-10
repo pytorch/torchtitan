@@ -13,7 +13,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
-from torchtitan.components.metrics import build_metrics_logger
+from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
@@ -126,17 +126,17 @@ def main(job_config: JobConfig):
     model_converters.convert(model)
 
     # metrics logging
-    build_metrics_logger_fn = (
-        build_metrics_logger
-        if train_spec.build_metrics_logger_fn is None
-        else train_spec.build_metrics_logger_fn
+    build_metrics_processor_fn = (
+        build_metrics_processor
+        if train_spec.build_metrics_processor_fn is None
+        else train_spec.build_metrics_processor_fn
     )
-    metrics_logger = build_metrics_logger_fn(job_config, parallel_dims)
-    color = metrics_logger.color
+    metrics_processor = build_metrics_processor_fn(job_config, parallel_dims)
+    color = metrics_processor.color
 
     # log model size
     model_param_count = utils.get_num_params(model)
-    metrics_logger.num_flop_per_token = utils.get_num_flop_per_token(
+    metrics_processor.num_flop_per_token = utils.get_num_flop_per_token(
         utils.get_num_params(model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
@@ -198,7 +198,7 @@ def main(job_config: JobConfig):
         model_parts = [model]
 
     # initialize device memory monitor and get peak flops for MFU calculation
-    device_memory_monitor = metrics_logger.device_memory_monitor
+    device_memory_monitor = metrics_processor.device_memory_monitor
     gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
     device_mem_stats = device_memory_monitor.get_peak_stats()
@@ -273,8 +273,8 @@ def main(job_config: JobConfig):
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
             input_ids, labels = batch
-            metrics_logger.ntokens_since_last_log += labels.numel()
-            metrics_logger.data_loading_times.append(
+            metrics_processor.ntokens_since_last_log += labels.numel()
+            metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
 
@@ -336,14 +336,7 @@ def main(job_config: JobConfig):
             lr_schedulers.step()
 
             # log metrics
-            if (
-                train_state.step == 1
-                or train_state.step % job_config.metrics.log_freq == 0
-            ):
-                # NOTE: Loss info after the last log step before checkpoint saving will
-                # not be ploted. This can be avoided by setting checkpoint.interval to
-                # be a multiple of metrics.log_freq
-
+            if metrics_processor.should_log(train_state.step):
                 if (
                     parallel_dims.dp_replicate_enabled
                     or parallel_dims.dp_shard_enabled
@@ -357,7 +350,9 @@ def main(job_config: JobConfig):
                 else:
                     global_avg_loss = global_max_loss = loss.item()
 
-                metrics_logger.log(train_state.step, global_avg_loss, global_max_loss)
+                metrics_processor.log(
+                    train_state.step, global_avg_loss, global_max_loss
+                )
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
@@ -381,7 +376,7 @@ def main(job_config: JobConfig):
         logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
 
-    metrics_logger.close()
+    metrics_processor.close()
     logger.info("Training completed")
 
 

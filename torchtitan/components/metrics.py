@@ -248,8 +248,11 @@ def _build_metric_logger(
     return BaseLogger()
 
 
-class MetricsLogger:
-    """Metrics logger that logs metrics to TensorBoard or WandB.
+class MetricsProcessor:
+    """Metrics processor to processes the metrics and log metrics.
+
+    The current MetricsProcessor log some metrics to STDOUT and some metrics to
+    TensorBoard or WandB.
 
     Args:
         job_config (JobConfig): Job configuration.
@@ -299,6 +302,9 @@ class MetricsLogger:
         self.num_flop_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
+
+    def should_log(self, step: int) -> bool:
+        return step == 1 or step % self.job_config.metrics.log_freq == 0
 
     def log(self, step: int, global_avg_loss: float, global_max_loss: float):
         assert self.num_flop_per_token > 0, "num_flop_per_token must be set"
@@ -359,16 +365,17 @@ class MetricsLogger:
         self.logger.close()
 
 
-def build_metrics_logger(
+def build_metrics_processor(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
-) -> MetricsLogger:
-    """Create a metrics logger.
+) -> MetricsProcessor:
+    """Create a metrics processor.
+
     Args:
         job_config (JobConfig): Job configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
         tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
 
     Returns:
-        MetricsLogger: A metrics logger.
+        MetricsProcessor: A metrics processor.
     """
-    return MetricsLogger(job_config, parallel_dims, tag)
+    return MetricsProcessor(job_config, parallel_dims, tag)

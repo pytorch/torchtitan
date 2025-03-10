@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.metrics import MetricsLogger
+from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
@@ -43,7 +43,7 @@ class ModelProtocol(Protocol):
 
 
 DataLoaderBuilder: TypeAlias = Callable[[...], BaseDataLoader]
-MetricsLoggerBuilder: TypeAlias = Callable[[...], MetricsLogger]
+MetricsProcessorBuilder: TypeAlias = Callable[[...], MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig], OptimizersContainer
 ]
@@ -65,7 +65,7 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     tokenizer_cls: Type[Tokenizer]
     loss_fn: LossFunction
-    build_metrics_logger_fn: Optional[MetricsLoggerBuilder] = None
+    build_metrics_processor_fn: Optional[MetricsProcessorBuilder] = None
 
 
 _train_specs = {}
