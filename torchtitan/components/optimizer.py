@@ -10,19 +10,17 @@ import math
 from typing import Any, Callable, Dict, Generic, List, TypeVar, Union
 
 import torch
-
 import torch.nn as nn
-from torch.distributed.checkpoint.state_dict import (
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-    StateDictOptions,
-)
+from torch.distributed.checkpoint.state_dict import (StateDictOptions,
+                                                     get_optimizer_state_dict,
+                                                     set_optimizer_state_dict)
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -423,6 +421,11 @@ def build_lr_schedulers(
             warmup_stable_steps = warmup_steps
         else:
             warmup_stable_steps = training_steps * (1 - lr_decay_ratio)
+        if warmup_stable_steps < warmup_steps:
+            logger.warning(
+                f"The warmup steps should be less than or equal to the warmup-stable steps ({warmup_stable_steps}). "
+                f"Consider reducing either the decay ratio ({lr_decay_ratio}) or the warmup steps ({warmup_steps})."
+            )
         if current_step < warmup_steps:
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
