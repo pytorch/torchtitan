@@ -224,6 +224,7 @@ def main(job_config: JobConfig):
     optimizers.register_step_post_hook(
         lambda *args, **kwargs: model_converters.post_optimizer_hook(model_parts)
     )
+    metrics_processor.optimizers = optimizers
 
     train_state = TrainState()
 
