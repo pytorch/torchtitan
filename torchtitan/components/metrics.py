@@ -5,15 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import time
 from collections import namedtuple
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
 
@@ -213,7 +215,7 @@ def _get_metrics_rank(
     return (world_size // pp_size) * (pp_size - 1)
 
 
-def build_metric_logger(
+def _build_metric_logger(
     job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
 ) -> BaseLogger:
     """
@@ -276,3 +278,136 @@ def build_metric_logger(
 
     logger.debug("No loggers enabled, returning BaseLogger")
     return BaseLogger()
+
+
+class MetricsProcessor:
+    """Metrics processor to processes the metrics and log metrics.
+
+    The current MetricsProcessor log some metrics to STDOUT and some metrics to
+    TensorBoard or WandB.
+
+    Args:
+        job_config (JobConfig): Job configuration.
+        parallel_dims (ParallelDims): Parallel dimensions.
+        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+    """
+
+    logger: BaseLogger
+    parallel_dims: ParallelDims
+    job_config: JobConfig
+    device_memory_monitor: DeviceMemoryMonitor
+    color: utils.Color
+
+    gpu_peak_flops: int
+    ntokens_since_last_log: int
+    data_loading_times: list[float]
+    time_last_log: float
+
+    num_flop_per_token: int
+    optimizers: Optional[OptimizersContainer]
+    lr_schedulers: Optional[LRSchedulersContainer]
+
+    def __init__(
+        self,
+        job_config: JobConfig,
+        parallel_dims: ParallelDims,
+        tag: Optional[str] = None,
+    ):
+        self.logger = _build_metric_logger(job_config, parallel_dims, tag)
+        self.parallel_dims = parallel_dims
+        self.job_config = job_config
+        self.device_memory_monitor = build_device_memory_monitor()
+        # used for colorful printing
+        self.color = (
+            utils.NoColor if job_config.metrics.disable_color_printing else utils.Color
+        )
+
+        self.gpu_peak_flops = utils.get_peak_flops(
+            self.device_memory_monitor.device_name
+        )
+        self.ntokens_since_last_log = 0
+        self.data_loading_times = []
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+
+        # These variables have to be set later as they depend on other components or model.
+        self.num_flop_per_token = -1
+        self.optimizers = None
+        self.lr_schedulers = None
+
+    def should_log(self, step: int) -> bool:
+        return step == 1 or step % self.job_config.metrics.log_freq == 0
+
+    def log(self, step: int, global_avg_loss: float, global_max_loss: float):
+        assert self.num_flop_per_token > 0, "num_flop_per_token must be set"
+
+        time_delta = time.perf_counter() - self.time_last_log
+
+        # tokens per second per device, abbreviated as tps
+        tps = self.ntokens_since_last_log / (
+            time_delta * self.parallel_dims.non_data_parallel_size
+        )
+        # model FLOPS utilization
+        # For its definition and calculation, please refer to the PaLM paper:
+        # https://arxiv.org/abs/2204.02311
+        mfu = 100 * self.num_flop_per_token * tps / self.gpu_peak_flops
+        tflops = self.num_flop_per_token * tps / 1e12
+
+        time_end_to_end = time_delta / self.job_config.metrics.log_freq
+        time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
+        time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
+
+        device_mem_stats = self.device_memory_monitor.get_peak_stats()
+
+        metrics = {
+            "loss_metrics/global_avg_loss": global_avg_loss,
+            "loss_metrics/global_max_loss": global_max_loss,
+            "throughput(tps)": tps,
+            "tflops": tflops,
+            "mfu(%)": mfu,
+            "time_metrics/end_to_end(s)": time_end_to_end,
+            "time_metrics/data_loading(s)": time_data_loading,
+            "time_metrics/data_loading(%)": time_data_loading_pct,
+            "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+            "memory/max_active(%)": device_mem_stats.max_active_pct,
+            "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+            "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+            "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+            "memory/num_ooms": device_mem_stats.num_ooms,
+        }
+        self.logger.log(metrics, step)
+
+        color = self.color
+        logger.info(
+            f"{color.red}step: {step:2}  "
+            f"{color.green}loss: {global_avg_loss:7.4f}  "
+            f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.blue}tps: {round(tps):,}  "
+            f"{color.cyan}tflops: {tflops:,.2f}  "
+            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+        )
+
+        self.ntokens_since_last_log = 0
+        self.data_loading_times.clear()
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+
+    def close(self):
+        self.logger.close()
+
+
+def build_metrics_processor(
+    job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
+) -> MetricsProcessor:
+    """Create a metrics processor.
+
+    Args:
+        job_config (JobConfig): Job configuration.
+        parallel_dims (ParallelDims): Parallel dimensions.
+        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+
+    Returns:
+        MetricsProcessor: A metrics processor.
+    """
+    return MetricsProcessor(job_config, parallel_dims, tag)
