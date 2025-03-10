@@ -13,10 +13,6 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
-from torchtitan.components.metrics import (
-    build_metrics_processor,
-    ensure_pp_loss_visible,
-)
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
@@ -25,6 +21,7 @@ from torchtitan.protocols.train_spec import get_train_spec
 
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.metrics import build_device_memory_monitor, build_metric_logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
@@ -41,6 +38,9 @@ def main(job_config: JobConfig):
 
     if job_config.job.print_args:
         logger.info(f"Running with args: {job_config.to_dict()}")
+
+    # used for colorful printing
+    color = utils.NoColor if job_config.metrics.disable_color_printing else utils.Color
 
     # take control of garbage collection to avoid stragglers
     gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
@@ -75,6 +75,10 @@ def main(job_config: JobConfig):
             ft_manager=ft_manager,
         )
     dist_utils.init_distributed(job_config)
+    # initialize device memory monitor and get peak flops for MFU calculation
+    device_memory_monitor = build_device_memory_monitor()
+    gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
+    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
 
     # build meshes
     world_mesh = parallel_dims.build_mesh(device_type=device_type)
@@ -128,18 +132,9 @@ def main(job_config: JobConfig):
     model_converters = build_model_converters(job_config, parallel_dims)
     model_converters.convert(model)
 
-    # metrics logging
-    build_metrics_processor_fn = (
-        build_metrics_processor
-        if train_spec.build_metrics_processor_fn is None
-        else train_spec.build_metrics_processor_fn
-    )
-    metrics_processor = build_metrics_processor_fn(job_config, parallel_dims)
-    color = metrics_processor.color
-
     # log model size
     model_param_count = utils.get_num_params(model)
-    metrics_processor.num_flop_per_token = utils.get_num_flop_per_token(
+    num_flop_per_token = utils.get_num_flop_per_token(
         utils.get_num_params(model, exclude_embedding=True),
         model_config,
         job_config.training.seq_len,
@@ -190,10 +185,6 @@ def main(job_config: JobConfig):
             with torch.no_grad():
                 m.init_weights(buffer_device=buffer_device)
             m.train()
-
-        # confirm that user will be able to view loss metrics on the console
-        ensure_pp_loss_visible(parallel_dims, job_config, color)
-
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
@@ -204,10 +195,6 @@ def main(job_config: JobConfig):
 
         model_parts = [model]
 
-    # initialize device memory monitor and get peak flops for MFU calculation
-    device_memory_monitor = metrics_processor.device_memory_monitor
-    gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
-    logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
     device_mem_stats = device_memory_monitor.get_peak_stats()
     logger.info(
         f"{device_type.upper()} memory usage for model: "
@@ -250,6 +237,18 @@ def main(job_config: JobConfig):
         return
 
     checkpoint.load(step=job_config.checkpoint.load_step)
+    metric_logger = build_metric_logger(job_config, parallel_dims)
+
+    # plot losses loaded from checkpoint (if any) to TensorBoard
+    # NOTE: Loss info after the last log step before checkpoint saving will not be ploted.
+    #       This can be avoided by setting checkpoint.interval to be a multiple of metrics.log_freq
+    if train_state.step > 0 and not job_config.metrics.disable_logging_from_checkpoint:
+        for idx, step in enumerate(train_state.log_steps):
+            metrics = {
+                "loss_metrics/global_avg_loss": train_state.global_avg_losses[idx],
+                "loss_metrics/global_max_loss": train_state.global_max_losses[idx],
+            }
+            metric_logger.log(metrics, step=step)
 
     data_iterator = iter(dataloader)
 
@@ -257,6 +256,12 @@ def main(job_config: JobConfig):
         parallel_dims.loss_parallel_enabled,
         job_config.experimental.enable_compiled_autograd,
     )
+
+    # variables used to keep info for metrics logging
+    ntokens_since_last_log = 0
+    data_loading_times = []
+    time_last_log = time.perf_counter()
+    device_memory_monitor.reset_peak_stats()
 
     # train loop
     logger.info(
@@ -280,10 +285,8 @@ def main(job_config: JobConfig):
             data_load_start = time.perf_counter()
             batch = next(data_iterator)
             input_ids, labels = batch
-            metrics_processor.ntokens_since_last_log += labels.numel()
-            metrics_processor.data_loading_times.append(
-                time.perf_counter() - data_load_start
-            )
+            ntokens_since_last_log += labels.numel()
+            data_loading_times.append(time.perf_counter() - data_load_start)
 
             input_ids = input_ids.to(device_type)
             labels = labels.to(device_type)
@@ -343,7 +346,10 @@ def main(job_config: JobConfig):
             lr_schedulers.step()
 
             # log metrics
-            if metrics_processor.should_log(train_state.step):
+            if (
+                train_state.step == 1
+                or train_state.step % job_config.metrics.log_freq == 0
+            ):
                 if (
                     parallel_dims.dp_replicate_enabled
                     or parallel_dims.dp_shard_enabled
@@ -357,9 +363,61 @@ def main(job_config: JobConfig):
                 else:
                     global_avg_loss = global_max_loss = loss.item()
 
-                metrics_processor.log(
-                    train_state.step, global_avg_loss, global_max_loss
+                # update train state
+                train_state.log_steps.append(train_state.step)
+                train_state.global_avg_losses.append(global_avg_loss)
+                train_state.global_max_losses.append(global_max_loss)
+
+                time_delta = time.perf_counter() - time_last_log
+
+                # tokens per second per device, abbreviated as tps
+                tps = ntokens_since_last_log / (
+                    time_delta * parallel_dims.non_data_parallel_size
                 )
+                # model FLOPS utilization
+                # For its definition and calculation, please refer to the PaLM paper:
+                # https://arxiv.org/abs/2204.02311
+                mfu = 100 * num_flop_per_token * tps / gpu_peak_flops
+                tflops = num_flop_per_token * tps / 1e12
+
+                time_end_to_end = time_delta / job_config.metrics.log_freq
+                time_data_loading = sum(data_loading_times) / len(data_loading_times)
+                time_data_loading_pct = 100 * sum(data_loading_times) / time_delta
+
+                device_mem_stats = device_memory_monitor.get_peak_stats()
+
+                metrics = {
+                    "loss_metrics/global_avg_loss": global_avg_loss,
+                    "loss_metrics/global_max_loss": global_max_loss,
+                    "throughput(tps)": tps,
+                    "tflops": tflops,
+                    "mfu(%)": mfu,
+                    "time_metrics/end_to_end(s)": time_end_to_end,
+                    "time_metrics/data_loading(s)": time_data_loading,
+                    "time_metrics/data_loading(%)": time_data_loading_pct,
+                    "memory/max_active(GiB)": device_mem_stats.max_active_gib,
+                    "memory/max_active(%)": device_mem_stats.max_active_pct,
+                    "memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+                    "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+                    "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+                    "memory/num_ooms": device_mem_stats.num_ooms,
+                }
+                metric_logger.log(metrics, step=train_state.step)
+
+                logger.info(
+                    f"{color.red}step: {train_state.step:2}  "
+                    f"{color.green}loss: {global_avg_loss:7.4f}  "
+                    f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                    f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                    f"{color.blue}tps: {round(tps):,}  "
+                    f"{color.cyan}tflops: {tflops:,.2f}  "
+                    f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+                )
+
+                ntokens_since_last_log = 0
+                data_loading_times.clear()
+                time_last_log = time.perf_counter()
+                device_memory_monitor.reset_peak_stats()
 
             checkpoint.save(
                 train_state.step, force=(train_state.step == job_config.training.steps)
@@ -383,7 +441,7 @@ def main(job_config: JobConfig):
         logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
 
-    metrics_processor.close()
+    metric_logger.close()
     logger.info("Training completed")
 
 
