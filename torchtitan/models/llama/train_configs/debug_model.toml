@@ -35,6 +35,7 @@ eps = 1e-8
 
 [scheduler]
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 lr_min = 0.0
 
