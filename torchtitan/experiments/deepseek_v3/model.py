@@ -604,10 +604,12 @@ class MoE(nn.Module):
             ).sum(dim=0)
             gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
             s = 0
+            # TODO: remove `tolist()`
             for i, k in enumerate(tokens_per_expert_group.tolist()):
                 gatherd_idxs[s : s + k] = i % self.experts_per_rank
                 s += k
             gatherd_idxs = gatherd_idxs.argsort()
+            # TODO: remove `tolist()`
             tokens_per_expert = tokens_per_expert_post_gather.tolist()
 
         sorted_tokens = gathered_tokens[gatherd_idxs]
