@@ -25,6 +25,7 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
+    ensure_pp_loss_visible,
 )
 
 
@@ -187,6 +188,10 @@ def main(job_config: JobConfig):
             with torch.no_grad():
                 m.init_weights(buffer_device=buffer_device)
             m.train()
+
+        # confirm that user will be able to view loss metrics on the console
+        ensure_pp_loss_visible(parallel_dims, job_config, color)
+
     else:
         # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
         train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
