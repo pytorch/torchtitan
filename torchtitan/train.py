@@ -13,7 +13,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager, TrainState
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
-from torchtitan.components.metrics import build_metrics_processor
+from torchtitan.components.metrics import (
+    build_metrics_processor,
+    ensure_pp_loss_visible,
+)
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
@@ -25,7 +28,6 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
-    ensure_pp_loss_visible,
 )
 
 
