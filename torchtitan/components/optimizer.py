@@ -422,7 +422,7 @@ def build_lr_schedulers(
         if lr_decay_ratio is None:
             warmup_stable_steps = warmup_steps
         else:
-            warmup_stable_steps = training_steps * (1 - lr_decay_ratio)
+            warmup_stable_steps = round(training_steps * (1 - lr_decay_ratio))
         if warmup_stable_steps < warmup_steps:
             logger.warning(
                 f"The warmup steps should be less than or equal to the warmup-stable steps ({warmup_stable_steps}). "
