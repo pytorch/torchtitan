@@ -260,13 +260,13 @@ class JobConfig:
 
         # lr scheduler configs
         self.parser.add_argument(
-            "--scheduler.warmup_steps",
+            "--lr_scheduler.warmup_steps",
             type=int,
             default=200,
             help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
         )
         self.parser.add_argument(
-            "--scheduler.decay_ratio",
+            "--lr_scheduler.decay_ratio",
             type=float,
             default=None,
             help="""
@@ -280,7 +280,7 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--scheduler.decay_type",
+            "--lr_scheduler.decay_type",
             type=str,
             default="linear",
             choices=["linear", "sqrt", "cosine"],
@@ -292,14 +292,14 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--scheduler.lr_min",
+            "--lr_scheduler.lr_min",
             type=float,
             default=0.0,
             help="""
             Min lr ratio for lr scheduler.
 
             If provided, the range of decay factor is scaled from 1 to `lr_min`
-            to ensure the learning rate does not drop below `optimizer.lr * scheduler.lr_min`.
+            to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.lr_min`.
             """,
         )
 

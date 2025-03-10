@@ -364,7 +364,7 @@ class LRSchedulersContainer(Stateful):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         # Load the same state_dict for all schedulers. The key value we're concerned
         # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``scheduler.warmup_steps``
+        # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
         # in ``job_config`` remain unchanged when resuming from a checkpoint, this
         # approach is safe. We call ``copy()`` here to ensure extra safety.
         for scheduler in self.schedulers:
@@ -391,10 +391,10 @@ def build_lr_schedulers(
             lr_schedulers.
     """
     training_steps = job_config.training.steps
-    warmup_steps = int(job_config.scheduler.warmup_steps)
-    lr_decay_ratio = job_config.scheduler.decay_ratio
-    lr_decay_type = job_config.scheduler.decay_type
-    lr_min = job_config.scheduler.lr_min
+    warmup_steps = int(job_config.lr_scheduler.warmup_steps)
+    lr_decay_ratio = job_config.lr_scheduler.decay_ratio
+    lr_decay_type = job_config.lr_scheduler.decay_type
+    lr_min = job_config.lr_scheduler.lr_min
 
     def linear_warmup_stable_decay(
         current_step: int,

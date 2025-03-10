@@ -19,10 +19,8 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
-
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
@@ -265,7 +263,7 @@ def main(job_config: JobConfig):
         f"global batch size {job_config.training.batch_size * dp_degree}, "
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
-        f"(warmup {job_config.scheduler.warmup_steps})"
+        f"(warmup {job_config.lr_scheduler.warmup_steps})"
     )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step

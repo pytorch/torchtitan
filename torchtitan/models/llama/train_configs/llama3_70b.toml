@@ -27,7 +27,7 @@ name = "AdamW"
 lr = 1.5e-4
 eps = 1e-8
 
-[scheduler]
+[lr_scheduler]
 warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
 
 [training]
