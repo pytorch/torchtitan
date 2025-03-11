@@ -15,7 +15,7 @@ import torch.nn as nn
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
-import torchtitan.protocols.train_spec as train_spec_moduleodule
+import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
