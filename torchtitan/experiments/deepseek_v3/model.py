@@ -573,25 +573,23 @@ class MoE(nn.Module):
             dist.all_to_all_single(
                 tokens_per_expert_group, tokens_per_expert, group=self.ep_group
             )
-            torch.sum(
-                tokens_per_expert_group.view(self.ep_size, -1),
-                dim=1,
-                out=self.output_splits,
-            )
-            # Received tokens from all other ranks. TODO: use mask instead
-            received = self.output_splits.sum()
-            received_splits = torch.empty_like(self.output_splits)  # unused
 
         # DP to EP token shuffle. This part needs gradient.
         on_device_all_to_all_v(
             self.token_gather_buf,
-            received_splits,
+            self.output_splits,
             sorted_tokens,
             self.input_splits,
             self.ep_group,
         )
-        # Output splits sanity check
-        # torch.testing.assert_close(received_splits, self.output_splits)
+
+        with torch.no_grad():
+            # Output splits sanity check
+            # expected_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=1)
+            # torch.testing.assert_close(self.output_splits, expected_splits)
+            # Received tokens from all other ranks. TODO: use mask instead
+            received = self.output_splits.sum()
+
         # TODO: don't use `received`
         gathered_tokens = self.token_gather_buf[:received]
 
@@ -634,6 +632,7 @@ class MoE(nn.Module):
         new_x = self.token_gather_buf[: outs.shape[0]]
         new_x[gatherd_idxs] = outs
         gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
+        received_splits = torch.empty_like(self.output_splits)  # unused
         # EP to DP token shuffle
         on_device_all_to_all_v(
             gathered_tokens,
