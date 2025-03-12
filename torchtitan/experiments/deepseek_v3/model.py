@@ -456,17 +456,15 @@ class MoE(nn.Module):
             self.ep_size = config.ep_size
             self.ep_rank = self.ep_group.rank()
             self.experts_per_rank = config.n_routed_experts // config.ep_size
-            self.experts = nn.ModuleList(
-                [
-                    (
-                        MLP(config, intermediate_size=config.moe_intermediate_size)
-                        if i >= self.ep_rank * self.experts_per_rank
-                        and i < (self.ep_rank + 1) * self.experts_per_rank
-                        else None
-                    )
-                    for i in range(config.n_routed_experts)
-                ]
-            )
+            # Use ModuleDict instead of ModuleList to preserve absoulte expert
+            # IDs while avoiding `None` experts. The absolute expert IDs match
+            # with checkpoint FQNs.
+            self.experts = nn.ModuleDict()
+            for i in range(self.experts_per_rank):
+                abs_expert_id = self.ep_rank * self.experts_per_rank + i
+                self.experts[str(abs_expert_id)] = MLP(
+                    config, intermediate_size=config.moe_intermediate_size
+                )
         else:
             self.ep_size = 1
             self.experts_per_rank = config.n_routed_experts
@@ -541,7 +539,7 @@ class MoE(nn.Module):
         # `idxs`), we don't need gradients here.
         with torch.no_grad():
             # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
             # Fill 1 to the selected experts
             cnts.scatter_(1, topk_ids, 1)
             tokens_per_expert = cnts.sum(dim=0)
@@ -608,12 +606,9 @@ class MoE(nn.Module):
         # Take necessary space from `token_send_buf` symm mem because we are
         # going to send them out after expert processing
         processed_tokens = self.token_send_buf[:received]
-        for i, expert in enumerate(self.experts):
-            if expert is None:
-                continue
-            local_expert_idx = i % self.experts_per_rank
-            processed_tokens[gatherd_idxs == local_expert_idx] = expert(
-                gathered_tokens[gatherd_idxs == local_expert_idx]
+        for i, expert in enumerate(self.experts.values()):
+            processed_tokens[gatherd_idxs == i] = expert(
+                gathered_tokens[gatherd_idxs == i]
             )
 
         # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
