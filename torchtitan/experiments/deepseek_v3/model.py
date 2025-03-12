@@ -456,17 +456,15 @@ class MoE(nn.Module):
             self.ep_size = config.ep_size
             self.ep_rank = self.ep_group.rank()
             self.experts_per_rank = config.n_routed_experts // config.ep_size
-            self.experts = nn.ModuleList(
-                [
-                    (
-                        MLP(config, intermediate_size=config.moe_intermediate_size)
-                        if i >= self.ep_rank * self.experts_per_rank
-                        and i < (self.ep_rank + 1) * self.experts_per_rank
-                        else None
-                    )
-                    for i in range(config.n_routed_experts)
-                ]
-            )
+            # Use ModuleDict instead of ModuleList to preserve absoulte expert
+            # IDs while avoiding `None` experts. The absolute expert IDs match
+            # with checkpoint FQNs.
+            self.experts = nn.ModuleDict()
+            for i in range(self.experts_per_rank):
+                abs_expert_id = self.ep_rank * self.experts_per_rank + i
+                self.experts[str(abs_expert_id)] = MLP(
+                    config, intermediate_size=config.moe_intermediate_size
+                )
         else:
             self.ep_size = 1
             self.experts_per_rank = config.n_routed_experts
@@ -541,7 +539,7 @@ class MoE(nn.Module):
         # `idxs`), we don't need gradients here.
         with torch.no_grad():
             # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
             # Fill 1 to the selected experts
             cnts.scatter_(1, topk_ids, 1)
             tokens_per_expert = cnts.sum(dim=0)
@@ -593,51 +591,34 @@ class MoE(nn.Module):
         # TODO: don't use `received`
         gathered_tokens = self.token_gather_buf[:received]
 
-        # This part prepares the token indices for each expert, because we
-        # receive them in a whole chunk for the entire expert group (i.e.,
-        # device). This part doesn't need gradient.
+        # This part prepares a 1D tensor with the same length as
+        # `gathered_tokens`. The 1D tensor is filled with local expert IDs which
+        # the tokens in `gathered_tokens` are headed for. This part doesn't need
+        # gradient.
         with torch.no_grad():
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank
-            ).sum(dim=0)
             gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
             s = 0
             # TODO: remove `tolist()`
             for i, k in enumerate(tokens_per_expert_group.tolist()):
                 gatherd_idxs[s : s + k] = i % self.experts_per_rank
                 s += k
-            gatherd_idxs = gatherd_idxs.argsort()
-            # TODO: remove `tolist()`
-            tokens_per_expert = tokens_per_expert_post_gather.tolist()
 
-        sorted_tokens = gathered_tokens[gatherd_idxs]
+        # Take necessary space from `token_send_buf` symm mem because we are
+        # going to send them out after expert processing
+        processed_tokens = self.token_send_buf[:received]
+        for i, expert in enumerate(self.experts.values()):
+            processed_tokens[gatherd_idxs == i] = expert(
+                gathered_tokens[gatherd_idxs == i]
+            )
 
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-            expert_out = expert(tokens_for_this_expert)
-            outputs.append(expert_out)
-            start_idx = end_idx
-
-        # len(outputs) == 0 means no tokens routed to this EP rank.
-        # `sorted_tokens` would have shape [0, hidden_dim], we use it so that
-        # `outs` is an empty tensor with shape [0, hidden_dim]
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens
-        # Take necessary space from `token_gather_buf` symm mem
-        new_x = self.token_gather_buf[: outs.shape[0]]
-        new_x[gatherd_idxs] = outs
-        gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
+        # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
+        gathered_tokens = self.token_gather_buf[: sorted_tokens_shape[0]]
         received_splits = torch.empty_like(self.output_splits)  # unused
         # EP to DP token shuffle
         on_device_all_to_all_v(
             gathered_tokens,
             received_splits,  # unused
-            new_x,
+            processed_tokens,
             self.output_splits,
             self.ep_group,
         )
@@ -649,7 +630,7 @@ class MoE(nn.Module):
             .type(topk_weight.dtype)
             .mul_(topk_weight.unsqueeze(dim=-1))
             .sum(dim=1)
-            .type(new_x.dtype)
+            .type(gathered_tokens.dtype)
         )
         return final_out
 
