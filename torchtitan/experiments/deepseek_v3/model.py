@@ -449,31 +449,25 @@ class MoE(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        if config.ep_size > 1:
-            # ep_size is the number of ranks in expert dimension
-            self.ep_group = get_group("ep")
-            assert config.ep_size == self.ep_group.size()
-            self.ep_size = config.ep_size
-            self.ep_rank = self.ep_group.rank()
-            self.experts_per_rank = config.n_routed_experts // config.ep_size
-            # Use ModuleDict instead of ModuleList to preserve absoulte expert
-            # IDs while avoiding `None` experts. The absolute expert IDs match
-            # with checkpoint FQNs.
-            self.experts = nn.ModuleDict()
-            for i in range(self.experts_per_rank):
-                abs_expert_id = self.ep_rank * self.experts_per_rank + i
-                self.experts[str(abs_expert_id)] = MLP(
-                    config, intermediate_size=config.moe_intermediate_size
-                )
-        else:
-            self.ep_size = 1
-            self.experts_per_rank = config.n_routed_experts
-            self.ep_rank = 0
-            self.experts = nn.ModuleList(
-                [
-                    MLP(config, intermediate_size=config.moe_intermediate_size)
-                    for i in range(config.n_routed_experts)
-                ]
+        # ep_size is the number of ranks in expert dimension
+        if config.ep_size <= 1:
+            raise ValueError(
+                "For code simplicity, this model only supports distributed experts, "
+                "thus EP size must be > 1, please modify your model config"
+            )
+        self.ep_group = get_group("ep")
+        assert config.ep_size == self.ep_group.size()
+        self.ep_size = config.ep_size
+        self.ep_rank = self.ep_group.rank()
+        self.experts_per_rank = config.n_routed_experts // config.ep_size
+        # Use ModuleDict instead of ModuleList to preserve absoulte expert
+        # IDs while avoiding `None` experts. The absolute expert IDs match
+        # with checkpoint FQNs.
+        self.experts = nn.ModuleDict()
+        for i in range(self.experts_per_rank):
+            abs_expert_id = self.ep_rank * self.experts_per_rank + i
+            self.experts[str(abs_expert_id)] = MLP(
+                config, intermediate_size=config.moe_intermediate_size
             )
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
@@ -481,16 +475,11 @@ class MoE(nn.Module):
             self.shared_experts = MLP(
                 config=config, intermediate_size=intermediate_size
             )
-        self.has_symm_mem = False
+        # `config.dtype` is a string, e.g., "bfloat16"
+        dtype = getattr(torch, config.dtype)
+        self.setup_symm_mem(dtype, self.gate.weight.device)
 
     def setup_symm_mem(self, dtype, device):
-        if self.has_symm_mem:
-            # Symmetric memory is already set up
-            return
-
-        assert (
-            self.config.ep_size > 1
-        ), "Symmetric memory is only effective when EP size > 1"
         # Input buffer for DP-to-EP shuffle
         self.token_send_buf = symm_mem.empty(
             self.config.max_seq_len
@@ -515,7 +504,6 @@ class MoE(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.has_symm_mem = True
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -529,10 +517,6 @@ class MoE(nn.Module):
         return y
 
     def moe_forward(self, x, topk_ids, topk_weight):
-        if self.ep_size > 1 and (not self.has_symm_mem):
-            # Set up symmetric memory for the first time, then reuse it
-            self.setup_symm_mem(x.dtype, x.device)
-
         # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
         # Since this is an "aritificial" index creation (final outcome being
