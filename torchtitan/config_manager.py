@@ -825,15 +825,6 @@ class JobConfig:
                     "Please update your config."
                 )
 
-        if self.lr_scheduler.decay_ratio is not None:
-            warmup_stable_steps = round(self.training.steps * (1 - self.lr_scheduler.decay_ratio))
-            if warmup_stable_steps < self.lr_scheduler.warmup_steps:
-                logger.warning(
-                    f"The warmup steps should be less than or equal to the warmup-stable steps ({warmup_stable_steps}). "
-                    f"Consider reducing either the decay ratio ({self.lr_scheduler.decay_ratio}) "
-                    f"or the warmup steps ({self.lr_scheduler.warmup_steps})."
-                )
-
     def _get_string_list_argument_names(self) -> list[str]:
         """Get the parser argument names of type `string_list`."""
         string_list_args = [
