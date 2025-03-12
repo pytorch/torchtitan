@@ -1,7 +1,7 @@
 # ---- All project specifications ---- #
 [project]
 name = "torchtitan"
-description = "A native-PyTorch library for large scale LLM training"
+description = "A PyTorch native library for large-scale model training"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
