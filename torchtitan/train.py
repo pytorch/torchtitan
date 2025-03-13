@@ -189,9 +189,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             # apply PT-D Pipeline Parallel
             (
-                pp_schedule,
+                self.pp_schedule,
                 self.model_parts,
-                has_first_stage,
+                self.pp_has_first_stage,
                 self.pp_has_last_stage,
             ) = self.train_spec.pipelining_fn(
                 model,
@@ -346,10 +346,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
-                if has_first_stage:
-                    pp_schedule.step(inputs, target=targets, losses=losses)
+                if self.pp_has_first_stage:
+                    self.pp_schedule.step(inputs, target=targets, losses=losses)
                 else:
-                    pp_schedule.step(target=targets, losses=losses)
+                    self.pp_schedule.step(target=targets, losses=losses)
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
