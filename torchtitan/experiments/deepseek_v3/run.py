@@ -37,9 +37,6 @@ def run_full_model(
 
     # Get model configs
     model_args = deepseek_config_registry[model_id]
-    # [Note]: I am making the model smaller for testing / avoiding OOM. If you
-    # have sufficient GPUs for model parallelism, you can remove this line.
-    model_args.num_hidden_layers = 16
 
     # Apply model parallelism
     model_args.ep_size = ep_size
