@@ -132,7 +132,7 @@ class ModelArgs:
     aux_loss_alpha: float = 0.001
     seq_aux: bool = True
     hidden_act: str = "silu"
-    max_position_embeddings: int = 4096
+    max_position_embeddings: int = 163840
     initializer_range: float = 0.02
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0

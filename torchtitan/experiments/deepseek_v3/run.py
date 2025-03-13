@@ -18,8 +18,8 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from transformers import AutoTokenizer
 
-# model_id, model_path, bs, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite", "/traindata/llama_hf_ckpt/DeepSeek-V2-Lite-Chat", 2, (2, 2)
-model_id, model_path, bs, mesh_shape = "deepseek-ai/deepseek-v3", "/traindata/llama_hf_ckpt/DeepSeek-V3-bf16", 8, (8, 4)
+model_id, model_path, bs, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite", "/traindata/llama_hf_ckpt/DeepSeek-V2-Lite-Chat", 2, (2, 2)
+# model_id, model_path, bs, mesh_shape = "deepseek-ai/deepseek-v3", "/traindata/llama_hf_ckpt/DeepSeek-V3-bf16", 8, (8, 4)
 
 @dataclass
 class DistConfig:
@@ -45,7 +45,7 @@ def create_model(dist_config: DistConfig):
     load_weights_from_hf(model, model_path, dist_config.device)
     model.train()
 
-    return PipelineStage(
+    return model, PipelineStage(
         model,
         dist_config.pp_rank,
         dist_config.pp_size,
@@ -71,7 +71,7 @@ def generate(mesh: DeviceMesh):
         device=device,
     )
 
-    stage = create_model(dist_config)
+    model, stage = create_model(dist_config)
     pp_schedule = ScheduleGPipe(stage, bs)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -85,34 +85,39 @@ def generate(mesh: DeviceMesh):
     x = x.to(device)
 
     for _ in range(10):
-        if dist_config.pp_rank == 0:
-            pp_schedule.step(x)
-            next_token = torch.zeros((x.shape[0],), dtype=torch.int64, device=device)
-            torch.distributed.broadcast(
-                next_token, 
-                group=dist_config.pp_mesh.get_group(), 
-                group_src=dist_config.pp_size - 1
-            )
-        elif dist_config.pp_rank == dist_config.pp_size - 1:
-            preds = pp_schedule.step()
-            next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
-            torch.distributed.broadcast(
-                next_token, 
-                group=dist_config.pp_mesh.get_group(), 
-                group_src=dist_config.pp_rank
-            )
-        else:
-            pp_schedule.step()
-            next_token = torch.zeros((x.shape[0],), dtype=torch.int64, device=device)
-            torch.distributed.broadcast(
-                next_token, 
-                group=dist_config.pp_mesh.get_group(), 
-                group_src=dist_config.size -1
-            )
+        if dist_config.pp_size > 1:
+            if dist_config.pp_rank == 0:
+                pp_schedule.step(x)
+                torch.distributed.broadcast(
+                    x, 
+                    group=dist_config.pp_mesh.get_group(), 
+                    group_src=dist_config.pp_size - 1
+                )
+            elif dist_config.pp_rank == dist_config.pp_size - 1:
+                preds = pp_schedule.step()
+                next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
+                x[:, next_idx] = next_token
+                torch.distributed.broadcast(
+                    x, 
+                    group=dist_config.pp_mesh.get_group(), 
+                    group_src=dist_config.pp_size - 1
+                )
+            else:
+                pp_schedule.step()
+                torch.distributed.broadcast(
+                    x, 
+                    group=dist_config.pp_mesh.get_group(), 
+                    group_src=dist_config.pp_size -1
+                )
 
-        x[:, next_idx] = next_token
-        next_idx += 1
-    print(tokenizer.decode(x[0]))
+            next_idx += 1
+        else:
+            preds = model(x)
+            next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
+            x[:, next_idx] = next_token
+            next_idx += 1
+    if rank == 0:
+        print(tokenizer.decode(x[0]))
 
 # Run the full model.
 def run_full_model(mesh: DeviceMesh):
