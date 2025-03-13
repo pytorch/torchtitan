@@ -192,7 +192,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 pp_schedule,
                 self.model_parts,
                 has_first_stage,
-                has_last_stage,
+                self.pp_has_last_stage,
             ) = self.train_spec.pipelining_fn(
                 model,
                 pp_mesh,
@@ -343,7 +343,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             with self.train_context(optional_context_parallel_ctx):
-                targets, losses = (labels, []) if has_last_stage else (None, None)
+                targets, losses = (
+                    (labels, []) if self.pp_has_last_stage else (None, None)
+                )
                 if has_first_stage:
                     pp_schedule.step(inputs, target=targets, losses=losses)
                 else:
@@ -353,7 +355,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
                 torch.mean(torch.stack(losses)).to(device)
-                if has_last_stage
+                if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=device)
             )
         else:
