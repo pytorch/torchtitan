@@ -151,7 +151,6 @@ class ModelArgs:
     # Added for symmetric memory
     max_seq_len: int = 4096
     dtype: str = "bfloat16"
-
     # Added for pipeline parallel
     num_stages: int = 1
     stage_idx: int = 0

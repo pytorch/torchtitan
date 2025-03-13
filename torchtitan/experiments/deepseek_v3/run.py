@@ -18,8 +18,8 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from transformers import AutoTokenizer
 
-model_id, model_path, bs, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite", "/traindata/llama_hf_ckpt/DeepSeek-V2-Lite", 2, (2, 2)
-# model_id, model_path, bs, mesh_shape = "deepseek-ai/deepseek-v3", "/traindata/llama_hf_ckpt/DeepSeek-V3-bf16", 8, (8, 4)
+# model_id, model_path, bs, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite", "/traindata/llama_hf_ckpt/DeepSeek-V2-Lite-Chat", 2, (2, 2)
+model_id, model_path, bs, mesh_shape = "deepseek-ai/deepseek-v3", "/traindata/llama_hf_ckpt/DeepSeek-V3-bf16", 8, (8, 4)
 
 @dataclass
 class DistConfig:
@@ -34,34 +34,24 @@ class DistConfig:
 
 
 def create_model(dist_config: DistConfig):
-    # Get model configs
     model_args = deepseek_config_registry[model_id]
-
-    # Apply model parallelism
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
     model_args.max_seq_len = 16384
-    # print(model_args)
 
-    # Instantiate model
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
-
-    # Load weights
     load_weights_from_hf(model, model_path, dist_config.device)
     model.train()
 
-    stage = None
-    if dist_config.pp_size > 1:
-        stage = PipelineStage(
-            model,
-            dist_config.pp_rank,
-            dist_config.pp_size,
-            dist_config.device,
-            group=dist_config.pp_mesh.get_group(),
-        )
-    return stage
+    return PipelineStage(
+        model,
+        dist_config.pp_rank,
+        dist_config.pp_size,
+        dist_config.device,
+        group=dist_config.pp_mesh.get_group(),
+    )
 
 
 # Generate from the model.
@@ -105,7 +95,7 @@ def generate(mesh: DeviceMesh):
             )
         elif dist_config.pp_rank == dist_config.pp_size - 1:
             preds = pp_schedule.step()
-            next_token = torch.argmax(preds[:, next_idx], dim=-1)
+            next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
             torch.distributed.broadcast(
                 next_token, 
                 group=dist_config.pp_mesh.get_group(), 
@@ -117,7 +107,7 @@ def generate(mesh: DeviceMesh):
             torch.distributed.broadcast(
                 next_token, 
                 group=dist_config.pp_mesh.get_group(), 
-                group_src=dist_config.pp_rank -1
+                group_src=dist_config.size -1
             )
 
         x[:, next_idx] = next_token
