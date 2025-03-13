@@ -224,6 +224,7 @@ def main(job_config: JobConfig):
     optimizers.register_step_post_hook(
         lambda *args, **kwargs: model_converters.post_optimizer_hook(model_parts)
     )
+    metrics_processor.optimizers = optimizers
 
     train_state = TrainState()
 
@@ -265,7 +266,7 @@ def main(job_config: JobConfig):
         f"global batch size {job_config.training.batch_size * dp_degree}, "
         f"sequence length {job_config.training.seq_len}, "
         f"total steps {job_config.training.steps} "
-        f"(warmup {job_config.training.warmup_steps})"
+        f"(warmup {job_config.lr_scheduler.warmup_steps})"
     )
     with maybe_enable_profiling(
         job_config, global_step=train_state.step

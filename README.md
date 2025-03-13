@@ -36,18 +36,20 @@ Our guiding principles when building `torchtitan`:
    - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
    - [Pipeline Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-training-with-zero-bubble-pipeline-parallelism/214420)
    - [Context Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-breaking-barriers-training-long-context-llms-with-1m-sequence-length-in-pytorch-using-context-parallel/215082)
-2. Selective layer and operator activation checkpointing
-3. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
+2. [Meta device](https://pytorch.org/docs/stable/meta.html) initialization
+3. Selective (layer or operator) activation checkpointing
+4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
-4. `torch.compile` support
-5. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
-6. DDP and HSDP
-7. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-8. Learning rate scheduler, meta-init, (optional) fused RMSNorm kernel
-9. Loss, GPU memory, throughput (tokens/sec), and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-10. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-11. All options easily configured via [toml files](torchtitan/models/llama/train_configs/)
-12. [Helper scripts](scripts/) to
+5. `torch.compile` support
+6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
+7. DDP and HSDP
+8. [TorchFT](https://github.com/pytorch/torchft) integration
+9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
+10. Flexible learning rate scheduler (warmup-stable-decay)
+11. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+12. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+13. All options easily configured via [toml files](torchtitan/models/llama/train_configs/)
+14. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
     - estimate FSDP/HSDP memory usage without materializing the model
@@ -62,7 +64,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 * [torchtitan/models/llama/model.py](torchtitan/models/llama/model.py) - the Llama 3.1 model definition
 * [torchtitan/models/llama/parallelize_llama.py](torchtitan/models/llama/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
 * [torchtitan/models/llama/pipeline_llama.py](torchtitan/models/llama/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
-* [torchtitan/checkpoint.py](torchtitan/checkpoint.py) - utils for saving/loading distributed checkpoints
+* [torchtitan/components/checkpoint.py](torchtitan/components/checkpoint.py) - utils for saving/loading distributed checkpoints
 * [torchtitan/components/float8.py](torchtitan/components/float8.py) - utils for applying Float8 techniques
 
 
