@@ -7,7 +7,7 @@
 import os
 import time
 from datetime import timedelta
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import torch
 import torch.distributed as dist
@@ -258,6 +258,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.metrics_processor.optimizers = self.optimizers
 
+        # Initialize trainer states that will be saved in checkpoint.
+        # These attributes must be initialized before checkpoint loading.
+        self.step = 0
+
         # TODO: Move the checkpoint logic to a separate method
         # load initial checkpoint
         self.checkpointer = CheckpointManager(
@@ -287,7 +291,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallel_dims.loss_parallel_enabled,
             job_config.experimental.enable_compiled_autograd,
         )
-        self.step = 0
 
         logger.info("Trainer initialized.")
 
@@ -435,20 +438,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.metrics_processor.close()
         logger.info("Training completed")
 
-    def state_dict(self):
+    def state_dict(self) -> dict[str, Any]:
         return {"step": self.step}
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
+
+    def close(self) -> None:
+        if self.checkpointer:
+            self.checkpointer.close()
 
 
 if __name__ == "__main__":
     init_logger()
     config = JobConfig()
     config.parse_args()
+    trainer: Optional[Trainer] = None
+
     try:
         trainer = Trainer(config)
         trainer.train()
     finally:
+        if trainer:
+            trainer.close()
+
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+            logger.info("Process group destroyed.")
