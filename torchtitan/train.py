@@ -256,6 +256,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.model_parts
             )
         )
+        self.metrics_processor.optimizers = self.optimizers
 
         # TODO: Move the checkpoint logic to a separate method
         # load initial checkpoint
@@ -296,7 +297,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"global batch size {job_config.training.batch_size * dp_degree}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
-            f"(warmup {job_config.training.warmup_steps})"
+            f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
     def next_batch(self, data_iterator: Iterable) -> tuple[torch.Tensor, torch.Tensor]:
@@ -330,7 +331,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=job_config.experimental.context_parallel_rotate_method,
+                cp_rotate_method=self.job_config.experimental.context_parallel_rotate_method,
             )
             if parallel_dims.cp_enabled
             else None

@@ -6,7 +6,8 @@
 
 import copy
 import functools
-from typing import Any, Callable, Dict, Generic, List, TypeVar
+import math
+from typing import Any, Callable, Dict, Generic, List, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -21,6 +22,7 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -362,7 +364,7 @@ class LRSchedulersContainer(Stateful):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         # Load the same state_dict for all schedulers. The key value we're concerned
         # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``training.warmup_steps``
+        # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
         # in ``job_config`` remain unchanged when resuming from a checkpoint, this
         # approach is safe. We call ``copy()`` here to ensure extra safety.
         for scheduler in self.schedulers:
@@ -388,30 +390,69 @@ def build_lr_schedulers(
         optimizers (OptimizersContainer): The corresponding optimizers for the
             lr_schedulers.
     """
-    warmup_steps = int(job_config.training.warmup_steps)
-    decay_steps = float(max(1, job_config.training.steps - warmup_steps))
+    training_steps = job_config.training.steps
+    warmup_steps = int(job_config.lr_scheduler.warmup_steps)
+    lr_decay_ratio = job_config.lr_scheduler.decay_ratio
+    lr_decay_type = job_config.lr_scheduler.decay_type
+    lr_min = job_config.lr_scheduler.lr_min
 
-    def linear_warmup_linear_decay(
-        warmup_steps: int, decay_steps: int, current_step: int
-    ) -> float:
-        """Computes linear warmup followed by linear decay.
+    def linear_warmup_stable_decay(
+        current_step: int,
+        warmup_steps: int,
+        lr_decay_ratio: Union[float, None],
+        lr_decay_type: str,
+        lr_min: float,
+    ):
+        """
+        Computes linear warmup followed by stable learning rate for a while,
+        then some type of decay.
 
         Per LambdaLR requirement, this is accomplished by returning
-        a multiplicative factor to adjust the learning rate to
-        create the desired schedule.
+        a multiplicative factor `curr_adjustment` ranging from 1 to 0
+        to adjust the learning rate to create the desired schedule.
+
+        We offer three types of learning rate decay schedules:
+        1. `linear`: decays linearly from 1 to 0 over the decay period.
+        2. `sqrt`: decays as 1 minus the square root of the decay progress.
+        3. `cosine`: follows a cosine curve, decaying according to the values of the half-period of the cosine function.
+
+        If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
+        to ensure the learning rate does not drop below this minimum value.
         """
+        if lr_decay_ratio is None:
+            warmup_stable_steps = warmup_steps
+        else:
+            warmup_stable_steps = training_steps * (1 - lr_decay_ratio)
+        if warmup_stable_steps < warmup_steps:
+            logger.warning(
+                f"The warmup steps should be less than or equal to the warmup-stable steps ({warmup_stable_steps}). "
+                f"Consider reducing either the decay ratio ({lr_decay_ratio}) or the warmup steps ({warmup_steps})."
+            )
         if current_step < warmup_steps:
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
             curr_adjustment = float(current_step / (warmup_steps + 1))
-
+        elif current_step < warmup_stable_steps:
+            curr_adjustment = 1.0
         else:
-            # linear decay
-            normalized_step = decay_steps - (current_step - warmup_steps)
-            curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
+            decay_steps = float(max(1, training_steps - warmup_stable_steps))
+            progress = float(current_step - warmup_stable_steps) / decay_steps
 
+            if lr_decay_type == "linear":
+                curr_adjustment = 1 - progress
+            elif lr_decay_type == "sqrt":
+                curr_adjustment = 1 - math.sqrt(progress)
+            elif lr_decay_type == "cosine":
+                curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            curr_adjustment = lr_min + (1 - lr_min) * curr_adjustment
         return curr_adjustment
 
-    lr_lambda = functools.partial(linear_warmup_linear_decay, warmup_steps, decay_steps)
+    lr_lambda = functools.partial(
+        linear_warmup_stable_decay,
+        warmup_steps=warmup_steps,
+        lr_decay_ratio=lr_decay_ratio,
+        lr_decay_type=lr_decay_type,
+        lr_min=lr_min,
+    )
     return LRSchedulersContainer(optimizers, lr_lambda)
