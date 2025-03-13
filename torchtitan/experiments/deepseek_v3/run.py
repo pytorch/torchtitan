@@ -58,10 +58,15 @@ def run_full_model(
     # Apply data parallelism
     fsdp_mesh = mesh["fsdp"]
     hsdp_mesh = mesh["ep", "fsdp"]
-
+    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
+    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
+    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
+    # it will be ineconomical re-gather the weights.
     for layer in model.model.layers.values():
-        # Apply FSDP to MoE
-        fully_shard(layer.mlp, mesh=fsdp_mesh, reshard_after_forward=False)
+        # Apply FSDP to experts
+        if hasattr(layer.mlp, "experts"):
+            for expert in layer.mlp.experts.values():
+                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
         # Apply HSDP to other parts such as attention, layernorm, because they
         # are doing DDP on EP dimension
         fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
