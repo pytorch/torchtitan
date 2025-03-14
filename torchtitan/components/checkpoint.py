@@ -13,8 +13,6 @@ import re
 import shutil
 import threading
 import time
-from dataclasses import dataclass, field
-from io import BytesIO
 from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Union
 
@@ -49,45 +47,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-# TODO: move this out from checkpoint.py and merge it with the trainer.py
-# We probably want to create a Trainer object.
-@dataclass
-class TrainState(Stateful):
-    step: int = 0
-    global_avg_losses: List[float] = field(default_factory=list)
-    global_max_losses: List[float] = field(default_factory=list)
-    log_steps: List[int] = field(default_factory=list)
-
-    def state_dict(self) -> Dict[str, Any]:
-        # Only checkpoint global_avg_losses and global_max_losses per log frequency
-        # to avoid sync overhead in every iteration.
-        global_avg_losses_bytes = BytesIO()
-        torch.save(self.global_avg_losses, global_avg_losses_bytes)
-        global_max_losses_bytes = BytesIO()
-        torch.save(self.global_max_losses, global_max_losses_bytes)
-        log_steps_bytes = BytesIO()
-        torch.save(self.log_steps, log_steps_bytes)
-        return {
-            "step": torch.tensor(self.step, dtype=torch.int32),
-            "global_avg_losses": global_avg_losses_bytes,
-            "global_max_losses": global_max_losses_bytes,
-            "log_steps": log_steps_bytes,
-        }
-
-    def load_state_dict(self, state_dict) -> None:
-        self.step = state_dict["step"].item()
-        state_dict["global_avg_losses"].seek(0)
-        self.global_avg_losses = torch.load(
-            state_dict["global_avg_losses"], weights_only=False
-        )
-        state_dict["global_max_losses"].seek(0)
-        self.global_max_losses = torch.load(
-            state_dict["global_max_losses"], weights_only=False
-        )
-        state_dict["log_steps"].seek(0)
-        self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
 class ModelWrapper(Stateful):
@@ -355,6 +314,9 @@ class CheckpointManager:
         )
 
     def __del__(self):
+        self.close()
+
+    def close(self):
         if self.enable_checkpoint:
             if self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())
