@@ -6,6 +6,8 @@
 import os
 from typing import Callable
 
+from torch.distributed.pipelining.microbatch import TensorChunkSpec
+
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -119,17 +121,18 @@ def build_pipeline_schedule(
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
-    # validate that the batch size is divisible by the number of microbatches otherwise we'll hang or error during training
-    if job_config.training.batch_size % n_microbatches != 0:
-        raise ValueError(
-            f"Batch size {job_config.training.batch_size} must be divisible by number of microbatches {n_microbatches}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatches."
-        )
+    # determine microbatch chunking specification
+    if job_config.experimental.pipeline_parallel_batch_split_dim != 0:
+        dim = job_config.experimental.pipeline_parallel_batch_split_dim
+        args_chunk_spec = (TensorChunkSpec(dim),)
+    else:
+        args_chunk_spec = None
 
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+        args_chunk_spec=args_chunk_spec,
     )
     logger.info(
         f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} "
