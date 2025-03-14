@@ -377,8 +377,7 @@ def _kernel_grouped_gemm_backward_w_scheduled(
 
 # ========== End Triton kernels ==========
 
-# Moved PyTorch fallback implementation to a separate file
-# ========== Begin grouped_gemm_backward ==========
+# ========== Begin grouped_gemm_backward cover function ==========
 
 
 def grouped_gemm_backward(
@@ -407,7 +406,7 @@ def grouped_gemm_backward(
         raise RuntimeError("CUDA not available for backward pass")
         # return _pytorch_fallback_backward(grad_output, x, w, m_sizes)
 
-    # Get GPU parameters
+    # Get GPU parameters - TODO: this can use PyTorch cached info...
     device_props = torch.cuda.get_device_properties("cuda")
     NUM_SMS = device_props.multi_processor_count
 
@@ -478,7 +477,7 @@ def grouped_gemm_backward(
             m_offset += m_sizes[g].item()
         group_offsets[G] = m_offset  # Total M
 
-        # Check if K dimension is even (maybe? optimize memory access patterns)
+        # Check if K dimension is even (optimize memory access patterns)
         EVEN_K = (K_x % 8) == 0
         logging.info(f"EVEN_K optimization enabled: {EVEN_K} (K={K_x})")
 
@@ -493,18 +492,13 @@ def grouped_gemm_backward(
             # Empty tensor when TMA is not used
             workspace = torch.empty(0, device=x.device, dtype=torch.uint8)
 
-        # Set block sizes based on K dimension - TODO - autotuning
-        if K_x <= 64:
-            BLOCK_SIZE_K = 64
-            BLOCK_SIZE_M = 64
-            # BLOCK_SIZE_K_W = 64
-            BLOCK_SIZE_N = 64
-        else:
-            # For larger K, use smaller blocks to avoid register pressure
-            BLOCK_SIZE_K = 32
-            BLOCK_SIZE_M = 32
-            # BLOCK_SIZE_K_W = 32
-            BLOCK_SIZE_N = 32
+        # Set block sizes based on K dimension
+        # For larger K, use smaller blocks to reduce register pressure
+        BLOCK_SIZE = 64 if K_x <= 64 else 32
+
+        BLOCK_SIZE_K = BLOCK_SIZE
+        BLOCK_SIZE_M = BLOCK_SIZE
+        BLOCK_SIZE_N = BLOCK_SIZE
 
         # Determine maximum size needed and set the grid size
         num_pid_m = triton.cdiv(M, BLOCK_SIZE_M)
@@ -514,19 +508,6 @@ def grouped_gemm_backward(
         # Compute total number of blocks needed for each kernel
         total_blocks_x = G * num_pid_m * num_pid_k
         total_blocks_w = G * num_pid_n * num_pid_k
-
-        # Set block sizes based on K dimension
-        if K_x <= 64:
-            BLOCK_SIZE_K_X = 64
-            BLOCK_SIZE_M = 64
-            BLOCK_SIZE_K_W = 64
-            BLOCK_SIZE_N = 64
-        else:
-            # For larger K, use smaller blocks to avoid register pressure
-            BLOCK_SIZE_K_X = 32
-            BLOCK_SIZE_M = 32
-            BLOCK_SIZE_K_W = 32
-            BLOCK_SIZE_N = 32
 
         try:
             logging.info("Computing grad_x with TMA-enabled kernel")
@@ -555,7 +536,7 @@ def grouped_gemm_backward(
                 USE_TMA_STORE,
                 BLOCK_SIZE_M=BLOCK_SIZE_M,
                 BLOCK_SIZE_N=BLOCK_SIZE_N,
-                BLOCK_SIZE_K=BLOCK_SIZE_K_X,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
                 EVEN_K=EVEN_K,
             )
             logging.info(
@@ -569,7 +550,7 @@ def grouped_gemm_backward(
         try:
             logging.info("Computing grad_w with TMA-enabled kernel")
 
-            # Fixed grid size based on SM count - similar to original approach
+            # Fixed grid size based on SM count
             grid = (NUM_SMS,)
 
             _kernel_grouped_gemm_backward_w_scheduled[grid](
@@ -592,7 +573,7 @@ def grouped_gemm_backward(
                 USE_TMA_LOAD,
                 USE_TMA_STORE,
                 BLOCK_SIZE_N=BLOCK_SIZE_N,
-                BLOCK_SIZE_K=BLOCK_SIZE_K_W,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
                 BLOCK_SIZE_M=BLOCK_SIZE_M,
                 EVEN_K=EVEN_K,
             )
