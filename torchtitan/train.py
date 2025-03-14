@@ -48,6 +48,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
+    pp_has_first_stage: bool
+    pp_has_last_stage: bool
+
+    device: torch.device
+
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
     def __init__(self, job_config: JobConfig):
@@ -65,9 +70,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
         device_module, device_type = utils.device_module, utils.device_type
-        device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
-        device_module.set_device(device)
+        device_module.set_device(self.device)
         ft_manager = ft.init_ft_manager(job_config)
 
         # init distributed
@@ -110,7 +115,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
             world_mesh,
-            device,
+            self.device,
             job_config.training.seed,
             job_config.training.deterministic,
         )
@@ -198,7 +203,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 pp_mesh,
                 parallel_dims,
                 job_config,
-                device,
+                self.device,
                 model_config,
                 self.train_spec.loss_fn,
             )
@@ -354,9 +359,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                torch.mean(torch.stack(losses)).to(device)
+                torch.mean(torch.stack(losses)).to(self.device)
                 if self.pp_has_last_stage
-                else torch.tensor([-1.0], device=device)
+                else torch.tensor([-1.0], device=self.device)
             )
         else:
             # Non-PP forward / backward
