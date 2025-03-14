@@ -4,128 +4,120 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# torchrun --standalone --nproc-per-node 4 run.py
-
-from dataclasses import dataclass
-
+# torchrun --standalone --nproc-per-node 8 run.py
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-
 from checkpoint import load_weights_from_hf
 from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
-from transformers import AutoTokenizer
 
-model_id, model_path, bs, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite", "/traindata/llama_hf_ckpt/DeepSeek-V2-Lite-Chat", 2, (2, 2)
-# model_id, model_path, bs, mesh_shape = "deepseek-ai/deepseek-v3", "/traindata/llama_hf_ckpt/DeepSeek-V3-bf16", 8, (8, 4)
-
-@dataclass
-class DistConfig:
-    mesh: DeviceMesh
-    pp_mesh: DeviceMesh
-    ep_mesh: DeviceMesh
-    pp_size: int
-    ep_size: int
-    ep_rank: int
-    pp_rank: int
-    device: torch.device
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 
-def create_model(dist_config: DistConfig):
-    model_args = deepseek_config_registry[model_id]
-    model_args.ep_size = dist_config.ep_size
-    model_args.num_stages = dist_config.pp_size
-    model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
-
-    with dist_config.device, dist_config.mesh:
-        model = DeepseekForCausalLM(model_args)
-    load_weights_from_hf(model, model_path, dist_config.device)
-    model.train()
-
-    return model, PipelineStage(
-        model,
-        dist_config.pp_rank,
-        dist_config.pp_size,
-        dist_config.device,
-        group=dist_config.pp_mesh.get_group(),
-    )
+# Use DeepSeek-V2-Lite as a proxy
+model_id = "deepseek-ai/DeepSeek-V2-Lite"
 
 
-# Generate from the model.
-def generate(mesh: DeviceMesh):
+# Run full model
+def run_full_model(
+    mesh: DeviceMesh,
+):
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
 
-    dist_config = DistConfig(
-        mesh=mesh,
-        pp_mesh=mesh["pp"],
-        ep_mesh=mesh["ep"],
-        pp_rank=mesh["pp"].get_local_rank(),
-        pp_size=mesh["pp"].size(),
-        ep_size=mesh["ep"].size(),
-        ep_rank=mesh["ep"].get_local_rank(),
-        device=device,
-    )
+    pp_mesh = mesh["pp"]
+    ep_mesh = mesh["ep"]
+    pp_rank = pp_mesh.get_local_rank()
+    ep_rank = ep_mesh.get_local_rank()
+    pp_size = pp_mesh.size()
+    ep_size = ep_mesh.size()
 
-    model, stage = create_model(dist_config)
-    pp_schedule = ScheduleGPipe(stage, bs)
+    # Get model configs
+    model_args = deepseek_config_registry[model_id]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is 2+2?"},
-    ]
-    x = tokenizer.apply_chat_template([messages] * bs, add_generation_prompt=True, return_tensors="pt")
-    next_idx = x.shape[-1]
-    x = torch.cat([x, torch.zeros(x.shape[0], 10, dtype=torch.int64)], dim=-1)
-    x = x.to(device)
+    # Apply model parallelism
+    model_args.ep_size = ep_size
+    model_args.num_stages = pp_size
+    model_args.stage_idx = pp_rank
+    print(model_args)
 
-    for _ in range(10):
-        if dist_config.pp_size > 1:
-            if dist_config.pp_rank == 0:
-                pp_schedule.step(x)
-                torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size - 1
-                )
-            elif dist_config.pp_rank == dist_config.pp_size - 1:
-                preds = pp_schedule.step()
-                next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
-                x[:, next_idx] = next_token
-                torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size - 1
-                )
-            else:
-                pp_schedule.step()
-                torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size -1
-                )
+    # Instantiate model
+    with device, mesh:
+        model = DeepseekForCausalLM(model_args)
 
-            next_idx += 1
+    # Load weights
+    load_weights_from_hf(model, model_id, device)
+    model.train()
+
+    # Apply data parallelism
+    fsdp_mesh = mesh["fsdp"]
+    hsdp_mesh = mesh["ep", "fsdp"]
+    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
+    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
+    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
+    # it will be ineconomical re-gather the weights.
+    for layer in model.model.layers.values():
+        # Apply FSDP to experts
+        if hasattr(layer.mlp, "experts"):
+            for expert in layer.mlp.experts.values():
+                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
+        # Apply HSDP to other parts such as attention, layernorm, because they
+        # are doing DDP on EP dimension
+        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
+
+    # Apply HSDP on root model (lm_head, embeddings, etc)
+    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
+
+    # Example inputs
+    bs = 2
+    seqlen = 128
+    x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
+    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
+
+    # Create loss function
+    loss_fn = torch.nn.functional.cross_entropy
+
+    # Run forward and backward
+    if pp_size > 1:
+        # Create pipeline stage
+        stage = PipelineStage(
+            model,
+            pp_rank,
+            pp_size,
+            device,
+            group=pp_mesh.get_group(),
+        )
+
+        # Create pipeline schedule
+        microbatches = 2
+        losses = []
+        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+
+        if pp_rank == 0:
+            y = pp_schedule.step(x)
+        elif pp_rank == pp_size - 1:
+            y = pp_schedule.step(target=label, losses=losses)
+            loss = torch.mean(torch.stack(losses))
         else:
-            preds = model(x)
-            next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
-            x[:, next_idx] = next_token
-            next_idx += 1
-    if rank == 0:
-        print(tokenizer.decode(x[0]))
+            pp_schedule.step()
+    else:
+        y = model(x)
+        loss = loss_fn(y, label)
+        loss.backward()
 
-# Run the full model.
-def run_full_model(mesh: DeviceMesh):
-    # TODO(eugen): Update.
-    raise NotImplementedError("Removed for now because it contains internal data.")
+    if pp_rank == pp_size - 1:
+        print(f"logits: {y.shape}")
+        print(f"{loss=}")
+
+    print("Backward done")
 
 
 if __name__ == "__main__":
-    mesh = dist.init_device_mesh("cuda", mesh_shape, mesh_dim_names=("pp", "ep"))
-    generate(mesh)
+    mesh = dist.init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
+
+    run_full_model(mesh)
+
     dist.destroy_process_group()

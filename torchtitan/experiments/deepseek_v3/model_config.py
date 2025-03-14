@@ -197,5 +197,6 @@ deepseek_v2_lite_config = ModelArgs(
 # Key is the model distribution ID on HuggingFace Hub
 deepseek_config_registry = {
     "deepseek-ai/DeepSeek-V2-Lite": deepseek_v2_lite_config,
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": deepseek_v2_lite_config,
     "deepseek-ai/deepseek-v3": ModelArgs(),
 }
