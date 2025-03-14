@@ -378,7 +378,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             [p for m in model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=pp_mesh if parallel_dims.pp_enabled else None,
+            pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
