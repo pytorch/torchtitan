@@ -38,7 +38,6 @@ def fully_shard(
 | `auto_wrap_policy` | removed |
 | `backward_prefetch` | removed |
 | `mixed_precision` | `mp_policy` |
-| `ignored_modules`/`ignored_states` | not yet implemented |
 | `param_init_fn` | removed |
 | `device_id` | removed |
 | `sync_module_states` | removed |
