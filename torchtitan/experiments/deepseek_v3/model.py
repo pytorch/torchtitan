@@ -1023,12 +1023,19 @@ class DeepseekModel(torch.nn.Module):
 
         self.layers = torch.nn.ModuleDict()
         layers_per_stage = config.num_hidden_layers // config.num_stages
-
         for layer_id in range(
             layers_per_stage * config.stage_idx,
             layers_per_stage * (config.stage_idx + 1),
         ):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
+        # If the model does not have an even number of layers, we add the
+        # extra layers to the last stage. 
+        if config.stage_idx == config.num_stages - 1:
+            start_idx = config.num_stages * layers_per_stage
+            extra_layers = config.num_hidden_layers % config.num_stages
+            for i in range(extra_layers):
+                layer_id = start_idx + i
+                self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
 
         self.norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
