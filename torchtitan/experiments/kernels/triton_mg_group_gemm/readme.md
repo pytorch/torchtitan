@@ -1,7 +1,7 @@
 ## Triton Group GEMM for MOE training and inference.
 ## M*G Version
 This is a v1 of a Triton Group GEMM for use with Moe models in both training and inference.
-This is an M*G group gemm, and returns an M*G,K output.  This may be more suitable for all2all EP MoE.
+This is an M*G group gemm, and returns an M*G,K output.  This may be more suitable for all2all EP MoE with Token Choice routing.
 
 Currently passes basic verification vs PyTorch reference on *simple* sizes and shapes:
 Max absolute difference: 0.000000e+00
