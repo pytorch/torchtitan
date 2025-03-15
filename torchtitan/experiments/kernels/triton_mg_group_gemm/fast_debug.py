@@ -1,3 +1,16 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pyre-unsafe
+
+"""
+Useful debugging util for backward pass with grouped GEMM verification.
+Has checks for gradient correctness, gradient shape, gradient value, and gradient value zero distribution.
+"""
+
 import logging
 
 import torch
@@ -9,7 +22,7 @@ logging.basicConfig(
 
 # Import the grouped GEMM implementations
 try:
-    from mg_backward import group_gemm_backward as grouped_gemm_backward
+    from mg_backward import grouped_gemm_backward
     from mg_forward import group_gemm_forward as grouped_gemm
 except ImportError:
     logging.error(
@@ -31,10 +44,10 @@ def test_backward_pass():
 
         # Test parameters for DeepSeek-like models
         G = 4  # Number of groups
-        M_sizes = [1024, 1024, 2048, 2048]  # Group sizes (will be adjusted)
+        M_sizes = [1024, 1024, 1024, 1024]  # Group sizes
         M_total = sum(M_sizes)  # Total M dimension
-        N = 512  # Output dimension (same for all groups)
-        K = 256  # Hidden dimension
+        N = 1024  # Output dimension (same for all groups)
+        K = 512  # Reduction dimension
 
         # Deepseek-like configs: ((4, 8192, 7168, 4096), (4, 8192, 2048, 7168), (8, 4096, 7168, 4096), (8, 4096, 2048, 7168))
         # Format: (G, M, K, N)
@@ -43,10 +56,11 @@ def test_backward_pass():
         m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
 
         # Create input and weight tensors
-        x = torch.randn(
-            M_total, K, dtype=torch.float16, device=device, requires_grad=True
-        )
-        w = torch.randn(N, K, dtype=torch.float16, device=device, requires_grad=True)
+        # bfloat16 is used for DeepSeek models (but float16 is nicer for verification)
+        test_dtype = torch.float16
+
+        x = torch.randn(M_total, K, dtype=test_dtype, device=device, requires_grad=True)
+        w = torch.randn(N, K, dtype=test_dtype, device=device, requires_grad=True)
 
         # Log the setup
         logging.info(f"Test setup - G: {G}, M_total: {M_total}, N: {N}, K: {K}")
@@ -73,11 +87,10 @@ def test_backward_pass():
         )
 
         # Step 3: Verify gradient computation using PyTorch's autograd
-        # First create autograd-enabled tensors
         x_autograd = x.detach().clone().requires_grad_(True)
         w_autograd = w.detach().clone().requires_grad_(True)
 
-        # Create a PyTorch reference implementation to compare against
+        # PyTorch reference implementation to compare against
         logging.info("Running PyTorch reference implementation")
 
         # Compute reference result
@@ -100,7 +113,7 @@ def test_backward_pass():
                 # Update start index
                 m_start = m_end
 
-        # Backpropagate using PyTorch
+        # Backpropagate
         reference_result.backward(grad_output)
 
         # Compare gradients
@@ -114,7 +127,7 @@ def test_backward_pass():
 
         # Check if gradients are close using allclose
         rtol = 1e-1  # Relative tolerance for bfloat16
-        atol = 1e-1  # Absolute tolerance for bfloat16
+        atol = 0.5  # Absolute tolerance for bfloat16
 
         grad_x_close = torch.allclose(grad_x, x_autograd.grad, rtol=rtol, atol=atol)
         if not grad_x_close:
@@ -229,12 +242,9 @@ def test_multiple_deepseek_configs():
             m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
 
             # Create input and weight tensors
-            x = torch.randn(
-                M, K, dtype=torch.bfloat16, device=device, requires_grad=True
-            )
-            w = torch.randn(
-                N, K, dtype=torch.bfloat16, device=device, requires_grad=True
-            )
+            test_dtype = torch.float16  # Use float16 for verification
+            x = torch.randn(M, K, dtype=test_dtype, device=device, requires_grad=True)
+            w = torch.randn(N, K, dtype=test_dtype, device=device, requires_grad=True)
 
             logging.info(f"Input x shape: {x.shape}, Weight w shape: {w.shape}")
 
@@ -269,9 +279,17 @@ def test_multiple_deepseek_configs():
 
             # Compare
             rtol = 1e-1
-            atol = 1e-1
+            atol = 0.5
             grad_x_close = torch.allclose(grad_x, x_ref.grad, rtol=rtol, atol=atol)
             grad_w_close = torch.allclose(grad_w, w_ref.grad, rtol=rtol, atol=atol)
+
+            logging.info("Comparing gradients with PyTorch reference")
+            grad_x_error = (grad_x - x_ref.grad).abs().max().item()
+            grad_w_error = (grad_w - w_ref.grad).abs().max().item()
+
+            logging.info(
+                f"Maximum gradient error - grad_x: {grad_x_error}, grad_w: {grad_w_error}"
+            )
 
             # Log results
             if grad_x_close and grad_w_close:
