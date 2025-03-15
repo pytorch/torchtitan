@@ -204,7 +204,7 @@ def _grouped_gemm(
     ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
 
     # Create output tensor with correct shape [M_total, N]
-    y = torch.empty((M_total, N), device=x.device, dtype=torch.bfloat16)
+    y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     USE_TMA_LOAD = True
