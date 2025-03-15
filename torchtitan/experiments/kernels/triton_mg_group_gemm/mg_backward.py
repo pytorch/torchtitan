@@ -1,3 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pyre-unsafe
 import logging
 from typing import Optional, Tuple
 
@@ -281,7 +288,7 @@ def _kernel_grouped_gemm_backward_dw_scheduled(
 # ======== End Triton kernels ========
 
 
-def group_gemm_backward(
+def grouped_gemm_backward(
     grad_output: torch.Tensor,
     x: torch.Tensor,
     w: torch.Tensor,
