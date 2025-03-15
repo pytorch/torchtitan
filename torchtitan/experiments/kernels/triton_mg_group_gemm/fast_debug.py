@@ -5,14 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-
-"""
-Useful debugging util for backward pass with grouped GEMM verification.
-Has checks for gradient correctness, gradient shape, gradient value, and gradient value zero distribution.
-"""
-
 import logging
 
+import numpy as np
 import torch
 
 # Configure logging
@@ -31,6 +26,172 @@ except ImportError:
     raise
 
 
+def compute_reference_forward(x, w, m_sizes):
+    """
+    Compute reference forward pass using PyTorch operations.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (M, K)
+        w (torch.Tensor): Weight tensor of shape (N, K)
+        m_sizes (torch.Tensor): Group sizes tensor of shape (G)
+
+    Returns:
+        torch.Tensor: Reference output tensor of shape (M, N)
+    """
+    result = torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype, device=x.device)
+
+    m_start = 0
+    for g in range(len(m_sizes)):
+        m_size = m_sizes[g].item()
+        if m_size > 0:
+            m_end = m_start + m_size
+
+            # Extract group input
+            x_g = x[m_start:m_end]
+
+            # Compute group output: y_g = x_g @ w.T
+            y_g = torch.matmul(x_g, w.T)
+
+            # Store result
+            result[m_start:m_end] = y_g
+
+            # Update start index
+            m_start = m_end
+
+    return result
+
+
+def compute_reference_backward(x, w, m_sizes, grad_output):
+    """
+    Compute reference backward pass using PyTorch autograd.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (M, K)
+        w (torch.Tensor): Weight tensor of shape (N, K)
+        m_sizes (torch.Tensor): Group sizes tensor of shape (G)
+        grad_output (torch.Tensor): Gradient tensor of shape (M, N)
+
+    Returns:
+        tuple: (grad_x, grad_w) gradient tensors
+    """
+    # Create autograd-enabled copies
+    x_autograd = x.detach().clone().requires_grad_(True)
+    w_autograd = w.detach().clone().requires_grad_(True)
+
+    # Compute forward pass
+    output = compute_reference_forward(x_autograd, w_autograd, m_sizes)
+
+    # Backpropagate
+    output.backward(grad_output)
+
+    return x_autograd.grad, w_autograd.grad
+
+
+def analyze_tensor_differences(actual, expected, name):
+    """
+    Analyze differences between actual and expected tensors.
+
+    Args:
+        actual (torch.Tensor): Actual tensor
+        expected (torch.Tensor): Expected tensor
+        name (str): Name of the tensor for logging
+
+    Returns:
+        bool: True if tensors are close enough
+    """
+    rtol = 0.5  # Relative tolerance for float16
+    atol = 0.5  # Absolute tolerance for float16
+
+    # Analyze differences
+    diff = (actual - expected).abs()
+    max_idx = diff.argmax().item()
+    idx = np.unravel_index(max_idx, actual.shape)
+    max_diff = diff.max().item()
+
+    logging.info(f"Largest {name} difference: {max_diff} at {idx}")
+    logging.info(f"Values: {actual[idx].item()} vs {expected[idx].item()}")
+
+    is_close = torch.allclose(actual, expected, rtol=rtol, atol=atol)
+
+    if is_close:
+        logging.info(f"✓ SUCCESS: {name} matches PyTorch reference")
+    else:
+        logging.error(f"✗ FAILURE: {name} mismatch detected")
+
+        # Count zeros
+        zeros_actual = (actual == 0).sum().item()
+        zeros_expected = (expected == 0).sum().item()
+        logging.info(
+            f"Zeros in {name} (actual): {zeros_actual}/{actual.numel()} ({zeros_actual/actual.numel()*100:.2f}%)"
+        )
+        logging.info(
+            f"Zeros in {name} (expected): {zeros_expected}/{expected.numel()} ({zeros_expected/expected.numel()*100:.2f}%)"
+        )
+
+        # Check for NaNs
+        nan_actual = torch.isnan(actual).sum().item()
+        if nan_actual > 0:
+            logging.error(f"NaN values detected in {name}: {nan_actual}")
+
+    return is_close
+
+
+def test_forward_pass():
+    """
+    A simple test for the M*G grouped GEMM forward pass with detailed error handling.
+
+    In M*G grouping:
+    - M dimension is partitioned into G groups (M_total = sum(M_sizes))
+    - N dimension is the same for all groups
+    """
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Test parameters for DeepSeek-like models
+        G = 4  # Number of groups
+        M_sizes = [2048, 2048, 2048, 2048]  # Group sizes (will be adjusted)
+        M_total = sum(M_sizes)  # Total M dimension
+        N = 4096  # Output dimension (same for all groups)
+        K = 7168  # Hidden dimension
+
+        # Create group sizes tensor
+        m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
+
+        # Create input and weight tensors - using float16 for higher precision
+        x = torch.randn(M_total, K, dtype=torch.float16, device=device)
+        w = torch.randn(N, K, dtype=torch.float16, device=device)
+
+        # Log the setup
+        logging.info(f"Test setup - G: {G}, M_total: {M_total}, N: {N}, K: {K}")
+        logging.info(f"Group sizes: {m_sizes}")
+        logging.info(f"Input x shape: {x.shape}")
+        logging.info(f"Weight w shape: {w.shape}")
+
+        # Run forward pass
+        logging.info("Running forward pass with grouped GEMM")
+        result = grouped_gemm(x, w, m_sizes)
+        logging.info(f"Forward result shape: {result.shape}")
+
+        # Compute reference result
+        logging.info("Computing reference result with PyTorch")
+        reference_result = compute_reference_forward(x, w, m_sizes)
+
+        # Compare results
+        logging.info("Comparing with PyTorch reference")
+        forward_close = analyze_tensor_differences(
+            result, reference_result, "Forward output"
+        )
+
+        return forward_close
+
+    except Exception as e:
+        logging.error(f"Test failed with error: {e}")
+        import traceback
+
+        logging.error(traceback.format_exc())
+        return False
+
+
 def test_backward_pass():
     """
     A simple test for the M*G grouped GEMM backward pass with detailed error handling.
@@ -44,23 +205,19 @@ def test_backward_pass():
 
         # Test parameters for DeepSeek-like models
         G = 4  # Number of groups
-        M_sizes = [1024, 1024, 1024, 1024]  # Group sizes
+        M_sizes = [2048, 2048, 2048, 2048]  # Group sizes (will be adjusted)
         M_total = sum(M_sizes)  # Total M dimension
-        N = 1024  # Output dimension (same for all groups)
-        K = 512  # Reduction dimension
-
-        # Deepseek-like configs: ((4, 8192, 7168, 4096), (4, 8192, 2048, 7168), (8, 4096, 7168, 4096), (8, 4096, 2048, 7168))
-        # Format: (G, M, K, N)
+        N = 4096  # Output dimension (same for all groups)
+        K = 7168  # Hidden dimension
 
         # Create group sizes tensor
         m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
 
-        # Create input and weight tensors
-        # bfloat16 is used for DeepSeek models (but float16 is nicer for verification)
-        test_dtype = torch.float16
-
-        x = torch.randn(M_total, K, dtype=test_dtype, device=device, requires_grad=True)
-        w = torch.randn(N, K, dtype=test_dtype, device=device, requires_grad=True)
+        # Create input and weight tensors - using float16 for higher precision
+        x = torch.randn(
+            M_total, K, dtype=torch.float16, device=device, requires_grad=True
+        )
+        w = torch.randn(N, K, dtype=torch.float16, device=device, requires_grad=True)
 
         # Log the setup
         logging.info(f"Test setup - G: {G}, M_total: {M_total}, N: {N}, K: {K}")
@@ -87,122 +244,21 @@ def test_backward_pass():
         )
 
         # Step 3: Verify gradient computation using PyTorch's autograd
-        x_autograd = x.detach().clone().requires_grad_(True)
-        w_autograd = w.detach().clone().requires_grad_(True)
-
-        # PyTorch reference implementation to compare against
         logging.info("Running PyTorch reference implementation")
 
-        # Compute reference result
-        reference_result = torch.zeros_like(result)
-        m_start = 0
-        for g in range(G):
-            m_size = m_sizes[g].item()
-            if m_size > 0:
-                m_end = m_start + m_size
-
-                # Extract group input
-                x_g = x_autograd[m_start:m_end]
-
-                # Compute group output: y_g = x_g @ w.T
-                y_g = torch.matmul(x_g, w_autograd.T)
-
-                # Store result
-                reference_result[m_start:m_end] = y_g
-
-                # Update start index
-                m_start = m_end
-
-        # Backpropagate
-        reference_result.backward(grad_output)
+        # Compute reference gradients
+        x_ref_grad, w_ref_grad = compute_reference_backward(x, w, m_sizes, grad_output)
 
         # Compare gradients
         logging.info("Comparing gradients with PyTorch reference")
-        grad_x_error = (grad_x - x_autograd.grad).abs().max().item()
-        grad_w_error = (grad_w - w_autograd.grad).abs().max().item()
+        grad_x_close = analyze_tensor_differences(grad_x, x_ref_grad, "grad_x")
+        grad_w_close = analyze_tensor_differences(grad_w, w_ref_grad, "grad_w")
 
-        logging.info(
-            f"Maximum gradient error - grad_x: {grad_x_error}, grad_w: {grad_w_error}"
-        )
-
-        # Check if gradients are close using allclose
-        rtol = 1e-1  # Relative tolerance for bfloat16
-        atol = 0.5  # Absolute tolerance for bfloat16
-
-        grad_x_close = torch.allclose(grad_x, x_autograd.grad, rtol=rtol, atol=atol)
-        if not grad_x_close:
-            logging.warning("FAILED: Gradient mismatch detected in grad_x")
-        else:
-            logging.info(
-                "✓ SUCCESS! grad_X matches the PyTorch reference (allclose check passed)"
-            )
-
-        grad_w_close = torch.allclose(grad_w, w_autograd.grad, rtol=rtol, atol=atol)
-        if not grad_w_close:
-            logging.warning("FAILED: Gradient mismatch detected in grad_w")
-        else:
-            logging.info(
-                "✓ SUCCESS! grad_W matches the PyTorch reference (allclose check passed)"
-            )
-
-        logging.info(
-            f"Gradients allclose check - grad_x: {grad_x_close}, grad_w: {grad_w_close}"
-        )
-
+        # Log overall result
         if grad_x_close and grad_w_close:
-            logging.info(
-                "✓ SUCCESS: Gradients match the PyTorch reference (allclose check passed)"
-            )
+            logging.info("✓ SUCCESS: Gradients match the PyTorch reference")
         else:
-            logging.error("✗ FAILURE: Gradient mismatch detected in allclose check")
-
-        # Additional diagnostics for all cases
-        # Import numpy for unravel_index
-        import numpy as np
-
-        # Analyze grad_x
-        diff_x = (grad_x - x_autograd.grad).abs()
-        max_idx_x = diff_x.argmax().item()
-        idx_x = np.unravel_index(max_idx_x, grad_x.shape)
-        logging.info(
-            f"Largest grad_x difference at {idx_x}: "
-            f"{grad_x[idx_x].item()} vs {x_autograd.grad[idx_x].item()}"
-        )
-
-        # Count zeros in grad_x
-        zeros_grad_x = (grad_x == 0).sum().item()
-        zeros_autograd_x = (x_autograd.grad == 0).sum().item()
-        logging.info(
-            f"Zeros in grad_x: {zeros_grad_x}/{grad_x.numel()} ({zeros_grad_x/grad_x.numel()*100:.2f}%)"
-        )
-        logging.info(
-            f"Zeros in x_autograd.grad: {zeros_autograd_x}/{x_autograd.grad.numel()} ({zeros_autograd_x/x_autograd.grad.numel()*100:.2f}%)"
-        )
-
-        # Analyze grad_w
-        diff_w = (grad_w - w_autograd.grad).abs()
-        max_idx_w = diff_w.argmax().item()
-        idx_w = np.unravel_index(max_idx_w, grad_w.shape)
-        logging.info(
-            f"Largest grad_w difference at {idx_w}: "
-            f"{grad_w[idx_w].item()} vs {w_autograd.grad[idx_w].item()}"
-        )
-
-        # Count zeros in grad_w
-        zeros_grad_w = (grad_w == 0).sum().item()
-        zeros_autograd_w = (w_autograd.grad == 0).sum().item()
-        logging.info(
-            f"Zeros in grad_w: {zeros_grad_w}/{grad_w.numel()} ({zeros_grad_w/grad_w.numel()*100:.2f}%)"
-        )
-        logging.info(
-            f"Zeros in w_autograd.grad: {zeros_autograd_w}/{w_autograd.grad.numel()} ({zeros_autograd_w/w_autograd.grad.numel()*100:.2f}%)"
-        )
-
-        # Check for NaN values (could indicate numerical issues)
-        nan_x = torch.isnan(grad_x).sum().item()
-        nan_w = torch.isnan(grad_w).sum().item()
-        if nan_x > 0 or nan_w > 0:
-            logging.error(f"NaN values detected! grad_x: {nan_x}, grad_w: {nan_w}")
+            logging.error("✗ FAILURE: Gradient mismatch detected")
 
         return grad_x_close and grad_w_close
 
@@ -216,7 +272,7 @@ def test_backward_pass():
 
 def test_multiple_deepseek_configs():
     """
-    Test multiple DeepSeek model configurations.
+    Test multiple DeepSeek model configurations with both forward and backward pass verification.
     """
     # DeepSeek configurations: (G, M, K, N)
     configs = [
@@ -241,10 +297,13 @@ def test_multiple_deepseek_configs():
             M_sizes = [base_size + (1 if i < remainder else 0) for i in range(G)]
             m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
 
-            # Create input and weight tensors
-            test_dtype = torch.float16  # Use float16 for verification
-            x = torch.randn(M, K, dtype=test_dtype, device=device, requires_grad=True)
-            w = torch.randn(N, K, dtype=test_dtype, device=device, requires_grad=True)
+            # Create input and weight tensors using float16 for higher precision
+            x = torch.randn(
+                M, K, dtype=torch.float16, device=device, requires_grad=True
+            )
+            w = torch.randn(
+                N, K, dtype=torch.float16, device=device, requires_grad=True
+            )
 
             logging.info(f"Input x shape: {x.shape}, Weight w shape: {w.shape}")
 
@@ -252,85 +311,83 @@ def test_multiple_deepseek_configs():
             result = grouped_gemm(x, w, m_sizes)
             logging.info(f"Forward result shape: {result.shape}")
 
+            # ===== FORWARD PASS VERIFICATION =====
+            # Compute reference forward result
+            reference_result = compute_reference_forward(x, w, m_sizes)
+
+            # Compare forward results
+            forward_close = analyze_tensor_differences(
+                result, reference_result, "Forward output"
+            )
+
+            # ===== BACKWARD PASS VERIFICATION =====
             # Create gradient for backpropagation
             grad_output = torch.randn_like(result)
 
             # Run backward pass
             grad_x, grad_w = grouped_gemm_backward(grad_output, x, w, m_sizes)
 
-            # Setup PyTorch reference
-            x_ref = x.detach().clone().requires_grad_(True)
-            w_ref = w.detach().clone().requires_grad_(True)
-
-            # Compute reference result
-            ref_result = torch.zeros_like(result)
-            m_start = 0
-            for g in range(G):
-                m_size = M_sizes[g]
-                if m_size > 0:
-                    m_end = m_start + m_size
-                    x_g = x_ref[m_start:m_end]
-                    y_g = torch.matmul(x_g, w_ref.T)
-                    ref_result[m_start:m_end] = y_g
-                    m_start = m_end
-
-            # Backpropagate
-            ref_result.backward(grad_output)
-
-            # Compare
-            rtol = 1e-1
-            atol = 0.5
-            grad_x_close = torch.allclose(grad_x, x_ref.grad, rtol=rtol, atol=atol)
-            grad_w_close = torch.allclose(grad_w, w_ref.grad, rtol=rtol, atol=atol)
-
-            logging.info("Comparing gradients with PyTorch reference")
-            grad_x_error = (grad_x - x_ref.grad).abs().max().item()
-            grad_w_error = (grad_w - w_ref.grad).abs().max().item()
-
-            logging.info(
-                f"Maximum gradient error - grad_x: {grad_x_error}, grad_w: {grad_w_error}"
+            # Compute reference gradients
+            x_ref_grad, w_ref_grad = compute_reference_backward(
+                x, w, m_sizes, grad_output
             )
 
-            # Log results
-            if grad_x_close and grad_w_close:
-                logging.info(f"✓ SUCCESS: Config {config_idx+1} passed!")
-            else:
-                logging.error(f"✗ FAILURE: Config {config_idx+1} failed!")
-                if not grad_x_close:
-                    logging.error("  grad_x mismatch")
-                if not grad_w_close:
-                    logging.error("  grad_w mismatch")
+            # Compare backward results
+            grad_x_close = analyze_tensor_differences(grad_x, x_ref_grad, "grad_x")
+            grad_w_close = analyze_tensor_differences(grad_w, w_ref_grad, "grad_w")
 
-            results.append((config_idx + 1, grad_x_close and grad_w_close))
+            # Overall config result
+            backward_close = grad_x_close and grad_w_close
+            config_success = forward_close and backward_close
+            results.append(
+                (config_idx + 1, config_success, forward_close, backward_close)
+            )
+
+            # Log overall config result
+            if config_success:
+                logging.info(f"✓ SUCCESS: Config {config_idx+1} passed all tests!")
+            else:
+                logging.error(
+                    f"✗ FAILURE: Config {config_idx+1} failed one or more tests"
+                )
 
         except Exception as e:
             logging.error(f"Config {config_idx+1} test failed with error: {e}")
             import traceback
 
             logging.error(traceback.format_exc())
-            results.append((config_idx + 1, False))
+            results.append((config_idx + 1, False, False, False))
 
     # Summary
     logging.info("\n===== Test Results Summary =====")
-    for config_idx, success in results:
-        status = "✓ PASSED" if success else "✗ FAILED"
-        logging.info(f"Config {config_idx}: {status}")
+    for config_idx, overall_success, forward_success, backward_success in results:
+        overall_status = "✓ PASSED" if overall_success else "✗ FAILED"
+        forward_status = "✓ PASSED" if forward_success else "✗ FAILED"
+        backward_status = "✓ PASSED" if backward_success else "✗ FAILED"
 
-    return all(success for _, success in results)
+        logging.info(f"Config {config_idx}: {overall_status}")
+        logging.info(f"  - Forward pass: {forward_status}")
+        logging.info(f"  - Backward pass: {backward_status}")
+
+    return all(overall_success for _, overall_success, _, _ in results)
 
 
 if __name__ == "__main__":
-    logging.info("Running fast debug for M*G grouped GEMM")
+    logging.info(
+        "Running verification for both forward and backward pass of M*G grouped GEMM"
+    )
 
-    # Import numpy for unravel_index
-    import numpy as np
+    # Run basic forward pass test
+    logging.info("\n===== Running basic forward pass test =====")
+    success_forward = test_forward_pass()
+    logging.info(f"Basic forward test {'succeeded' if success_forward else 'failed'}")
 
-    # Run single test
+    # Run basic backward pass test
     logging.info("\n===== Running basic backward pass test =====")
-    success_basic = test_backward_pass()
-    logging.info(f"Basic test {'succeeded' if success_basic else 'failed'}")
+    success_backward = test_backward_pass()
+    logging.info(f"Basic backward test {'succeeded' if success_backward else 'failed'}")
 
-    # Run multiple DeepSeek configs
+    # Run multiple DeepSeek configs with forward and backward verification
     logging.info("\n===== Running tests for all DeepSeek configs =====")
     success_configs = test_multiple_deepseek_configs()
     logging.info(
@@ -338,7 +395,7 @@ if __name__ == "__main__":
     )
 
     # Overall result
-    overall_success = success_basic and success_configs
+    overall_success = success_forward and success_backward and success_configs
     logging.info(
         f"\nOverall test result: {'SUCCESS' if overall_success else 'FAILURE'}"
     )
