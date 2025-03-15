@@ -5,6 +5,7 @@ This is an M*G group gemm, and returns an M*G,K output.  This may be more suitab
 
 Currently passes basic verification vs PyTorch reference on *simple* sizes and shapes:
 Forward: 
+~~~
 Max absolute difference: 0.000000e+00
 Max relative difference: 0.000000e+00
 ✓ Outputs match within tolerance
@@ -41,9 +42,9 @@ Backwards:
 2025-03-15 11:50:45,181 - INFO - Zeros in grad_w: 0/131072 (0.00%)
 2025-03-15 11:50:45,181 - INFO - Zeros in w_autograd.grad: 8/131072 (0.01%)
 2025-03-15 11:50:45,208 - INFO - Basic test succeeded
-
+~~~
 Todo:
-1 - Add BF16 backward pass support
-2 - Add autotuning
-3 - FP8 support backward.
-4 - Benchmarking.
+1 - Add BF16 backward pass support  
+2 - Add autotuning  
+3 - FP8 support backward.  
+4 - Benchmarking.  
