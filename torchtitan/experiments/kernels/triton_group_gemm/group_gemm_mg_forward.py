@@ -169,7 +169,7 @@ def _kernel_grouped_gemm(
                     )
 
 
-TT_FP8_DTYPE = tl.float8e4b8 if torch.version.hip else tl.float8e4nv
+TT_FP8_DTYPE = tl.float8e4nv
 
 
 def _grouped_gemm(
@@ -262,50 +262,26 @@ def _grouped_gemm(
     except Exception as e:
         print(f"Error in TMA descriptor setup: {e}")
 
-    if x_scale is not None and w_scale is not None:
-        assert x_scale.is_contiguous()
-        assert w_scale.is_contiguous()
-        # Call kernel directly without autotuning
-        _kernel_grouped_gemm_fp8_rowwise[grid_size](
-            desc_x,
-            x_scale,
-            desc_w,
-            w_scale,
-            y,
-            workspace,
-            m_sizes,
-            G,
-            M_BUCKET,
-            N,
-            K,
-            NUM_SMS,
-            USE_TMA_LOAD,
-            USE_TMA_STORE,
-            BLOCK_SIZE_M=64,
-            BLOCK_SIZE_N=64,
-            BLOCK_SIZE_K=32,
-        )
-    else:
-        assert x_scale is None
-        assert w_scale is None
-        # TODO -  autotuning
-        _kernel_grouped_gemm[grid_size](
-            desc_x,
-            desc_w,
-            y,
-            workspace,
-            m_sizes,
-            G,
-            M_BUCKET,
-            N,
-            K,
-            NUM_SMS,
-            USE_TMA_LOAD,
-            USE_TMA_STORE,
-            BLOCK_SIZE_M=64,
-            BLOCK_SIZE_N=64,
-            BLOCK_SIZE_K=32,
-        )
+    assert x_scale is None
+    assert w_scale is None
+    # TODO -  autotuning
+    _kernel_grouped_gemm[grid_size](
+        desc_x,
+        desc_w,
+        y,
+        workspace,
+        m_sizes,
+        G,
+        M_BUCKET,
+        N,
+        K,
+        NUM_SMS,
+        USE_TMA_LOAD,
+        USE_TMA_STORE,
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_K=32,
+    )
 
     # Verify the output shape
     expected_output_shape = (M_total, N)
