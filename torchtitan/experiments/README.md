@@ -1,4 +1,4 @@
-To help users contribute and improve `torchtitan` in a more rapid fashion, we are adding a new, experimental section. The general contribution guidelines for this are below and we look forward to your innovations!
+To accelerate contributions to and innovations around `torchtitan`, we are adding this new, experimental folder. Below are the general contributing guidelines, and we look forward to your contributions!
 
 ## Contributing Guidelines
 
