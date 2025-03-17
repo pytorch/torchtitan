@@ -6,19 +6,18 @@
 
 import enum
 import functools
-import multiprocessing as mp
 import os
 import queue
 import re
 import shutil
 import threading
 import time
-from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint.state_dict import (
@@ -66,6 +65,11 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
+        # `set_model_state_dict()` does change the keys of the input state_dict,
+        # we will need to reinitialize the cache_state_dict.
+        self.cache_state_dict = {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
 
 class Terminate:
@@ -294,7 +298,7 @@ class CheckpointManager:
             self.async_future = None
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
-            ctx = get_context("spawn")
+            ctx = mp.get_context("spawn")
             self.mp_queue_send = ctx.Queue()
             self.mp_queue_recv = ctx.Queue()
             self.mp = ctx.Process(
