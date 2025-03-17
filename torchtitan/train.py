@@ -12,10 +12,10 @@ from typing import Any, Iterable, Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -395,8 +395,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             loss = loss.detach()
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, world_mesh["dp_cp"]),
-                dist_utils.dist_max(loss, world_mesh["dp_cp"]),
+                dist_utils.dist_mean(loss, world_mesh["dp_shard"]),
+                dist_utils.dist_max(loss, world_mesh["dp_shard"]),
             )
         else:
             global_avg_loss = global_max_loss = loss.item()
