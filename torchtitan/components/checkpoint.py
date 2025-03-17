@@ -280,7 +280,7 @@ class CheckpointManager:
                 )
             self.purge_queue = queue.Queue()
             self.purge_thread = threading.Thread(
-                target=purge_thread, args=(self.purge_queue,)
+                target=purge_thread, args=(self.purge_queue,), daemon=True
             )
             self.purge_thread.start()
         else:
