@@ -65,6 +65,11 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
+        # `set_model_state_dict()` does change the keys of the input state_dict,
+        # we will need to reinitialize the cache_state_dict.
+        self.cache_state_dict = {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
 
 class Terminate:
