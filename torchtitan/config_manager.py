@@ -479,7 +479,7 @@ class JobConfig:
             """,
         )
         # I'm not particularly fond of this. Users can choose to write their own wrapper
-        # module and import TorchTitan training loop and execute it, which look cleaner.
+        # module and import torchtitan training loop and execute it, which look cleaner.
         # One reason to provide this option is to allow users to use the existing run script.
         # While the script is pretty trivial now, we may add more logic when integrating
         # with TorchFT.
@@ -489,10 +489,9 @@ class JobConfig:
             type=str,
             default="",
             help="""
-                The --custom_model_path option allows to specify a custom path to a model module
-                that is not natively implemented within TorchTitan.
-                Acceptable values are the file system path to the module (e.g., my_models/model_x)
-                dotted import module  (e.g., some_package.model_x).
+                This option allows importing an external module from a custom path.
+                Acceptable value can be a file system path to the module (e.g., my_models/model_x),
+                or a dotted import module (e.g., some_package.model_x).
             """,
         )
         self.parser.add_argument(
