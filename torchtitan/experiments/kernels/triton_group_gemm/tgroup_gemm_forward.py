@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-
+# This code is from FBGemm with modifications: https://github.com/pytorch/FBGEMM/tree/main/fbgemm_gpu/experimental/gemm/triton_gemm
 import functools
 from typing import Optional
 
