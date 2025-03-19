@@ -746,20 +746,17 @@ class JobConfig:
             help="The minimum number of FT replica for each step.",
         )
 
-        # I'm not particularly fond of this. Users can choose to write their own wrapper
-        # module and import torchtitan training loop and execute it, which look cleaner.
-        # One reason to provide this option is to allow users to use the existing run script.
-        # While the script is pretty trivial now, we may add more logic when integrating
-        # with TorchFT.
-        # This option is subject to change and may be deleted in the future.
         self.parser.add_argument(
             "--experimental.custom_model_path",
             type=str,
             default="",
             help="""
-                This option allows importing an external module from a custom path.
-                Acceptable value can be a file system path to the module (e.g., my_models/model_x),
-                or a dotted import module (e.g., some_package.model_x).
+            This option enables the importation of external modules from custom paths.
+            Currently, it only supports dotted import modules (e.g., some_package.model_x).
+            It is the user's responsibility to ensure that the specified path can be
+            successfully imported. One method to achieve this, you can place your module
+            inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
+            make it available for import.
             """,
         )
 

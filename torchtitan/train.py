@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 import os
 import time
 from datetime import timedelta
@@ -60,7 +61,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(f"Starting job: {job_config.job.description}")
 
         if job_config.experimental.custom_model_path:
-            utils.import_module_from_path(job_config.experimental.custom_model_path)
+            importlib.import_module(job_config.experimental.custom_model_path)
 
         if job_config.job.print_args:
             logger.info(f"Running with args: {job_config.to_dict()}")
