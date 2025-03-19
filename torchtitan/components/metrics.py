@@ -238,7 +238,7 @@ def _build_metric_logger(
 
     # Determine if this rank should log
     should_log = has_logging_enabled
-    if metrics_config.rank_0_only and should_log:
+    if (not metrics_config.save_for_all_ranks) and should_log:
         metrics_rank = _get_metrics_rank(parallel_dims, job_config)
         should_log = torch.distributed.get_rank() == metrics_rank
 
@@ -256,7 +256,7 @@ def _build_metric_logger(
         dump_dir, metrics_config.save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
     )
 
-    if not metrics_config.rank_0_only:
+    if metrics_config.save_for_all_ranks:
         base_log_dir = os.path.join(
             base_log_dir, f"rank_{torch.distributed.get_rank()}"
         )
