@@ -70,7 +70,7 @@ class JobConfig:
     in the toml file
     """
 
-    def __init__(self, custom_parser: Optional[argparse.ArgumentParser] = None):
+    def __init__(self):
         self.args_dict = None
         # main parser
         self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
@@ -159,15 +159,15 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
-        # TODO: store_true & default=True make impossible for cmd to set it to False
         self.parser.add_argument(
-            "--metrics.rank_0_only",
+            "--metrics.save_for_all_ranks",
             action="store_true",
             default=True,
             help="""
-                Whether to save TensorBoard metrics only for rank 0 or for all ranks.
-                When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
-                which is the only stage that computes loss metrics.
+                Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
+                When this option is False and pipeline_parallel_degree is > 1, the metrics
+                component uses the 0th rank of the last stage pipeline group, which is the
+                only stage that computes loss metrics.
             """,
         )
         self.parser.add_argument(
