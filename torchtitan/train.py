@@ -60,8 +60,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         logger.info(f"Starting job: {job_config.job.description}")
 
-        if job_config.experimental.custom_model_path:
-            importlib.import_module(job_config.experimental.custom_model_path)
+        if job_config.experimental.custom_import:
+            importlib.import_module(job_config.experimental.custom_import)
 
         if job_config.job.print_args:
             logger.info(f"Running with args: {job_config.to_dict()}")

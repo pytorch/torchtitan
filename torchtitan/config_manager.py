@@ -747,11 +747,11 @@ class JobConfig:
         )
 
         self.parser.add_argument(
-            "--experimental.custom_model_path",
+            "--experimental.custom_import",
             type=str,
             default="",
             help="""
-            This option enables the importation of external modules from custom paths.
+            This option enables the importation of external modules.
             Currently, it only supports dotted import modules (e.g., some_package.model_x).
             It is the user's responsibility to ensure that the specified path can be
             successfully imported. One method to achieve this, you can place your module
