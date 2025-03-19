@@ -52,6 +52,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     device: torch.device
 
+    # states
+    step: int
+
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
     def __init__(self, job_config: JobConfig):
