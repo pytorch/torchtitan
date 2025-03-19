@@ -5,10 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
+import inspect
 import os
 import sys
 from collections import defaultdict
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -43,6 +45,9 @@ def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
         sec[name] = string_list(sec[name])
 
 
+CUSTOM_PARSER_MODULE = "--experimental.custom_args_module"
+
+
 class JobConfig:
     """
     A helper class to manage the train configuration.
@@ -65,7 +70,7 @@ class JobConfig:
     in the toml file
     """
 
-    def __init__(self):
+    def __init__(self, custom_parser: Optional[argparse.ArgumentParser] = None):
         self.args_dict = None
         # main parser
         self.parser = argparse.ArgumentParser(description="torchtitan arg parser.")
@@ -154,15 +159,15 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
+        # TODO: store_true & default=True make impossible for cmd to set it to False
         self.parser.add_argument(
-            "--metrics.save_for_all_ranks",
+            "--metrics.rank_0_only",
             action="store_true",
-            default=False,
+            default=True,
             help="""
-                Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
-                When this option is False and pipeline_parallel_degree is > 1, the metrics
-                component uses the 0th rank of the last stage pipeline group, which is the
-                only stage that computes loss metrics.
+                Whether to save TensorBoard metrics only for rank 0 or for all ranks.
+                When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
+                which is the only stage that computes loss metrics.
             """,
         )
         self.parser.add_argument(
@@ -760,10 +765,58 @@ class JobConfig:
             """,
         )
 
+        self.parser.add_argument(
+            CUSTOM_PARSER_MODULE,
+            type=str,
+            default="",
+            help="""
+                This option allows users to extend TorchTitan's existing JobConfig by importing
+                a customized module. Similar to ``--experimental.custom_model_path``, the user
+                needs to ensure that the path can be imported. The module should contain exactly
+                one public function and the function has the signature
+                ``def func(parser: argparse.ArgumentParser) -> None:``. The user can use the
+                given parser to add new argument by calling``parser.add_argument``, as wish.
+            """,
+        )
+
+        self._is_parsed = False
+
+    def maybe_add_custom_args(self) -> None:
+        """Add custom arguments to the parser if --experimental.custom_args_module is set.
+
+        Note: This function should be called before the parser is used to parse arguments.
+        """
+        argparser = argparse.ArgumentParser()
+        argparser.add_argument(
+            CUSTOM_PARSER_MODULE,
+            type=str,
+            default="",
+        )
+        args, _ = argparser.parse_known_args()
+        custom_args_module = vars(args)["experimental.custom_args_module"]
+        if custom_args_module == "":
+            return
+
+        if self._is_parsed:
+            raise RuntimeError(
+                "JobConfig has already been parsed. We could not add new arguments."
+            )
+
+        module = importlib.import_module(custom_args_module)
+        public_functions = [
+            name
+            for name, func in inspect.getmembers(module)
+            if inspect.isfunction(func) and not name.startswith("_")
+        ]
+        func = getattr(module, public_functions[0])
+        func(self.parser)
+        return
+
     def to_dict(self):
         return self.args_dict
 
     def parse_args(self, args_list: list = sys.argv[1:]):
+        self._is_parsed = True
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict

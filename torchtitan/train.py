@@ -460,6 +460,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 if __name__ == "__main__":
     init_logger()
     config = JobConfig()
+    config.maybe_add_custom_args()
     config.parse_args()
     trainer: Optional[Trainer] = None
 
