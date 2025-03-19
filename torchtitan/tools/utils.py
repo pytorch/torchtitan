@@ -5,9 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
