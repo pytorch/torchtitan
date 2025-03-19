@@ -12,8 +12,8 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 
-from torch.distributed import DeviceMesh
-from torch.distributed._composable.fsdp import (
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     fully_shard,
     MixedPrecisionPolicy,
