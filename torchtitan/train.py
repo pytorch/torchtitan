@@ -268,8 +268,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
 
-        # TODO: Move the checkpoint logic to a separate method
-        # load initial checkpoint
         self.checkpointer = CheckpointManager(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -298,9 +296,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallelism_config.enable_compiled_autograd,
         )
 
-        logger.info("Trainer initialized.")
-
         logger.info(
+            "Trainer initialized. "
             f"Training starts at step {self.step + 1}, "
             f"with local batch size {job_config.training.batch_size}, "
             f"global batch size {job_config.training.batch_size * dp_degree}, "
@@ -406,7 +403,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     @record
     def train(self):
-        # train loop
         job_config = self.job_config
         with maybe_enable_profiling(
             job_config, global_step=self.step
