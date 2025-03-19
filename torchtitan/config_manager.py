@@ -10,7 +10,7 @@ import inspect
 import os
 import sys
 from collections import defaultdict
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
 import torch
 
