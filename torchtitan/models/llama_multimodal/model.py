@@ -38,9 +38,7 @@ class ModelArgs:
     is_causal: bool = True
 
     # decoder part
-    decoder_embed_dim: int = (
-        4096  # This is for linear projection to convert the output of encoder to decoder
-    )
+    decoder_embed_dim: int = 4096  # This is for linear projection to convert the output of encoder to decoder
     fusion_interval: int = 1  # This is the interval of layers that are used for fusion
     num_special_tokens: int = 2  # This is the number of special tokens in the tokenizer
     decoder_num_layers: int = 16
