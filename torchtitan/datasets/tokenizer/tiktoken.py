@@ -26,6 +26,7 @@ import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
 from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
 
@@ -190,3 +191,7 @@ class TikTokenizer(Tokenizer):
                     slice_start = i
                     current_slice_len = 1
         yield s[slice_start:]
+
+
+def build_tiktoken_tokenizer(job_config: JobConfig) -> TikTokenizer:
+    return TikTokenizer(job_config.model.tokenizer_path)

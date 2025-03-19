@@ -7,7 +7,7 @@
 import torch
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 
 
 class TestDatasetCheckpointing:

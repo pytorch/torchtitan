@@ -64,7 +64,7 @@ class TestJobConfig:
                 "./torchtitan/models/llama/train_configs/debug_model.toml",
             ]
         )
-        assert config.experimental.pipeline_parallel_split_points == []
+        assert config.parallelism.pipeline_parallel_split_points == []
 
         # toml has no split points, but cmdline splits are specified
         config = JobConfig()
@@ -72,20 +72,20 @@ class TestJobConfig:
             [
                 "--job.config_file",
                 "./torchtitan/models/llama/train_configs/debug_model.toml",
-                "--experimental.pipeline_parallel_split_points",
+                "--parallelism.pipeline_parallel_split_points",
                 f"{cmdline_split_str}",
             ]
         )
         assert (
-            config.experimental.pipeline_parallel_split_points == cmdline_splits
-        ), config.experimental.pipeline_parallel_split_points
+            config.parallelism.pipeline_parallel_split_points == cmdline_splits
+        ), config.parallelism.pipeline_parallel_split_points
 
         # toml has split points, cmdline does not
         with tempfile.NamedTemporaryFile() as fp:
             with open(fp.name, "wb") as f:
                 tomli_w.dump(
                     {
-                        "experimental": {
+                        "parallelism": {
                             "pipeline_parallel_split_points": toml_split_str,
                         }
                     },
@@ -94,15 +94,15 @@ class TestJobConfig:
             config = JobConfig()
             config.parse_args(["--job.config_file", fp.name])
             assert (
-                config.experimental.pipeline_parallel_split_points == toml_splits
-            ), config.experimental.pipeline_parallel_split_points
+                config.parallelism.pipeline_parallel_split_points == toml_splits
+            ), config.parallelism.pipeline_parallel_split_points
 
         # toml has split points, cmdline overrides them
         with tempfile.NamedTemporaryFile() as fp:
             with open(fp.name, "wb") as f:
                 tomli_w.dump(
                     {
-                        "experimental": {
+                        "parallelism": {
                             "pipeline_parallel_split_points": toml_split_str,
                         }
                     },
@@ -113,13 +113,13 @@ class TestJobConfig:
                 [
                     "--job.config_file",
                     fp.name,
-                    "--experimental.pipeline_parallel_split_points",
+                    "--parallelism.pipeline_parallel_split_points",
                     f"{cmdline_split_str}",
                 ]
             )
             assert (
-                config.experimental.pipeline_parallel_split_points == cmdline_splits
-            ), config.experimental.pipeline_parallel_split_points
+                config.parallelism.pipeline_parallel_split_points == cmdline_splits
+            ), config.parallelism.pipeline_parallel_split_points
 
     def test_parse_exclude_from_loading(self):
 

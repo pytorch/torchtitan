@@ -10,8 +10,7 @@ from datetime import timedelta
 from typing import Any, Iterable, Optional
 
 import torch
-import torch.distributed as dist
-import torch.nn as nn
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
@@ -38,13 +37,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     parallel_dims: ParallelDims
     train_spec: train_spec_module.TrainSpec
-    world_mesh: dist.DeviceMesh
+    world_mesh: torch.distributed.DeviceMesh
 
     dataloader: train_spec_module.BaseDataLoader
     metrics_processor: train_spec_module.MetricsProcessor
     checkpointer: CheckpointManager
 
-    model_parts: list[nn.Module]
+    model_parts: list[torch.nn.Module]
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
@@ -77,25 +76,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # init distributed
         world_size = int(os.environ["WORLD_SIZE"])
+        parallelism_config = job_config.parallelism
         if not ft_manager.enabled:
             self.parallel_dims = parallel_dims = ParallelDims(
-                dp_shard=job_config.training.data_parallel_shard_degree,
-                dp_replicate=job_config.training.data_parallel_replicate_degree,
-                cp=job_config.experimental.context_parallel_degree,
-                tp=job_config.training.tensor_parallel_degree,
-                pp=job_config.experimental.pipeline_parallel_degree,
+                dp_shard=parallelism_config.data_parallel_shard_degree,
+                dp_replicate=parallelism_config.data_parallel_replicate_degree,
+                cp=parallelism_config.context_parallel_degree,
+                tp=parallelism_config.tensor_parallel_degree,
+                pp=parallelism_config.pipeline_parallel_degree,
                 world_size=world_size,
-                enable_loss_parallel=not job_config.training.disable_loss_parallel,
+                enable_loss_parallel=not parallelism_config.disable_loss_parallel,
             )
         else:
             self.parallel_dims = parallel_dims = ft.FTParallelDims(
-                dp_shard=job_config.training.data_parallel_shard_degree,
-                dp_replicate=job_config.training.data_parallel_replicate_degree,
-                cp=job_config.experimental.context_parallel_degree,
-                tp=job_config.training.tensor_parallel_degree,
-                pp=job_config.experimental.pipeline_parallel_degree,
+                dp_shard=parallelism_config.data_parallel_shard_degree,
+                dp_replicate=parallelism_config.data_parallel_replicate_degree,
+                cp=parallelism_config.context_parallel_degree,
+                tp=parallelism_config.tensor_parallel_degree,
+                pp=parallelism_config.pipeline_parallel_degree,
                 world_size=world_size,
-                enable_loss_parallel=not job_config.training.disable_loss_parallel,
+                enable_loss_parallel=not parallelism_config.disable_loss_parallel,
                 ft_manager=ft_manager,
             )
         dist_utils.init_distributed(job_config)
@@ -108,9 +108,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             dp_degree, dp_rank = 1, 0
 
-        if parallel_dims.pp_enabled:
-            pp_mesh = world_mesh["pp"]
-
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
@@ -122,7 +119,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # build dataloader
-        tokenizer = self.train_spec.tokenizer_cls(job_config.model.tokenizer_path)
+        tokenizer = self.train_spec.build_tokenizer_fn(job_config)
 
         # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
         # dataloader must be changed.
@@ -192,7 +189,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
-            # apply PT-D Pipeline Parallel
+            if not self.train_spec.pipelining_fn:
+                raise RuntimeError(
+                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
+                    f"does not support pipelining"
+                )
+
+            # apply both PT-D Pipeline Parallel and SPMD-style PT-D techniques
             (
                 self.pp_schedule,
                 self.model_parts,
@@ -200,23 +203,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.pp_has_last_stage,
             ) = self.train_spec.pipelining_fn(
                 model,
-                pp_mesh,
+                world_mesh,
                 parallel_dims,
                 job_config,
                 self.device,
                 model_config,
+                self.train_spec.parallelize_fn,
                 self.train_spec.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
             del model
 
-            # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-            # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-            # optimizer, and checkpointing
             for m in self.model_parts:
-                # apply SPMD-style PT-D techniques
-                self.train_spec.parallelize_fn(m, world_mesh, parallel_dims, job_config)
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
@@ -224,10 +223,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
-
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            self.train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
+            model = self.train_spec.parallelize_fn(
+                model, world_mesh, parallel_dims, job_config
+            )
+
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
@@ -294,7 +295,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.train_context = dist_utils.get_train_context(
             parallel_dims.loss_parallel_enabled,
-            job_config.experimental.enable_compiled_autograd,
+            parallelism_config.enable_compiled_autograd,
         )
 
         logger.info("Trainer initialized.")
@@ -339,7 +340,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.experimental.context_parallel_rotate_method,
+                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
             if parallel_dims.cp_enabled
             else None

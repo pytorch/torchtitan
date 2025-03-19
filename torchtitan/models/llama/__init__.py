@@ -7,9 +7,10 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.components.optimizer import build_lr_schedulers, build_optimizers
+from torchtitan.components.lr_scheduler import build_lr_schedulers
+from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer import TikTokenizer
+from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .model import Transformer, TransformerModelArgs
@@ -69,7 +70,7 @@ register_train_spec(
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
-        tokenizer_cls=TikTokenizer,
+        build_tokenizer_fn=build_tiktoken_tokenizer,
         loss_fn=cross_entropy_loss,
     )
 )

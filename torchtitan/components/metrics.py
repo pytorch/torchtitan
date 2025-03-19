@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
@@ -168,7 +169,7 @@ def ensure_pp_loss_visible(
     """
 
     # V Block Schedules return loss on rank 0
-    if job_config.experimental.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -183,8 +184,9 @@ def ensure_pp_loss_visible(
 
     if str(loss_visible_rank) not in env_logged_ranks:
         logger.warning(
-            f"{color.red}Pipeline parallel loss is not visible. "
-            f"Add {color.yellow}rank {loss_visible_rank}{color.red} to LOG_RANK environment variable in run_train.sh.{color.reset}"
+            f"{color.red}Pipeline Parallel loss is not visible. "
+            f"Please add {color.yellow}rank {loss_visible_rank}{color.red} "
+            f"to LOG_RANK environment variable in run_train.sh.{color.reset}"
         )
 
 
@@ -206,7 +208,7 @@ def _get_metrics_rank(
         return 0
 
     # V Block Schedules return loss on rank 0
-    if job_config.experimental.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
         return 0
 
     # Calculate first rank of the last pipeline stage

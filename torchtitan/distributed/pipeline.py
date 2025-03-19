@@ -25,7 +25,7 @@ __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_r
 # TODO: It's unclear if this API is general enough to be used by other models.
 # If not, we should move it to a Transformer-specific directory.
 def generate_split_points(
-    job_config: JobConfig, pp_dim: int, num_layers: int
+    pipeline_parallel_schedule: str, pp_dim: int, num_layers: int
 ) -> list[str]:
     """
     Generate a default split point based on the number of layers and
@@ -40,9 +40,7 @@ def generate_split_points(
         list[str]: A list of split point FQNs.
     """
 
-    schedule_class = get_schedule_class(
-        job_config.experimental.pipeline_parallel_schedule
-    )
+    schedule_class = get_schedule_class(pipeline_parallel_schedule)
     if issubclass(schedule_class, PipelineScheduleSingle):
         num_stages_per_rank = 1
     elif issubclass(schedule_class, PipelineScheduleMulti):
@@ -50,9 +48,7 @@ def generate_split_points(
         # no pipeline split is specified
         num_stages_per_rank = 2
     else:
-        raise ValueError(
-            f"Unsupported pipeline schedule: {job_config.experimental.pipeline_parallel_schedule}"
-        )
+        raise ValueError(f"Unsupported pipeline schedule: {pipeline_parallel_schedule}")
     total_stages = pp_dim * num_stages_per_rank
     if total_stages > num_layers:
         raise ValueError("Total stages cannot be greater than the number of layers")
@@ -93,7 +89,7 @@ def build_pipeline_schedule(
     Returns:
         _PipelineSchedule: The pipeline schedule for the given stages.
     """
-    pp_schedule_csv = job_config.experimental.pipeline_parallel_schedule_csv
+    pp_schedule_csv = job_config.parallelism.pipeline_parallel_schedule_csv
 
     # Validate that pp_schedule_csv is a valid path
     if pp_schedule_csv:
@@ -104,13 +100,13 @@ def build_pipeline_schedule(
         schedule_class = _PipelineScheduleRuntime
     else:
         schedule_class = get_schedule_class(
-            job_config.experimental.pipeline_parallel_schedule
+            job_config.parallelism.pipeline_parallel_schedule
         )
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    n_microbatches = job_config.experimental.pipeline_parallel_microbatches
+    n_microbatches = job_config.parallelism.pipeline_parallel_microbatches
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
-    num_total_stages = job_config.experimental.pipeline_parallel_degree * len(stages)
+    num_total_stages = job_config.parallelism.pipeline_parallel_degree * len(stages)
     if n_microbatches is None:
         n_microbatches = num_total_stages
     elif n_microbatches < num_total_stages:
@@ -132,7 +128,7 @@ def build_pipeline_schedule(
         loss_fn=loss_fn,
     )
     logger.info(
-        f"Using pipeline schedule {job_config.experimental.pipeline_parallel_schedule} "
+        f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
