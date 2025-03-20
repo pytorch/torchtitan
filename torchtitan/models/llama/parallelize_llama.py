@@ -11,17 +11,13 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
-
-from torch.distributed import DeviceMesh
-from torch.distributed._composable.fsdp import (
-    CPUOffloadPolicy,
-    fully_shard,
-    MixedPrecisionPolicy,
-)
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -52,7 +48,7 @@ def parallelize_llama(
 
     if parallel_dims.tp_enabled:
         if (
-            job_config.experimental.enable_async_tensor_parallel
+            job_config.parallelism.enable_async_tensor_parallel
             and not job_config.training.compile
         ):
             raise RuntimeError("Async TP requires --training.compile")
@@ -73,7 +69,7 @@ def parallelize_llama(
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.experimental.enable_async_tensor_parallel,
+            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -98,7 +94,7 @@ def parallelize_llama(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.training.fsdp_reshard_after_forward,
+            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -118,8 +114,10 @@ def parallelize_llama(
             model,
             world_mesh,
             enable_compile=job_config.training.compile,
-            enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
+            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
+
+    return model
 
 
 def apply_tp(

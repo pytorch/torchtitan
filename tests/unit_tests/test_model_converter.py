@@ -14,14 +14,15 @@ from torchtitan.protocols.model_converter import (
 
 
 def build_parallel_dims(job_config, world_size):
+    parallelism_config = job_config.parallelism
     parallel_dims = ParallelDims(
-        dp_shard=job_config.training.data_parallel_shard_degree,
-        dp_replicate=job_config.training.data_parallel_replicate_degree,
-        cp=job_config.experimental.context_parallel_degree,
-        tp=job_config.training.tensor_parallel_degree,
-        pp=job_config.experimental.pipeline_parallel_degree,
+        dp_shard=parallelism_config.data_parallel_shard_degree,
+        dp_replicate=parallelism_config.data_parallel_replicate_degree,
+        cp=parallelism_config.context_parallel_degree,
+        tp=parallelism_config.tensor_parallel_degree,
+        pp=parallelism_config.pipeline_parallel_degree,
         world_size=world_size,
-        enable_loss_parallel=not job_config.training.disable_loss_parallel,
+        enable_loss_parallel=not parallelism_config.disable_loss_parallel,
     )
     return parallel_dims
 

@@ -5,10 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-import importlib
-import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -164,36 +161,3 @@ def check_if_feature_in_pytorch(
             f"{min_nightly_version}. Please upgrade a newer version to include the "
             f"change in ({pull_request_link}) for correct {feature_name}."
         )
-
-
-def import_module_from_path(path: str):
-    path = os.path.expanduser(path)
-
-    # 1. Check if path is an existing file or directory path.
-    if os.path.exists(path):
-        if not os.path.isdir(path):
-            raise ImportError(f"Path '{path}' is not a directory.")
-        init_file = os.path.join(path, "__init__.py")
-        if os.path.isfile(init_file):
-            return _import_module_from_init(path)
-
-        raise ImportError(
-            f"Directory '{path}' is not a Python package because it does not "
-            "contain an __init__.py file."
-        )
-
-    # 2. If not a valid path, assume it's a dotted module name.
-    return importlib.import_module(path)
-
-
-def _import_module_from_init(path: str):
-    init_file = os.path.join(path, "__init__.py")
-    module_name = os.path.basename(path)
-    spec = importlib.util.spec_from_file_location(module_name, init_file)
-    if spec is None:
-        raise ImportError(f"Could not create spec from '{init_file}'")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module

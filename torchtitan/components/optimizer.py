@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import functools
-from typing import Any, Callable, Dict, Generic, List, TypeVar
+from typing import Any, Dict, Generic, List, TypeVar
 
 import torch
 import torch.nn as nn
@@ -15,18 +14,14 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
     StateDictOptions,
 )
-from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 
 __all__ = [
     "OptimizersContainer",
-    "LRSchedulersContainer",
     "build_optimizers",
-    "build_lr_schedulers",
 ]
 
 
@@ -265,7 +260,7 @@ def build_optimizers(
         job_config (JobConfig): Job config containing the optimizer name and parameters.
     """
     optim_in_bwd = job_config.optimizer.early_step_in_backward
-    if optim_in_bwd and job_config.experimental.pipeline_parallel_degree > 1:
+    if optim_in_bwd and job_config.parallelism.pipeline_parallel_degree > 1:
         raise NotImplementedError(
             "Optimizers in backward is not supported with pipeline parallelism."
         )
@@ -308,110 +303,3 @@ def build_optimizers(
         )
     else:
         return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
-
-
-class LRSchedulersContainer(Stateful):
-    """Container for multiple learning rate schedulers.
-
-    This class is used to wrap multiple LRSchedulers into a single object that can be
-    used to reduce the complexity of the training loop. This mimics the behavior of
-    ``torch.optim.lr_scheduler.LRScheduler``. The design concept is the same as
-    ``OptimizersContainer``. This class currently only supports ``LambdaLR``.
-
-    **Note**
-    Users who want to customize the lr_scheduler behavior can inherit from this class and
-    extend the functionality as needed. The following methods must follow the same
-    signature as ``torch.optim.lr_scheduler.LRScheduler`` class: ``step()``, ``state_dict()``,
-    ``load_state_dict()``.
-
-    **Limitations**
-    This class assumes all the lr schedulers are the same. There is no easy way to support
-    resharding for multiple different LRSchedulers because LRScheduler.state_dict() is not
-    resharding friendly. Therefore, the limitation is used to allow TorchTitan to support
-    lr scheduler resharding.
-
-    Args:
-        optimizers (OptimizersContainer): The corresponding optimizers for the lr_schedulers.
-    """
-
-    schedulers: List[LRScheduler]
-
-    def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
-
-        self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
-
-    def __iter__(self) -> LRScheduler:
-        return iter(self.schedulers)
-
-    def __len__(self) -> int:
-        return len(self.schedulers)
-
-    def step(self) -> None:
-        for scheduler in self.schedulers:
-            scheduler.step()
-
-    def state_dict(self) -> Dict[str, Any]:
-        # While there may be multiple schedulers, we only save the first one because
-        # the state_dict is the same for all. See the limitations section in the
-        # docstring.
-        return self.schedulers[0].state_dict()
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        # Load the same state_dict for all schedulers. The key value we're concerned
-        # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
-        # that is immutable. As long as ``training.steps`` and ``training.warmup_steps``
-        # in ``job_config`` remain unchanged when resuming from a checkpoint, this
-        # approach is safe. We call ``copy()`` here to ensure extra safety.
-        for scheduler in self.schedulers:
-            scheduler.load_state_dict(copy.deepcopy(state_dict))
-
-
-def build_lr_schedulers(
-    optimizers: OptimizersContainer, job_config: JobConfig
-) -> LRSchedulersContainer:
-    """Create a LRSchedulerContainer for the given optimizers and job config.
-
-    This function creates a ``LRSchedulersContainer`` for the given optimizers.
-    ``job_config`` should define the correct lr scheduler parameters.
-
-    **Note**
-    Users who want to customize the lr scheduler behavior can create their own
-    ``LRSchedulersContainer`` subclass and ``build_lr_scheduler``. Passing the
-    customized ``build_lr_schedulers`` to ``TrainSpec`` will create the customized
-    ``LRSchedulersContainer``.
-
-
-    Args:
-        optimizers (OptimizersContainer): The corresponding optimizers for the
-            lr_schedulers.
-    """
-    warmup_steps = int(job_config.training.warmup_steps)
-    decay_steps = float(max(1, job_config.training.steps - warmup_steps))
-
-    def linear_warmup_linear_decay(
-        warmup_steps: int, decay_steps: int, current_step: int
-    ) -> float:
-        """Computes linear warmup followed by linear decay.
-
-        Per LambdaLR requirement, this is accomplished by returning
-        a multiplicative factor to adjust the learning rate to
-        create the desired schedule.
-        """
-        if current_step < warmup_steps:
-            # linear warmup
-            # 0-indexed step, hence + 1 adjustments
-            current_step += 1
-            curr_adjustment = float(current_step / (warmup_steps + 1))
-
-        else:
-            # linear decay
-            normalized_step = decay_steps - (current_step - warmup_steps)
-            curr_adjustment = 1 - (decay_steps - normalized_step) / decay_steps
-
-        return curr_adjustment
-
-    lr_lambda = functools.partial(linear_warmup_linear_decay, warmup_steps, decay_steps)
-    return LRSchedulersContainer(optimizers, lr_lambda)
