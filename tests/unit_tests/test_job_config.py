@@ -207,7 +207,7 @@ class TestJobConfig:
 
     def test_custom_parser(self):
         sys.argv.append(
-            "--experimental.custom_args_module=torchtitan.experiments.argparser_example"
+            "--experimental.custom_args_module=tests.argparser_example"
         )
         config = JobConfig()
         config.maybe_add_custom_args()
