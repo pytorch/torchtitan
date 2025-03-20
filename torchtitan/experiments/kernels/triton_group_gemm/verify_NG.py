@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 import logging
+import traceback
 
 import numpy as np
 import torch
@@ -17,8 +18,8 @@ logging.basicConfig(
 
 # Import the grouped GEMM implementations
 try:
+    from baseline import grouped_gemm_forward
     from NG_backward import grouped_gemm_backward
-    from NG_forward import group_gemm_forward as grouped_gemm
 except ImportError:
     logging.error(
         "Error importing grouped GEMM modules. Make sure the implementation files are in the correct path."
@@ -26,49 +27,49 @@ except ImportError:
     raise
 
 
-def compute_reference_forward(x, w, m_sizes):
+def compute_reference_forward(x, w, n_sizes):
     """
     Compute reference forward pass using PyTorch operations.
 
     Args:
         x (torch.Tensor): Input tensor of shape (M, K)
         w (torch.Tensor): Weight tensor of shape (N, K)
-        m_sizes (torch.Tensor): Group sizes tensor of shape (G)
+        n_sizes (torch.Tensor): Group sizes tensor of shape (G)
 
     Returns:
         torch.Tensor: Reference output tensor of shape (M, N)
     """
     result = torch.zeros((x.shape[0], w.shape[0]), dtype=x.dtype, device=x.device)
 
-    m_start = 0
-    for g in range(len(m_sizes)):
-        m_size = m_sizes[g].item()
-        if m_size > 0:
-            m_end = m_start + m_size
+    n_start = 0
+    for g in range(len(n_sizes)):
+        n_size = n_sizes[g].item()
+        if n_size > 0:
+            n_end = n_start + n_size
 
-            # Extract group input
-            x_g = x[m_start:m_end]
+            # Extract group weights
+            w_g = w[n_start:n_end]
 
-            # Compute group output: y_g = x_g @ w.T
-            y_g = torch.matmul(x_g, w.T)
+            # Compute group output: y_g = x @ w_g.T
+            y_g = torch.matmul(x, w_g.T)
 
             # Store result
-            result[m_start:m_end] = y_g
+            result[:, n_start:n_end] = y_g
 
             # Update start index
-            m_start = m_end
+            n_start = n_end
 
     return result
 
 
-def compute_reference_backward(x, w, m_sizes, grad_output):
+def compute_reference_backward(x, w, n_sizes, grad_output):
     """
     Compute reference backward pass using PyTorch autograd.
 
     Args:
         x (torch.Tensor): Input tensor of shape (M, K)
         w (torch.Tensor): Weight tensor of shape (N, K)
-        m_sizes (torch.Tensor): Group sizes tensor of shape (G)
+        n_sizes (torch.Tensor): Group sizes tensor of shape (G)
         grad_output (torch.Tensor): Gradient tensor of shape (M, N)
 
     Returns:
@@ -79,7 +80,7 @@ def compute_reference_backward(x, w, m_sizes, grad_output):
     w_autograd = w.detach().clone().requires_grad_(True)
 
     # Compute forward pass
-    output = compute_reference_forward(x_autograd, w_autograd, m_sizes)
+    output = compute_reference_forward(x_autograd, w_autograd, n_sizes)
 
     # Backpropagate
     output.backward(grad_output)
@@ -138,43 +139,43 @@ def analyze_tensor_differences(actual, expected, name):
 
 def test_forward_pass():
     """
-    A simple test for the M*G grouped GEMM forward pass with detailed error handling.
+    A simple test for the N*G grouped GEMM forward pass with detailed error handling.
 
-    In M*G grouping:
-    - M dimension is partitioned into G groups (M_total = sum(M_sizes))
-    - N dimension is the same for all groups
+    In N*G grouping:
+    - N dimension is partitioned into G groups (N_total = sum(N_sizes))
+    - M dimension is the same for all groups
     """
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Test parameters for DeepSeek-like models
         G = 4  # Number of groups
-        M_sizes = [2048, 2048, 2048, 2048]  # Group sizes (will be adjusted)
-        M_total = sum(M_sizes)  # Total M dimension
-        N = 4096  # Output dimension (same for all groups)
+        N_sizes = [1024, 1024, 1024, 1024]  # Group sizes
+        N_total = sum(N_sizes)  # Total N dimension
+        M = 8192  # Input dimension (same for all groups)
         K = 7168  # Hidden dimension
 
         # Create group sizes tensor
-        m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
+        n_sizes = torch.tensor(N_sizes, device=device, dtype=torch.int32)
 
         # Create input and weight tensors - using float16 for higher precision
-        x = torch.randn(M_total, K, dtype=torch.float16, device=device)
-        w = torch.randn(N, K, dtype=torch.float16, device=device)
+        x = torch.randn(M, K, dtype=torch.float16, device=device)
+        w = torch.randn(N_total, K, dtype=torch.float16, device=device)
 
         # Log the setup
-        logging.info(f"Test setup - G: {G}, M_total: {M_total}, N: {N}, K: {K}")
-        logging.info(f"Group sizes: {m_sizes}")
+        logging.info(f"Test setup - G: {G}, N_total: {N_total}, M: {M}, K: {K}")
+        logging.info(f"Group sizes: {n_sizes}")
         logging.info(f"Input x shape: {x.shape}")
         logging.info(f"Weight w shape: {w.shape}")
 
         # Run forward pass
         logging.info("Running forward pass with grouped GEMM")
-        result = grouped_gemm(x, w, m_sizes)
+        result = grouped_gemm_forward(x, w, n_sizes)
         logging.info(f"Forward result shape: {result.shape}")
 
         # Compute reference result
         logging.info("Computing reference result with PyTorch")
-        reference_result = compute_reference_forward(x, w, m_sizes)
+        reference_result = compute_reference_forward(x, w, n_sizes)
 
         # Compare results
         logging.info("Comparing with PyTorch reference")
@@ -186,48 +187,46 @@ def test_forward_pass():
 
     except Exception as e:
         logging.error(f"Test failed with error: {e}")
-        import traceback
-
         logging.error(traceback.format_exc())
         return False
 
 
 def test_backward_pass():
     """
-    A simple test for the M*G grouped GEMM backward pass with detailed error handling.
+    A simple test for the N*G grouped GEMM backward pass with detailed error handling.
 
-    In M*G grouping:
-    - M dimension is partitioned into G groups (M_total = sum(M_sizes))
-    - N dimension is the same for all groups
+    In N*G grouping:
+    - N dimension is partitioned into G groups (N_total = sum(N_sizes))
+    - M dimension is the same for all groups
     """
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Test parameters for DeepSeek-like models
         G = 4  # Number of groups
-        M_sizes = [2048, 2048, 2048, 2048]  # Group sizes (will be adjusted)
-        M_total = sum(M_sizes)  # Total M dimension
-        N = 4096  # Output dimension (same for all groups)
+        N_sizes = [1024, 1024, 1024, 1024]  # Group sizes
+        N_total = sum(N_sizes)  # Total N dimension
+        M = 8192  # Input dimension (same for all groups)
         K = 7168  # Hidden dimension
 
         # Create group sizes tensor
-        m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
+        n_sizes = torch.tensor(N_sizes, device=device, dtype=torch.int32)
 
         # Create input and weight tensors - using float16 for higher precision
-        x = torch.randn(
-            M_total, K, dtype=torch.float16, device=device, requires_grad=True
+        x = torch.randn(M, K, dtype=torch.float16, device=device, requires_grad=True)
+        w = torch.randn(
+            N_total, K, dtype=torch.float16, device=device, requires_grad=True
         )
-        w = torch.randn(N, K, dtype=torch.float16, device=device, requires_grad=True)
 
         # Log the setup
-        logging.info(f"Test setup - G: {G}, M_total: {M_total}, N: {N}, K: {K}")
-        logging.info(f"Group sizes: {m_sizes}")
+        logging.info(f"Test setup - G: {G}, N_total: {N_total}, M: {M}, K: {K}")
+        logging.info(f"Group sizes: {n_sizes}")
         logging.info(f"Input x shape: {x.shape}")
         logging.info(f"Weight w shape: {w.shape}")
 
         # Step 1: Run forward pass
         logging.info("Running forward pass")
-        result = grouped_gemm(x, w, m_sizes)
+        result = grouped_gemm_forward(x, w, n_sizes)
         logging.info(f"Forward result shape: {result.shape}")
 
         # Create a gradient for backpropagation
@@ -236,7 +235,7 @@ def test_backward_pass():
 
         # Step 2: Run backward pass directly
         logging.info("Running backward pass directly")
-        grad_x, grad_w = grouped_gemm_backward(grad_output, x, w, m_sizes)
+        grad_x, grad_w = grouped_gemm_backward(grad_output, x, w, n_sizes)
 
         # Verify gradient shapes
         logging.info(
@@ -247,7 +246,7 @@ def test_backward_pass():
         logging.info("Running PyTorch reference implementation")
 
         # Compute reference gradients
-        x_ref_grad, w_ref_grad = compute_reference_backward(x, w, m_sizes, grad_output)
+        x_ref_grad, w_ref_grad = compute_reference_backward(x, w, n_sizes, grad_output)
 
         # Compare gradients
         logging.info("Comparing gradients with PyTorch reference")
@@ -291,11 +290,11 @@ def test_multiple_deepseek_configs():
         try:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            # Create even group sizes
-            base_size = M // G
-            remainder = M % G
-            M_sizes = [base_size + (1 if i < remainder else 0) for i in range(G)]
-            m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
+            # Create even group sizes for N dimension
+            base_size = N // G
+            remainder = N % G
+            N_sizes = [base_size + (1 if i < remainder else 0) for i in range(G)]
+            n_sizes = torch.tensor(N_sizes, device=device, dtype=torch.int32)
 
             # Create input and weight tensors using float16 for higher precision
             x = torch.randn(
@@ -308,12 +307,12 @@ def test_multiple_deepseek_configs():
             logging.info(f"Input x shape: {x.shape}, Weight w shape: {w.shape}")
 
             # Run forward pass
-            result = grouped_gemm(x, w, m_sizes)
+            result = grouped_gemm_forward(x, w, n_sizes)
             logging.info(f"Forward result shape: {result.shape}")
 
             # ===== FORWARD PASS VERIFICATION =====
             # Compute reference forward result
-            reference_result = compute_reference_forward(x, w, m_sizes)
+            reference_result = compute_reference_forward(x, w, n_sizes)
 
             # Compare forward results
             forward_close = analyze_tensor_differences(
@@ -325,11 +324,11 @@ def test_multiple_deepseek_configs():
             grad_output = torch.randn_like(result)
 
             # Run backward pass
-            grad_x, grad_w = grouped_gemm_backward(grad_output, x, w, m_sizes)
+            grad_x, grad_w = grouped_gemm_backward(grad_output, x, w, n_sizes)
 
             # Compute reference gradients
             x_ref_grad, w_ref_grad = compute_reference_backward(
-                x, w, m_sizes, grad_output
+                x, w, n_sizes, grad_output
             )
 
             # Compare backward results
@@ -353,8 +352,6 @@ def test_multiple_deepseek_configs():
 
         except Exception as e:
             logging.error(f"Config {config_idx+1} test failed with error: {e}")
-            import traceback
-
             logging.error(traceback.format_exc())
             results.append((config_idx + 1, False, False, False))
 
@@ -374,7 +371,7 @@ def test_multiple_deepseek_configs():
 
 if __name__ == "__main__":
     logging.info(
-        "Running verification for both forward and backward pass of M*G grouped GEMM"
+        "Running verification for both forward and backward pass of N*G grouped GEMM"
     )
 
     # Run basic forward pass test

@@ -10,7 +10,7 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
-from tma_utils import TmaAutoTuneHelper
+from tma_cuda_wrapper import CudaUtils, TmaDescriptorHelper
 
 # Configure logging
 logging.basicConfig(

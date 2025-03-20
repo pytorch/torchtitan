@@ -98,7 +98,6 @@ def grouped_gemm(
 class GroupedGEMMWithGrad(torch.autograd.Function):
     """
     Autograd function wrapper for grouped GEMM with custom backward.
-    This class enables direct use of the custom kernels with automatic gradient.
     """
 
     @staticmethod
@@ -168,7 +167,7 @@ def grouped_gemm_with_grad(
         x: Input tensor of shape [M, K]
         w: Weight tensor of shape [N*G, K]
         group_sizes: Tensor or list specifying the size of each group, shape [G]
-        use_custom_kernel: Whether to use custom CUDA kernels (if available)
+        use_custom_kernel: Whether to use custom Triton kernels
 
     Returns:
         Result tensor of shape [M, N*G]
