@@ -188,7 +188,11 @@ class OnDeviceAllToAllV(torch.autograd.Function):
         grad_input_splits = torch.empty_like(grad_output_splits)
         grad_input = grad_output.new_empty(*ctx.input_shape)
         _on_device_all_to_all_v(
-            grad_input, grad_input_splits, grad_output, grad_output_splits, group=ctx.group
+            grad_input,
+            grad_input_splits,
+            grad_output,
+            grad_output_splits,
+            group=ctx.group,
         )
         return None, None, grad_input, None, None
 
