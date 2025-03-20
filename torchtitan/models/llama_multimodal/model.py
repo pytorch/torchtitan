@@ -15,8 +15,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.models.norms import RMSNorm
-
 
 @dataclass
 class ModelArgs:
@@ -1136,8 +1134,8 @@ class CrossAttention(nn.Module):
             model_args.decoder_embed_dim,
             bias=False,
         )
-        self.q_norm = RMSNorm(dim=self.head_dim, eps=1e-05)
-        self.k_norm = RMSNorm(dim=self.head_dim, eps=1e-05)
+        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-05)
+        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-05)
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -1190,14 +1188,14 @@ class DecoderTransformerSelfAttnBlock(nn.Module):
     ):
         super().__init__()
         self.attn = SelfAttention(model_args)
-        self.ln_attn = RMSNorm(dim=model_args.decoder_embed_dim, eps=1e-5)
+        self.ln_attn = nn.RMSNorm(model_args.decoder_embed_dim, eps=1e-5)
         self.mlp = FeedForwardForDecoder(
             dim=model_args.decoder_embed_dim,
             hidden_dim=4 * model_args.decoder_embed_dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
         )
-        self.ln_mlp = RMSNorm(dim=model_args.decoder_embed_dim, eps=1e-5)
+        self.ln_mlp = nn.RMSNorm(model_args.decoder_embed_dim, eps=1e-5)
 
     def forward(
         self,
@@ -1218,14 +1216,14 @@ class DecoderTransformerCrossAttnBlock(nn.Module):
     ):
         super().__init__()
         self.attn = CrossAttention(model_args)
-        self.ln_attn = RMSNorm(dim=model_args.decoder_embed_dim)
+        self.ln_attn = nn.RMSNorm(model_args.decoder_embed_dim)
         self.mlp = FeedForward(
             dim=model_args.decoder_embed_dim,
             hidden_dim=4 * model_args.decoder_embed_dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
         )
-        self.ln_mlp = RMSNorm(dim=model_args.decoder_embed_dim)
+        self.ln_mlp = nn.RMSNorm(model_args.decoder_embed_dim)
         self.attn_scale = TanhGate()
         self.mlp_scale = TanhGate()
 
@@ -1413,7 +1411,7 @@ class MultimodalDecoder(nn.Module):
             model_args.num_special_tokens,
             model_args.decoder_embed_dim,
         )
-        self.norm = RMSNorm(model_args.decoder_embed_dim, eps=1e-05)
+        self.norm = nn.RMSNorm(model_args.decoder_embed_dim, eps=1e-05)
         self.output = nn.Linear(
             model_args.decoder_embed_dim, model_args.vocab_size, bias=False
         )
