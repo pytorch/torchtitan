@@ -45,8 +45,6 @@ def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
         sec[name] = string_list(sec[name])
 
 
-
-
 class JobConfig:
     """
     A helper class to manage the train configuration.
