@@ -194,6 +194,11 @@ class JobConfig:
             help="Type of layer normalization to use [layernorm, np_layernorm, rmsnorm]",
         )
         self.parser.add_argument(
+            "--model.use_flex_attn",
+            action="store_true",
+            help="Whether to use Flex Attention.",
+        )
+        self.parser.add_argument(
             "--model.tokenizer_path",
             type=str,
             default="./assets/tokenizer/original/tokenizer.model",

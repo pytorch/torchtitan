@@ -8,11 +8,16 @@
 
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Callable, ClassVar, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
@@ -35,6 +40,8 @@ class TransformerModelArgs(BaseModelArgs):
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
     norm_type: str = "rmsnorm"
+
+    use_flex_attn: bool = False
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -146,6 +153,13 @@ class Attention(nn.Module):
 
     """
 
+    # We registered flex_attention related attributes as class variables as we
+    # need to amortize the cost of compilation. Enabling per-instance flex_attention
+    # is not supported.
+    block_mask: ClassVar[Optional[BlockMask]] = None
+    use_flex_attn: ClassVar[bool] = False
+    flex_attn: ClassVar[Optional[Callable]] = None
+
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -165,6 +179,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
+        self.use_flex_attn = model_args.use_flex_attn
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -187,6 +202,7 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -208,12 +224,33 @@ class Attention(nn.Module):
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
         # we use casual mask for training
-        output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        if self.use_flex_attn:
+            # assert False, (type(xq), type(xk), type(xv))
+            self._init_flex_attn(seqlen=seqlen)
+            output = self.flex_attn(xq, xk, xv, block_mask=self.block_mask)
+        else:
+            output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
+
+    @torch.no_grad()
+    def _init_flex_attn(self, seqlen: int) -> None:
+        if self.block_mask is not None:
+            return
+
+        def causal_mask(b, h, q_idx, kv_idx):
+            return q_idx >= kv_idx
+
+        compiled_create_block_mask = torch.compile(create_block_mask)
+        self.block_mask = compiled_create_block_mask(
+            causal_mask, None, None, seqlen, seqlen
+        )
+        self.flex_attn = torch.compile(
+            flex_attention, mode="max-autotune-no-cudagraphs"
+        )
 
 
 class FeedForward(nn.Module):
