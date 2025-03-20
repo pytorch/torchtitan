@@ -45,7 +45,6 @@ def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
         sec[name] = string_list(sec[name])
 
 
-CUSTOM_PARSER_MODULE = "--experimental.custom_args_module"
 
 
 class JobConfig:
@@ -766,7 +765,7 @@ class JobConfig:
         )
 
         self.parser.add_argument(
-            CUSTOM_PARSER_MODULE,
+            "--experimental.custom_args_module",
             type=str,
             default="",
             help="""
