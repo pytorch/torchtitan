@@ -150,8 +150,6 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
             if cp_context is not None:
                 from torch.nn.attention import sdpa_kernel, SDPBackend
 
-                # currently we only support these two SDP backends.
-                # TODO (xilunwu): support cuDNN backend
                 stack.enter_context(
                     sdpa_kernel(
                         [
