@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
+import inspect
 import os
 import sys
 from collections import defaultdict
@@ -760,10 +762,52 @@ class JobConfig:
             """,
         )
 
+        self.parser.add_argument(
+            "--experimental.custom_args_module",
+            type=str,
+            default="",
+            help="""
+                This option allows users to extend TorchTitan's existing JobConfig by importing
+                a customized module. Similar to ``--experimental.custom_model_path``, the user
+                needs to ensure that the path can be imported. The module should contain exactly
+                one public function and the function has the signature
+                ``def func(parser: argparse.ArgumentParser) -> None:``. The user can use the
+                given parser to add new argument by calling``parser.add_argument``, as wish.
+            """,
+        )
+
+        self._is_parsed = False
+        self._allow_unkown_args = False
+
+    def maybe_add_custom_args(self) -> None:
+        """Add custom arguments to the parser if --experimental.custom_args_module is set.
+
+        Note: This function should be called before the parser is used to parse arguments.
+        """
+        if self._is_parsed:
+            raise RuntimeError(
+                "JobConfig has already been parsed. We could not add new arguments."
+            )
+
+        self._allow_unkown_args = True
+        self.parse_args(sys.argv[1:])
+        self._allow_unkown_args = False
+
+        if self.experimental.custom_args_module:
+            module = importlib.import_module(self.experimental.custom_args_module)
+            public_functions = [
+                name
+                for name, func in inspect.getmembers(module)
+                if inspect.isfunction(func) and not name.startswith("_")
+            ]
+            func = getattr(module, public_functions[0])
+            func(self.parser)
+
     def to_dict(self):
         return self.args_dict
 
     def parse_args(self, args_list: list = sys.argv[1:]):
+        self._is_parsed = True
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict
@@ -837,7 +881,10 @@ class JobConfig:
         """
         Parse command line arguments and return the parsed args and the command line only args
         """
-        args = self.parser.parse_args(args_list)
+        if self._allow_unkown_args:
+            args, _ = self.parser.parse_known_args(args_list)
+        else:
+            args = self.parser.parse_args(args_list)
         string_list_argnames = set(self._get_string_list_argument_names())
 
         # aux parser to parse the command line only args, with no defaults from main parser

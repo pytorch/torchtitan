@@ -4,14 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 import tempfile
+import unittest
 
 import pytest
 import tomli_w
 from torchtitan.config_manager import JobConfig
 
 
-class TestJobConfig:
+class TestJobConfig(unittest.TestCase):
     def test_command_line_args(self):
         config = JobConfig()
         config.parse_args([])
@@ -51,7 +53,6 @@ class TestJobConfig:
         assert config.job.dump_folder == "/tmp/test_tt/"
 
     def test_parse_pp_split_points(self):
-
         toml_splits = ["layers.2", "layers.4", "layers.6"]
         toml_split_str = ",".join(toml_splits)
         cmdline_splits = ["layers.1", "layers.3", "layers.5"]
@@ -122,7 +123,6 @@ class TestJobConfig:
             ), config.parallelism.pipeline_parallel_split_points
 
     def test_parse_exclude_from_loading(self):
-
         toml_splits = ["optimizer", "dataloader"]
         toml_split_str = ",".join(toml_splits)
         cmdline_splits = ["optimizer", "lr_scheduler"]
@@ -205,3 +205,61 @@ class TestJobConfig:
         config = JobConfig()
         parser = config.parser
         parser.print_help()
+
+    def test_custom_parser(self):
+        path = "tests.assets.argparser_example"
+        sys.argv.append(f"--experimental.custom_args_module={path}")
+        config = JobConfig()
+        config.maybe_add_custom_args()
+        config.parse_args(
+            [
+                "--custom_args.how-is-your-day",
+                "bad",
+                "--model.converters",
+                "float8,mxfp",
+            ]
+        )
+        assert config.custom_args.how_is_your_day == "bad"
+        assert config.model.converters == ["float8", "mxfp"]
+
+        # There will be a SystemExit raised by ArgumentParser with exist status 2.
+        with self.assertRaisesRegex(SystemExit, "2"):
+            config.parse_args(
+                [
+                    "--custom_args.how-is-your-day",
+                    "bad",
+                    "--model.converters",
+                    "float8,mxfp",
+                    "--abcde",
+                ]
+            )
+        sys.argv.pop()
+
+        with tempfile.NamedTemporaryFile() as fp:
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
+                    {
+                        "experimental": {
+                            "custom_args_module": path,
+                        }
+                    },
+                    f,
+                )
+            sys.argv.append(f"--job.config_file={fp.name}")
+            config = JobConfig()
+            config.maybe_add_custom_args()
+            config.parse_args(
+                [
+                    "--custom_args.how-is-your-day",
+                    "bad",
+                    "--model.converters",
+                    "float8,mxfp",
+                ]
+            )
+            assert config.custom_args.how_is_your_day == "bad"
+            assert config.model.converters == ["float8", "mxfp"]
+            sys.argv.pop()
+
+
+if __name__ == "__main__":
+    unittest.main()
