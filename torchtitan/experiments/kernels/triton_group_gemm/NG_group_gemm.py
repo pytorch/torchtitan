@@ -10,8 +10,8 @@ logging.basicConfig(
 
 # Try to import the custom GEMM implementations
 try:
-    from tgroup_gemm_backwards import grouped_gemm_backward
-    from tgroup_gemm_forward import grouped_gemm_forward
+    from NG_backward import grouped_gemm_backward
+    from NG_forward import grouped_gemm_forward
 
     _HAS_CUSTOM_GEMM = True
 except ImportError:
