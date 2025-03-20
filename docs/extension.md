@@ -35,4 +35,24 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 
 ### Extending `JobConfig`
-Work in progress: We will provide an extension point to [`JobConfig`](../torchtitan/config_manager.py). This section is to be updated.
+[`JobConfig`](../torchtitan/config_manager.py) provides an argument `--experimental.custom_args_module`. When specified, `JobConfig` attempts to import the module provided by the argument. The imported module should contain exactly one public function. `JobConfig` executes this public function, passing its own argparser as an argument. This allows you to extend `JobConfig` with custom functionality.
+
+Suppose you want to add a custom argument `--custom_args.how-is-your-day` to `JobConfig`. You can create a Python module (e.g., `custom_args.py`) with a single public function and put it to `torchtitan/experiments/your_folder/`:
+
+```
+import argparse
+
+
+def extend_parser(parser: argparse.ArgumentParser) -> None:
+     parser.add_argument(
+         "--custom_args.how-is-your-day",
+         type=str,
+         default="good",
+         help="Just an example.",
+     )
+```
+
+To utilize the custom argument, specify the following arguments when running the training script:
+```
+--experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args --custom_args.how-is-your-day=wonderful
+```
