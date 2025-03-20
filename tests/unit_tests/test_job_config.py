@@ -207,7 +207,7 @@ class TestJobConfig(unittest.TestCase):
         parser.print_help()
 
     def test_custom_parser(self):
-        path = "tests.argparser_example"
+        path = "tests.assets.argparser_example"
         sys.argv.append(f"--experimental.custom_args_module={path}")
         config = JobConfig()
         config.maybe_add_custom_args()
