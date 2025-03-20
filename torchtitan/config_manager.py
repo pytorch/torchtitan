@@ -791,17 +791,17 @@ class JobConfig:
 
         self._allow_unkown_args = True
         self.parse_args(sys.argv[1:])
-
-        module = importlib.import_module(self.experimental.custom_args_module)
-        public_functions = [
-            name
-            for name, func in inspect.getmembers(module)
-            if inspect.isfunction(func) and not name.startswith("_")
-        ]
-        func = getattr(module, public_functions[0])
-        func(self.parser)
         self._allow_unkown_args = False
-        return
+
+        if self.experimental.custom_args_module:
+            module = importlib.import_module(self.experimental.custom_args_module)
+            public_functions = [
+                name
+                for name, func in inspect.getmembers(module)
+                if inspect.isfunction(func) and not name.startswith("_")
+            ]
+            func = getattr(module, public_functions[0])
+            func(self.parser)
 
     def to_dict(self):
         return self.args_dict
