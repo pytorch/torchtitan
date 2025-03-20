@@ -147,6 +147,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_config.norm_type = job_config.model.norm_type
         model_config.vocab_size = tokenizer.n_words
         model_config.max_seq_len = job_config.training.seq_len
+        model_config.use_flex_attn = job_config.model.use_flex_attn
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_config}"
