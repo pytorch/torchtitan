@@ -1022,12 +1022,19 @@ class DeepseekModel(torch.nn.Module):
         )
 
         self.layers = torch.nn.ModuleDict()
-        layers_per_stage = config.num_hidden_layers // config.num_stages
-
-        for layer_id in range(
-            layers_per_stage * config.stage_idx,
-            layers_per_stage * (config.stage_idx + 1),
-        ):
+        division = config.num_hidden_layers // config.num_stages
+        residual = config.num_hidden_layers % config.num_stages
+        # Some earlier stages may have 1 more layer than latter stages because
+        # the division may have residual; this is more even than giving the
+        # entire residual to the last stage.
+        layers_per_stage = [
+            division + 1 if stage < residual else division
+            for stage in range(config.num_stages)
+        ]
+        assert sum(layers_per_stage) == config.num_hidden_layers
+        layer_id_start = sum(layers_per_stage[: config.stage_idx])
+        layer_id_end = layer_id_start + layers_per_stage[config.stage_idx]
+        for layer_id in range(layer_id_start, layer_id_end):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
 
         self.norm = (
