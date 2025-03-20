@@ -11,12 +11,12 @@ import os
 import sys
 from typing import Optional
 
-import tma_utils as utils
-
 import torch
 
 import triton
 import triton.language as tl
+
+from tma_cuda_wrapper import CudaUtils, TmaDescriptorHelper
 from triton.runtime import driver  # @manual
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -182,7 +182,7 @@ def _grouped_gemm(
     """
     M*G style grouped GEMM with TMA support.
     """
-    if not utils.HAS_TMA_DESC:
+    if not CudaUtils.verify_tma():
         raise NotImplementedError("Grouped GEMM without TMA is not supported yet")
 
     G = m_sizes.shape[0]
@@ -216,7 +216,7 @@ def _grouped_gemm(
     workspace = None
 
     if USE_TMA_LOAD:
-        desc_helper = utils.TmaAutoTuneHelper()
+        desc_helper = TmaDescriptorHelper()
         desc_helper.init_tma_descriptor("x")
         desc_helper.init_tma_descriptor("w")
         desc_x = desc_helper.get_tma_descriptor_kernel_param("x")
@@ -224,7 +224,7 @@ def _grouped_gemm(
 
     if USE_TMA_STORE:
         workspace = torch.empty(
-            NUM_SMS * utils.TmaAutoTuneHelper.TMA_SIZE,
+            NUM_SMS * desc_helper.tma_size,
             device=x.device,
             dtype=torch.uint8,
         )
