@@ -36,16 +36,30 @@ DeviceType = Union[int, str, torch.device]
 
 def pipeline_llama(
     model: nn.Module,
-    pp_mesh: DeviceMesh,
+    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
     model_config: TransformerModelArgs,
+    parallelize_fn: Callable[[nn.Module], nn.Module],
     loss_fn: Callable[..., torch.Tensor],
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    stages, models = pipeline_llama_manual_split(
+    pp_mesh = world_mesh["pp"]
+
+    stages, model_parts = pipeline_llama_manual_split(
         model, pp_mesh, parallel_dims, job_config, device, model_config
     )
+
+    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+    # optimizer, and checkpointing
+    for i, m in enumerate(model_parts):
+        # apply SPMD-style PT-D techniques
+        m = parallelize_fn(m, world_mesh, parallel_dims, job_config)
+        model_parts[i] = m
+        # NOTE: this is to update the model in the stage
+        #       in case the model is modified e.g. by torch.compile
+        stages[i].submod = m
 
     pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
 
@@ -58,7 +72,7 @@ def pipeline_llama(
         if stage.is_last:
             has_last_stage = True
 
-    return pp_schedule, models, has_first_stage, has_last_stage
+    return pp_schedule, model_parts, has_first_stage, has_last_stage
 
 
 def pipeline_llama_manual_split(
@@ -79,10 +93,12 @@ def pipeline_llama_manual_split(
     """
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
+    parllelism_config = job_config.parallelism
 
-    splits = (
-        job_config.experimental.pipeline_parallel_split_points
-        or generate_split_points(job_config, parallel_dims.pp, model_config.n_layers)
+    splits = parllelism_config.pipeline_parallel_split_points or generate_split_points(
+        parllelism_config.pipeline_parallel_schedule,
+        parallel_dims.pp,
+        model_config.n_layers,
     )
 
     def _build_stage(
@@ -125,9 +141,7 @@ def pipeline_llama_manual_split(
     stages = []
     models = []
 
-    schedule_class = get_schedule_class(
-        job_config.experimental.pipeline_parallel_schedule
-    )
+    schedule_class = get_schedule_class(parllelism_config.pipeline_parallel_schedule)
     style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
 
     for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):

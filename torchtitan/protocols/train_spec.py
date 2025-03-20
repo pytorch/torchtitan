@@ -7,13 +7,15 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, Type, TypeAlias
+from typing import Callable, Optional, Protocol, Type, TypeAlias
 
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
-from torchtitan.components.dataloader import DataLoaderBuilder
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 
@@ -41,6 +43,9 @@ class ModelProtocol(Protocol):
         ...
 
 
+DataLoaderBuilder: TypeAlias = Callable[[...], BaseDataLoader]
+TokenizerBuilder: TypeAlias = Callable[[...], Tokenizer]
+MetricsProcessorBuilder: TypeAlias = Callable[[...], MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig], OptimizersContainer
 ]
@@ -53,18 +58,16 @@ class TrainSpec:
     name: str
     cls: Type[nn.Module]
     config: dict[str, BaseModelArgs]
-    parallelize_fn: Callable[[nn.Module], None]
-    pipelining_fn: Callable[
-        [nn.Module], tuple[_PipelineSchedule, list[nn.Module], bool, bool]
+    parallelize_fn: Callable[[nn.Module], nn.Module]
+    pipelining_fn: Optional[
+        Callable[[nn.Module], tuple[_PipelineSchedule, list[nn.Module], bool, bool]]
     ]
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
     build_dataloader_fn: DataLoaderBuilder
-    tokenizer_cls: Type[Tokenizer]
+    build_tokenizer_fn: TokenizerBuilder
     loss_fn: LossFunction
-
-    # TODO: Add a FQN convert fn to allow users to load checkpoints from
-    # HuggingFace or other sources that have different FQN conventions.
+    build_metrics_processor_fn: Optional[MetricsProcessorBuilder] = None
 
 
 _train_specs = {}

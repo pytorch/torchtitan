@@ -6,21 +6,18 @@
 
 import enum
 import functools
-import multiprocessing as mp
 import os
 import queue
 import re
 import shutil
 import threading
 import time
-from dataclasses import dataclass, field
-from io import BytesIO
-from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint.state_dict import (
@@ -32,7 +29,8 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 
 from torchtitan.components.ft import FTManager
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
@@ -49,45 +47,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-# TODO: move this out from checkpoint.py and merge it with the trainer.py
-# We probably want to create a Trainer object.
-@dataclass
-class TrainState(Stateful):
-    step: int = 0
-    global_avg_losses: List[float] = field(default_factory=list)
-    global_max_losses: List[float] = field(default_factory=list)
-    log_steps: List[int] = field(default_factory=list)
-
-    def state_dict(self) -> Dict[str, Any]:
-        # Only checkpoint global_avg_losses and global_max_losses per log frequency
-        # to avoid sync overhead in every iteration.
-        global_avg_losses_bytes = BytesIO()
-        torch.save(self.global_avg_losses, global_avg_losses_bytes)
-        global_max_losses_bytes = BytesIO()
-        torch.save(self.global_max_losses, global_max_losses_bytes)
-        log_steps_bytes = BytesIO()
-        torch.save(self.log_steps, log_steps_bytes)
-        return {
-            "step": torch.tensor(self.step, dtype=torch.int32),
-            "global_avg_losses": global_avg_losses_bytes,
-            "global_max_losses": global_max_losses_bytes,
-            "log_steps": log_steps_bytes,
-        }
-
-    def load_state_dict(self, state_dict) -> None:
-        self.step = state_dict["step"].item()
-        state_dict["global_avg_losses"].seek(0)
-        self.global_avg_losses = torch.load(
-            state_dict["global_avg_losses"], weights_only=False
-        )
-        state_dict["global_max_losses"].seek(0)
-        self.global_max_losses = torch.load(
-            state_dict["global_max_losses"], weights_only=False
-        )
-        state_dict["log_steps"].seek(0)
-        self.log_steps = torch.load(state_dict["log_steps"], weights_only=False)
 
 
 class ModelWrapper(Stateful):
@@ -107,6 +66,11 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
+        # `set_model_state_dict()` does change the keys of the input state_dict,
+        # we will need to reinitialize the cache_state_dict.
+        self.cache_state_dict = {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
 
 class Terminate:
@@ -317,7 +281,7 @@ class CheckpointManager:
                 )
             self.purge_queue = queue.Queue()
             self.purge_thread = threading.Thread(
-                target=purge_thread, args=(self.purge_queue,)
+                target=purge_thread, args=(self.purge_queue,), daemon=True
             )
             self.purge_thread.start()
         else:
@@ -335,7 +299,7 @@ class CheckpointManager:
             self.async_future = None
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
-            ctx = get_context("spawn")
+            ctx = mp.get_context("spawn")
             self.mp_queue_send = ctx.Queue()
             self.mp_queue_recv = ctx.Queue()
             self.mp = ctx.Process(
@@ -355,6 +319,9 @@ class CheckpointManager:
         )
 
     def __del__(self):
+        self.close()
+
+    def close(self):
         if self.enable_checkpoint:
             if self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())

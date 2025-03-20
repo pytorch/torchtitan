@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
+import inspect
 import os
 import sys
 from collections import defaultdict
@@ -154,23 +156,16 @@ class JobConfig:
             default="tb",
             help="Folder to dump TensorBoard states",
         )
-        # TODO: store_true & default=True make impossible for cmd to set it to False
         self.parser.add_argument(
-            "--metrics.rank_0_only",
+            "--metrics.save_for_all_ranks",
             action="store_true",
-            default=True,
+            default=False,
             help="""
-                Whether to save TensorBoard metrics only for rank 0 or for all ranks.
-                When pipeline_parallel_degree is > 1, this option uses the 0th rank of the last stage pipeline group,
-                which is the only stage that computes loss metrics.
+                Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
+                When this option is False and pipeline_parallel_degree is > 1, the metrics
+                component uses the 0th rank of the last stage pipeline group, which is the
+                only stage that computes loss metrics.
             """,
-        )
-        self.parser.add_argument(
-            "--metrics.disable_logging_from_checkpoint",
-            action="store_true",
-            help="""
-                Whether to log metrics from scratch for each checkpoint load. We have seen this feature
-                leading to nccl watchdog timeout issue when testing with tb. This flag disables it.""",
         )
         self.parser.add_argument(
             "--metrics.enable_wandb",
@@ -258,6 +253,51 @@ class JobConfig:
             register_post_accumulate_grad_hook after the optimizer is built.""",
         )
 
+        # lr scheduler configs
+        self.parser.add_argument(
+            "--lr_scheduler.warmup_steps",
+            type=int,
+            default=200,
+            help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
+        )
+        self.parser.add_argument(
+            "--lr_scheduler.decay_ratio",
+            type=float,
+            default=None,
+            help="""
+            Controls the proportion of the training steps allocated to the learning rate decay phase.
+
+            If `None`, the learning rate will begin decaying immediately after the warmup period.
+            Otherwise, the learning rate will remain stable after the warmup period and
+            only start decaying during the last `decay_ratio` portion of the total training steps.
+
+            This is known as the Warmup-Stable-Decay (WSD) schedule, as described in https://arxiv.org/abs/2404.06395.
+            """,
+        )
+        self.parser.add_argument(
+            "--lr_scheduler.decay_type",
+            type=str,
+            default="linear",
+            choices=["linear", "sqrt", "cosine"],
+            help="""
+            Learning rate decay type to use during training:
+            - 'linear': linearly decays learning rate from initial to final value
+            - 'sqrt': decays learning rate following a 1 minus square root curve
+            - 'cosine': smoothly decays learning rate following a cosine curve
+            """,
+        )
+        self.parser.add_argument(
+            "--lr_scheduler.lr_min",
+            type=float,
+            default=0.0,
+            help="""
+            Min lr ratio for lr scheduler.
+
+            If provided, the range of decay factor is scaled from 1 to `lr_min`
+            to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.lr_min`.
+            """,
+        )
+
         # training configs
         self.parser.add_argument(
             "--training.dataset", type=str, default="c4_test", help="Dataset to use"
@@ -276,12 +316,6 @@ class JobConfig:
             "--training.seq_len", type=int, default=2048, help="Sequence length"
         )
         self.parser.add_argument(
-            "--training.warmup_steps",
-            type=int,
-            default=200,
-            help="Steps for lr scheduler warmup, normally 1/5 of --training.steps",
-        )
-        self.parser.add_argument(
             "--training.max_norm",
             type=Union[float, int],
             default=1.0,
@@ -294,174 +328,10 @@ class JobConfig:
             help="How many train steps to run",
         )
         self.parser.add_argument(
-            "--training.data_parallel_replicate_degree",
-            type=int,
-            default=1,
-            help="""
-            The `data_parallel_replicate_degree` argument specifies the degree of
-            data parallelism for weight replication. When this value is greater
-            than 1, weights will be replicated across `data_parallel_replicate_degree`
-            ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
-            method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
-            parallelism method used is DDP (Distributed Data Parallelism).
-            1 means disabled.""",
-        )
-        self.parser.add_argument(
-            "--training.data_parallel_shard_degree",
-            type=int,
-            default=-1,
-            help="""
-            The `data_parallel_shard_degree` argument specifies the degree of data
-            parallelism for weight sharding. When this value is greater than 1, weights
-            will be sharded across `data_parallel_shard_degree` ranks. If
-            `data_parallel_replicate_degree` is also greater than 1, the parallelism
-            method used is HSDP (Hybrid Sharded Data Parallelism).  Otherwise, the
-            parallelism method used is FSDP (Fully Sharded Data Parallelism).
-
-            -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-            only `data_parallel_shard_degree` can be negative. 1 means disabled.""",
-        )
-        self.parser.add_argument(
             "--training.enable_cpu_offload",
             action="store_true",
             help="""
             Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP""",
-        )
-        self.parser.add_argument(
-            "--training.tensor_parallel_degree",
-            type=int,
-            default=1,
-            help="Tensor Parallelism degree. 1 means disabled.",
-        )
-        self.parser.add_argument(
-            "--training.disable_loss_parallel",
-            action="store_true",
-            help="Whether to apply loss parallel when sequence parallel is enabled",
-        )
-        self.parser.add_argument(
-            "--training.fsdp_reshard_after_forward",
-            type=str,
-            default="default",
-            choices=["default", "always", "never"],
-            help="""
-            `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
-            within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
-            trading off memory and communication. See torch's `fully_shard` API for more documentation
-            on `reshard_after_forward`.
-            The supported policies include "default", "always" and "never":
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-              scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-            """,
-        )
-        self.parser.add_argument(
-            "--experimental.enable_async_tensor_parallel",
-            action="store_true",
-            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_degree",
-            type=int,
-            default=1,
-            help="""
-                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
-                If using looped schedules, this still specifies the number of physical ranks, not the number
-                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_split_points",
-            type=string_list,
-            nargs="+",
-            default=[],
-            help="""
-                Specify comma-separated names of modules to use as the beginning of a split point.
-
-                e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
-                the first containing all the layers up to layers.0,
-                the second containing layers.0 and up to layers.2,
-                the third containing layers.2 and all the remaining layers.
-
-                Note: fully-automated splitting may be enabled in the future,
-                but currently the split points must be specified manually.""",
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_schedule",
-            type=str,
-            default="1F1B",
-            help="""
-                Specify the Pipeline Parallel schedule to use. The supported schedules are:
-                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
-                The schedule must be compatible with the split points and stages_per_rank.
-
-                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
-                and split_points = number of stages - 1
-                """,
-        )
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_schedule_csv",
-            type=str,
-            default="",
-            help="""
-                Specify the path to the pipeline parallel schedule csv file to use.
-                The pipeline_parallel_schedule argument must be either
-                PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
-            """,
-        )
-
-        self.parser.add_argument(
-            "--experimental.pipeline_parallel_microbatches",
-            type=int,
-            default=None,
-            help="""
-                How many microbatches to split the global training batch into when using pipeline parallelism.
-
-                The global training batch size must be evenly divisible by the number of microbatches.
-
-                The default value will be the number of pipeline stages, if unspecified.
-            """,
-        )
-        self.parser.add_argument(
-            "--experimental.enable_compiled_autograd",
-            action="store_true",
-            help="Enable CompiledAutograd to compile the backward.",
-        )
-        self.parser.add_argument(
-            "--experimental.context_parallel_degree",
-            type=int,
-            default=1,
-            help="Context parallelism degree. 1 means disabled.",
-        )
-        self.parser.add_argument(
-            "--experimental.context_parallel_rotate_method",
-            type=str,
-            default="allgather",
-            help="""
-                The collective to use in context parallel SDPA for kv shards exchange.
-
-                'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
-
-                'alltoall' means to all-to-all shuffle the kv shards.
-
-                The default value is 'allgather'.
-            """,
-        )
-        # I'm not particularly fond of this. Users can choose to write their own wrapper
-        # module and import TorchTitan training loop and execute it, which look cleaner.
-        # One reason to provide this option is to allow users to use the existing run script.
-        # While the script is pretty trivial now, we may add more logic when integrating
-        # with TorchFT.
-        # This option is subject to change and may be deleted in the future.
-        self.parser.add_argument(
-            "--experimental.custom_model_path",
-            type=str,
-            default="",
-            help="""
-                The --custom_model_path option allows to specify a custom path to a model module
-                that is not natively implemented within TorchTitan.
-                Acceptable values are the file system path to the module (e.g., my_models/model_x)
-                dotted import module  (e.g., some_package.model_x).
-            """,
         )
         self.parser.add_argument(
             "--training.mixed_precision_param",
@@ -505,6 +375,155 @@ class JobConfig:
             action="store_true",
             help="Use deterministic algorithms wherever possible, may be slower",
         )
+
+        # parallelism configs
+        self.parser.add_argument(
+            "--parallelism.data_parallel_replicate_degree",
+            type=int,
+            default=1,
+            help="""
+            The `data_parallel_replicate_degree` argument specifies the degree of
+            data parallelism for weight replication. When this value is greater
+            than 1, weights will be replicated across `data_parallel_replicate_degree`
+            ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
+            parallelism method used is DDP (Distributed Data Parallelism).
+            1 means disabled.""",
+        )
+        self.parser.add_argument(
+            "--parallelism.enable_compiled_autograd",
+            action="store_true",
+            help="Enable CompiledAutograd to compile the backward.",
+        )
+        self.parser.add_argument(
+            "--parallelism.data_parallel_shard_degree",
+            type=int,
+            default=-1,
+            help="""
+            The `data_parallel_shard_degree` argument specifies the degree of data
+            parallelism for weight sharding. When this value is greater than 1, weights
+            will be sharded across `data_parallel_shard_degree` ranks. If
+            `data_parallel_replicate_degree` is also greater than 1, the parallelism
+            method used is HSDP (Hybrid Sharded Data Parallelism).  Otherwise, the
+            parallelism method used is FSDP (Fully Sharded Data Parallelism).
+
+            -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
+            only `data_parallel_shard_degree` can be negative. 1 means disabled.""",
+        )
+        self.parser.add_argument(
+            "--parallelism.fsdp_reshard_after_forward",
+            type=str,
+            default="default",
+            choices=["default", "always", "never"],
+            help="""
+            `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
+            within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
+            trading off memory and communication. See torch's `fully_shard` API for more documentation
+            on `reshard_after_forward`.
+            The supported policies include "default", "always" and "never":
+            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
+              scenarios.
+            - "always" will enable `reshard_after_forward` for all forward passes.
+            - "never" will disable `reshard_after_forward` for all forward passes.
+            """,
+        )
+        self.parser.add_argument(
+            "--parallelism.tensor_parallel_degree",
+            type=int,
+            default=1,
+            help="Tensor Parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
+            "--parallelism.disable_loss_parallel",
+            action="store_true",
+            help="Whether to apply loss parallel when sequence parallel is enabled",
+        )
+        self.parser.add_argument(
+            "--parallelism.enable_async_tensor_parallel",
+            action="store_true",
+            help="Whether to apply async tensor parallel (currently only effective when compile is enabled)",
+        )
+        self.parser.add_argument(
+            "--parallelism.pipeline_parallel_degree",
+            type=int,
+            default=1,
+            help="""
+                Pipeline Parallelism degree, or number of ranks. 1 means disabled.
+                If using looped schedules, this still specifies the number of physical ranks, not the number
+                of stages.  Stages per rank are inferred from split points degree, and schedule.""",
+        )
+        self.parser.add_argument(
+            "--parallelism.pipeline_parallel_split_points",
+            type=string_list,
+            nargs="+",
+            default=[],
+            help="""
+                Specify comma-separated names of modules to use as the beginning of a split point.
+
+                e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
+                the first containing all the layers up to layers.0,
+                the second containing layers.0 and up to layers.2,
+                the third containing layers.2 and all the remaining layers.
+
+                Note: fully-automated splitting may be enabled in the future,
+                but currently the split points must be specified manually.""",
+        )
+        self.parser.add_argument(
+            "--parallelism.pipeline_parallel_schedule",
+            type=str,
+            default="1F1B",
+            help="""
+                Specify the Pipeline Parallel schedule to use. The supported schedules are:
+                https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
+                The schedule must be compatible with the split points and stages_per_rank.
+
+                Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
+                and split_points = number of stages - 1
+                """,
+        )
+        self.parser.add_argument(
+            "--parallelism.pipeline_parallel_schedule_csv",
+            type=str,
+            default="",
+            help="""
+                Specify the path to the pipeline parallel schedule csv file to use.
+                The pipeline_parallel_schedule argument must be either
+                PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
+            """,
+        )
+        self.parser.add_argument(
+            "--parallelism.pipeline_parallel_microbatches",
+            type=int,
+            default=None,
+            help="""
+                How many microbatches to split the global training batch into when using pipeline parallelism.
+
+                The global training batch size must be evenly divisible by the number of microbatches.
+
+                The default value will be the number of pipeline stages, if unspecified.
+            """,
+        )
+        self.parser.add_argument(
+            "--parallelism.context_parallel_degree",
+            type=int,
+            default=1,
+            help="Context parallelism degree. 1 means disabled.",
+        )
+        self.parser.add_argument(
+            "--parallelism.context_parallel_rotate_method",
+            type=str,
+            default="allgather",
+            help="""
+                The collective to use in context parallel SDPA for kv shards exchange.
+
+                'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
+
+                'alltoall' means to all-to-all shuffle the kv shards.
+
+                The default value is 'allgather'.
+            """,
+        )
+
         # checkpointing configs
         self.parser.add_argument(
             "--checkpoint.enable_checkpoint",
@@ -606,6 +625,7 @@ class JobConfig:
                 This will load the model only, excluding the specified keys.
             """,
         )
+
         # activation checkpointing configs
         self.parser.add_argument(
             "--activation_checkpoint.mode",
@@ -678,7 +698,7 @@ class JobConfig:
             help="Flight recorder ring buffer size, >0 means recording by default, 0 means disabled",
         )
 
-        # memory estimation settings
+        # memory estimation configs
         self.parser.add_argument(
             "--memory_estimation.enabled",
             help="Whether to estimate memory usage for FSDP",
@@ -704,13 +724,13 @@ class JobConfig:
             """,
         )
 
+        # torchft configs
         self.parser.add_argument(
             "--fault_tolerance.replica_id",
             type=int,
             default=0,
             help="The TorchFT replica ID of this run.",
         )
-
         self.parser.add_argument(
             "--fault_tolerance.group_size",
             type=int,
@@ -721,7 +741,6 @@ class JobConfig:
                 dimension
             """,
         )
-
         self.parser.add_argument(
             "--fault_tolerance.min_replica_size",
             type=int,
@@ -729,10 +748,66 @@ class JobConfig:
             help="The minimum number of FT replica for each step.",
         )
 
+        self.parser.add_argument(
+            "--experimental.custom_import",
+            type=str,
+            default="",
+            help="""
+            This option enables the importation of external modules.
+            Currently, it only supports dotted import modules (e.g., some_package.model_x).
+            It is the user's responsibility to ensure that the specified path can be
+            successfully imported. One method to achieve this, you can place your module
+            inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
+            make it available for import.
+            """,
+        )
+
+        self.parser.add_argument(
+            "--experimental.custom_args_module",
+            type=str,
+            default="",
+            help="""
+                This option allows users to extend TorchTitan's existing JobConfig by importing
+                a customized module. Similar to ``--experimental.custom_model_path``, the user
+                needs to ensure that the path can be imported. The module should contain exactly
+                one public function and the function has the signature
+                ``def func(parser: argparse.ArgumentParser) -> None:``. The user can use the
+                given parser to add new argument by calling``parser.add_argument``, as wish.
+            """,
+        )
+
+        self._is_parsed = False
+        self._allow_unkown_args = False
+
+    def maybe_add_custom_args(self) -> None:
+        """Add custom arguments to the parser if --experimental.custom_args_module is set.
+
+        Note: This function should be called before the parser is used to parse arguments.
+        """
+        if self._is_parsed:
+            raise RuntimeError(
+                "JobConfig has already been parsed. We could not add new arguments."
+            )
+
+        self._allow_unkown_args = True
+        self.parse_args(sys.argv[1:])
+        self._allow_unkown_args = False
+
+        if self.experimental.custom_args_module:
+            module = importlib.import_module(self.experimental.custom_args_module)
+            public_functions = [
+                name
+                for name, func in inspect.getmembers(module)
+                if inspect.isfunction(func) and not name.startswith("_")
+            ]
+            func = getattr(module, public_functions[0])
+            func(self.parser)
+
     def to_dict(self):
         return self.args_dict
 
     def parse_args(self, args_list: list = sys.argv[1:]):
+        self._is_parsed = True
         args, cmd_args = self.parse_args_from_command_line(args_list)
         config_file = getattr(args, "job.config_file", None)
         # build up a two level dict
@@ -806,7 +881,10 @@ class JobConfig:
         """
         Parse command line arguments and return the parsed args and the command line only args
         """
-        args = self.parser.parse_args(args_list)
+        if self._allow_unkown_args:
+            args, _ = self.parser.parse_known_args(args_list)
+        else:
+            args = self.parser.parse_args(args_list)
         string_list_argnames = set(self._get_string_list_argument_names())
 
         # aux parser to parse the command line only args, with no defaults from main parser
