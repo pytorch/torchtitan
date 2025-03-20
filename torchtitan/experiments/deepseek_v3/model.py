@@ -444,6 +444,13 @@ class MoE(nn.Module):
     A mixed expert module containing shared experts.
     """
 
+    # Class attributes:
+    # Symmetric memory buffers shared by all MoE instances across layers
+    token_send_buf: Optional[torch.Tensor] = None
+    token_gather_buf: Optional[torch.Tensor] = None
+    input_splits: Optional[torch.Tensor] = None
+    output_splits: Optional[torch.Tensor] = None
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -480,8 +487,13 @@ class MoE(nn.Module):
         self.setup_symm_mem(dtype, self.gate.weight.device)
 
     def setup_symm_mem(self, dtype, device):
+        # Symmetric memory buffers are shared by all MoE instances across
+        # layers, so we only need to initialize them once
+        if MoE.token_send_buf is not None:
+            return
+
         # Input buffer for DP-to-EP shuffle
-        self.token_send_buf = symm_mem.empty(
+        MoE.token_send_buf = symm_mem.empty(
             self.config.max_seq_len
             * self.num_experts_per_tok,  # seq len * top k (flattened)
             self.config.hidden_size,  # hidden dim
@@ -489,21 +501,22 @@ class MoE(nn.Module):
             device=device,
         )
         # Number of tokens to send to EP peers, aka. input splits
-        self.input_splits = symm_mem.empty(
+        MoE.input_splits = symm_mem.empty(
             self.ep_size, dtype=torch.int64, device=device
         )
         # Number of tokens to receive from EP peers, aka. output splits
-        self.output_splits = symm_mem.empty(
+        MoE.output_splits = symm_mem.empty(
             self.ep_size, dtype=torch.int64, device=device
         )
         # Input buffer for EP-to-DP shuffle
-        self.token_gather_buf = symm_mem.empty(
+        MoE.token_gather_buf = symm_mem.empty(
             # worst case, all tokens are routed to one EP rank
-            self.token_send_buf.shape[0] * self.ep_size,
+            MoE.token_send_buf.shape[0] * self.ep_size,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
         )
+        print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -532,7 +545,7 @@ class MoE(nn.Module):
             sorted_tokens_shape = idxs.shape + x.shape[1:]
 
         # Take necessary space from the `token_send_buf` symm mem
-        sorted_tokens = self.token_send_buf[: idxs.shape[0]]
+        sorted_tokens = MoE.token_send_buf[: idxs.shape[0]]
         sorted_tokens.copy_(x[idxs // topk_ids.shape[1]])
         # TODO: I tried to use `out=` to avoid copy, but it is not
         # differentiable
@@ -547,7 +560,7 @@ class MoE(nn.Module):
             # Sum the tokens over local experts, then we get tokens per EP rank,
             # which is the input splits
             torch.sum(
-                tokens_per_expert.view(self.ep_size, -1), dim=1, out=self.input_splits
+                tokens_per_expert.view(self.ep_size, -1), dim=1, out=MoE.input_splits
             )
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
@@ -558,22 +571,22 @@ class MoE(nn.Module):
 
         # DP to EP token shuffle. This part needs gradient.
         on_device_all_to_all_v(
-            self.token_gather_buf,
-            self.output_splits,
+            MoE.token_gather_buf,
+            MoE.output_splits,
             sorted_tokens,
-            self.input_splits,
+            MoE.input_splits,
             self.ep_group,
         )
 
         with torch.no_grad():
             # Output splits sanity check
             # expected_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=1)
-            # torch.testing.assert_close(self.output_splits, expected_splits)
+            # torch.testing.assert_close(MoE.output_splits, expected_splits)
             # Received tokens from all other ranks. TODO: use mask instead
-            received = self.output_splits.sum()
+            received = MoE.output_splits.sum()
 
         # TODO: don't use `received`
-        gathered_tokens = self.token_gather_buf[:received]
+        gathered_tokens = MoE.token_gather_buf[:received]
 
         # This part prepares a 1D tensor with the same length as
         # `gathered_tokens`. The 1D tensor is filled with local expert IDs which
@@ -589,21 +602,21 @@ class MoE(nn.Module):
 
         # Take necessary space from `token_send_buf` symm mem because we are
         # going to send them out after expert processing
-        processed_tokens = self.token_send_buf[:received]
+        processed_tokens = MoE.token_send_buf[:received]
         for i, expert in enumerate(self.experts.values()):
             processed_tokens[gatherd_idxs == i] = expert(
                 gathered_tokens[gatherd_idxs == i]
             )
 
         # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
-        gathered_tokens = self.token_gather_buf[: sorted_tokens_shape[0]]
-        received_splits = torch.empty_like(self.output_splits)  # unused
+        gathered_tokens = MoE.token_gather_buf[: sorted_tokens_shape[0]]
+        received_splits = torch.empty_like(MoE.output_splits)  # unused
         # EP to DP token shuffle
         on_device_all_to_all_v(
             gathered_tokens,
             received_splits,  # unused
             processed_tokens,
-            self.output_splits,
+            MoE.output_splits,
             self.ep_group,
         )
 
