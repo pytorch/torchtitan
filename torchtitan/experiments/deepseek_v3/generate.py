@@ -10,17 +10,18 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 
 from checkpoint import load_weights_from_hf
 from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (2, 2)
 # model_id, mesh_shape = "deepseek-ai/deepseek-v3", (8, 4)
+
 
 @dataclass
 class DistConfig:
@@ -76,9 +77,9 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 10):
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     x = tokenizer.apply_chat_template(
-        [messages] * dist_config.pp_size, 
-        add_generation_prompt=True, 
-        return_tensors="pt"
+        [messages] * dist_config.pp_size,
+        add_generation_prompt=True,
+        return_tensors="pt",
     )
     next_idx = x.shape[-1]
     x = torch.cat([x, torch.zeros(x.shape[0], n_tokens, dtype=torch.int64)], dim=-1)
@@ -89,31 +90,31 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 10):
             if dist_config.pp_rank == 0:
                 pp_schedule.step(x)
                 torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size - 1
+                    x,
+                    group=dist_config.pp_mesh.get_group(),
+                    group_src=dist_config.pp_size - 1,
                 )
             elif dist_config.pp_rank == dist_config.pp_size - 1:
                 preds = pp_schedule.step()
-                next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
+                next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
                 x[:, next_idx] = next_token
                 torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size - 1
+                    x,
+                    group=dist_config.pp_mesh.get_group(),
+                    group_src=dist_config.pp_size - 1,
                 )
             else:
                 pp_schedule.step()
                 torch.distributed.broadcast(
-                    x, 
-                    group=dist_config.pp_mesh.get_group(), 
-                    group_src=dist_config.pp_size -1
+                    x,
+                    group=dist_config.pp_mesh.get_group(),
+                    group_src=dist_config.pp_size - 1,
                 )
 
             next_idx += 1
         else:
             preds = model(x)
-            next_token = torch.argmax(preds[:, next_idx-1], dim=-1)
+            next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
             x[:, next_idx] = next_token
             next_idx += 1
     if rank == 0:

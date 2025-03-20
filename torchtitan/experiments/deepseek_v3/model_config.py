@@ -136,15 +136,17 @@ class ModelArgs:
     initializer_range: float = 0.02
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
-    rope_scaling: dict = field(default_factory=lambda: {
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
-        "mscale": 1.0,
-        "mscale_all_dim": 1.0,
-        "original_max_position_embeddings": 4096,
-        "type": "yarn"
-    })
+    rope_scaling: dict = field(
+        default_factory=lambda: {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 40,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096,
+            "type": "yarn",
+        }
+    )
     attention_bias: bool = False
     attention_dropout: float = 0.0
     pad_token_id = None
@@ -188,7 +190,7 @@ deepseek_v2_lite_config = ModelArgs(
         "mscale": 0.707,
         "mscale_all_dim": 0.707,
         "original_max_position_embeddings": 4096,
-        "type": "yarn"
+        "type": "yarn",
     },
 )
 
