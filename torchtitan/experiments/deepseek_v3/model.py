@@ -1029,7 +1029,7 @@ class DeepseekModel(torch.nn.Module):
         ):
             self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
         # If the model does not have an even number of layers, we add the
-        # extra layers to the last stage. 
+        # extra layers to the last stage.
         if config.stage_idx == config.num_stages - 1:
             start_idx = config.num_stages * layers_per_stage
             extra_layers = config.num_hidden_layers % config.num_stages

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -132,19 +132,11 @@ class ModelArgs:
     aux_loss_alpha: float = 0.001
     seq_aux: bool = True
     hidden_act: str = "silu"
-    max_position_embeddings: int = 163840
+    max_position_embeddings: int = 4096
     initializer_range: float = 0.02
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
-    rope_scaling: dict = field(default_factory=lambda: {
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
-        "mscale": 1.0,
-        "mscale_all_dim": 1.0,
-        "original_max_position_embeddings": 4096,
-        "type": "yarn"
-    })
+    rope_scaling = None
     attention_bias: bool = False
     attention_dropout: float = 0.0
     pad_token_id = None
@@ -174,22 +166,13 @@ deepseek_v2_lite_config = ModelArgs(
     v_head_dim=128,
     qk_nope_head_dim=128,
     topk_method="greedy",
-    n_group=1,
-    topk_group=1,
+    n_group=None,
+    topk_group=None,
     num_experts_per_tok=6,
     first_k_dense_replace=1,
     norm_topk_prob=False,
     scoring_func="softmax",
-    max_position_embeddings=4096,
-    rope_scaling={
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
-        "mscale": 0.707,
-        "mscale_all_dim": 0.707,
-        "original_max_position_embeddings": 4096,
-        "type": "yarn"
-    },
+    max_position_embeddings=2048,
 )
 
 
@@ -197,6 +180,5 @@ deepseek_v2_lite_config = ModelArgs(
 # Key is the model distribution ID on HuggingFace Hub
 deepseek_config_registry = {
     "deepseek-ai/DeepSeek-V2-Lite": deepseek_v2_lite_config,
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": deepseek_v2_lite_config,
     "deepseek-ai/deepseek-v3": ModelArgs(),
 }
