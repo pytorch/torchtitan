@@ -162,7 +162,7 @@ class JobConfig:
         self.parser.add_argument(
             "--metrics.save_for_all_ranks",
             action="store_true",
-            default=True,
+            default=False,
             help="""
                 Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
                 When this option is False and pipeline_parallel_degree is > 1, the metrics
