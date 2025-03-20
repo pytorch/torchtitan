@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# torchrun --standalone --nproc-per-node 8 run.py
+# torchrun --standalone --nproc-per-node 4 run.py
 import torch
 import torch.distributed as dist
 from checkpoint import load_weights_from_hf
@@ -12,8 +12,7 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import fully_shard
-from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 
 
 # Use DeepSeek-V2-Lite as a proxy
@@ -52,25 +51,6 @@ def run_full_model(
     load_weights_from_hf(model, model_id, device)
     model.train()
 
-    # Apply data parallelism
-    fsdp_mesh = mesh["fsdp"]
-    hsdp_mesh = mesh["ep", "fsdp"]
-    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
-    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
-    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
-    # it will be ineconomical re-gather the weights.
-    for layer in model.model.layers.values():
-        # Apply FSDP to experts
-        if hasattr(layer.mlp, "experts"):
-            for expert in layer.mlp.experts.values():
-                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
-        # Apply HSDP to other parts such as attention, layernorm, because they
-        # are doing DDP on EP dimension
-        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
-
-    # Apply HSDP on root model (lm_head, embeddings, etc)
-    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
-
     # Example inputs
     bs = 2
     seqlen = 128
@@ -94,7 +74,7 @@ def run_full_model(
         # Create pipeline schedule
         microbatches = 2
         losses = []
-        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+        pp_schedule = ScheduleGPipe(stage, microbatches, loss_fn=loss_fn)
 
         if pp_rank == 0:
             y = pp_schedule.step(x)
@@ -116,7 +96,7 @@ def run_full_model(
 
 
 if __name__ == "__main__":
-    mesh = dist.init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
+    mesh = dist.init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "ep"))
 
     run_full_model(mesh)
 
