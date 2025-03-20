@@ -46,58 +46,43 @@ def run_full_model(
     # Instantiate model
     with device, mesh:
         model = DeepseekForCausalLM(model_args)
+        model.eval()
 
     # Load weights
     load_weights_from_hf(model, model_id, device)
-    model.train()
 
     # Example inputs
     bs = 2
+    microbatches = 2
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
-    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
 
-    # Create loss function
-    loss_fn = torch.nn.functional.cross_entropy
+    # Create pipeline stage
+    stage = PipelineStage(
+        model,
+        pp_rank,
+        pp_size,
+        device,
+        group=pp_mesh.get_group(),
+    )
 
-    # Run forward and backward
-    if pp_size > 1:
-        # Create pipeline stage
-        stage = PipelineStage(
-            model,
-            pp_rank,
-            pp_size,
-            device,
-            group=pp_mesh.get_group(),
-        )
+    # Create pipeline schedule
+    pp_schedule = ScheduleGPipe(stage, microbatches)
 
-        # Create pipeline schedule
-        microbatches = 2
-        losses = []
-        pp_schedule = ScheduleGPipe(stage, microbatches, loss_fn=loss_fn)
-
-        if pp_rank == 0:
-            y = pp_schedule.step(x)
-        elif pp_rank == pp_size - 1:
-            y = pp_schedule.step(target=label, losses=losses)
-            loss = torch.mean(torch.stack(losses))
-        else:
-            pp_schedule.step()
+    # Run forward
+    if pp_rank == 0:
+        y = pp_schedule.step(x)
     else:
-        y = model(x)
-        loss = loss_fn(y, label)
-        loss.backward()
+        y = pp_schedule.step()
 
     if pp_rank == pp_size - 1:
-        print(f"logits: {y.shape}")
-        print(f"{loss=}")
-
-    print("Backward done")
+        print(y.shape)
 
 
 if __name__ == "__main__":
     mesh = dist.init_device_mesh("cuda", (2, 2), mesh_dim_names=("pp", "ep"))
 
-    run_full_model(mesh)
+    with torch.no_grad():
+        run_full_model(mesh)
 
     dist.destroy_process_group()
