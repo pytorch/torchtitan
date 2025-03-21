@@ -632,20 +632,6 @@ class MoE(nn.Module):
         return final_out
 
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 class Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -755,13 +741,6 @@ class Attention(nn.Module):
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return (
-            tensor.view(bsz, seq_len, self.num_heads, self.v_head_dim)
-            .transpose(1, 2)
-            .contiguous()
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -795,11 +774,6 @@ class Attention(nn.Module):
         )
         kv_seq_len = value_states.shape[-2]
 
-        # If there is kv cache (inference), we need to use the full sequence
-        # length
-        # if past_key_value is not None:
-        #     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
@@ -812,59 +786,35 @@ class Attention(nn.Module):
         key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
         key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
 
-        # if past_key_value is not None:
-        #     cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-        #     key_states, value_states = past_key_value.update(
-        #         key_states, value_states, self.layer_idx, cache_kwargs
-        #     )
-
-        attn_weights = (
-            torch.matmul(query_states, key_states.transpose(2, 3)) * self.softmax_scale
-        )
-
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
+        if attention_mask is not None:
+            # Attention mask was made 4D because the `attn_weights` above is 4D.
+            # We probably can make this mask smarter if we want to pack sequences
+            # together, instead of using padding. This optimization can be used in
+            # inference. For training, if we want to pack sequences, data loader
+            # will pass in a mask containing such info.
+            attention_mask = _prepare_4d_causal_attention_mask(
+                attention_mask,  # None, or user provided mask in 2D
+                (bsz, q_len),
+                hidden_states,
+                0,  # past_key_values_length, 0 when training
             )
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
 
-        # Attention mask was made 4D because the `attn_weights` above is 4D.
-        # We probably can make this mask smarter if we want to pack sequences
-        # together, instead of using padding. This optimization can be used in
-        # inference. For training, if we want to pack sequences, data loader
-        # will pass in a mask containing such info.
-        attention_mask = _prepare_4d_causal_attention_mask(
-            attention_mask,  # None, or user provided mask in 2D
-            (bsz, q_len),
-            hidden_states,
-            0,  # past_key_values_length, 0 when training
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query=query_states,
+            key=key_states,
+            value=value_states,
+            attn_mask=attention_mask,
+            dropout_p=self.attention_dropout,
+            is_causal=attention_mask is None,
+            scale=self.softmax_scale,
         )
-        if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-            )
-
-        attn_weights = attn_weights + attention_mask
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.v_head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.v_head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim)
-
         attn_output = self.o_proj(attn_output)
 
         return attn_output
