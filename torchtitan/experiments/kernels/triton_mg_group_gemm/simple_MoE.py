@@ -195,24 +195,6 @@ class MixtureOfExperts(nn.Module):
         return output, router_logits
 
     def forward_mg_gemm(self, x: torch.Tensor) -> torch.Tensor:
-        """
-                Forward pass using M*G grouped GEMM.
-
-                TODO:  hitting this error:
-                                               ^^^^^^^^^^^^^^^
-          File "/home/less/.conda/envs/tritondev/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-            return self._call_impl(*args, **kwargs)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          File "/home/less/.conda/envs/tritondev/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-            return forward_call(*args, **kwargs)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          File "/data/users/less/torchtitan/torchtitan/experiments/kernels/triton_mg_group_gemm/simple_MoE.py", line 306, in forward
-            return self.forward_mg_gemm(x)
-                   ^^^^^^^^^^^^^^^^^^^^^^^
-          File "/data/users/less/torchtitan/torchtitan/experiments/kernels/triton_mg_group_gemm/simple_MoE.py", line 224, in forward_mg_gemm
-            m_sizes.sum().item() == total_tokens
-        AssertionError: m_sizes sum (8192) must match total_tokens (4096)
-        """
         batch_size, seq_len, _ = x.shape
         x_flat = x.reshape(-1, self.input_dim)  # (batch_size * seq_len, input_dim)
         total_tokens = batch_size * seq_len
@@ -222,6 +204,22 @@ class MixtureOfExperts(nn.Module):
 
         # Get token counts for each expert
         token_counts = [indices.numel() for indices in expert_indices]
+        m_sizes = torch.tensor(token_counts, dtype=torch.int32, device=x.device)
+
+        print(f"Token counts per expert: {token_counts}")
+        print(f"m_sizes: {m_sizes}")
+
+        # Create the combined input tensor
+        combined_input = torch.zeros(sum(token_counts), self.input_dim, device=x.device)
+
+        start_idx = 0
+        for expert_idx, indices in enumerate(expert_indices):
+            if indices.numel() > 0:
+                end_idx = start_idx + indices.numel()
+                combined_input[start_idx:end_idx] = x_flat[indices]
+                start_idx = end_idx
+
+        print(f"combined_input shape: {combined_input.shape}")
 
         # First layer: input -> hidden
         fc1_weight_reshaped = self.expert_fc1_weight.reshape(
@@ -229,82 +227,79 @@ class MixtureOfExperts(nn.Module):
         )
         fc1_weight_combined = fc1_weight_reshaped.reshape(-1, self.input_dim)
 
-        # Create m_sizes tensor that matches the total input size
-        m_sizes = torch.zeros(self.num_experts, dtype=torch.int32, device=x.device)
-        for expert_idx, count in enumerate(token_counts):
-            m_sizes[expert_idx] = count
+        print(f"fc1_weight_combined shape: {fc1_weight_combined.shape}")
 
-        # Ensure m_sizes sums to total_tokens
-        assert (
-            m_sizes.sum().item() == total_tokens
-        ), f"m_sizes sum ({m_sizes.sum().item()}) must match total_tokens ({total_tokens})"
+        # Run the grouped GEMM
+        hidden_outputs = grouped_gemm_forward(
+            combined_input, fc1_weight_combined, m_sizes
+        )
 
-        # Run the grouped GEMM with the full input tensor
-        hidden_outputs = grouped_gemm_forward(x_flat, fc1_weight_combined, m_sizes)
+        print(f"hidden_outputs shape after first GEMM: {hidden_outputs.shape}")
 
         # Apply activation
         hidden_outputs = F.gelu(hidden_outputs)
 
-        # Check and ensure dimensions match
-        hidden_dim = self.hidden_dim
-        output_dim = self.output_dim
+        print(f"hidden_outputs shape after activation: {hidden_outputs.shape}")
 
-        # Reshape FC2 weights to match expected format for grouped GEMM
+        # Second layer: hidden -> output
+        # Reshape hidden_outputs to match expected dimensions
+        reshaped_hidden_outputs = []
+        start_idx = 0
+
+        for expert_idx, count in enumerate(token_counts):
+            if count > 0:
+                end_idx = start_idx + count
+                # Take this expert's outputs and reshape to [count, hidden_dim]
+                expert_output = hidden_outputs[
+                    start_idx:end_idx,
+                    expert_idx * self.hidden_dim : (expert_idx + 1) * self.hidden_dim,
+                ]
+                reshaped_hidden_outputs.append(expert_output)
+                start_idx = end_idx
+
+        # Concatenate all reshaped outputs
+        hidden_outputs = torch.cat(reshaped_hidden_outputs, dim=0)
+
+        # Reshape expert weights for second layer
         fc2_weight_reshaped = self.expert_fc2_weight.reshape(
             self.num_experts, self.output_dim, self.hidden_dim
         )
         fc2_weight_combined = fc2_weight_reshaped.reshape(-1, self.hidden_dim)
 
-        # Make sure hidden_outputs has the right shape [M_total, hidden_dim]
-        # where M_total is the sum of token counts
-        # This ensures K dimension matches between hidden_outputs and fc2_weight_combined
-        if hidden_outputs.shape[1] != hidden_dim:
-            hidden_outputs = hidden_outputs.reshape(-1, hidden_dim)
+        print(f"fc2_weight_combined shape: {fc2_weight_combined.shape}")
 
-        # Run the grouped GEMM for the second layer
-        # Update m_sizes to match the actual number of tokens in hidden_outputs
-        # Create m_sizes tensor with the ACTUAL token counts
-        m_sizes = torch.tensor(token_counts, dtype=torch.int32, device=x.device)
-
-        # Ensure m_sizes sums to the total number of tokens in combined_input
-        assert (
-            m_sizes.sum() == combined_input.shape[0]
-        ), "m_sizes must sum to total tokens"
-
-        # Run the grouped GEMM
-        # When calling grouped_gemm_forward, use the full input tensor and adjusted m_sizes
+        # Run the second grouped GEMM
         expert_outputs_combined = grouped_gemm_forward(
-            x_flat, fc2_weight_combined, m_sizes
+            hidden_outputs, fc2_weight_combined, m_sizes
         )
 
-        # Add biases
-        """start_idx = 0
-        for expert_idx, count in enumerate(token_counts):
-            if count > 0:
-                end_idx = start_idx + count
-                bias_start = expert_idx * self.output_dim
-                bias_end = (expert_idx + 1) * self.output_dim
-                expert_outputs_combined[start_idx:end_idx] += self.expert_fc2_bias[
-                    bias_start:bias_end
-                ]
-                start_idx = end_idx
-        """
-        # Initialize final output tensor
-        final_output = torch.zeros(
-            batch_size * seq_len, self.output_dim, device=x.device
-        )
+        # Initialize final output tensor with correct shape
+        final_output = torch.zeros(total_tokens, self.output_dim, device=x.device)
 
         # Distribute the outputs back to the original token positions
         start_idx = 0
         for expert_idx, indices in enumerate(expert_indices):
             if indices.numel() > 0:
                 end_idx = start_idx + indices.numel()
+                # Get this expert's outputs
                 expert_outputs = expert_outputs_combined[start_idx:end_idx]
+
+                print(
+                    f"Expert {expert_idx} - indices shape: {indices.shape}, expert_outputs shape: {expert_outputs.shape}"
+                )
 
                 # Scale outputs by router probabilities
                 scaled_outputs = expert_outputs * dispatch_tensor[
                     indices, expert_idx
                 ].unsqueeze(1)
+
+                # Ensure dimensions match before using index_add_
+                if scaled_outputs.shape[1] != final_output.shape[1]:
+                    print(
+                        f"Dimension mismatch: scaled_outputs {scaled_outputs.shape}, final_output {final_output.shape}"
+                    )
+                    # Reshape if needed - make sure output_dim is correct
+                    scaled_outputs = scaled_outputs[:, : self.output_dim]
 
                 # Add to final output
                 final_output.index_add_(0, indices, scaled_outputs)
