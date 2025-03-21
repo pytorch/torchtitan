@@ -6,6 +6,8 @@
 
 # pyre-unsafe
 
+# autotuning from FBGemm with modifications: https://github.com/pytorch/FBGEMM/tree/main/fbgemm_gpu/experimental/gemm/triton_gemm
+
 import functools
 import os
 import sys
@@ -22,6 +24,93 @@ from triton.runtime import driver  # @manual
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
+_NV_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": block_size_m,
+            "BLOCK_SIZE_N": block_size_n,
+            "BLOCK_SIZE_K": block_size_k,
+        },
+        num_stages=num_stages,
+        num_warps=num_warps,
+        num_ctas=num_ctas,
+    )
+    for block_size_m in [64, 128]
+    for block_size_n in [64, 128, 256]
+    for block_size_k in [64, 128, 256]
+    for num_stages in [3, 4]
+    for num_warps in [4, 8]
+    for num_ctas in [1]
+]
+
+
+def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
+    device = torch.cuda.current_device()
+    # BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps, num_stages
+    if dtsize is None:
+        dtsize = named_args["c_ptr"].element_size()
+    if dtype is None:
+        dtype = named_args["c_ptr"].dtype
+
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_M, BLOCK_N, BLOCK_K, num_stages = (
+            kw["BLOCK_SIZE_M"],
+            kw["BLOCK_SIZE_N"],
+            kw["BLOCK_SIZE_K"],
+            config.num_stages,
+        )
+        G, M, N, K = (
+            named_args["G"],
+            named_args["M_BUCKET"],
+            named_args["N"],
+            named_args["K"],
+        )
+
+        # 1. make sure we have enough smem
+        max_shared_memory = driver.active.utils.get_device_properties(device)[
+            "max_shared_mem"
+        ]
+
+        required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
+        if required_shared_memory > max_shared_memory:
+            continue
+
+        M_PER_GROUP = M // G
+        MIN_M_TILES = 32 if torch.version.hip else 64
+        # 2. make sure we don't load M tiles that are too big
+        if BLOCK_M > MIN_M_TILES and BLOCK_M > (M_PER_GROUP * 2):
+            continue
+        # 3. make sure we don't load N tiles that are too small
+        if BLOCK_M < 128 and BLOCK_M < (M_PER_GROUP // 2):
+            continue
+
+        num_sm = driver.active.utils.get_device_properties(device)[
+            "multiprocessor_count"
+        ]
+        N_TILES = N // BLOCK_N
+        MIN_N_TILES = 32 if torch.version.hip else 64
+        # 4. make sure we don't load N tiles that are too big
+        if BLOCK_N > MIN_N_TILES and M * N_TILES < num_sm:
+            continue
+        # 5. make sure we don't load N tiles that are too small
+        if BLOCK_N < 128 and M * N_TILES > 2 * num_sm:
+            continue
+        # 6. make sure K can be evenly divided
+        if K % BLOCK_K != 0:
+            continue
+
+        pruned_configs.append(config)
+
+    return pruned_configs
+
+
+@triton.autotune(
+    configs=_NV_CONFIGS,
+    key=["G", "M_BUCKET", "N", "K"],
+    prune_configs_by={"early_config_prune": early_config_prune},
+)
 @triton.jit
 def _kernel_grouped_gemm(
     a_desc_ptr,
@@ -235,37 +324,43 @@ def _grouped_gemm(
 
     try:
         if USE_TMA_LOAD and desc_helper is not None:
-            # Fixed block sizes that work well for most cases
-            BLOCK_SIZE_M = 64
-            BLOCK_SIZE_N = 64
-            BLOCK_SIZE_K = 32
 
-            desc_helper.fill_2d_tma_descriptor(
-                "x",
-                x.data_ptr(),
-                M_total,
-                K,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_K,
-                x.element_size(),
-            )
+            def grid(META):
+                if USE_TMA_LOAD:
+                    nonlocal desc_helper
+                    # Fixed block sizes that work well for most cases
+                    # BLOCK_SIZE_M = 64
+                    # BLOCK_SIZE_N = 64
+                    # BLOCK_SIZE_K = 32
 
-            desc_helper.fill_2d_tma_descriptor(
-                "w",
-                w.data_ptr(),
-                N,
-                K,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_K,
-                w.element_size(),
-            )
+                    desc_helper.fill_2d_tma_descriptor(
+                        "x",
+                        x.data_ptr(),
+                        M_total,
+                        K,
+                        META["BLOCK_SIZE_M"],
+                        META["BLOCK_SIZE_K"],
+                        x.element_size(),
+                    )
+
+                    desc_helper.fill_2d_tma_descriptor(
+                        "w",
+                        w.data_ptr(),
+                        N,
+                        K,
+                        META["BLOCK_SIZE_N"],
+                        META["BLOCK_SIZE_K"],
+                        w.element_size(),
+                    )
+                return (NUM_SMS,)
+
     except Exception as e:
         print(f"Error in TMA descriptor setup: {e}")
 
     assert x_scale is None
     assert w_scale is None
-    # TODO -  autotuning
-    _kernel_grouped_gemm[grid_size](
+
+    _kernel_grouped_gemm[grid](
         desc_x,
         desc_w,
         y,
@@ -278,9 +373,6 @@ def _grouped_gemm(
         NUM_SMS,
         USE_TMA_LOAD,
         USE_TMA_STORE,
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_K=32,
     )
 
     # Verify the output shape
