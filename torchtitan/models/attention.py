@@ -25,18 +25,19 @@ class SDPA(torch.nn.Module):
     use_flex_attn: ClassVar[bool] = False
     flex_attn: ClassVar[Optional[Callable]] = None
 
-    def __init__(self) -> None:
-        self.use_flex_attn = model_args.use_flex_attn
+    def __init__(self, use_flex_attn) -> None:
+        super().__init__()
+        self.use_flex_attn = use_flex_attn
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
         if self.use_flex_attn:
-            # assert False, (type(xq), type(xk), type(xv))
+            _, _, seqlen, _ = q.shape
             self._init_flex_attn(seqlen=seqlen)
-            return self.flex_attn(xq, xk, xv, block_mask=self.block_mask)
+            return self.flex_attn(q, k, v, block_mask=self.block_mask)
         else:
-            return F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
     @torch.no_grad()
     def _init_flex_attn(self, seqlen: int) -> None:
