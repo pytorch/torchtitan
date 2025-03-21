@@ -206,7 +206,7 @@ def _grouped_gemm(
     # Create output tensor with correct shape [M_total, N]
     y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
     USE_TMA_STORE = True
 
@@ -292,7 +292,7 @@ def _grouped_gemm(
     return y
 
 
-def group_gemm_forward(
+def grouped_gemm_forward(
     x: torch.Tensor, w: torch.Tensor, m_sizes: torch.Tensor
 ) -> torch.Tensor:
     return _grouped_gemm(x, w, m_sizes)
