@@ -196,86 +196,85 @@ class MixtureOfExperts(nn.Module):
 
     def forward_mg_gemm(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass using M*G grouped GEMM.
+                Forward pass using M*G grouped GEMM.
+
+                TODO:  hitting this error:
+                                               ^^^^^^^^^^^^^^^
+          File "/home/less/.conda/envs/tritondev/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+            return self._call_impl(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          File "/home/less/.conda/envs/tritondev/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+            return forward_call(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          File "/data/users/less/torchtitan/torchtitan/experiments/kernels/triton_mg_group_gemm/simple_MoE.py", line 306, in forward
+            return self.forward_mg_gemm(x)
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+          File "/data/users/less/torchtitan/torchtitan/experiments/kernels/triton_mg_group_gemm/simple_MoE.py", line 224, in forward_mg_gemm
+            m_sizes.sum().item() == total_tokens
+        AssertionError: m_sizes sum (8192) must match total_tokens (4096)
         """
         batch_size, seq_len, _ = x.shape
         x_flat = x.reshape(-1, self.input_dim)  # (batch_size * seq_len, input_dim)
+        total_tokens = batch_size * seq_len
 
         # Get routing information
         router_logits, dispatch_tensor, expert_indices = self.router(x)
 
-        # Get token counts for each expert (this will be our M-dimension group sizes)
+        # Get token counts for each expert
         token_counts = [indices.numel() for indices in expert_indices]
-        m_sizes = torch.tensor(token_counts, dtype=torch.int32, device=x.device)
 
-        # If any expert has 0 tokens, assign at least 1 token (can be a dummy)
-        for expert_idx, count in enumerate(token_counts):
-            if count == 0:
-                # Create a dummy token (will be multiplied by 0 later)
-                if expert_idx == 0:
-                    # For the first expert, just duplicate the first token
-                    indices = torch.zeros(1, dtype=torch.long, device=x.device)
-                else:
-                    # For other experts, take the first token from the previous expert
-                    indices = expert_indices[expert_idx - 1][:1]
-                expert_indices[expert_idx] = indices
-                token_counts[expert_idx] = 1
-                m_sizes[expert_idx] = 1
-
-        # Create the combined input tensor for grouped GEMM
-        # We need to arrange the tokens in groups corresponding to each expert
-        combined_input = torch.zeros(sum(token_counts), self.input_dim, device=x.device)
-
-        start_idx = 0
-        for expert_idx, indices in enumerate(expert_indices):
-            if indices.numel() > 0:
-                end_idx = start_idx + indices.numel()
-                combined_input[start_idx:end_idx] = x_flat[indices]
-                start_idx = end_idx
-
-        # First layer: input -> hidden (grouped GEMM)
-        # Reshape expert weights to match the expected format
+        # First layer: input -> hidden
         fc1_weight_reshaped = self.expert_fc1_weight.reshape(
             self.num_experts, self.hidden_dim, self.input_dim
         )
-
-        # Convert to the format expected by grouped_gemm_forward
-        # We need it as (N, K) where N is the total output dimension across all experts
         fc1_weight_combined = fc1_weight_reshaped.reshape(-1, self.input_dim)
 
-        # Run the grouped GEMM
-        hidden_outputs = grouped_gemm_forward(
-            combined_input, fc1_weight_combined, m_sizes
-        )
-
-        # Add biases
-        """start_idx = 0
+        # Create m_sizes tensor that matches the total input size
+        m_sizes = torch.zeros(self.num_experts, dtype=torch.int32, device=x.device)
         for expert_idx, count in enumerate(token_counts):
-            if count > 0:
-                end_idx = start_idx + count
-                bias_start = expert_idx * self.hidden_dim
-                bias_end = (expert_idx + 1) * self.hidden_dim
-                # hidden_outputs[start_idx:end_idx] += self.expert_fc1_bias[
-                hidden_outputs[start_idx:end_idx] += self.expert_fc1_bias[
-                    bias_start:bias_end
-                ].unsqueeze(0)
-                # bias_start:bias_end
-                # ]
-                start_idx = end_idx
-        """
+            m_sizes[expert_idx] = count
+
+        # Ensure m_sizes sums to total_tokens
+        assert (
+            m_sizes.sum().item() == total_tokens
+        ), f"m_sizes sum ({m_sizes.sum().item()}) must match total_tokens ({total_tokens})"
+
+        # Run the grouped GEMM with the full input tensor
+        hidden_outputs = grouped_gemm_forward(x_flat, fc1_weight_combined, m_sizes)
+
         # Apply activation
         hidden_outputs = F.gelu(hidden_outputs)
 
-        # Second layer: hidden -> output (grouped GEMM)
-        # Reshape expert weights
+        # Check and ensure dimensions match
+        hidden_dim = self.hidden_dim
+        output_dim = self.output_dim
+
+        # Reshape FC2 weights to match expected format for grouped GEMM
         fc2_weight_reshaped = self.expert_fc2_weight.reshape(
             self.num_experts, self.output_dim, self.hidden_dim
         )
         fc2_weight_combined = fc2_weight_reshaped.reshape(-1, self.hidden_dim)
 
+        # Make sure hidden_outputs has the right shape [M_total, hidden_dim]
+        # where M_total is the sum of token counts
+        # This ensures K dimension matches between hidden_outputs and fc2_weight_combined
+        if hidden_outputs.shape[1] != hidden_dim:
+            hidden_outputs = hidden_outputs.reshape(-1, hidden_dim)
+
+        # Run the grouped GEMM for the second layer
+        # Update m_sizes to match the actual number of tokens in hidden_outputs
+        # Create m_sizes tensor with the ACTUAL token counts
+        m_sizes = torch.tensor(token_counts, dtype=torch.int32, device=x.device)
+
+        # Ensure m_sizes sums to the total number of tokens in combined_input
+        assert (
+            m_sizes.sum() == combined_input.shape[0]
+        ), "m_sizes must sum to total tokens"
+
         # Run the grouped GEMM
+        # When calling grouped_gemm_forward, use the full input tensor and adjusted m_sizes
         expert_outputs_combined = grouped_gemm_forward(
-            hidden_outputs, fc2_weight_combined, m_sizes
+            x_flat, fc2_weight_combined, m_sizes
         )
 
         # Add biases
