@@ -71,8 +71,8 @@ def compute_reference_forward(x, w, m_sizes):
         x_names=["N"],  # We'll vary the output dimension
         x_vals=[1024, 2048, 4096, 8192, 16384],  # Different output dimensions to test
         line_arg="provider",  # We'll compare different providers
-        line_vals=["pytorch_reference", "optimized_kernel"],
-        line_names=["PyTorch Reference", "Optimized Kernel"],
+        line_vals=["pytorch_reference", "M*G grouped GEMM"],
+        line_names=["PyTorch Reference", "M*G grouped Kernel"],
         styles=[("blue", "-"), ("red", "-")],
         ylabel="TFLOPS",  # We'll measure TFLOPS
         plot_name="mg_grouped_gemm_comparison",
