@@ -106,11 +106,13 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
     return pruned_configs
 
 
+"""
 @triton.autotune(
     configs=_NV_CONFIGS,
     key=["G", "M_BUCKET", "N", "K"],
     prune_configs_by={"early_config_prune": early_config_prune},
 )
+
 @triton.jit
 def _kernel_grouped_gemm(
     a_desc_ptr,
@@ -259,6 +261,175 @@ def _kernel_grouped_gemm(
                         c,
                         mask=offs_am[:, None] < m_size and offs_bn[None, :] < n_size,
                     )
+"""
+
+
+# Flat Global Indexing Kernel (NG-style)
+@triton.autotune(
+    configs=_NV_CONFIGS,
+    key=["G", "M_BUCKET", "N", "K"],
+    prune_configs_by={"early_config_prune": early_config_prune},
+)
+@triton.jit
+def _kernel_grouped_gemm_flat_indexing(
+    a_desc_ptr,
+    b_desc_ptr,
+    c_ptr,
+    workspace,
+    m_sizes,
+    # problem sizes
+    G: tl.constexpr,
+    M_BUCKET: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    USE_TMA_LOAD: tl.constexpr,
+    USE_TMA_STORE: tl.constexpr,
+    USE_FAST_ACCUM: tl.constexpr,
+    # tile sizes
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    # Use NG-style flat global indexing
+    tidx = tl.program_id(0)
+
+    dtype = c_ptr.dtype.element_ty
+    TMA_SIZE: tl.constexpr = 128
+    if USE_TMA_STORE:
+        c_desc_ptr = workspace + tidx * TMA_SIZE
+    else:
+        c_desc_ptr = None
+
+    M_end_offset = 0
+    iterated_tiles = 0  # Track total tiles processed so far
+
+    for g in range(G):
+        # Move across groups
+        M_start_offset = M_end_offset
+        m_size = tl.load(m_sizes + g)
+        M_end_offset = M_start_offset + m_size
+
+        if m_size > 0:
+            # Compute for this group
+            n_size = N
+
+            # Calculate the number of tiles for this group
+            num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
+            num_n_tiles = tl.cdiv(n_size, BLOCK_SIZE_N)
+            num_tiles = num_m_tiles * num_n_tiles
+
+            if USE_TMA_STORE:
+                # Set up TMA descriptor for output
+                # pyre-ignore
+                tl.extra.cuda.experimental_device_tensormap_create2d(
+                    desc_ptr=c_desc_ptr,
+                    global_address=c_ptr + M_start_offset * N,
+                    load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+                    global_size=[m_size, n_size],
+                    element_ty=c_ptr.dtype.element_ty,
+                )
+                # pyre-ignore
+                tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(c_desc_ptr)
+
+            # Process tiles using the NG-style flat indexing approach
+            # Only threads with IDs in the range [iterated_tiles, iterated_tiles + num_tiles) work on this group
+            while tidx >= iterated_tiles and tidx < iterated_tiles + num_tiles:
+                gidx = (
+                    tidx - iterated_tiles
+                )  # Convert to local tile index within this group
+
+                # Split M first and N second
+                tile_m_idx = gidx % num_m_tiles
+                tile_n_idx = gidx // num_m_tiles
+
+                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+                tl.static_assert(K % BLOCK_SIZE_K == 0)
+
+                if USE_TMA_LOAD:
+                    # Use TMA to load input and weight blocks
+                    m_offset = (M_start_offset + tile_m_idx * BLOCK_SIZE_M).to(tl.int32)
+                    n_offset = (tile_n_idx * BLOCK_SIZE_N).to(tl.int32)
+
+                    for k_offset in range(0, K, BLOCK_SIZE_K):
+                        # Load input block [M, K]
+                        a = tl._experimental_descriptor_load(
+                            a_desc_ptr,
+                            [m_offset, k_offset],
+                            [BLOCK_SIZE_M, BLOCK_SIZE_K],
+                            dtype,
+                        )
+
+                        # Load weight block [N, K]
+                        b = tl._experimental_descriptor_load(
+                            b_desc_ptr,
+                            [n_offset, k_offset],
+                            [BLOCK_SIZE_N, BLOCK_SIZE_K],
+                            dtype,
+                        )
+
+                        # Compute matrix multiplication
+                        if USE_FAST_ACCUM:
+                            accumulator = tl.dot(a, b.T, accumulator)
+                        else:
+                            accumulator += tl.dot(a, b.T)
+                else:
+                    # Manual load without TMA
+                    offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                    offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                    offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+                    a_ptrs = (
+                        a_desc_ptr
+                        + (M_start_offset + offs_am[:, None]) * K
+                        + offs_k[None, :]
+                    )
+
+                    b_ptrs = b_desc_ptr + (offs_bn[:, None]) * K + offs_k[None, :]
+
+                    for k_offset in range(0, K, BLOCK_SIZE_K):
+                        # Load with bounds checking
+                        a = tl.load(a_ptrs, mask=offs_am[:, None] < m_size)
+                        b = tl.load(b_ptrs, mask=offs_bn[:, None] < n_size)
+
+                        # Compute matrix multiplication
+                        accumulator += tl.dot(a, b.T)
+
+                        # Update pointers for next block
+                        a_ptrs += BLOCK_SIZE_K
+                        b_ptrs += BLOCK_SIZE_K
+
+                # Store result
+                if USE_TMA_STORE:
+                    # Store using TMA
+                    m_offset = (tile_m_idx * BLOCK_SIZE_M).to(tl.int32)
+                    n_offset = (tile_n_idx * BLOCK_SIZE_N).to(tl.int32)
+
+                    tl._experimental_descriptor_store(
+                        c_desc_ptr,
+                        accumulator.to(c_ptr.dtype.element_ty),
+                        [m_offset, n_offset],
+                    )
+                else:
+                    # Manual store
+                    offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                    offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+
+                    c = accumulator.to(c_ptr.dtype.element_ty)
+
+                    tl.store(
+                        c_ptr
+                        + (M_start_offset + offs_am[:, None]) * N  # Row stride is N
+                        + offs_bn[None, :],  # Column offset
+                        c,
+                        mask=offs_am[:, None] < m_size and offs_bn[None, :] < n_size,
+                    )
+
+                # Move to the next tile using the stride equal to NUM_SMS
+                tidx += NUM_SMS
+
+            # Update the total tiles count for the next group
+            iterated_tiles += num_tiles
 
 
 TT_FP8_DTYPE = tl.float8e4nv
@@ -351,7 +522,7 @@ def _grouped_gemm(
     assert x_scale is None
     assert w_scale is None
 
-    _kernel_grouped_gemm[grid](
+    _kernel_grouped_gemm_flat_indexing[grid](  # _kernel_grouped_gemm[grid](
         desc_x,
         desc_w,
         y,
