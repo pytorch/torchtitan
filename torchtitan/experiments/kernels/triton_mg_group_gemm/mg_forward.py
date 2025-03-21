@@ -90,7 +90,7 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
             "multiprocessor_count"
         ]
         N_TILES = N // BLOCK_N
-        MIN_N_TILES = 32 if torch.version.hip else 64
+        MIN_N_TILES = 64
         # 4. make sure we don't load N tiles that are too big
         if BLOCK_N > MIN_N_TILES and M * N_TILES < num_sm:
             continue
@@ -472,7 +472,7 @@ def _grouped_gemm(
 
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
-    USE_TMA_STORE = False  # Sometimes results in compile error
+    USE_TMA_STORE = False  # TODO: Sometimes results in compile error and not seeing perf win with it yet...
 
     desc_helper = None
     desc_x = x
