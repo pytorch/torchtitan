@@ -23,6 +23,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.experiments.simple_fsdp import disable_data_parallel
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -222,7 +223,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             for m in self.model_parts:
                 m.to_empty(device=init_device)
-                with torch.no_grad():
+                with disable_data_parallel() if job_config.model.name == "llama3_simple_fsdp" else torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
                 m.train()
 
@@ -235,7 +236,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
             model.to_empty(device=init_device)
-            with torch.no_grad():
+            with disable_data_parallel() if job_config.model.name == "llama3_simple_fsdp" else torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
             model.train()
 
