@@ -78,7 +78,7 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
             continue
 
         M_PER_GROUP = M // G
-        MIN_M_TILES = 32 if torch.version.hip else 64
+        MIN_M_TILES = 64
         # 2. make sure we don't load M tiles that are too big
         if BLOCK_M > MIN_M_TILES and BLOCK_M > (M_PER_GROUP * 2):
             continue
@@ -126,6 +126,7 @@ def _kernel_grouped_gemm(
     NUM_SMS: tl.constexpr,
     USE_TMA_LOAD: tl.constexpr,
     USE_TMA_STORE: tl.constexpr,
+    USE_FAST_ACCUM: tl.constexpr,
     # tile sizes
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -134,8 +135,8 @@ def _kernel_grouped_gemm(
     pid = tl.program_id(0)
     num_pid = tl.num_programs(0)
 
-    dtype: tl.dtype = c_ptr.dtype.element_ty
-    TMA_SIZE: tl.constexpr = tl.constexpr(128)
+    dtype = c_ptr.dtype.element_ty
+    TMA_SIZE = 128
     if USE_TMA_STORE:
         c_desc_ptr = workspace + pid * TMA_SIZE
     else:
@@ -163,8 +164,7 @@ def _kernel_grouped_gemm(
                 # pyre-ignore
                 tl.extra.cuda.experimental_device_tensormap_create2d(
                     desc_ptr=c_desc_ptr,
-                    global_address=c_ptr
-                    + M_start_offset * N,  # Offset to this group's output
+                    global_address=c_ptr + M_start_offset * N,
                     load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
                     global_size=[m_size, n_size],
                     element_ty=c_ptr.dtype.element_ty,
@@ -204,7 +204,10 @@ def _kernel_grouped_gemm(
                         )
 
                         # Compute matrix multiplication
-                        accumulator += tl.dot(a, b.T)
+                        if USE_FAST_ACCUM:
+                            accumulator = tl.dot(a, b.T, accumulator)
+                        else:
+                            accumulator += tl.dot(a, b.T)
                 else:
                     # Manual load without TMA
                     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -267,6 +270,7 @@ def _grouped_gemm(
     m_sizes: torch.Tensor,
     x_scale: Optional[torch.Tensor] = None,
     w_scale: Optional[torch.Tensor] = None,
+    use_fast_accum: bool = False,
 ) -> torch.Tensor:
     """
     M*G style grouped GEMM with TMA support.
@@ -297,7 +301,7 @@ def _grouped_gemm(
 
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
-    USE_TMA_STORE = True
+    USE_TMA_STORE = False  # Sometimes results in compile error
 
     desc_helper = None
     desc_x = x
@@ -318,44 +322,31 @@ def _grouped_gemm(
             dtype=torch.uint8,
         )
 
-    # TODO - Skip autotuning - use fixed grid size
-    grid_size = (min(NUM_SMS, 4),)  # Use smaller grid for small inputs
+    def grid(META):
+        if USE_TMA_LOAD:
+            nonlocal desc_helper
+            desc_helper.fill_2d_tma_descriptor(
+                "x",
+                x.data_ptr(),
+                M_total,
+                K,
+                META["BLOCK_SIZE_M"],
+                META["BLOCK_SIZE_K"],
+                x.element_size(),
+            )
+
+            desc_helper.fill_2d_tma_descriptor(
+                "w",
+                w.data_ptr(),
+                N,
+                K,
+                META["BLOCK_SIZE_N"],
+                META["BLOCK_SIZE_K"],
+                w.element_size(),
+            )
+        return (NUM_SMS,)
+
     M_BUCKET = triton.next_power_of_2(M_total)
-
-    try:
-        if USE_TMA_LOAD and desc_helper is not None:
-
-            def grid(META):
-                if USE_TMA_LOAD:
-                    nonlocal desc_helper
-                    # Fixed block sizes that work well for most cases
-                    # BLOCK_SIZE_M = 64
-                    # BLOCK_SIZE_N = 64
-                    # BLOCK_SIZE_K = 32
-
-                    desc_helper.fill_2d_tma_descriptor(
-                        "x",
-                        x.data_ptr(),
-                        M_total,
-                        K,
-                        META["BLOCK_SIZE_M"],
-                        META["BLOCK_SIZE_K"],
-                        x.element_size(),
-                    )
-
-                    desc_helper.fill_2d_tma_descriptor(
-                        "w",
-                        w.data_ptr(),
-                        N,
-                        K,
-                        META["BLOCK_SIZE_N"],
-                        META["BLOCK_SIZE_K"],
-                        w.element_size(),
-                    )
-                return (NUM_SMS,)
-
-    except Exception as e:
-        print(f"Error in TMA descriptor setup: {e}")
 
     assert x_scale is None
     assert w_scale is None
@@ -373,12 +364,7 @@ def _grouped_gemm(
         NUM_SMS,
         USE_TMA_LOAD,
         USE_TMA_STORE,
-    )
-
-    # Verify the output shape
-    expected_output_shape = (M_total, N)
-    assert y.shape == expected_output_shape, (
-        f"Output shape mismatch: got {y.shape}, " f"expected {expected_output_shape}"
+        USE_FAST_ACCUM=use_fast_accum,
     )
 
     return y
