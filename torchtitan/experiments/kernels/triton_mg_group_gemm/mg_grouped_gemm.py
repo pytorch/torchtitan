@@ -240,7 +240,8 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
 # =============== Start Triton Kernels ===============
 """
 Forward pass for grouped GEMM with Triton, where grouping is M*G
-""""
+"""
+
 
 # Flat Global Indexing Kernel (previously gride stride loop)
 @triton.autotune(

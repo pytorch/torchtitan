@@ -15,10 +15,10 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Import the grouped GEMM implementations
+# Import grouped GEMM implementations
 try:
-    from mg_backward import grouped_gemm_backward
-    from mg_forward import group_gemm_forward as grouped_gemm
+    from mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
+
 except ImportError:
     logging.error(
         "Error importing grouped GEMM modules. Make sure the implementation files are in the correct path."
@@ -169,7 +169,7 @@ def test_forward_pass():
 
         # Run forward pass
         logging.info("Running forward pass with grouped GEMM")
-        result = grouped_gemm(x, w, m_sizes)
+        result = grouped_gemm_forward(x, w, m_sizes)
         logging.info(f"Forward result shape: {result.shape}")
 
         # Compute reference result
@@ -227,7 +227,7 @@ def test_backward_pass():
 
         # Step 1: Run forward pass
         logging.info("Running forward pass")
-        result = grouped_gemm(x, w, m_sizes)
+        result = grouped_gemm_forward(x, w, m_sizes)
         logging.info(f"Forward result shape: {result.shape}")
 
         # Create a gradient for backpropagation
@@ -308,7 +308,7 @@ def test_multiple_deepseek_configs():
             logging.info(f"Input x shape: {x.shape}, Weight w shape: {w.shape}")
 
             # Run forward pass
-            result = grouped_gemm(x, w, m_sizes)
+            result = grouped_gemm_forward(x, w, m_sizes)
             logging.info(f"Forward result shape: {result.shape}")
 
             # ===== FORWARD PASS VERIFICATION =====
