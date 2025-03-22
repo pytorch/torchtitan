@@ -821,7 +821,6 @@ class JobConfig:
             ]
             func = getattr(module, public_functions[0])
             func(self.parser)
-        )
 
 
 
