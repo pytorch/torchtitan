@@ -23,6 +23,8 @@ from triton.runtime import driver  # @manual
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# fp8 types
+TT_FP8_DTYPE = tl.float8e4nv
 
 _NV_CONFIGS = [
     triton.Config(
@@ -430,9 +432,6 @@ def _kernel_grouped_gemm_flat_indexing(
 
             # Update the total tiles count for the next group
             iterated_tiles += num_tiles
-
-
-TT_FP8_DTYPE = tl.float8e4nv
 
 
 def _grouped_gemm(

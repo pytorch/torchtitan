@@ -295,9 +295,9 @@ class MixtureOfExperts(nn.Module):
 
                 # Ensure dimensions match before using index_add_
                 if scaled_outputs.shape[1] != final_output.shape[1]:
-                    print(
-                        f"Dimension mismatch: scaled_outputs {scaled_outputs.shape}, final_output {final_output.shape}"
-                    )
+                    # print(
+                    #    f"Reshaping: Dimension mismatch: scaled_outputs {scaled_outputs.shape}, final_output {final_output.shape}"
+                    # )
                     # Reshape if needed - make sure output_dim is correct
                     scaled_outputs = scaled_outputs[:, : self.output_dim]
 
