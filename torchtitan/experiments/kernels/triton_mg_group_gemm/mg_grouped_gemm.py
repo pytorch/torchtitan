@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# credit - TMAHelper class, AutoTuning, and flat style indexed forward kernel are derived from FBGemm:
+# https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm
+
 # pyre-unsafe
 import functools
 import logging
@@ -16,7 +19,6 @@ import torch
 import triton
 import triton.language as tl
 
-from tma_cuda_wrapper import CudaUtils, TmaDescriptorHelper
 from triton.runtime import driver  # @manual
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -55,7 +57,6 @@ class CudaUtils:
         return torch.cuda.get_device_properties("cuda").multi_processor_count
 
 
-# this class derived from FBGemm -https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm/utils.py
 class TmaDescriptorHelper:
     """Helper class for managing TMA descriptors in Triton kernels."""
 
@@ -150,7 +151,6 @@ class TmaDescriptorHelper:
 
 
 # ======  Autotuning utilities ======
-# Autotuning from FBGemm - https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm/grouped_gemm.py
 
 _NV_CONFIGS = [
     triton.Config(
@@ -243,7 +243,7 @@ Forward pass for grouped GEMM with Triton, where grouping is M*G
 """
 
 
-# Flat Global Indexing Kernel (previously gride stride loop)
+# Flat Global Indexing Kernel (previously grid stride loop)
 @triton.autotune(
     configs=_NV_CONFIGS,
     key=["G", "M_BUCKET", "N", "K"],
@@ -264,17 +264,18 @@ def _kernel_grouped_gemm_flat_indexing(
     NUM_SMS: tl.constexpr,
     USE_TMA_LOAD: tl.constexpr,
     USE_TMA_STORE: tl.constexpr,
-    USE_FAST_ACCUM: tl.constexpr,
+    # TMA descriptor
+    TMA_SIZE: tl.constexpr,
     # tile sizes
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ) -> None:
-    # Use flat global indexing
+    # Use flat global indexing like FBGEMM
     tidx = tl.program_id(0)
 
     dtype = c_ptr.dtype.element_ty
-    TMA_SIZE: tl.constexpr = 128
+
     if USE_TMA_STORE:
         c_desc_ptr = workspace + tidx * TMA_SIZE
     else:
@@ -284,7 +285,7 @@ def _kernel_grouped_gemm_flat_indexing(
     iterated_tiles = 0  # Track total tiles processed so far
 
     for g in range(G):
-        # Move across groups
+        # Move down along groups
         M_start_offset = M_end_offset
         m_size = tl.load(m_sizes + g)
         M_end_offset = M_start_offset + m_size
@@ -293,13 +294,13 @@ def _kernel_grouped_gemm_flat_indexing(
             # Compute for this group
             n_size = N
 
-            # Calculate the number of tiles for this group
+            # number of tiles for this group
             num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
             num_n_tiles = tl.cdiv(n_size, BLOCK_SIZE_N)
             num_tiles = num_m_tiles * num_n_tiles
 
             if USE_TMA_STORE:
-                # Set up TMA descriptor for output
+                # TMA descriptor for output
                 # pyre-ignore
                 tl.extra.cuda.experimental_device_tensormap_create2d(
                     desc_ptr=c_desc_ptr,
@@ -318,7 +319,7 @@ def _kernel_grouped_gemm_flat_indexing(
                     tidx - iterated_tiles
                 )  # Convert to local tile index within this group
 
-                # Split M first and N second
+                # M index is overflow, N index is divided
                 tile_m_idx = gidx % num_m_tiles
                 tile_n_idx = gidx // num_m_tiles
 
@@ -346,12 +347,8 @@ def _kernel_grouped_gemm_flat_indexing(
                             [BLOCK_SIZE_N, BLOCK_SIZE_K],
                             dtype,
                         )
-
-                        # Compute matrix multiplication
-                        if USE_FAST_ACCUM:
-                            accumulator = tl.dot(a, b.T, accumulator)
-                        else:
-                            accumulator += tl.dot(a, b.T)
+                        # Main matmul
+                        accumulator += tl.dot(a, b.T)
                 else:
                     # Manual load without TMA
                     offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -371,7 +368,7 @@ def _kernel_grouped_gemm_flat_indexing(
                         a = tl.load(a_ptrs, mask=offs_am[:, None] < m_size)
                         b = tl.load(b_ptrs, mask=offs_bn[:, None] < n_size)
 
-                        # Compute matrix multiplication
+                        # Main matmul
                         accumulator += tl.dot(a, b.T)
 
                         # Update pointers for next block
@@ -680,13 +677,13 @@ def _kernel_grouped_gemm_backward_dw_scheduled(
 # ======== PyTorch wrapper functions ========
 
 
-def _grouped_gemm(
+def _grouped_gemm_forward_wrapper(
     x: torch.Tensor,
     w: torch.Tensor,
     m_sizes: torch.Tensor,
+    tma_size: int = 128,
     x_scale: Optional[torch.Tensor] = None,
     w_scale: Optional[torch.Tensor] = None,
-    use_fast_accum: bool = False,
 ) -> torch.Tensor:
     """
     M*G style grouped GEMM with TMA support.
@@ -725,7 +722,7 @@ def _grouped_gemm(
     workspace = None
 
     if USE_TMA_LOAD:
-        desc_helper = TmaDescriptorHelper()
+        desc_helper = TmaDescriptorHelper(tma_size=tma_size)
         desc_helper.init_tma_descriptor("x")
         desc_helper.init_tma_descriptor("w")
         desc_x = desc_helper.get_tma_descriptor_kernel_param("x")
@@ -780,7 +777,7 @@ def _grouped_gemm(
         NUM_SMS,
         USE_TMA_LOAD,
         USE_TMA_STORE,
-        USE_FAST_ACCUM=use_fast_accum,
+        TMA_SIZE=tma_size,
     )
 
     return y
@@ -789,7 +786,7 @@ def _grouped_gemm(
 def grouped_gemm_forward(
     x: torch.Tensor, w: torch.Tensor, m_sizes: torch.Tensor
 ) -> torch.Tensor:
-    return _grouped_gemm(x, w, m_sizes)
+    return _grouped_gemm_forward_wrapper(x, w, m_sizes)
 
 
 def grouped_gemm_backward(
