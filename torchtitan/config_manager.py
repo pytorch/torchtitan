@@ -753,6 +753,20 @@ class JobConfig:
             help="The minimum number of FT replica for each step.",
         )
 
+        # hpc , slurm etc settings
+        self.parser.add_argument(
+            "--hpc.rank_var",
+            type=str,
+            default=None,
+            help="The enviroment var set by launcher ( e.g.  mpirun, mpiexec, ect.) for rank.",
+        )
+        self.parser.add_argument(
+            "--hpc.local_rank_var",
+            type=str,
+            default=None,
+            help="The enviroment var set by launcher ( e.g.  mpirun, mpiexec, ect.) for local rank.",
+        )
+
         self.parser.add_argument(
             "--experimental.custom_import",
             type=str,
@@ -807,6 +821,9 @@ class JobConfig:
             ]
             func = getattr(module, public_functions[0])
             func(self.parser)
+        )
+
+
 
     def to_dict(self):
         return self.args_dict

@@ -31,6 +31,12 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+def hpc_setup(job_config: JobConfig):
+    if job_config.hpc.rank_var:
+        os.environ['RANK'] = os.getenv(job_config.hpc.rank_var)
+    if job_config.hpc.local_rank_var:
+        os.environ['LOCAL_RANK'] = os.getenv(job_config.hpc.local_rank_var)
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
@@ -463,6 +469,8 @@ if __name__ == "__main__":
     config = JobConfig()
     config.maybe_add_custom_args()
     config.parse_args()
+    hpc_setup(config)
+
     trainer: Optional[Trainer] = None
 
     try:
