@@ -502,35 +502,36 @@ class MoE(nn.Module):
     def setup_symm_mem(
         self, dtype: torch.dtype, device: torch.device, shared: bool = False
     ):
-        # If Symmetric memory buffers are shared by all MoE instances across
-        # layers, we only need to initialize them once
-        if shared and self.token_send_buf is not None:
-            return
-
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
+        # Number of tokens to send to EP peers, aka. input splits
+        self.input_splits = symm_mem.empty(
+            self.ep_size, dtype=torch.int64, device=device
+        )
+        # Number of tokens to receive from EP peers, aka. output splits
+        self.output_splits = symm_mem.empty(
+            self.ep_size, dtype=torch.int64, device=device
+        )
+
+        # If Symmetric memory buffers are shared by all MoE instances across
+        # layers, we only need to initialize them once
+        handle = MoE if shared else self
+        if handle.token_send_buf is not None:
+            return
 
         # Input buffer for DP-to-EP shuffle
-        MoE.token_send_buf = symm_mem.empty(
+        handle.token_send_buf = symm_mem.empty(
             self.config.max_seq_len
             * self.num_experts_per_tok,  # seq len * top k (flattened)
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
         )
-        # Number of tokens to send to EP peers, aka. input splits
-        MoE.input_splits = symm_mem.empty(
-            self.ep_size, dtype=torch.int64, device=device
-        )
-        # Number of tokens to receive from EP peers, aka. output splits
-        MoE.output_splits = symm_mem.empty(
-            self.ep_size, dtype=torch.int64, device=device
-        )
         # Input buffer for EP-to-DP shuffle
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
-        MoE.token_gather_buf = symm_mem.empty(
-            MoE.token_send_buf.shape[0] * overflow,
+        handle.token_gather_buf = symm_mem.empty(
+            handle.token_send_buf.shape[0] * overflow,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
@@ -592,7 +593,7 @@ class MoE(nn.Module):
                     dim=1,
                     out=self.input_splits,
                 )
-            on_device_all_to_all_v(
+            token_gather_buf = on_device_all_to_all_v(
                 self.token_gather_buf,
                 self.output_splits,
                 self.token_send_buf,
@@ -603,7 +604,7 @@ class MoE(nn.Module):
                 # Received tokens from all other ranks. TODO: use mask instead
                 received = self.output_splits.sum()
             # TODO: don't use `received`
-            gathered_tokens = self.token_gather_buf[:received]
+            gathered_tokens = token_gather_buf[:received]
         else:  # "torch_all_to_all"
             # Prepare input ans output splits
             with torch.no_grad():
@@ -649,14 +650,14 @@ class MoE(nn.Module):
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
-            returned_tokens = self.token_gather_buf[: sorted_tokens_shape[0]]
-            on_device_all_to_all_v(
-                returned_tokens,
+            token_gather_buf = on_device_all_to_all_v(
+                self.token_gather_buf,
                 self.input_splits,  # unused
                 processed_tokens,
                 self.output_splits,
                 self.ep_group,
             )
+            returned_tokens = token_gather_buf[: sorted_tokens_shape[0]]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
