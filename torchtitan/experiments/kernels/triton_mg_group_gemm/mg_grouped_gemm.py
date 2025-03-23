@@ -388,11 +388,18 @@ _NV_CONFIGS = [
 
 def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
     device = torch.cuda.current_device()
-    # BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps, num_stages
+    # Check if we're using grad_input_ptr (for backward) or c_ptr (for forward)
+    if "grad_input_ptr" in named_args:
+        ptr_name = "grad_input_ptr"
+    elif "c_ptr" in named_args:
+        ptr_name = "c_ptr"
+    else:
+        raise KeyError("Neither c_ptr nor grad_input_ptr found in kernel arguments")
+
     if dtsize is None:
-        dtsize = named_args["c_ptr"].element_size()
+        dtsize = named_args[ptr_name].element_size()
     if dtype is None:
-        dtype = named_args["c_ptr"].dtype
+        dtype = named_args[ptr_name].dtype
 
     pruned_configs = []
     for config in configs:
@@ -960,6 +967,293 @@ def _kernel_grouped_gemm_backward_dw_scheduled(
     )
 
 
+# ---- dx ----
+@triton.autotune(
+    configs=_NV_CONFIGS,
+    key=["G", "M_BUCKET", "N", "K"],
+    prune_configs_by={"early_config_prune": early_config_prune},
+)
+@triton.jit
+def _kernel_mg_dx_tma(
+    grad_output_desc_ptr,  # grad_output descriptor [M_total, N]
+    w_desc_ptr,  # weight descriptor [N, K]
+    grad_input_ptr,  # output grad_x [M_total, K]
+    workspace,  # workspace for TMA store
+    m_sizes,  # group sizes [G]
+    a_scale_ptr,  # Optional scale for grad_output in FP8
+    b_scale_ptr,  # Optional scale for w in FP8
+    # problem sizes
+    G: tl.constexpr,
+    M_BUCKET: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    # config
+    NUM_SMS: tl.constexpr,
+    USE_TMA_LOAD: tl.constexpr,
+    USE_TMA_STORE: tl.constexpr,
+    TMA_SIZE: tl.constexpr,
+    USE_FP8: tl.constexpr,
+    # tiles
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    """
+    TMA-optimized kernel for computing gradients with respect to input (dx).
+    For the forward pass Y = X @ W.T, the backward for input is:
+    grad_X = grad_Y @ W
+
+    Key differences from forward:
+    1. W is used directly (not transposed)
+    2. The reduction dimension is now N (not K)
+    3. Output is [M, K] instead of [M, N]
+    """
+    tbidx = tl.program_id(0)  # thread block index
+
+    c_dtype = grad_input_ptr.dtype.element_ty
+    c_desc_ptr = workspace + (tbidx * TMA_SIZE)
+
+    M_end = 0
+    processed_tiles = 0
+
+    for g in range(G):
+        # Move down along groups - same as forward
+        M_start = M_end
+        m_size = tl.load(m_sizes + g)
+        M_end = M_start + m_size
+
+        if m_size > 0:
+            # Process this group
+            # tiles for this group - now producing [M, K] output
+            num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
+            num_k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+            group_num_tiles = num_m_tiles * num_k_tiles
+
+            # TMA Store prep for [M, K] output
+            tl.extra.cuda.experimental_device_tensormap_create2d(
+                desc_ptr=c_desc_ptr,
+                global_address=grad_input_ptr + M_start * K,
+                load_size=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+                global_size=[m_size, K],
+                element_ty=c_dtype,
+            )
+            tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(c_desc_ptr)
+
+            while tbidx >= processed_tiles and tbidx < (
+                processed_tiles + group_num_tiles
+            ):
+                group_index = tbidx - processed_tiles
+
+                # Different tiling scheme for [M, K] output
+                tile_m_index = group_index % num_m_tiles
+                tile_k_index = group_index // num_m_tiles
+
+                # Initialize accumulator for grad_input block [M, K]
+                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
+
+                # Position in full matrix
+                m_offset = (M_start + (tile_m_index * BLOCK_SIZE_M)).to(tl.int32)
+                k_offset = (tile_k_index * BLOCK_SIZE_K).to(tl.int32)
+
+                # reduce along N dimension (instead of K in forward)
+                for n_offset in range(0, N, BLOCK_SIZE_N):
+                    # grad_output block [M, N]
+                    grad_output = tl._experimental_descriptor_load(
+                        grad_output_desc_ptr,
+                        [m_offset, n_offset],
+                        [BLOCK_SIZE_M, BLOCK_SIZE_N],
+                        c_dtype,
+                    )
+
+                    # weight block [N, K] - no transpose needed
+                    w = tl._experimental_descriptor_load(
+                        w_desc_ptr,
+                        [n_offset, k_offset],
+                        [BLOCK_SIZE_N, BLOCK_SIZE_K],
+                        c_dtype,
+                    )
+
+                    # grad_x = grad_output @ w
+                    # reducing along N dimension
+                    accumulator += tl.dot(grad_output, w)
+
+                # Apply FP8 scaling if needed
+                if USE_FP8:
+                    # Load the scales and apply
+                    offs_am = tile_m_index * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                    offs_bk = tile_k_index * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+
+                    a_scale = tl.load(
+                        a_scale_ptr + M_start + offs_am[:, None],
+                        mask=offs_am[:, None] < m_size,
+                    )
+                    b_scale = tl.load(
+                        b_scale_ptr + offs_bk[None, :],
+                        mask=offs_bk[None, :] < K,
+                    )
+
+                    accumulator = accumulator.to(tl.float32) * a_scale * b_scale
+
+                # Store using TMA
+                m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
+                k_offset = (tile_k_index * BLOCK_SIZE_K).to(tl.int32)
+
+                tl._experimental_descriptor_store(
+                    c_desc_ptr,
+                    accumulator.to(c_dtype),
+                    [m_offset, k_offset],
+                )
+
+                # Move to the next tile
+                tbidx += NUM_SMS
+
+            # Update the total tiles count for the next group
+            processed_tiles += group_num_tiles
+
+
+def grouped_gemm_dx_optimized(
+    grad_output: torch.Tensor,
+    w: torch.Tensor,
+    m_sizes: torch.Tensor,
+    tma_size: int = 128,
+    using_fp8: bool = False,
+    grad_output_scale: Optional[torch.Tensor] = None,
+    w_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Optimized backward pass for computing gradient with respect to input (dx)
+    using TMA patterns similar to the forward pass.
+
+    Args:
+        grad_output: Gradient of output, shape [M_total, N]
+        w: Weight tensor, shape [N, K]
+        m_sizes: Group sizes tensor, shape [G]
+        tma_size: Size of TMA descriptor
+        using_fp8: Whether to use FP8 quantization
+        grad_output_scale: Scale for grad_output in FP8 mode
+        w_scale: Scale for w in FP8 mode
+
+    Returns:
+        grad_x: Gradient with respect to x, shape [M_total, K]
+    """
+    """
+    Optimized backward pass for computing gradient with respect to input (dx)
+    using TMA patterns similar to the forward pass.
+
+    Args:
+        grad_output: Gradient of output, shape [M_total, N]
+        w: Weight tensor, shape [N, K]
+        m_sizes: Group sizes tensor, shape [G]
+        tma_size: Size of TMA descriptor
+        using_fp8: Whether to use FP8 quantization
+        grad_output_scale: Scale for grad_output in FP8 mode
+        w_scale: Scale for w in FP8 mode
+
+    Returns:
+        grad_x: Gradient with respect to x, shape [M_total, K]
+    """
+    if not CudaUtils.verify_tma():
+        raise NotImplementedError("Optimized dx computation requires TMA support")
+
+    G = m_sizes.shape[0]
+
+    assert grad_output.is_contiguous()
+    assert w.is_contiguous()
+    assert m_sizes.is_contiguous()
+
+    M_total, N_grad = grad_output.shape
+    N_w, K = w.shape
+
+    # Check dimensions
+    assert N_grad == N_w, f"Grad_output N ({N_grad}) must match weight N ({N_w})"
+
+    # Verify that the sum of m_sizes matches M_total
+    sum_m_sizes = m_sizes.sum().item()
+    assert (
+        M_total == sum_m_sizes
+    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+
+    # Create output tensor (grad_x) with shape [M_total, K]
+    grad_x = torch.empty(
+        (M_total, K), device=grad_output.device, dtype=grad_output.dtype
+    )
+
+    NUM_SMS = CudaUtils.get_num_sms()
+    USE_TMA_LOAD = True
+    USE_TMA_STORE = True
+
+    # Handle FP8 scaling if needed
+    if using_fp8 and (grad_output_scale is None or w_scale is None):
+        print("FP8 scaling in progress...")
+        grad_output_fp8, grad_output_scales = triton_quantize_fp8_row(grad_output)
+        w_fp8, w_scales = triton_quantize_fp8_row(w)
+        grad_output = grad_output_fp8
+        w = w_fp8
+        grad_output_scale = grad_output_scales
+        w_scale = w_scales
+
+    # Set up TMA descriptors
+    desc_helper = TmaDescriptorHelper(tma_size=tma_size)
+    desc_helper.init_tma_descriptor("grad_output")
+    desc_helper.init_tma_descriptor("w")
+    desc_grad_output = desc_helper.get_tma_descriptor_kernel_param("grad_output")
+    desc_w = desc_helper.get_tma_descriptor_kernel_param("w")
+
+    # Allocate workspace for TMA store
+    workspace = torch.empty(
+        NUM_SMS * desc_helper.tma_size,
+        device=grad_output.device,
+        dtype=torch.uint8,
+    )
+
+    def grid(META):
+        # Fill TMA descriptors with appropriate dimensions
+        desc_helper.fill_2d_tma_descriptor(
+            "grad_output",
+            grad_output.data_ptr(),
+            M_total,
+            N_grad,
+            META["BLOCK_SIZE_M"],
+            META["BLOCK_SIZE_N"],
+            grad_output.element_size(),
+        )
+
+        desc_helper.fill_2d_tma_descriptor(
+            "w",
+            w.data_ptr(),
+            N_w,
+            K,
+            META["BLOCK_SIZE_N"],
+            META["BLOCK_SIZE_K"],
+            w.element_size(),
+        )
+        return (NUM_SMS,)
+
+    M_BUCKET = triton.next_power_of_2(M_total)
+
+    # Launch the optimized kernel for computing grad_x
+    _kernel_mg_dx_tma[grid](
+        desc_grad_output,
+        desc_w,
+        grad_x,
+        workspace,
+        m_sizes,
+        grad_output_scale,
+        w_scale,
+        G,
+        M_BUCKET,
+        N_grad,  # N dimension is now the reduction dimension
+        K,
+        NUM_SMS,
+        USE_TMA_LOAD,
+        USE_TMA_STORE,
+        TMA_SIZE=tma_size,
+        USE_FP8=using_fp8,
+    )
+
+    return grad_x
+
+
 # ======== End Triton kernels ========
 
 # ======== PyTorch wrapper functions ========
@@ -1212,9 +1506,13 @@ def grouped_gemm_backward(
 
         try:
             logging.info(f"Computing grad_x with optimized kernel (TMA={can_use_tma})")
-
+            grad_x = grouped_gemm_dx_optimized(
+                grad_output,
+                w,
+                m_sizes,
+            )
             # Fixed grid size based on SM count
-            grid = (NUM_SMS,)
+            """grid = (NUM_SMS,)
 
             _kernel_grouped_gemm_backward_dx_scheduled[grid](
                 grad_output,
@@ -1239,6 +1537,7 @@ def grouped_gemm_backward(
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 EVEN_K=EVEN_K,
             )
+            """
 
             logging.info("Kernel run success: grad_x computation successful")
         except Exception as e:
