@@ -85,7 +85,7 @@ def run_full_model(
 
     # Use Symmetric Memory for MoE token shuffle. Do not share across layers,
     # because shuffle outputs are saved by autograd for backward.
-    model.setup_symm_mem(torch.bfloat16, device, shared=True)
+    model.setup_symm_mem(torch.bfloat16, device)
 
     # Run forward and backward
     if pp_size > 1:

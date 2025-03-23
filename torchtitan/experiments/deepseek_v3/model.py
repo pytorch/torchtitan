@@ -499,11 +499,12 @@ class MoE(nn.Module):
     # is that autograd requires tensors not be modified a second time, this
     # conflicts with our wish of sharing the symm mem across layers and/or
     # PP microbatches.
-    def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, shared: bool = False
-    ):
+    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
+
+        # Splits are not shared across layers, because autograd needs to save
+        # them for backward.
         # Number of tokens to send to EP peers, aka. input splits
         self.input_splits = symm_mem.empty(
             self.ep_size, dtype=torch.int64, device=device
@@ -513,14 +514,13 @@ class MoE(nn.Module):
             self.ep_size, dtype=torch.int64, device=device
         )
 
-        # If Symmetric memory buffers are shared by all MoE instances across
+        # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
-        handle = MoE if shared else self
-        if handle.token_send_buf is not None:
+        if MoE.token_send_buf is not None:
             return
 
         # Input buffer for DP-to-EP shuffle
-        handle.token_send_buf = symm_mem.empty(
+        MoE.token_send_buf = symm_mem.empty(
             self.config.max_seq_len
             * self.num_experts_per_tok,  # seq len * top k (flattened)
             self.config.hidden_size,  # hidden dim
@@ -530,8 +530,8 @@ class MoE(nn.Module):
         # Input buffer for EP-to-DP shuffle
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
-        handle.token_gather_buf = symm_mem.empty(
-            handle.token_send_buf.shape[0] * overflow,
+        MoE.token_gather_buf = symm_mem.empty(
+            MoE.token_send_buf.shape[0] * overflow,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
@@ -1195,10 +1195,8 @@ class DeepseekForCausalLM(torch.nn.Module):
 
     # Setup Symmetric Memory for MoE token shuffle.
     # Supports inference currently.
-    def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, shared: bool = False
-    ):
+    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         for layer in self.model.layers.values():
             if not isinstance(layer.mlp, MoE):
                 continue
-            layer.mlp.setup_symm_mem(dtype, device, shared)
+            layer.mlp.setup_symm_mem(dtype, device)
