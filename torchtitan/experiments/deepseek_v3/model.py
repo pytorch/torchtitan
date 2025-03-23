@@ -446,6 +446,11 @@ class MoE(nn.Module):
     """
 
     # Class attributes:
+    # Two shuffle method supported:
+    # 1. "torch_all_to_all"
+    # 2. "symm_mem" (see `setup_symm_mem` below)
+    shuffle_method = "torch_all_to_all"
+
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
     token_gather_buf: Optional[torch.Tensor] = None
@@ -483,12 +488,8 @@ class MoE(nn.Module):
             self.shared_experts = MLP(
                 config=config, intermediate_size=intermediate_size
             )
-        # Two shuffle method supported:
-        # 1. "torch_all_to_all"
-        # 2. "symm_mem" (see `setup_symm_mem` below)
-        self.shuffle_method = "torch_all_to_all"
 
-    # This function is used to create a symm mem buffer for MoE. It is for
+    # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
     # all_to_all APIs which requrie a GPU-to-CPU sync of the splits.  If a user
     # calls this function, the `shuffle_method` would switch from
@@ -498,13 +499,16 @@ class MoE(nn.Module):
     # is that autograd requires tensors not be modified a second time, this
     # conflicts with our wish of sharing the symm mem across layers and/or
     # PP microbatches.
-    def setup_symm_mem(self, dtype, device):
+    def setup_symm_mem(
+        self, dtype: torch.dtype, device: torch.device, shared: bool = False
+    ):
+        # If Symmetric memory buffers are shared by all MoE instances across
+        # layers, we only need to initialize them once
+        if shared and self.token_send_buf is not None:
+            return
+
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
-        # Symmetric memory buffers are shared by all MoE instances across
-        # layers, so we only need to initialize them once
-        if MoE.token_send_buf is not None:
-            return
 
         # Input buffer for DP-to-EP shuffle
         MoE.token_send_buf = symm_mem.empty(
@@ -523,9 +527,10 @@ class MoE(nn.Module):
             self.ep_size, dtype=torch.int64, device=device
         )
         # Input buffer for EP-to-DP shuffle
+        # Assuming worst case, 2x tokens are routed to one EP rank
+        overflow = 2
         MoE.token_gather_buf = symm_mem.empty(
-            # worst case, all tokens are routed to one EP rank
-            MoE.token_send_buf.shape[0] * self.ep_size,
+            MoE.token_send_buf.shape[0] * overflow,
             self.config.hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
@@ -578,27 +583,27 @@ class MoE(nn.Module):
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
-            MoE.token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+            self.token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
-            # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=MoE.token_send_buf[: idxs.shape[0]])
+            # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
             with torch.no_grad():
                 torch.sum(
                     tokens_per_expert.view(self.ep_size, -1),
                     dim=1,
-                    out=MoE.input_splits,
+                    out=self.input_splits,
                 )
             on_device_all_to_all_v(
-                MoE.token_gather_buf,
-                MoE.output_splits,
-                MoE.token_send_buf,
-                MoE.input_splits,
+                self.token_gather_buf,
+                self.output_splits,
+                self.token_send_buf,
+                self.input_splits,
                 self.ep_group,
             )
             with torch.no_grad():
                 # Received tokens from all other ranks. TODO: use mask instead
-                received = MoE.output_splits.sum()
+                received = self.output_splits.sum()
             # TODO: don't use `received`
-            gathered_tokens = MoE.token_gather_buf[:received]
+            gathered_tokens = self.token_gather_buf[:received]
         else:  # "torch_all_to_all"
             # Prepare input ans output splits
             with torch.no_grad():
@@ -629,7 +634,7 @@ class MoE(nn.Module):
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_send_buf` symm mem because we are
             # going to send them out after expert processing
-            processed_tokens = MoE.token_send_buf[: gathered_tokens.shape[0]]
+            processed_tokens = self.token_send_buf[: gathered_tokens.shape[0]]
         else:  # "torch_all_to_all"
             processed_tokens = torch.empty_like(gathered_tokens)
 
@@ -644,12 +649,12 @@ class MoE(nn.Module):
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
-            returned_tokens = MoE.token_gather_buf[: sorted_tokens_shape[0]]
+            returned_tokens = self.token_gather_buf[: sorted_tokens_shape[0]]
             on_device_all_to_all_v(
                 returned_tokens,
-                MoE.input_splits,  # unused
+                self.input_splits,  # unused
                 processed_tokens,
-                MoE.output_splits,
+                self.output_splits,
                 self.ep_group,
             )
         else:  # "torch_all_to_all"
@@ -1189,8 +1194,10 @@ class DeepseekForCausalLM(torch.nn.Module):
 
     # Setup Symmetric Memory for MoE token shuffle.
     # Supports inference currently.
-    def setup_symm_mem(self, dtype, device):
+    def setup_symm_mem(
+        self, dtype: torch.dtype, device: torch.device, shared: bool = False
+    ):
         for layer in self.model.layers.values():
             if not isinstance(layer.mlp, MoE):
                 continue
-            layer.mlp.setup_symm_mem(dtype, device)
+            layer.mlp.setup_symm_mem(dtype, device, shared)
