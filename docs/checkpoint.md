@@ -5,7 +5,7 @@ An example script for converting the original Llama3 checkpoints into the expect
 
 The script expects a path to the original checkpoint files, and a path to an output directory:
 ```bash
-python3 scripts/convert_llama_to_dcp.py <input_dir> <output_dir>
+python -m scripts.convert_llama_to_dcp <input_dir> <output_dir>
 ```
 
 
