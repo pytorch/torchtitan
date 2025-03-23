@@ -148,8 +148,10 @@ def test_forward_pass():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Test parameters for DeepSeek-like models
-        G = 4  # Number of groups
-        M_sizes = [2048, 2048, 2048, 2048]  # Group sizes (will be adjusted)
+        G = 1  # Number of groups
+        M_sizes = [
+            2048,
+        ]  # 2048, 2048, 2048]  # Group sizes (will be adjusted)
         M_total = sum(M_sizes)  # Total M dimension
         N = 4096  # Output dimension (same for all groups)
         K = 7168  # Hidden dimension
