@@ -187,7 +187,6 @@ class OnDeviceAllToAllV(torch.autograd.Function):
             if OnDeviceAllToAllV.max_output_shape is None
             else max(OnDeviceAllToAllV.max_output_shape, output.shape)
         )
-        print(f"FWD: {output_splits=}")
         return output
 
     @staticmethod
@@ -209,7 +208,6 @@ class OnDeviceAllToAllV(torch.autograd.Function):
 
         # Size info
         (grad_output_splits,) = ctx.saved_tensors
-        print(f"BWD: {grad_output_splits=}")
         grad_input_splits = torch.empty_like(grad_output_splits)  # unused
         grad_input = grad_output.new_empty(*ctx.input_shape)
 
