@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# credit - TMAHelper class, AutoTuning, and flat style indexed forward kernel are derived from FBGemm:
+# credit - TMAHelper class, AutoTuning, FP8 row quantization and flat style indexed forward kernel are derived from FBGemm:
 # https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm
 
 # pyre-unsafe
@@ -18,6 +18,7 @@ import torch
 
 import triton
 import triton.language as tl
+from triton import Config as TConfig
 
 from triton.runtime import driver  # @manual
 
@@ -149,6 +150,219 @@ class TmaDescriptorHelper:
 
 # ================== End of supporting functions ==================
 
+# ================== Start of FP8 row quantization ==================
+
+
+@triton.autotune(
+    configs=[
+        TConfig({"BLOCK_SIZE": 512}),
+        TConfig({"BLOCK_SIZE": 1024}),
+        TConfig({"BLOCK_SIZE": 2048}),
+        TConfig({"BLOCK_SIZE": 4096}),
+        TConfig({"BLOCK_SIZE": 8192}),
+    ],
+    key=["K"],
+)
+@triton.jit
+def _kernel_quantize_fp8_row(
+    A,
+    A_scale,
+    A_fp8,
+    scale_ub,
+    zero_start_index_M,
+    B,
+    M,
+    N,
+    K,
+    stride_ab,
+    stride_am,
+    stride_an,
+    stride_ak,
+    stride_ob,
+    stride_om,
+    stride_on,
+    stride_ok,
+    stride_zb,  # not used
+    stride_zm,  # not used
+    TL_FP8_DTYPE: tl.constexpr,
+    MAX_FP8: tl.constexpr,
+    EPS: tl.constexpr,
+    CLAMP_MAX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    USE_INT64: tl.constexpr,
+) -> None:
+    """Quantize and scale each row.
+
+    Scale per row i is computed as MAX_FP8 / max(abs(A[i, :]))
+
+    Kernel naively iterates through  matrix with [1, BLOCK_SIZE] tiles
+    in a max pass then scale/quantize pass.
+
+    Todo:
+        * Better tiling schemes.
+
+    Args:
+        A (Tensor): higher precision input tensor of 4 dimension.
+        A_scale (Tensor): [B * M * N] reciprocal scale tensor per row.
+        A_fp8 (Tensor): fp8 scaled tensor. A_fp8 = A / a_scale
+        scale_ub (Tensor): [1] Maximum value allowed for scale.
+        B (int): Size of dimenion 0
+        M (int): Size of dimenion 1
+        N (int): Size of dimenion 2
+        K (int): Size of dimenion 3
+        stride_ab (int): Stride of b dimension of A.
+        stride_am (int): Stride of m dimension of A.
+        stride_an (int): Stride of n dimension of A.
+        stride_ak (int): Stride of k dimension of A.
+        stride_ob (int): Stride of b dimension of output.
+        stride_om (int): Stride of m dimension of output.
+        stride_on (int): Stride of n dimension of output.
+        stride_ok (int): Stride of k dimension of output.
+        stride_zb (int): Stride of b dimension of jagged index.
+        stride_zm (int): Stride of m dimension of jagged index.
+        TL_FP8_DTYPE (tl.dtype): Target fp8 datatype.
+        MAX_FP8 (float): Maxmimum expressible value for FP8.
+        EPS (float): Epsilon value for numerical stability.
+        CLAMP_MAX (bool): Whethar to apply scale_ub.
+        Removed:  JAGGED (bool): Whether to use jagged indexing.
+        BLOCK_SIZE (int): Block size for reduction.
+        USE_INT64 (bool): Whether to use int64 indexing for large inputs.
+    """
+    pid = tl.program_id(0)
+    # Use int64 indexing for large inputs. This is slower, but
+    # needed to avoid index overflows.
+    if USE_INT64:
+        pid = pid.to(tl.int64)
+    n_offset = tl.arange(0, BLOCK_SIZE)
+    a_offset_base = (
+        pid // (M * N) * stride_ab
+        + (pid % (M * N)) // N * stride_am
+        + (pid % (M * N)) % N * stride_an
+    )
+    a_fp8_offset_base = (
+        pid // (M * N) * stride_ob
+        + (pid % (M * N)) // N * stride_om
+        + (pid % (M * N)) % N * stride_on
+    )
+
+    K_in = K
+
+    # Calculate max.
+    cur_max = 0.0
+    for _k in range(0, tl.cdiv(K_in, BLOCK_SIZE)):
+        a = tl.load(
+            A + a_offset_base + n_offset * stride_ak,
+            mask=n_offset < K_in,
+            other=0.0,
+        )
+        tile_max = tl.max(tl.abs(a))
+        cur_max = tl.maximum(tile_max, cur_max)
+        n_offset += BLOCK_SIZE
+
+    # Clamp max value appropriately.
+    if CLAMP_MAX:
+        ub = tl.load(scale_ub)
+        cur_max = tl.clamp(cur_max, EPS, ub)
+    else:
+        cur_max = tl.maximum(cur_max, EPS)
+    # Scale and quantize.
+    a_scale = MAX_FP8 / cur_max
+    tl.store(A_scale + pid, 1.0 / a_scale)
+    n_offset = tl.arange(0, BLOCK_SIZE)
+
+    for _k in range(0, tl.cdiv(K, BLOCK_SIZE)):
+        a = tl.load(
+            A + a_offset_base + n_offset * stride_ak,
+            mask=n_offset < K_in,
+            other=0.0,
+        )
+        a_fp8 = a * a_scale
+        # Clamp A to fp8 range to make sure there's no overflow.
+        # This is required for AMD. Nvidia's default saturation
+        # handles it, but it's nice to have anyway.
+        a_fp8 = tl.clamp(a_fp8, -MAX_FP8, MAX_FP8).to(TL_FP8_DTYPE)
+        tl.store(
+            A_fp8 + a_fp8_offset_base + n_offset * stride_ok,
+            a_fp8,
+            mask=n_offset < K,
+        )
+        n_offset += BLOCK_SIZE
+
+
+def triton_quantize_fp8_row(
+    a: torch.Tensor,
+    scale_ub: Optional[torch.Tensor] = None,
+    zero_start_index_M: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Call the triton quantize fp8 row kernel to quantize a tensor to fp8 with row-wise scalings.
+
+    Args:
+        a (Tensor): higher precision input tensor of 4 dimension.
+        scale_ub (Tensor): Maximum allowed value for scale.
+        zero_start_index_M (Tensor): Indicates number of nonzero elements in each row.
+
+    Returns:
+        torch.Tensor: fp8 scaled tensor.
+        torch.Tensor: reciprocal scale tensor per row.
+    """
+    assert a.dim() <= 4, "Triton only supports up to 4 dimension input tensor."
+    a_shape = a.shape
+    while a.dim() < 4:
+        a = a.unsqueeze(0)
+    # if zero_start_index_M is not None:
+    # There should be one value of zero_start_index_M per NxK matrix.
+    #     zero_start_index_M = zero_start_index_M.view(a.shape[0], a.shape[1])
+
+    # Set constant values.
+    pt_fp8_dtype = torch.float8_e4m3fn
+    tl_dtype = tl.float8e4nv
+    max_fp8 = torch.finfo(pt_fp8_dtype).max
+    eps = 1e-12
+
+    num_rows = a.numel() // a.shape[-1]
+    a_scale = torch.empty((num_rows), dtype=torch.float32, device=a.device)
+    a_fp8 = torch.empty(a.shape, device=a.device, dtype=pt_fp8_dtype)
+
+    # If input tensor is sufficiently large, we need to use int64 indexing.
+    use_int64 = a.numel() > (2**31 - 1)
+    grid = (num_rows,)
+
+    _kernel_quantize_fp8_row[grid](
+        a,
+        a_scale,
+        a_fp8,
+        scale_ub,
+        zero_start_index_M,
+        a.shape[0],
+        a.shape[1],
+        a.shape[2],
+        a.shape[3],
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        a.stride(3),
+        a_fp8.stride(0),
+        a_fp8.stride(1),
+        a_fp8.stride(2),
+        a_fp8.stride(3),
+        None,
+        None,
+        # zero_start_index_M.stride(0) if zero_start_index_M is not None else None,
+        # zero_start_index_M.stride(1) if zero_start_index_M is not None else None,
+        TL_FP8_DTYPE=tl_dtype,
+        MAX_FP8=max_fp8,
+        EPS=eps,
+        CLAMP_MAX=scale_ub is not None,
+        # JAGGED=zero_start_index_M is not None,
+        USE_INT64=use_int64,
+    )
+
+    return a_fp8.view(a_shape), a_scale.view(a_shape[:-1])
+
+
+# ================== End of FP8 row quantization ==================
+
 
 # ======  Autotuning utilities ======
 
@@ -250,11 +464,13 @@ Forward pass for grouped GEMM with Triton, where grouping is M*G
 )
 @triton.jit
 def _kernel_mg_forward_tma(
-    a_ptr,
-    b_ptr,
+    a_desc_ptr,
+    b_desc_ptr,
     c_ptr,
     workspace,
     m_sizes,
+    a_scale_ptr,
+    b_scale_ptr,
     # problem sizes
     G: tl.constexpr,
     M_BUCKET: tl.constexpr,
@@ -265,6 +481,7 @@ def _kernel_mg_forward_tma(
     USE_TMA_LOAD: tl.constexpr,
     USE_TMA_STORE: tl.constexpr,
     TMA_SIZE: tl.constexpr,
+    USE_FP8: tl.constexpr,
     # tiles
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -277,6 +494,7 @@ def _kernel_mg_forward_tma(
     tbidx = tl.program_id(0)  # thread block index
 
     c_dtype = c_ptr.dtype.element_ty
+
     c_desc_ptr = workspace + (tbidx * TMA_SIZE)
 
     M_end = 0
@@ -324,22 +542,39 @@ def _kernel_mg_forward_tma(
                 for k_offset in range(0, K, BLOCK_SIZE_K):
                     # input block [M,K]
                     a = tl._experimental_descriptor_load(
-                        a_ptr,
+                        a_desc_ptr,
                         [m_offset, k_offset],
                         [BLOCK_SIZE_M, BLOCK_SIZE_K],
                         c_dtype,
                     )
                     # weight block [N, K]
                     b = tl._experimental_descriptor_load(
-                        b_ptr,
+                        b_desc_ptr,
                         [n_offset, k_offset],
                         [BLOCK_SIZE_N, BLOCK_SIZE_K],
                         c_dtype,
                     )
 
                     accumulator += tl.dot(a, b.T)
+                if USE_FP8:
+                    # Scale the accumulator
+                    # Load the scales and apply
+                    offs_am = tile_m_index * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                    offs_bn = tile_n_index * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+
+                    a_scale = tl.load(
+                        a_scale_ptr + M_start + offs_am[:, None],
+                        mask=offs_am[:, None] < m_size,
+                    )
+                    b_scale = tl.load(
+                        b_scale_ptr + offs_bn[None, :],
+                        mask=offs_bn[None, :] < n_size,
+                    )
+
+                    accumulator = accumulator.to(tl.float32) * a_scale * b_scale
 
                 # Store using TMA
+
                 m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
                 n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
 
@@ -348,6 +583,7 @@ def _kernel_mg_forward_tma(
                     accumulator.to(c_dtype),
                     [m_offset, n_offset],
                 )
+
                 # Move to the next tile
                 tbidx += NUM_SMS
             # Update the total tiles count for the next group
@@ -729,16 +965,19 @@ def _kernel_grouped_gemm_backward_dw_scheduled(
 # ======== PyTorch wrapper functions ========
 
 
-def _grouped_gemm_forward_wrapper(
+def grouped_gemm_forward(
     x: torch.Tensor,
     w: torch.Tensor,
     m_sizes: torch.Tensor,
     tma_size: int = 128,
+    using_fp8: bool = False,
     x_scale: Optional[torch.Tensor] = None,
     w_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    M*G style grouped GEMM with TMA support.
+    M*G style grouped GEMM with TMA and Float8 support.
+    FP8 support is triggered by passing x_scale and w_scale tensors.
+
     """
     if not CudaUtils.verify_tma():
         raise NotImplementedError("Grouped GEMM without TMA is not supported yet")
@@ -766,8 +1005,23 @@ def _grouped_gemm_forward_wrapper(
 
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
-    USE_TMA_STORE = True  # TODO: Sometimes results in compile error and not seeing perf win with it yet...
+    USE_TMA_STORE = True
 
+    if x_scale is not None and w_scale is not None:
+        using_fp8 = True
+
+    # TODO: not clear if we should integrate FP8 by handling here in the wrapper
+    # or if we should expect scales to be passed in.
+    if using_fp8 and x_scale is None and w_scale is None:
+        print(f"FP8 scaling in progress...")
+        x_fp8, x_scales = triton_quantize_fp8_row(x)
+        w_fp8, w_scales = triton_quantize_fp8_row(w)
+        x = x_fp8
+        w = w_fp8
+        x_scale = x_scales
+        w_scale = w_scales
+
+    print(f"{x_scale=}")
     desc_helper = None
     desc_x = x
     desc_w = w
@@ -812,10 +1066,7 @@ def _grouped_gemm_forward_wrapper(
         return (NUM_SMS,)
 
     M_BUCKET = triton.next_power_of_2(M_total)
-
-    assert x_scale is None
-    assert w_scale is None
-
+    print(f"{M_BUCKET=}")
     _kernel_mg_forward_tma[grid](  #
         # _kernel_grouped_gemm_flat_indexing[grid](  # _kernel_grouped_gemm[grid](
         desc_x,
@@ -823,6 +1074,8 @@ def _grouped_gemm_forward_wrapper(
         y,
         workspace,
         m_sizes,
+        x_scale,
+        w_scale,
         G,
         M_BUCKET,
         N,
@@ -831,15 +1084,10 @@ def _grouped_gemm_forward_wrapper(
         USE_TMA_LOAD,
         USE_TMA_STORE,
         TMA_SIZE=tma_size,
+        USE_FP8=using_fp8,
     )
 
     return y
-
-
-def grouped_gemm_forward(
-    x: torch.Tensor, w: torch.Tensor, m_sizes: torch.Tensor
-) -> torch.Tensor:
-    return _grouped_gemm_forward_wrapper(x, w, m_sizes)
 
 
 def grouped_gemm_backward(
@@ -1036,9 +1284,8 @@ def grouped_gemm_backward(
 
 class GroupedGEMM_mg(torch.autograd.Function):
     """
-    Autograd function for GroupedGEMM operation with M*G distribution.
+    Autograd function for GroupedGEMM with M*G grouping.
 
-    This enables automatic differentiation of the GroupedGEMM operation.
     """
 
     @staticmethod
@@ -1056,9 +1303,9 @@ class GroupedGEMM_mg(torch.autograd.Function):
             Output tensor, shape [M_total, N]
         """
         # Import here to avoid circular import
-        from mg_forward import group_gemm_forward
+        # from mg_forward import group_gemm_forward
 
-        output = group_gemm_forward(x, w, m_sizes)
+        output = grouped_gemm_forward(x, w, m_sizes)
 
         # Save inputs for backward pass
         ctx.save_for_backward(x, w, m_sizes)
@@ -1096,7 +1343,7 @@ def mg_grouped_gemm_full(
     x: torch.Tensor, w: torch.Tensor, m_sizes: torch.Tensor, use_tma: bool = True
 ) -> torch.Tensor:
     """
-    Differentiable grouped GEMM operation with M*G distribution.
+    Differentiable grouped GEMM operation for M*G grouped GeMM.
 
     Args:
         x: Input tensor, shape [M_total, K]

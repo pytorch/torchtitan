@@ -12,7 +12,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
-from mg_forward import grouped_gemm_forward
+from mg_grouped_gemm import grouped_gemm_forward
 
 
 class TestMG_GroupedGEMM(unittest.TestCase):
