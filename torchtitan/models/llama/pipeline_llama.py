@@ -93,10 +93,10 @@ def pipeline_llama_manual_split(
     """
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
-    parllelism_config = job_config.parallelism
+    parallelism_config = job_config.parallelism
 
-    splits = parllelism_config.pipeline_parallel_split_points or generate_split_points(
-        parllelism_config.pipeline_parallel_schedule,
+    splits = parallelism_config.pipeline_parallel_split_points or generate_split_points(
+        parallelism_config.pipeline_parallel_schedule,
         parallel_dims.pp,
         model_config.n_layers,
     )
@@ -141,7 +141,7 @@ def pipeline_llama_manual_split(
     stages = []
     models = []
 
-    schedule_class = get_schedule_class(parllelism_config.pipeline_parallel_schedule)
+    schedule_class = get_schedule_class(parallelism_config.pipeline_parallel_schedule)
     style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
 
     for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
