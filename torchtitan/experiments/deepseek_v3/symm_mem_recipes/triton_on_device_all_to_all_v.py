@@ -161,6 +161,10 @@ def _on_device_all_to_all_v(
 
 
 class OnDeviceAllToAllV(torch.autograd.Function):
+    # A symmetric memory holding the grad_output during backward
+    grad_output_buf = None
+    max_output_shape = None
+
     @staticmethod
     def forward(
         ctx,
@@ -171,26 +175,49 @@ class OnDeviceAllToAllV(torch.autograd.Function):
         group: dist.ProcessGroup = dist.group.WORLD,
     ):
         _on_device_all_to_all_v(output, output_splits, input, input_splits, group=group)
+        # Output splits in forward is the input splits in backward
         ctx.save_for_backward(output_splits)
         ctx.group = group
         ctx.input_shape = input.shape
+        ctx.dtype = output.dtype
+        ctx.device = output.device
+        # Bookkeep the max output shape for grad_output_buf allocation
+        OnDeviceAllToAllV.max_output_shape = (
+            output.shape
+            if OnDeviceAllToAllV.max_output_shape is None
+            else max(OnDeviceAllToAllV.max_output_shape, output.shape)
+        )
+        print(f"FWD: {output_splits=}")
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        # TODO: autograd requires tensors not be modified a second time, this
-        # conflicts with our wish of sharing the symm mem across layers and/or
-        # PP microbatches.
-        return NotImplementedError(
-            "OnDeviceAllToAllV backward is not ready, please use it for inference only"
-        )
-        grad_output_splits = ctx.saved_tensors
-        grad_input_splits = torch.empty_like(grad_output_splits)
+        # Initialize grad_output buffer (one time only)
+        if OnDeviceAllToAllV.grad_output_buf is None:
+            assert (
+                OnDeviceAllToAllV.max_output_shape is not None
+            ), "`forward` must be called first"
+            OnDeviceAllToAllV.grad_output_buf = symm_mem.empty(
+                *OnDeviceAllToAllV.max_output_shape,
+                dtype=ctx.dtype,
+                device=ctx.device,
+            )
+
+        # TODO: is there a way to tell autograd to feed grad_output directly to
+        # our symm_mem buffer?
+        OnDeviceAllToAllV.grad_output_buf.copy_(grad_output)
+
+        # Size info
+        (grad_output_splits,) = ctx.saved_tensors
+        print(f"BWD: {grad_output_splits=}")
+        grad_input_splits = torch.empty_like(grad_output_splits)  # unused
         grad_input = grad_output.new_empty(*ctx.input_shape)
+
+        # Shuffle gradients back to the input
         _on_device_all_to_all_v(
             grad_input,
             grad_input_splits,
-            grad_output,
+            OnDeviceAllToAllV.grad_output_buf,
             grad_output_splits,
             group=ctx.group,
         )

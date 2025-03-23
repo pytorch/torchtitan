@@ -13,7 +13,7 @@ from model_config import deepseek_config_registry
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 
 
 # Use DeepSeek-V2-Lite as a proxy
@@ -83,6 +83,10 @@ def run_full_model(
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
 
+    # Use Symmetric Memory for MoE token shuffle. Do not share across layers,
+    # because shuffle outputs are saved by autograd for backward.
+    model.setup_symm_mem(torch.bfloat16, device, shared=True)
+
     # Run forward and backward
     if pp_size > 1:
         # Create pipeline stage
@@ -95,9 +99,9 @@ def run_full_model(
         )
 
         # Create pipeline schedule
-        microbatches = 2
+        microbatches = 1
         losses = []
-        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+        pp_schedule = ScheduleGPipe(stage, microbatches, loss_fn=loss_fn)
 
         if pp_rank == 0:
             y = pp_schedule.step(x)
