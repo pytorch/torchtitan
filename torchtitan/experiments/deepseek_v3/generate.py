@@ -123,10 +123,13 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
     if rank == 0:
         output = tokenizer.decode(x[0])
         # Clean up the output by removing special tokens
-        output = output.replace("<｜begin▁of▁sentence｜>", "")
+        bos = tokenizer.bos_token
+        output = output.replace(bos, "")
         # Truncate at end of sentence token  (might not be correct termination)
-        if "<｜end▁of▁sentence｜>" in output:
-            output = output.split("<｜end▁of▁sentence｜>")[0]
+        # Use tokenizer's EOS token for more portable code
+        eos_token = tokenizer.eos_token
+        if eos_token and eos_token in output:
+            output = output.split(eos_token)[0]
 
         print(f"Output: {output}")
 
