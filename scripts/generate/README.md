@@ -33,5 +33,5 @@ PROMPT="What is the meaning of life?" \
 #### View Available Arguments
 
 ```bash
-> python ./scripts/generate/test_generate.py --help
+> python -m scripts.generate.test_generate --help
 ```

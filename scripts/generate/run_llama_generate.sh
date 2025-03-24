@@ -37,7 +37,7 @@ set -x
 torchrun --standalone \
 	--nproc_per_node="${NGPU}" \
 	--local-ranks-filter="${LOG_RANK}" \
-	scripts/generate/test_generate.py \
+	-m scripts.generate.test_generate \
 	--config="${CONFIG_FILE}" \
 	--checkpoint="${CHECKPOINT_DIR}" \
 	--prompt="${PROMPT}" \
