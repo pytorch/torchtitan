@@ -493,7 +493,11 @@ class MoE(nn.Module):
     # calls this function, the `shuffle_method` would switch from
     # `torch_all_to_all` to `symm_mem`.
     def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, microbatches: int
+        self,
+        max_seq_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        microbatches: int,
     ):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
@@ -501,11 +505,12 @@ class MoE(nn.Module):
         self.curr_send = 0
         self.curr_gather = 0
 
+        # Input buffer: seq len * top k (flattened)
+        input_len = max_seq_len * self.num_experts_per_tok
         # Assuming worst case, 2x tokens are routed to one EP rank
-        overflow = 2
-        OnDeviceAllToAllV.max_output_len = (
-            self.config.max_seq_len * self.num_experts_per_tok * overflow
-        )
+        max_output_len = 2 * input_len
+        # This value is needed by `OnDeviceAllToAllV` to prepare the output buffer
+        OnDeviceAllToAllV.max_output_len = max_output_len
 
         # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
@@ -517,8 +522,7 @@ class MoE(nn.Module):
         for _ in range(self.microbatches):
             MoE.token_send_buf.append(
                 symm_mem.empty(
-                    self.config.max_seq_len
-                    * self.num_experts_per_tok,  # seq len * top k (flattened)
+                    input_len,
                     self.config.hidden_size,  # hidden dim
                     dtype=dtype,
                     device=device,
@@ -528,9 +532,7 @@ class MoE(nn.Module):
         for _ in range(self.microbatches):
             MoE.token_gather_buf.append(
                 symm_mem.empty(
-                    self.config.max_seq_len
-                    * self.num_experts_per_tok  # seq len * top k (flattened)
-                    * overflow,
+                    max_output_len,
                     self.config.hidden_size,  # hidden dim
                     dtype=dtype,
                     device=device,
@@ -1194,11 +1196,10 @@ class DeepseekForCausalLM(torch.nn.Module):
         return reordered_past
 
     # Setup Symmetric Memory for MoE token shuffle.
-    # Supports inference currently.
     def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, microbatches: int
+        self, seq_len: int, dtype: torch.dtype, device: torch.device, microbatches: int
     ):
         for layer in self.model.layers.values():
             if not isinstance(layer.mlp, MoE):
                 continue
-            layer.mlp.setup_symm_mem(dtype, device, microbatches)
+            layer.mlp.setup_symm_mem(seq_len, dtype, device, microbatches)

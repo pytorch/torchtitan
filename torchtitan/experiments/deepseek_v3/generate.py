@@ -40,14 +40,17 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
+    max_seq_len = 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
     load_weights_from_hf(model, model_id, dist_config.device)
     model.eval()
     model.setup_symm_mem(
-        torch.bfloat16, dist_config.device, microbatches=dist_config.pp_size
+        max_seq_len,
+        torch.bfloat16,
+        dist_config.device,
+        microbatches=dist_config.pp_size,
     )
 
     return model, PipelineStage(
