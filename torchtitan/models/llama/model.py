@@ -78,7 +78,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
         torch.Tensor: Reshaped frequency tensor.
     """
     ndim = x.ndim
-    assert 0 <= 1 < ndim
+    assert ndim > 1
     seqlen = x.shape[1]
     freqs_cis = freqs_cis[0:seqlen]
     assert freqs_cis.shape == (seqlen, x.shape[-1])
