@@ -13,7 +13,7 @@ from model_config import deepseek_config_registry
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 
 # Use DeepSeek-V2-Lite as a proxy
@@ -74,19 +74,21 @@ def run_full_model(
     # Apply HSDP on root model (lm_head, embeddings, etc)
     fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
 
-    # Example inputs
+    # Synthetic setting
     microbatches = pp_size * 2
-    bs = 2
+
+    # Use Symmetric Memory for MoE token shuffle.
+    model.setup_symm_mem(torch.bfloat16, device, microbatches)
+
+    # Example inputs
+    torch.manual_seed(ep_rank)
+    bs = 4
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
     label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
-
-    # Use Symmetric Memory for MoE token shuffle. Do not share across layers,
-    # because shuffle outputs are saved by autograd for backward.
-    model.setup_symm_mem(torch.bfloat16, device, microbatches)
 
     # Run forward and backward
     if pp_size > 1:
@@ -101,7 +103,7 @@ def run_full_model(
 
         # Create pipeline schedule
         losses = []
-        pp_schedule = ScheduleGPipe(stage, microbatches, loss_fn=loss_fn)
+        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
 
         if pp_rank == 0:
             y = pp_schedule.step(x)
@@ -118,6 +120,10 @@ def run_full_model(
     if pp_rank == pp_size - 1:
         print(f"logits: {y.shape}")
         print(f"{loss=}")
+
+    if pp_rank == 0:
+        param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
+        print(f"{torch.linalg.norm(param.grad)=}")
 
     print("Backward done")
 

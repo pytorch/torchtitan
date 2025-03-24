@@ -504,9 +504,15 @@ class MoE(nn.Module):
     ):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
-        self.curr_microbatch = 0
         self.microbatches = microbatches
+        self.curr_send = 0
+        self.curr_gather = 0
 
+        # Assuming worst case, 2x tokens are routed to one EP rank
+        overflow = 2
+        self.gather_buf_len = (
+            self.config.max_seq_len * self.num_experts_per_tok * overflow
+        )
         # # Splits are not shared across layers, because autograd needs to save
         # # them for backward.
         # # Number of tokens to send to EP peers, aka. input splits
@@ -520,12 +526,12 @@ class MoE(nn.Module):
 
         # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
-        # if MoE.token_send_buf is not None:
-        #     return
+        if len(MoE.token_send_buf):
+            return
 
         # Input buffer for DP-to-EP shuffle
         for _ in range(self.microbatches):
-            self.token_send_buf.append(
+            MoE.token_send_buf.append(
                 symm_mem.empty(
                     self.config.max_seq_len
                     * self.num_experts_per_tok,  # seq len * top k (flattened)
@@ -535,13 +541,8 @@ class MoE(nn.Module):
                 )
             )
         # Input buffer for EP-to-DP shuffle
-        # Assuming worst case, 2x tokens are routed to one EP rank
-        overflow = 2
-        self.gather_buf_len = (
-            self.config.max_seq_len * self.num_experts_per_tok * overflow
-        )
         for _ in range(self.microbatches):
-            self.token_gather_buf.append(
+            MoE.token_gather_buf.append(
                 symm_mem.empty(
                     self.config.max_seq_len
                     * self.num_experts_per_tok  # seq len * top k (flattened)
@@ -552,6 +553,16 @@ class MoE(nn.Module):
                 )
             )
         print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
+
+    def get_next_send_buf(self):
+        rv = self.token_send_buf[self.curr_send]
+        self.curr_send = (self.curr_send + 1) % self.microbatches
+        return rv
+
+    def get_next_gather_buf(self):
+        rv = self.token_gather_buf[self.curr_gather]
+        self.curr_gather = (self.curr_gather + 1) % self.microbatches
+        return rv
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -600,7 +611,7 @@ class MoE(nn.Module):
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
-            token_send_buf = self.token_send_buf[self.curr_microbatch]
+            token_send_buf = self.get_next_send_buf()
             token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
@@ -649,9 +660,7 @@ class MoE(nn.Module):
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_gather_buf` symm mem because we are
             # going to send them out after expert processing
-            processed_tokens = self.token_gather_buf[self.curr_microbatch][
-                : gathered_tokens.shape[0]
-            ]
+            processed_tokens = self.get_next_gather_buf()[: gathered_tokens.shape[0]]
         else:  # "torch_all_to_all"
             processed_tokens = torch.empty_like(gathered_tokens)
 
@@ -668,7 +677,6 @@ class MoE(nn.Module):
             # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
             unused_splits = torch.empty_like(input_splits)
             return_buf = processed_tokens.new_empty(*sorted_tokens_shape)
-            # self.token_gather_buf[self.curr_microbatch][: gathered_tokens.shape[0]].copy_(processed_tokens)
             returned_tokens = on_device_all_to_all_v(
                 return_buf,
                 input_splits,  # unused
@@ -694,8 +702,6 @@ class MoE(nn.Module):
             .sum(dim=1)
             .type(returned_tokens.dtype)
         )
-
-        self.curr_microbatch = (self.curr_microbatch + 1) % self.microbatches
         return final_out
 
 
