@@ -7,13 +7,29 @@
 # Usage:
 # python download.py {model_id}
 # Example:
-# python download.py deepseek-ai/DeepSeek-V2-Lite
+# python download.py v2   # v2 = deepseek-ai/DeepSeek-V2-Lite-Chat
+
+# Available models:
+# "deepseek-ai/DeepSeek-V2-Lite-Chat"
+# "deepseek-ai/deepseek-v3"
+
 
 import sys
 
 from transformers import AutoModelForCausalLM
 
-model_id = sys.argv[1]
+
+MODELS = {"v2": "deepseek-ai/DeepSeek-V2-Lite-Chat", "v3": "deepseek-ai/deepseek-v3"}
+
+if len(sys.argv) != 2 or sys.argv[1] not in MODELS:
+    print(f"Usage: python download.py [model_version]")
+    print("Available models:")
+    for key, model in MODELS.items():
+        print(f"{key}: {model}")
+    sys.exit(1)
+
+model_id = MODELS[sys.argv[1]]
+print(f"Downloading model: {model_id}")
 
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
