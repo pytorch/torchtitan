@@ -105,6 +105,15 @@ class Float8Converter(ModelConverter):
         if not self.enabled:
             return
 
+        from torchao.prototype.mx_formats.mx_linear import swap_linear_with_mx_linear
+        from torchao.prototype.mx_formats.config import MXLinearConfig
+
+        config = MXLinearConfig.from_recipe_name("mxfp8_cublas")
+        config.use_fp8_dim1_cast_triton_kernel = True
+
+        swap_linear_with_mx_linear(model, config=config, filter_fn=lambda mod, fqn: fqn != "output")
+        return
+
         from torchao.float8 import convert_to_float8_training
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
