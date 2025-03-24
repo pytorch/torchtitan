@@ -10,9 +10,10 @@
 # python download.py v2   # v2 = deepseek-ai/DeepSeek-V2-Lite-Chat
 
 # Available models:
-# "deepseek-ai/DeepSeek-V2-Lite-Chat"
+# "deepseek-ai/DeepSeek-V2-Lite"
 # "deepseek-ai/deepseek-v3"
 
+# Note - Trust remote code is set to yes to download the model.
 
 import sys
 
@@ -34,4 +35,5 @@ print(f"Downloading model: {model_id}")
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
     device_map="auto",
+    trust_remote_code=True,
 )
