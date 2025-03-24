@@ -95,6 +95,14 @@ def get_peak_flops(device_name: str) -> int:
     elif "MI250X" in device_name:
         # data from https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html (per GCD)
         return 191.5e12
+    elif "Data Center GPU Max 1550" in device_name:
+        # Also known as Ponte Vecchio (PVC).
+        # data from https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2025-0/intel-xe-gpu-architecture.html
+        # Dot Product Accumulate Systolic (DPAS):
+        # - Freq: 1300MHz
+        # - #ops: 512
+        max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
+        return 512 * max_comp_units * 1300 * 10**6
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
