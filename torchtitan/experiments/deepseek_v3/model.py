@@ -40,7 +40,7 @@ import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 from model_config import ModelArgs
-from symm_mem_recipes import on_device_all_to_all_v
+from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
@@ -454,8 +454,6 @@ class MoE(nn.Module):
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = []
     token_gather_buf: Optional[torch.Tensor] = []
-    # input_splits: Optional[torch.Tensor] = None
-    # output_splits: Optional[torch.Tensor] = None
 
     def __init__(self, config):
         super().__init__()
@@ -505,7 +503,7 @@ class MoE(nn.Module):
 
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
-        self.gather_buf_len = (
+        OnDeviceAllToAllV.max_output_len = (
             self.config.max_seq_len * self.num_experts_per_tok * overflow
         )
 
@@ -514,6 +512,7 @@ class MoE(nn.Module):
         if len(MoE.token_send_buf):
             return
 
+        # But they are not shared across microbatches
         # Input buffer for DP-to-EP shuffle
         for _ in range(self.microbatches):
             MoE.token_send_buf.append(
@@ -600,13 +599,7 @@ class MoE(nn.Module):
             token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
-            output_splits = torch.empty_like(input_splits)
-            gather_buf = token_send_buf.new_empty(
-                self.gather_buf_len, self.config.hidden_size
-            )
-            token_gather_buf = on_device_all_to_all_v(
-                gather_buf,
-                output_splits,
+            token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
                 token_send_buf,
                 input_splits,
                 self.ep_group,
@@ -659,17 +652,12 @@ class MoE(nn.Module):
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":
-            # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
-            unused_splits = torch.empty_like(input_splits)
-            return_buf = processed_tokens.new_empty(*sorted_tokens_shape)
-            returned_tokens = on_device_all_to_all_v(
-                return_buf,
-                input_splits,  # unused
+            token_return_buf, _ = OnDeviceAllToAllV.apply(
                 processed_tokens,
                 output_splits,
                 self.ep_group,
             )
-            # returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
+            returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
