@@ -6,6 +6,9 @@
 
 # torchrun --standalone --nproc-per-node 4 generate.py
 
+# use inference.sh "Your Question Here?" to run inference with a single prompt.
+
+import sys
 from dataclasses import dataclass
 
 import torch
@@ -56,7 +59,7 @@ def create_model(dist_config: DistConfig):
     )
 
 
-def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 10):
+def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
@@ -118,14 +121,27 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 10):
             x[:, next_idx] = next_token
             next_idx += 1
     if rank == 0:
-        print(tokenizer.decode(x[0]))
+        output = tokenizer.decode(x[0])
+        # Clean up the output by removing special tokens
+        output = output.replace("<｜begin▁of▁sentence｜>", "")
+        # Truncate at end of sentence token  (might not be correct termination)
+        if "<｜end▁of▁sentence｜>" in output:
+            output = output.split("<｜end▁of▁sentence｜>")[0]
+
+        print(f"Output: {output}")
 
 
 if __name__ == "__main__":
+    # Get user prompt from command line arguments
+    user_prompt = "What is 2+2?"  # Default prompt
+    if len(sys.argv) > 1:
+        user_prompt = sys.argv[1]
+
     mesh = dist.init_device_mesh("cuda", mesh_shape, mesh_dim_names=("pp", "ep"))
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is 2+2?"},
+        {"role": "user", "content": user_prompt},
     ]
     generate(mesh, messages)
+    print(f"\nClosing inference mesh...")
     dist.destroy_process_group()
