@@ -149,6 +149,7 @@ def build_lr_schedulers(
         elif current_step <= warmup_stable_steps:
             curr_adjustment = 1.0
         else:
+            assert decay_steps != 0, "decay_steps must be greater than 0"
             progress = float(current_step - warmup_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
