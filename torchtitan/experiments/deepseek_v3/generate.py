@@ -19,11 +19,94 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (2, 2)
 # model_id, mesh_shape = "deepseek-ai/deepseek-v3", (8, 4)
+
+
+def colorize_chat(text, user_color=None, assistant_color=None, output_color=None):
+    """Parse and colorize chat output with optional colors for each role."""
+    lines = text.split("\n")
+    result = []
+
+    current_role = None
+    current_content = []
+
+    def _process_current_content():
+        if not current_role or not current_content:
+            return None
+
+        content = "\n".join(current_content)
+        if current_role == "output":
+            return (
+                f"Output: {output_color}{content}{color.reset}"
+                if output_color
+                else f"Output: {content}"
+            )
+        else:
+            try:
+                prefix, rest = current_content[0].split(":", 1)
+                role_color = user_color if current_role == "user" else assistant_color
+                if role_color:
+                    formatted = f"{prefix}:{role_color}{rest}{color.reset}"
+                    if len(current_content) > 1:
+                        formatted += (
+                            f"{role_color}\n"
+                            + "\n".join(current_content[1:])
+                            + f"{color.reset}"
+                        )
+                    return formatted
+            except ValueError:
+                pass
+        return content
+
+    for line in lines:
+        if line.startswith("Output:"):
+            if processed := _process_current_content():
+                result.append(processed)
+            current_role = "output"
+            content = line[len("Output:") :].strip()
+            if output_color:
+                content = f"Output: {output_color}{content}{color.reset}"
+            else:
+                content = f"Output: {content}"
+            result.append(content)
+            current_content = []
+
+        elif line.startswith("User:"):
+            if processed := _process_current_content():
+                result.append(processed)
+            current_role = "user"
+            current_content = [line]
+
+        elif line.startswith("Assistant:"):
+            if processed := _process_current_content():
+                result.append(processed)
+            current_role = "assistant"
+            current_content = [line]
+
+        else:
+            if current_content:
+                current_content.append(line)
+            elif line.strip() and current_role is None:
+                # Handle system message at the beginning
+                current_role = "output"
+                if output_color:
+                    result.append(f"Output: {output_color}{line.strip()}{color.reset}")
+                else:
+                    result.append(f"Output: {line.strip()}")
+
+    # Process the last segment
+    if processed := _process_current_content():
+        result.append(processed)
+
+    return "\n".join(result)
+
+
+color = Color()
 
 
 @dataclass
@@ -61,6 +144,7 @@ def create_model(dist_config: DistConfig):
 
 def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
     rank = dist.get_rank()
+
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
 
@@ -77,6 +161,11 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
 
     model, stage = create_model(dist_config)
     pp_schedule = ScheduleGPipe(stage, dist_config.pp_size)
+
+    if rank == 0:
+        print(
+            f"{color.yellow}Running inference with {model_id} on {mesh_shape} mesh{color.reset}"
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     x = tokenizer.apply_chat_template(
@@ -120,18 +209,23 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
             next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
             x[:, next_idx] = next_token
             next_idx += 1
+
     if rank == 0:
         output = tokenizer.decode(x[0])
         # Clean up the output by removing special tokens
         bos = tokenizer.bos_token
         output = output.replace(bos, "")
-        # Truncate at end of sentence token  (might not be correct termination)
-        # Use tokenizer's EOS token for more portable code
+        # Truncate at end of sentence token
         eos_token = tokenizer.eos_token
         if eos_token and eos_token in output:
             output = output.split(eos_token)[0]
-
-        print(f"Output: {output}")
+        colored_output = colorize_chat(
+            output,
+            user_color=color.green,
+            assistant_color=color.cyan,
+            output_color=color.blue,
+        )
+        print(f"\n{colored_output}")
 
 
 if __name__ == "__main__":
@@ -141,10 +235,13 @@ if __name__ == "__main__":
         user_prompt = sys.argv[1]
 
     mesh = dist.init_device_mesh("cuda", mesh_shape, mesh_dim_names=("pp", "ep"))
+
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": user_prompt},
     ]
     generate(mesh, messages)
-    print("\nClosing inference mesh...")
+
+    if dist.get_rank() == 0:
+        print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
     dist.destroy_process_group()
