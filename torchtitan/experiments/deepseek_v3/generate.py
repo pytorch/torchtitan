@@ -143,5 +143,5 @@ if __name__ == "__main__":
         {"role": "user", "content": user_prompt},
     ]
     generate(mesh, messages)
-    print(f"\nClosing inference mesh...")
+    print("\nClosing inference mesh...")
     dist.destroy_process_group()
