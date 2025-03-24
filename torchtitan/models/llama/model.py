@@ -19,6 +19,9 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
+
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
@@ -42,6 +45,29 @@ class TransformerModelArgs(BaseModelArgs):
     norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
+
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        self.norm_type = job_config.model.norm_type
+        self.vocab_size = tokenizer.n_words
+        self.max_seq_len = job_config.training.seq_len
+        self.use_flex_attn = job_config.model.use_flex_attn
+
+    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+        l, h, q, t = (
+            self.n_layers,
+            self.n_heads,
+            self.dim // self.n_heads,
+            seq_len,
+        )
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
+        flop_per_token = 6 * num_params + 12 * l * h * q * t
+
+        return flop_per_token
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:

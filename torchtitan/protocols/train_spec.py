@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Type, TypeAlias
 
@@ -29,6 +30,14 @@ class BaseModelArgs:
     """
 
     _enforced: str = "This field is used to enforce all fields have defaults."
+
+    @abstractmethod
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        pass
+
+    @abstractmethod
+    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+        pass
 
 
 class ModelProtocol(Protocol):

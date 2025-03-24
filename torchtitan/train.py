@@ -139,21 +139,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build model (using meta init)
         model_cls = self.train_spec.cls
-        model_config = self.train_spec.config[job_config.model.flavor]
-        # set the model configs from training inputs:
-        # 1. norm type to decide which norm layer to use
-        # 2. vocab size from tokenizer
-        # 3. max_seq_len base on inputs
-        model_config.norm_type = job_config.model.norm_type
-        model_config.vocab_size = tokenizer.n_words
-        model_config.max_seq_len = job_config.training.seq_len
-        model_config.use_flex_attn = job_config.model.use_flex_attn
+        model_args = self.train_spec.config[job_config.model.flavor]
+        # set the model args from training job configs
+        model_args.update_from_config(job_config, tokenizer)
 
         logger.info(
-            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_config}"
+            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_config)
+            model = model_cls.from_model_args(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -170,9 +164,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # log model size
         model_param_count = utils.get_num_params(model)
-        self.metrics_processor.num_flop_per_token = utils.get_num_flop_per_token(
+        self.metrics_processor.num_flop_per_token = model_args.get_num_flop_per_token(
             utils.get_num_params(model, exclude_embedding=True),
-            model_config,
             job_config.training.seq_len,
         )
 
@@ -212,7 +205,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 parallel_dims,
                 job_config,
                 self.device,
-                model_config,
+                model_args,
                 self.train_spec.parallelize_fn,
                 self.train_spec.loss_fn,
             )
