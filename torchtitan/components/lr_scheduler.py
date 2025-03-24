@@ -142,11 +142,10 @@ def build_lr_schedulers(
         to ensure the learning rate does not drop below this minimum value.
         """
         warmup_stable_steps = warmup_steps + stable_steps
-        if current_step < warmup_steps:
+        if current_step <= warmup_steps:
             # linear warmup
-            # 0-indexed step, hence + 1 adjustments
-            current_step += 1
-            curr_adjustment = float(current_step / (warmup_steps + 1))
+            # 1-indexed step
+            curr_adjustment = float(current_step / warmup_steps)
         elif current_step <= warmup_stable_steps:
             curr_adjustment = 1.0
         else:
