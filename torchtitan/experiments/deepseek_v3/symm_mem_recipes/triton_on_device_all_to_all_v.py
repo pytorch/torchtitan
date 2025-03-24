@@ -163,18 +163,24 @@ def _on_device_all_to_all_v(
 class OnDeviceAllToAllV(torch.autograd.Function):
     # A symmetric memory holding the grad_output during backward
     grad_output_buf = None
-    max_output_shape = None
+    # A symmetric memory for exchanges split sizes during both forward and backward
     splits_buf = None
+    # Maximum output length (need to be set before use of OnDeviceAllToAllV)
+    max_output_len = None
 
     @staticmethod
     def forward(
         ctx,
-        output: torch.Tensor,
-        output_splits: torch.Tensor,
         input: torch.Tensor,
         input_splits: torch.Tensor,
         group: dist.ProcessGroup = dist.group.WORLD,
     ):
+        """
+        Args:
+            input: input tensor with data for all ranks concatenated.
+            input_splits: input splits of shape (group.world_size,)
+            group: process group to scope the collective.
+        """
         # Initialize input splits buffer (one time only)
         if OnDeviceAllToAllV.splits_buf is None:
             OnDeviceAllToAllV.splits_buf = symm_mem.empty(
@@ -183,37 +189,48 @@ class OnDeviceAllToAllV(torch.autograd.Function):
                 device=input_splits.device,
             )
 
+        if OnDeviceAllToAllV.max_output_len is None:
+            raise RuntimeError(
+                "Please set max output length via `OnDeviceAllToAllV.max_output_len = ...`"
+            )
+
+        # Allocate output buffer
+        output = input.new_empty(OnDeviceAllToAllV.max_output_len, *input.shape[1:])
+        # Allocate output splits tensor
+        output_splits = torch.empty_like(input_splits)
         # Copy input splits to the buffer
         OnDeviceAllToAllV.splits_buf.copy_(input_splits)
 
+        # Shuffle input to output
         _on_device_all_to_all_v(
             output, output_splits, input, OnDeviceAllToAllV.splits_buf, group=group
         )
+
         # Output splits in forward is the input splits in backward
         ctx.save_for_backward(output_splits)
         ctx.group = group
         ctx.input_shape = input.shape
-        ctx.dtype = output.dtype
-        ctx.device = output.device
-        # Bookkeep the max output shape for grad_output_buf allocation
-        OnDeviceAllToAllV.max_output_shape = (
-            output.shape
-            if OnDeviceAllToAllV.max_output_shape is None
-            else max(OnDeviceAllToAllV.max_output_shape, output.shape)
-        )
-        return output
+        return output, output_splits
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_splits):
+        """
+        Backward is implemented as a shuffle of the output's gradients to the input.
+        Args:
+            `grad_output`: output's gradients passed from the downstream.
+            `grad_splits`: unused.
+        """
+
         # Initialize grad_output buffer (one time only)
         if OnDeviceAllToAllV.grad_output_buf is None:
             assert (
-                OnDeviceAllToAllV.max_output_shape is not None
-            ), "`forward` must be called first"
+                OnDeviceAllToAllV.max_output_len is not None
+            ), "`max_output_len` not set"
             OnDeviceAllToAllV.grad_output_buf = symm_mem.empty(
-                *OnDeviceAllToAllV.max_output_shape,
-                dtype=ctx.dtype,
-                device=ctx.device,
+                OnDeviceAllToAllV.max_output_len,
+                *grad_output.shape[1:],
+                dtype=grad_output.dtype,
+                device=grad_output.device,
             )
 
         # TODO: is there a way to tell autograd to feed grad_output directly to
@@ -236,7 +253,7 @@ class OnDeviceAllToAllV(torch.autograd.Function):
             OnDeviceAllToAllV.splits_buf,
             group=ctx.group,
         )
-        return None, None, grad_input, None, None
+        return grad_input, None, None
 
 
 # Alias

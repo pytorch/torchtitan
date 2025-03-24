@@ -132,7 +132,9 @@ def create_model(dist_config: DistConfig):
         model = DeepseekForCausalLM(model_args)
     load_weights_from_hf(model, model_id, dist_config.device)
     model.eval()
-    model.setup_symm_mem(torch.bfloat16, dist_config.device, microbatches=dist_config.pp_size)
+    model.setup_symm_mem(
+        torch.bfloat16, dist_config.device, microbatches=dist_config.pp_size
+    )
 
     return model, PipelineStage(
         model,
