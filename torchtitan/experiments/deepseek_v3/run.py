@@ -76,14 +76,15 @@ def run_full_model(
 
     # Synthetic setting
     microbatches = pp_size * 2
+    bs = 4  # microbatch size
+    seqlen = 128
 
-    # Use Symmetric Memory for MoE token shuffle.
-    model.setup_symm_mem(torch.bfloat16, device, microbatches)
+    # Use Symmetric Memory for MoE token shuffle. The number of tokens in each
+    # buffer would be microbatch size * seq_len, i.e. flattened.
+    model.setup_symm_mem(bs * seqlen, torch.bfloat16, device, microbatches)
 
     # Example inputs
     torch.manual_seed(ep_rank)
-    bs = 4
-    seqlen = 128
     x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
     label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
