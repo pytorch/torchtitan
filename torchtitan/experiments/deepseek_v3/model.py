@@ -494,11 +494,6 @@ class MoE(nn.Module):
     # all_to_all APIs which requrie a GPU-to-CPU sync of the splits.  If a user
     # calls this function, the `shuffle_method` would switch from
     # `torch_all_to_all` to `symm_mem`.
-
-    # Status: supports inference. For training, this is disabled for now. Reason
-    # is that autograd requires tensors not be modified a second time, this
-    # conflicts with our wish of sharing the symm mem across layers and/or
-    # PP microbatches.
     def setup_symm_mem(
         self, dtype: torch.dtype, device: torch.device, microbatches: int
     ):
@@ -513,16 +508,6 @@ class MoE(nn.Module):
         self.gather_buf_len = (
             self.config.max_seq_len * self.num_experts_per_tok * overflow
         )
-        # # Splits are not shared across layers, because autograd needs to save
-        # # them for backward.
-        # # Number of tokens to send to EP peers, aka. input splits
-        # self.input_splits = symm_mem.empty(
-        #     self.ep_size, dtype=torch.int64, device=device
-        # )
-        # # Number of tokens to receive from EP peers, aka. output splits
-        # self.output_splits = symm_mem.empty(
-        #     self.ep_size, dtype=torch.int64, device=device
-        # )
 
         # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
