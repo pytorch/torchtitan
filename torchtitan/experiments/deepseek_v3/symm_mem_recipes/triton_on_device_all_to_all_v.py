@@ -164,6 +164,7 @@ class OnDeviceAllToAllV(torch.autograd.Function):
     # A symmetric memory holding the grad_output during backward
     grad_output_buf = None
     max_output_shape = None
+    splits_buf = None
 
     @staticmethod
     def forward(
@@ -174,7 +175,20 @@ class OnDeviceAllToAllV(torch.autograd.Function):
         input_splits: torch.Tensor,
         group: dist.ProcessGroup = dist.group.WORLD,
     ):
-        _on_device_all_to_all_v(output, output_splits, input, input_splits, group=group)
+        # Initialize input splits buffer (one time only)
+        if OnDeviceAllToAllV.splits_buf is None:
+            OnDeviceAllToAllV.splits_buf = symm_mem.empty(
+                *input_splits.shape,
+                dtype=input_splits.dtype,
+                device=input_splits.device,
+            )
+
+        # Copy input splits to the buffer
+        OnDeviceAllToAllV.splits_buf.copy_(input_splits)
+
+        _on_device_all_to_all_v(
+            output, output_splits, input, OnDeviceAllToAllV.splits_buf, group=group
+        )
         # Output splits in forward is the input splits in backward
         ctx.save_for_backward(output_splits)
         ctx.group = group
@@ -204,10 +218,13 @@ class OnDeviceAllToAllV(torch.autograd.Function):
 
         # TODO: is there a way to tell autograd to feed grad_output directly to
         # our symm_mem buffer?
-        OnDeviceAllToAllV.grad_output_buf.copy_(grad_output)
+        OnDeviceAllToAllV.grad_output_buf.narrow(0, 0, grad_output.shape[0]).copy_(
+            grad_output
+        )
 
         # Size info
         (grad_output_splits,) = ctx.saved_tensors
+        OnDeviceAllToAllV.splits_buf.copy_(grad_output_splits)
         grad_input_splits = torch.empty_like(grad_output_splits)  # unused
         grad_input = grad_output.new_empty(*ctx.input_shape)
 
@@ -216,7 +233,7 @@ class OnDeviceAllToAllV(torch.autograd.Function):
             grad_input,
             grad_input_splits,
             OnDeviceAllToAllV.grad_output_buf,
-            grad_output_splits,
+            OnDeviceAllToAllV.splits_buf,
             group=ctx.group,
         )
         return None, None, grad_input, None, None

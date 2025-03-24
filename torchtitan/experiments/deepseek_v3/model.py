@@ -452,10 +452,10 @@ class MoE(nn.Module):
     shuffle_method = "torch_all_to_all"
 
     # Symmetric memory buffers shared by all MoE instances across layers
-    token_send_buf: Optional[torch.Tensor] = None
-    token_gather_buf: Optional[torch.Tensor] = None
-    input_splits: Optional[torch.Tensor] = None
-    output_splits: Optional[torch.Tensor] = None
+    token_send_buf: Optional[torch.Tensor] = []
+    token_gather_buf: Optional[torch.Tensor] = []
+    # input_splits: Optional[torch.Tensor] = None
+    # output_splits: Optional[torch.Tensor] = None
 
     def __init__(self, config):
         super().__init__()
@@ -499,43 +499,58 @@ class MoE(nn.Module):
     # is that autograd requires tensors not be modified a second time, this
     # conflicts with our wish of sharing the symm mem across layers and/or
     # PP microbatches.
-    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
+    def setup_symm_mem(
+        self, dtype: torch.dtype, device: torch.device, microbatches: int
+    ):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
+        self.curr_microbatch = 0
+        self.microbatches = microbatches
 
-        # Splits are not shared across layers, because autograd needs to save
-        # them for backward.
-        # Number of tokens to send to EP peers, aka. input splits
-        self.input_splits = symm_mem.empty(
-            self.ep_size, dtype=torch.int64, device=device
-        )
-        # Number of tokens to receive from EP peers, aka. output splits
-        self.output_splits = symm_mem.empty(
-            self.ep_size, dtype=torch.int64, device=device
-        )
+        # # Splits are not shared across layers, because autograd needs to save
+        # # them for backward.
+        # # Number of tokens to send to EP peers, aka. input splits
+        # self.input_splits = symm_mem.empty(
+        #     self.ep_size, dtype=torch.int64, device=device
+        # )
+        # # Number of tokens to receive from EP peers, aka. output splits
+        # self.output_splits = symm_mem.empty(
+        #     self.ep_size, dtype=torch.int64, device=device
+        # )
 
         # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
-        if MoE.token_send_buf is not None:
-            return
+        # if MoE.token_send_buf is not None:
+        #     return
 
         # Input buffer for DP-to-EP shuffle
-        MoE.token_send_buf = symm_mem.empty(
-            self.config.max_seq_len
-            * self.num_experts_per_tok,  # seq len * top k (flattened)
-            self.config.hidden_size,  # hidden dim
-            dtype=dtype,
-            device=device,
-        )
+        for _ in range(self.microbatches):
+            self.token_send_buf.append(
+                symm_mem.empty(
+                    self.config.max_seq_len
+                    * self.num_experts_per_tok,  # seq len * top k (flattened)
+                    self.config.hidden_size,  # hidden dim
+                    dtype=dtype,
+                    device=device,
+                )
+            )
         # Input buffer for EP-to-DP shuffle
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
-        MoE.token_gather_buf = symm_mem.empty(
-            MoE.token_send_buf.shape[0] * overflow,
-            self.config.hidden_size,  # hidden dim
-            dtype=dtype,
-            device=device,
+        self.gather_buf_len = (
+            self.config.max_seq_len * self.num_experts_per_tok * overflow
         )
+        for _ in range(self.microbatches):
+            self.token_gather_buf.append(
+                symm_mem.empty(
+                    self.config.max_seq_len
+                    * self.num_experts_per_tok  # seq len * top k (flattened)
+                    * overflow,
+                    self.config.hidden_size,  # hidden dim
+                    dtype=dtype,
+                    device=device,
+                )
+            )
         print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
 
     def forward(self, hidden_states):
@@ -580,35 +595,34 @@ class MoE(nn.Module):
             dist.all_to_all_single(
                 tokens_per_expert_group, tokens_per_expert, group=self.ep_group
             )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
 
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
-            self.token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+            token_send_buf = self.token_send_buf[self.curr_microbatch]
+            token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
-            with torch.no_grad():
-                torch.sum(
-                    tokens_per_expert.view(self.ep_size, -1),
-                    dim=1,
-                    out=self.input_splits,
-                )
+            output_splits = torch.empty_like(input_splits)
+            gather_buf = token_send_buf.new_empty(
+                self.gather_buf_len, self.config.hidden_size
+            )
             token_gather_buf = on_device_all_to_all_v(
-                self.token_gather_buf,
-                self.output_splits,
-                self.token_send_buf,
-                self.input_splits,
+                gather_buf,
+                output_splits,
+                token_send_buf,
+                input_splits,
                 self.ep_group,
             )
             with torch.no_grad():
                 # Received tokens from all other ranks. TODO: use mask instead
-                received = self.output_splits.sum()
+                received = output_splits.sum()
             # TODO: don't use `received`
             gathered_tokens = token_gather_buf[:received]
         else:  # "torch_all_to_all"
             # Prepare input ans output splits
             with torch.no_grad():
-                input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
                 output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
                     dim=1
                 )
@@ -633,9 +647,11 @@ class MoE(nn.Module):
 
         # Prepare buffer for tokens processed by experts
         if self.shuffle_method == "symm_mem":
-            # Take necessary space from `token_send_buf` symm mem because we are
+            # Take necessary space from `token_gather_buf` symm mem because we are
             # going to send them out after expert processing
-            processed_tokens = self.token_send_buf[: gathered_tokens.shape[0]]
+            processed_tokens = self.token_gather_buf[self.curr_microbatch][
+                : gathered_tokens.shape[0]
+            ]
         else:  # "torch_all_to_all"
             processed_tokens = torch.empty_like(gathered_tokens)
 
@@ -650,14 +666,17 @@ class MoE(nn.Module):
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_gather_buf` symm mem to receive processed tokens
-            token_gather_buf = on_device_all_to_all_v(
-                self.token_gather_buf,
-                self.input_splits,  # unused
+            unused_splits = torch.empty_like(input_splits)
+            return_buf = processed_tokens.new_empty(*sorted_tokens_shape)
+            # self.token_gather_buf[self.curr_microbatch][: gathered_tokens.shape[0]].copy_(processed_tokens)
+            returned_tokens = on_device_all_to_all_v(
+                return_buf,
+                input_splits,  # unused
                 processed_tokens,
-                self.output_splits,
+                output_splits,
                 self.ep_group,
             )
-            returned_tokens = token_gather_buf[: sorted_tokens_shape[0]]
+            # returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
@@ -675,6 +694,8 @@ class MoE(nn.Module):
             .sum(dim=1)
             .type(returned_tokens.dtype)
         )
+
+        self.curr_microbatch = (self.curr_microbatch + 1) % self.microbatches
         return final_out
 
 
@@ -1195,8 +1216,10 @@ class DeepseekForCausalLM(torch.nn.Module):
 
     # Setup Symmetric Memory for MoE token shuffle.
     # Supports inference currently.
-    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
+    def setup_symm_mem(
+        self, dtype: torch.dtype, device: torch.device, microbatches: int
+    ):
         for layer in self.model.layers.values():
             if not isinstance(layer.mlp, MoE):
                 continue
-            layer.mlp.setup_symm_mem(dtype, device)
+            layer.mlp.setup_symm_mem(dtype, device, microbatches)

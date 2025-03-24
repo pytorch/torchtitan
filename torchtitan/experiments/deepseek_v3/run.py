@@ -75,17 +75,18 @@ def run_full_model(
     fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
 
     # Example inputs
+    microbatches = pp_size * 2
     bs = 2
     seqlen = 128
-    x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
-    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
+    x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
+    label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
 
     # Use Symmetric Memory for MoE token shuffle. Do not share across layers,
     # because shuffle outputs are saved by autograd for backward.
-    model.setup_symm_mem(torch.bfloat16, device)
+    model.setup_symm_mem(torch.bfloat16, device, microbatches)
 
     # Run forward and backward
     if pp_size > 1:
@@ -99,7 +100,6 @@ def run_full_model(
         )
 
         # Create pipeline schedule
-        microbatches = 1
         losses = []
         pp_schedule = ScheduleGPipe(stage, microbatches, loss_fn=loss_fn)
 
