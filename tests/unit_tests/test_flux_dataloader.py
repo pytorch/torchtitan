@@ -16,7 +16,7 @@ class TestFLUXDataLoader:
     def test_FLUX_dataloader(self):
         dataset_name = "cc12m"
         batch_size = 2
-        seq_len = 1024
+        seq_len = 512
         world_size = 4
         rank = 0
         seed = 1
