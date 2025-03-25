@@ -27,7 +27,7 @@
 # limitations under the License.
 """ PyTorch DeepSeek model."""
 import math
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -452,8 +452,8 @@ class MoE(nn.Module):
     shuffle_method = "torch_all_to_all"
 
     # Symmetric memory buffers shared by all MoE instances across layers
-    token_send_buf: Optional[List[torch.Tensor]] = []
-    token_gather_buf: Optional[List[torch.Tensor]] = []
+    token_send_buf: Optional[torch.Tensor] = None
+    token_gather_buf: Optional[torch.Tensor] = None
 
     def __init__(self, config):
         super().__init__()
@@ -492,14 +492,9 @@ class MoE(nn.Module):
     # all_to_all APIs which requrie a GPU-to-CPU sync of the splits.  If a user
     # calls this function, the `shuffle_method` would switch from
     # `torch_all_to_all` to `symm_mem`.
-    def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, microbatches: int
-    ):
+    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
-        self.microbatches = microbatches
-        self.curr_send = 0
-        self.curr_gather = 0
 
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
@@ -509,36 +504,29 @@ class MoE(nn.Module):
 
         # Symmetric memory buffers are shared by all MoE instances across
         # layers, we only need to initialize them once
-        if len(MoE.token_send_buf):
+        if MoE.token_send_buf is not None:
             return
 
-        # But they are not shared across microbatches
         # Input buffer for DP-to-EP shuffle
-        for _ in range(self.microbatches):
-            MoE.token_send_buf.append(
-                symm_mem.empty(
-                    self.config.max_seq_len
-                    * self.num_experts_per_tok,  # seq len * top k (flattened)
-                    self.config.hidden_size,  # hidden dim
-                    dtype=dtype,
-                    device=device,
-                )
-            )
+        MoE.token_send_buf = symm_mem.empty(
+            self.config.max_seq_len
+            * self.num_experts_per_tok,  # seq len * top k (flattened)
+            self.config.hidden_size,  # hidden dim
+            dtype=dtype,
+            device=device,
+        )
         # Input buffer for EP-to-DP shuffle
-        for _ in range(self.microbatches):
-            MoE.token_gather_buf.append(
-                symm_mem.empty(
-                    self.config.max_seq_len
-                    * self.num_experts_per_tok  # seq len * top k (flattened)
-                    * overflow,
-                    self.config.hidden_size,  # hidden dim
-                    dtype=dtype,
-                    device=device,
-                )
-            )
+        MoE.token_gather_buf = symm_mem.empty(
+            self.config.max_seq_len
+            * self.num_experts_per_tok  # seq len * top k (flattened)
+            * overflow,
+            self.config.hidden_size,  # hidden dim
+            dtype=dtype,
+            device=device,
+        )
         print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
 
-    def get_next_send_buf(self):
+    def get_send_buf(self):
         # [Why detach?] During a first forward-backward step, the buffer would
         # be included in a computational graph. In a second step, autograd will
         # return an error saying "Trying to backward through the graph a second
@@ -547,15 +535,11 @@ class MoE(nn.Module):
         # backward through the graph a second time. To avoid this, we detach the
         # buffer from the graph. `detach()` returns a new tensor, which shares
         # the same storage with the original one.
-        rv = self.token_send_buf[self.curr_send].detach()
-        self.curr_send = (self.curr_send + 1) % self.microbatches
-        return rv
+        return self.token_send_buf.detach()
 
-    def get_next_gather_buf(self):
-        # See [Why detach?] in `get_next_send_buf`
-        rv = self.token_gather_buf[self.curr_gather].detach()
-        self.curr_gather = (self.curr_gather + 1) % self.microbatches
-        return rv
+    def get_gather_buf(self):
+        # See [Why detach?] in `get_send_buf`
+        return self.token_gather_buf.detach()
 
     def forward(self, hidden_states):
         identity = hidden_states
@@ -604,7 +588,7 @@ class MoE(nn.Module):
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
-            token_send_buf = self.get_next_send_buf()
+            token_send_buf = self.get_send_buf()
             token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
@@ -647,7 +631,7 @@ class MoE(nn.Module):
         if self.shuffle_method == "symm_mem":
             # Take necessary space from `token_gather_buf` symm mem because we are
             # going to send them out after expert processing
-            processed_tokens = self.get_next_gather_buf()[: gathered_tokens.shape[0]]
+            processed_tokens = self.get_gather_buf()[: gathered_tokens.shape[0]]
         else:  # "torch_all_to_all"
             processed_tokens = torch.empty_like(gathered_tokens)
 
@@ -1204,10 +1188,8 @@ class DeepseekForCausalLM(torch.nn.Module):
 
     # Setup Symmetric Memory for MoE token shuffle.
     # Supports inference currently.
-    def setup_symm_mem(
-        self, dtype: torch.dtype, device: torch.device, microbatches: int
-    ):
+    def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         for layer in self.model.layers.values():
             if not isinstance(layer.mlp, MoE):
                 continue
-            layer.mlp.setup_symm_mem(dtype, device, microbatches)
+            layer.mlp.setup_symm_mem(dtype, device)
