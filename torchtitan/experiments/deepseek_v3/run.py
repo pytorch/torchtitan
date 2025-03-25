@@ -91,39 +91,43 @@ def run_full_model(
     loss_fn = torch.nn.functional.cross_entropy
 
     # Run forward and backward
-    if pp_size > 1:
-        # Create pipeline stage
-        stage = PipelineStage(
-            model,
-            pp_rank,
-            pp_size,
-            device,
-            group=pp_mesh.get_group(),
-        )
+    steps = 2
+    for _ in range(steps):
+        if pp_size > 1:
+            # Create pipeline stage
+            stage = PipelineStage(
+                model,
+                pp_rank,
+                pp_size,
+                device,
+                group=pp_mesh.get_group(),
+            )
 
-        # Create pipeline schedule
-        losses = []
-        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+            # Create pipeline schedule
+            losses = []
+            pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+
+            if pp_rank == 0:
+                y = pp_schedule.step(x)
+            elif pp_rank == pp_size - 1:
+                y = pp_schedule.step(target=label, losses=losses)
+                loss = torch.mean(torch.stack(losses))
+            else:
+                pp_schedule.step()
+        else:
+            y = model(x)
+            loss = loss_fn(y, label)
+            loss.backward()
+
+        if pp_rank == pp_size - 1:
+            print(f"logits: {y.shape}")
+            print(f"{loss=}")
 
         if pp_rank == 0:
-            y = pp_schedule.step(x)
-        elif pp_rank == pp_size - 1:
-            y = pp_schedule.step(target=label, losses=losses)
-            loss = torch.mean(torch.stack(losses))
-        else:
-            pp_schedule.step()
-    else:
-        y = model(x)
-        loss = loss_fn(y, label)
-        loss.backward()
+            param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
+            print(f"{torch.linalg.norm(param.grad)=}")
 
-    if pp_rank == pp_size - 1:
-        print(f"logits: {y.shape}")
-        print(f"{loss=}")
-
-    if pp_rank == 0:
-        param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
-        print(f"{torch.linalg.norm(param.grad)=}")
+        model.zero_grad()
 
     print("Backward done")
 
