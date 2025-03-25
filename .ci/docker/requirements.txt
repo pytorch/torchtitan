@@ -7,3 +7,7 @@ blobfile
 tabulate
 wandb
 fsspec
+transformers
+einops
+sentencepiece
+torchvision
