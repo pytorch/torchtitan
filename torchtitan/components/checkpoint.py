@@ -150,6 +150,31 @@ def purge_thread(purge_queue: queue.Queue):
         logger.info("Destroying the purge thread.")
 
 
+class TensorMetadata(dataclass):
+    shape: torch.Size
+    dtype: torch.dtype
+    is_dtensor: bool
+
+class Assignment(dataclass):
+    filename: str
+    sorted_fqns: List[str]
+
+# Loader id -> assignment
+RoundType = dict[int, Assignment]
+
+class ConvertAssignments(dataclass):
+    """This class is used to convert the assignment from the old format to the new format.
+
+    The old format is a list of tuples, where each tuple contains the source and destination
+    paths. The new format is a dictionary, where the keys are the source paths and the values
+    are the destination paths.
+
+    Args:
+        assignment (List[Tuple[str, str]]): The assignment to convert.
+    """
+    rounds: List[RoundType] = field(default_factory=list)
+
+
 class CheckpointManager:
     """This class manages the checkpointing logic for the TorchTitan trainer.
 
@@ -644,3 +669,123 @@ class CheckpointManager:
             for _, path in to_delete:
                 assert self.purge_thread is not None
                 self.purge_queue.put(path)
+
+
+    def _convert_gather_information(self, pg: dist.ProcessGroup) -> None:
+        pass
+
+    def _get_reading_assignment(self, reader, total_loader: int) -> ConvertAssignments:
+        metadata = reader.read_metadata()
+        filename_to_fqn = defaultdict(list)
+        for fqn, filename in metadata.storage_data.items():
+            filename_to_fqn[filename].append(fqn)
+        sorted_filenames = sorted(list(set(filename_to_fqn.keys())))
+
+        num_rounds = math.ceil(len(sorted_filenames) / total_loader)
+        assignments = ConvertAssignments(rounds=[])
+        for round in range(num_rounds):
+            assignments.rounds.append({})
+            for loader_id in range(total_loader):
+                filename_id = loader_id + round * total_loader
+                if filename_id >= len(sorted_filenames):
+                    break
+                filename = sorted_filenames[filename_id]
+                assignments.rounds[round][loader_id] = Assignment(
+                    filename=filename,
+                    fqns=sorted(filename_to_fqn[filename]),
+                )
+
+        return assignments
+
+    def _convert_scatter_state_dict(
+        self, state_dict: Dict[str, torch.Tensor], cpu_state_dict: Dict[str, torch.Tensor], my_rank: int, pg: dist.ProcessGroup
+    ) -> dist.Work:
+
+        all_shards = [[] for _ in range(dist.get_world_size(pg))]
+        for k, v in cpu_state_dict.items():
+            assert isinstance(state_dict[k], dist.tensor.DTensor)
+            # First, slice the tensor into shards
+            # Second, flatten the shards and move the shards to GPUs
+        all_shards = [torch.concat(shards) for shard in all_shards]
+        shard_len = all_shards[0].numel()
+        all_shards = [F.pad(t, [0, shard_len - t.numel()]) if t.numel() < shard_len else t for t in all_shards]
+        local_tensor = torch.empty_like(all_shards[0])
+
+
+        return dist.scatter(local_tensor, all_shards, src=my_rank, pg=pg)
+
+    def _convert_receive_scattered_state_dict(
+        self, state_dict: Dict[str, torch.Tensor], shard_info: Dict[str, TensorMetadata], fqns: List[str], pg: dist.ProcessGroup
+    ) -> dist.Work:
+        shard_len =
+        for k, v in shard_info.item():
+        for k, v in cpu_state_dict.items():
+
+        local_tensor = torch.empty()
+
+
+        pass
+
+
+    def convert(self, pg: dist.ProcessGroup, path: str, token: Optional[str] = None) -> None:
+        my_rank = dist.get_rank(pg)
+        shoud_load = my_rank % 8 == 0
+        loader_id = my_rank // 8
+        total_loader = dist.get_world_size(pg) // 8
+
+        from torch.distributed.checkpoint._hf_storage import _HuggingFaceStorageReader
+        reader = _HuggingFaceStorageReader(path, token)
+
+
+        # This should be a sharded state_dict.
+        state_dict = self.states[MODEL].state_dict()
+
+        # 1. Use Allgather to collect sharding information for all parameters
+        # across machines.
+        if my_rank == 0:
+            shard_info = {k: TensorMetadata(t.shape, t.dtype, isinstance(t, DTensor)) for k, t in state_dict.items()}
+        else:
+            shard_info = None
+        object_list = [shard_info]
+        dist.broadcast_object_list(object_list, src=0, group=pg)
+        shard_info = object_list[0]
+
+        # 2. Assign the first trainer on each machine to read a specific file in a
+        # round-robin fashion.
+        assignments = self._get_reading_assignment(reader, total_loader)
+
+        for round in assignments.rounds:
+            cpu_state_dict = {}
+            # 3. Load the entire set of tensors from the file into the GPU memory of
+            # the first trainer on each machine.
+            if should_load:
+                for fqn in round[loader_id].fqns:
+                    cpu_state_dict[fqn] = torch.empty(
+                        state_dict[fqn].shape, dtype=state_dict[fqn].dtype, device="cpu"
+                    )
+
+            # We actually don't need the filename as `dcp.load` will figure it out what
+            # fqns are in the file. We just need to pass in the fqns to the `load`.
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    dcp.load, cpu_state_dict, storage_reader=reader, process_group=pg
+                )
+
+            future.result()
+
+            # 4. Distribute loaded tensor data across all ranks using scatter communication.
+            works = []
+            for fqns_loader_id, fqns in enumerate(round):
+                if fqns_loader_id == loader_id and should_load:
+                    # This rank is responsible for scattering the loaded tensor data.
+                    assert fqns == list(cpu_state_dict.keys())
+                    work = self._convert_scatter_state_dict(state_dict, cpu_state_dict, my_rank, pg)
+                else:
+                    # We need to use shard_info from rank0 to pad for scatter.
+                    work = self._convert_receive_scattered_state_dict(state_dict, shard_info, fqns, pg)
+                works.append(work)
+
+            for work in works:
+                work.wait()
+
+        save_with_gc({MODEL: state_dict}, checkpoint_id=0)

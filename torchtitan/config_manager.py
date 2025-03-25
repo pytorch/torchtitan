@@ -630,6 +630,18 @@ class JobConfig:
                 This will load the model only, excluding the specified keys.
             """,
         )
+        self.parser.add_argument(
+            "--checkpoint.convert_path",
+            type=str,
+            default="",
+            help="""
+                When enabled, the trainer will not perform any training.
+                It will do all parallelisms initializations, then load the
+                checkpoint from the specified path, and then convert it to
+                the DCP format based on the initialized parallelisms.
+                Note that this require all ranks can access all the checkpoint.
+            """,
+        )
 
         # activation checkpointing configs
         self.parser.add_argument(
