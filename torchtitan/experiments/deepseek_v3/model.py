@@ -539,12 +539,21 @@ class MoE(nn.Module):
         print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
 
     def get_next_send_buf(self):
-        rv = self.token_send_buf[self.curr_send]
+        # [Why detach?] During a first forward-backward step, the buffer would
+        # be included in a computational graph. In a second step, autograd will
+        # return an error saying "Trying to backward through the graph a second
+        # time (or directly access saved tensors more than once)". This is
+        # because the buffer is still in the graph, and autograd is trying to
+        # backward through the graph a second time. To avoid this, we detach the
+        # buffer from the graph. `detach()` returns a new tensor, which shares
+        # the same storage with the original one.
+        rv = self.token_send_buf[self.curr_send].detach()
         self.curr_send = (self.curr_send + 1) % self.microbatches
         return rv
 
     def get_next_gather_buf(self):
-        rv = self.token_gather_buf[self.curr_gather]
+        # See [Why detach?] in `get_next_send_buf`
+        rv = self.token_gather_buf[self.curr_gather].detach()
         self.curr_gather = (self.curr_gather + 1) % self.microbatches
         return rv
 
