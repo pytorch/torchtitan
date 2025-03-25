@@ -21,6 +21,10 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.tokenizer.HFEmbedder import HFEmbedder
 from torchtitan.tools.logging import logger
+from torchtitan.tools.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_profiling,
+)
 from torchvision import transforms
 
 
@@ -127,6 +131,7 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         batch_size: int = 1,
         seed: int = 0,
         device: str = "cpu",
+        job_config: JobConfig = None,
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
@@ -155,6 +160,7 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         self._sample_idx = 0
         self._all_target_imgs: list[torch.Tensor] = []
         self._all_prompts: list[str] = []
+        self.job_config = job_config
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
@@ -167,39 +173,58 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
 
     def _prepare(self):
         # TODO: update to device operation
-        target_img = torch.stack(self._all_target_imgs).to(self.device)
+        with maybe_enable_memory_snapshot(
+            self.job_config, global_step=0
+        ) as memory_profiler:
 
-        sample_t5_embedding = self._t5_embedder(self._all_prompts)
-        txt_ids = torch.zeros(self.batch_size, sample_t5_embedding.shape[1], 3)
-        sample_clip_embedding = self._clip_embedder(self._all_prompts)
+            target_img = torch.stack(self._all_target_imgs).to(self.device)
 
-        noise_latent = _get_noise_latent(
-            self.batch_size,
-            target_img.shape[0],
-            target_img.shape[1],
-            dtype=torch.bfloat16,
-            seed=self.seed,
-        )
+            if memory_profiler:
+                memory_profiler.step()
 
-        _, _, h, w = noise_latent.shape  # (16, 256/8, 256/8) = (16, 32, 32)
-        # patchify the noise latent, p = 2
-        noise_latent = rearrange(
-            noise_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2
-        )
+            sample_t5_embedding = self._t5_embedder(self._all_prompts)
 
-        img_ids = torch.zeros(h // 2, w // 2, 3)
-        img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-        img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
-        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=self.batch_size)
+            if memory_profiler:
+                memory_profiler.step()
 
-        return {
-            "img": noise_latent.to(self.device),
-            "img_ids": img_ids.to(self.device),
-            "txt": sample_t5_embedding.to(self.device),
-            "txt_ids": txt_ids.to(self.device),
-            "vec": sample_clip_embedding.to(self.device),
-            "target": target_img,
-        }
+            txt_ids = torch.zeros(self.batch_size, sample_t5_embedding.shape[1], 3)
+            sample_clip_embedding = self._clip_embedder(self._all_prompts)
+
+            if memory_profiler:
+                memory_profiler.step()
+
+            noise_latent = _get_noise_latent(
+                self.batch_size,
+                target_img.shape[0],
+                target_img.shape[1],
+                dtype=torch.bfloat16,
+                seed=self.seed,
+            )
+
+            _, _, h, w = noise_latent.shape  # (16, 256/8, 256/8) = (16, 32, 32)
+            # patchify the noise latent, p = 2
+            noise_latent = rearrange(
+                noise_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2
+            )
+
+            img_ids = torch.zeros(h // 2, w // 2, 3)
+            img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
+            img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+            img_ids = repeat(img_ids, "h w c -> b (h w) c", b=self.batch_size)
+
+            output = {
+                "img": noise_latent.to(self.device),
+                "img_ids": img_ids.to(self.device),
+                "txt": sample_t5_embedding.to(self.device),
+                "txt_ids": txt_ids.to(self.device),
+                "vec": sample_clip_embedding.to(self.device),
+                "target": target_img,
+            }
+
+            if memory_profiler:
+                memory_profiler.step(exit_ctx=True)
+
+            return output
 
     def __iter__(self):
         samples_cnt = 0
@@ -270,4 +295,5 @@ def build_flux_dataloader(
         batch_size=batch_size,
         seed=seed,
         device=device,
+        job_config=job_config,
     )

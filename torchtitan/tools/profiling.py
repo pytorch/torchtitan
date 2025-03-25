@@ -95,7 +95,7 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                 )
                 # when resume training, we start from the last step
                 self.step_num = step_num
-                self.freq = freq
+                self.freq = 1
 
             def step(self, exit_ctx: bool = False):
                 self.step_num += 1

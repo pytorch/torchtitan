@@ -28,6 +28,7 @@ class TestFLUXDataLoader:
 
         for k, v in input_data.items():
             print(k, v.shape)
+            input_data[k] = v.cpu()
 
         assert len(input_data) == 6
         # TODO(jianiw): Add more data shape check once we finalize input and model
@@ -35,7 +36,7 @@ class TestFLUXDataLoader:
     def _load_t5(self, device: str = "cpu", max_length: int = 512) -> HFEmbedder:
         # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
         return HFEmbedder(
-            "google/t5-v1_1-xxl", max_length=max_length, torch_dtype=torch.bfloat16
+            "google/t5-v1_1-small", max_length=max_length, torch_dtype=torch.bfloat16
         ).to(device)
 
     def _load_clip(self, device: str = "cpu") -> HFEmbedder:
@@ -58,6 +59,9 @@ class TestFLUXDataLoader:
                 str(seq_len),
                 "--training.seed",
                 str(seed),
+                "--profiling.enable_memory_snapshot",  # enable memory snapshot
+                "--profiling.save_memory_snapshot_folder",
+                "memory_snapshot",
             ]
         )
 
