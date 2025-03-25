@@ -76,5 +76,5 @@ class TestMG_GroupedGEMM(unittest.TestCase):
             G, M, N, K = shape
             print(f"Testing BF16 M*G Deepseek shape: G={G}, M={M}, N={N}, K={K}")
             self._run_grouped_gemm_test(
-                shape, device, dtype=torch.bfloat16, atol=1e-2, rtol=1e-2
+                shape, device, dtype=torch.bfloat16, atol=1e-5, rtol=1.6e-2
             )
