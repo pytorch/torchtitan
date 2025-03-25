@@ -27,7 +27,7 @@
 # limitations under the License.
 """ PyTorch DeepSeek model."""
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -452,8 +452,8 @@ class MoE(nn.Module):
     shuffle_method = "torch_all_to_all"
 
     # Symmetric memory buffers shared by all MoE instances across layers
-    token_send_buf: Optional[torch.Tensor] = []
-    token_gather_buf: Optional[torch.Tensor] = []
+    token_send_buf: Optional[List[torch.Tensor]] = []
+    token_gather_buf: Optional[List[torch.Tensor]] = []
 
     def __init__(self, config):
         super().__init__()
