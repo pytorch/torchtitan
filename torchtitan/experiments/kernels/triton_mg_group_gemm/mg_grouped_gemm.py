@@ -565,27 +565,10 @@ def _kernel_mg_forward_tma(
                     )
 
                     accumulator += tl.dot(a, b.T)
-                if USE_FP8:
-                    # Scale the accumulator
-                    # Load the scales and apply
-                    offs_am = tile_m_index * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-                    offs_bn = tile_n_index * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-                    a_scale = tl.load(
-                        a_scale_ptr + M_start + offs_am[:, None],
-                        mask=offs_am[:, None] < m_size,
-                    )
-                    b_scale = tl.load(
-                        b_scale_ptr + offs_bn[None, :],
-                        mask=offs_bn[None, :] < n_size,
-                    )
-
-                    accumulator = accumulator.to(tl.float32) * a_scale * b_scale
 
                 # Store using TMA
-
                 m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
-                n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
+                # n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
 
                 tl._experimental_descriptor_store(
                     c_desc_ptr,
@@ -1409,7 +1392,7 @@ def grouped_gemm_forward(
         x_scale = x_scales
         w_scale = w_scales
     """
-    print(f"{x_scale=}")
+    # print(f"{x_scale=}")
     desc_helper = None
     desc_x = x
     desc_w = w
@@ -1454,7 +1437,7 @@ def grouped_gemm_forward(
         return (NUM_SMS,)
 
     M_BUCKET = triton.next_power_of_2(M_total)
-    print(f"{M_BUCKET=}")
+    # print(f"{M_BUCKET=}")
     _kernel_mg_forward_tma[grid](  #
         # _kernel_grouped_gemm_flat_indexing[grid](  # _kernel_grouped_gemm[grid](
         desc_x,
