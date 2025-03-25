@@ -59,9 +59,6 @@ class TestFLUXDataLoader:
                 str(seq_len),
                 "--training.seed",
                 str(seed),
-                "--profiling.enable_memory_snapshot",  # enable memory snapshot
-                "--profiling.save_memory_snapshot_folder",
-                "memory_snapshot",
             ]
         )
 
