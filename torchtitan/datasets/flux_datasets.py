@@ -126,6 +126,7 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         infinite: bool = False,
         batch_size: int = 1,
         seed: int = 0,
+        device: str = "cpu",
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
@@ -148,6 +149,7 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
 
         self.infinite = infinite
         self.batch_size = batch_size
+        self.device = device
 
         # Variables for checkpointing
         self._sample_idx = 0
@@ -163,9 +165,9 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
             next(it)
         return it
 
-    def _prepare(self, device="cuda"):
+    def _prepare(self):
         # TODO: update to device operation
-        target_img = torch.stack(self._all_target_imgs).to(device)
+        target_img = torch.stack(self._all_target_imgs).to(self.device)
 
         sample_t5_embedding = self._t5_embedder(self._all_prompts)
         txt_ids = torch.zeros(self.batch_size, sample_t5_embedding.shape[1], 3)
@@ -191,11 +193,11 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         img_ids = repeat(img_ids, "h w c -> b (h w) c", b=self.batch_size)
 
         return {
-            "img": noise_latent.to(device),
-            "img_ids": img_ids.to(device),
-            "txt": sample_t5_embedding.to(device),
-            "txt_ids": txt_ids.to(device),
-            "vec": sample_clip_embedding.to(device),
+            "img": noise_latent.to(self.device),
+            "img_ids": img_ids.to(self.device),
+            "txt": sample_t5_embedding.to(self.device),
+            "txt_ids": txt_ids.to(self.device),
+            "vec": sample_clip_embedding.to(self.device),
             "target": target_img,
         }
 
@@ -250,6 +252,7 @@ def build_flux_dataloader(
     embedder: List[HFEmbedder],
     job_config: JobConfig,
     infinite: bool = True,
+    device: str = "cpu",
 ) -> FLUXDataLoader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
@@ -266,4 +269,5 @@ def build_flux_dataloader(
         infinite=infinite,
         batch_size=batch_size,
         seed=seed,
+        device=device,
     )
