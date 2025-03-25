@@ -17,7 +17,7 @@ from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 
 # Use DeepSeek-V2-Lite as a proxy
-model_id = "deepseek-ai/DeepSeek-V2-Lite"
+model_id = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
 
 # Run full model
@@ -74,46 +74,74 @@ def run_full_model(
     # Apply HSDP on root model (lm_head, embeddings, etc)
     fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
 
+    # Synthetic setting
+    microbatches = pp_size * 2
+
+    # Use Symmetric Memory for MoE token shuffle.
+    model.setup_symm_mem(torch.bfloat16, device, microbatches)
+
     # Example inputs
-    bs = 2
+    torch.manual_seed(ep_rank)
+    bs = 4
     seqlen = 128
-    x = torch.randint(model_args.vocab_size, (bs, seqlen), device=device)
-    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
+    x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
+    label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
 
     # Run forward and backward
-    if pp_size > 1:
-        # Create pipeline stage
-        stage = PipelineStage(
-            model,
-            pp_rank,
-            pp_size,
-            device,
-            group=pp_mesh.get_group(),
-        )
+    steps = 10
+    # Add memory check before training
+    if pp_rank == 0:
+        torch.cuda.reset_peak_memory_stats()
+        mem_before = torch.cuda.max_memory_reserved() / (1024**3)
+        print(f"Memory reserved before training: {mem_before:.2f} GB")
 
-        # Create pipeline schedule
-        microbatches = 2
-        losses = []
-        pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+    for step in range(steps):
+        if pp_size > 1:
+            # Create pipeline stage
+            stage = PipelineStage(
+                model,
+                pp_rank,
+                pp_size,
+                device,
+                group=pp_mesh.get_group(),
+            )
+
+            # Create pipeline schedule
+            losses = []
+            pp_schedule = Schedule1F1B(stage, microbatches, loss_fn=loss_fn)
+
+            if pp_rank == 0:
+                y = pp_schedule.step(x)
+            elif pp_rank == pp_size - 1:
+                y = pp_schedule.step(target=label, losses=losses)
+                loss = torch.mean(torch.stack(losses))
+            else:
+                pp_schedule.step()
+        else:
+            y = model(x)
+            loss = loss_fn(y, label)
+            loss.backward()
+
+        if pp_rank == pp_size - 1:
+            print(f"logits: {y.shape}")
+            print(f"{loss=}")
 
         if pp_rank == 0:
-            y = pp_schedule.step(x)
-        elif pp_rank == pp_size - 1:
-            y = pp_schedule.step(target=label, losses=losses)
-            loss = torch.mean(torch.stack(losses))
-        else:
-            pp_schedule.step()
-    else:
-        y = model(x)
-        loss = loss_fn(y, label)
-        loss.backward()
-
-    if pp_rank == pp_size - 1:
-        print(f"logits: {y.shape}")
-        print(f"{loss=}")
+            param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
+            print(f"{torch.linalg.norm(param.grad)=}")
+        iter_memory = torch.cuda.max_memory_reserved() / (1024**3)
+        print(
+            f"iter {step+1}:  Memory reserved after forward/backward: {iter_memory:.2f} GB"
+        )
+        model.zero_grad()
+    # Add memory check after training
+    if pp_rank == 0:
+        mem_after = torch.cuda.max_memory_reserved() / (1024**3)
+        print(f"Memory reserved after training: {mem_after:.2f} GB")
+        print(f"Memory increase: {mem_after - mem_before:.2f} GB")
 
     print("Backward done")
 
