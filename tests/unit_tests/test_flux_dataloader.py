@@ -15,7 +15,7 @@ from torchtitan.datasets.tokenizer.HFEmbedder import HFEmbedder
 class TestFLUXDataLoader:
     def test_FLUX_dataloader(self):
         dataset_name = "cc12m"
-        batch_size = 2
+        batch_size = 2  # batch_size = 4 will cause OOM
         seq_len = 512
         world_size = 4
         rank = 0
