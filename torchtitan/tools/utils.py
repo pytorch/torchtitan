@@ -58,7 +58,7 @@ def get_num_params(model: nn.Module, exclude_embedding: bool = False) -> int:
     return num_params
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200 GPU and AMD MI250, MI300X and AMD MI325X
+# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
 def get_peak_flops(device_name: str) -> int:
     try:
         # Run the lspci command and capture the output
@@ -101,6 +101,8 @@ def get_peak_flops(device_name: str) -> int:
         # Dot Product Accumulate Systolic (DPAS):
         # - Freq: 1300MHz
         # - #ops: 512
+        # Full EU mode (i.e. 512 max compute units): 340.8 TFLOPS (BF16)
+        # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
     else:  # for other GPU types, assume A100
