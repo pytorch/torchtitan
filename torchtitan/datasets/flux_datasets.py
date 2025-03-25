@@ -5,25 +5,28 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import random
 from dataclasses import dataclass
+from logging import raiseExceptions
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from einops import rearrange, repeat
-from torch.distributed.checkpoint.stateful import Stateful
+from PIL import Image
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.tokenizer.HFEmbedder import HFEmbedder
 from torchtitan.tools.logging import logger
+from torchvision import transforms
 
 
 def _process_cc12m_image(
     sample: dict[str, Any], output_size: int = 256
-) -> torch.Tensor:
+) -> tuple[str, torch.Tensor]:
     """
     Process CC12M dataset sample image.
     Steps:
@@ -32,36 +35,55 @@ def _process_cc12m_image(
     """
     img = sample[
         "jpg"
-    ]  # NOTE: type should be PIL Image, https://huggingface.co/docs/datasets/en/image_load
-    # TODO(jianiw): add image open, processing logic here
+    ]  # NOTE: type is PIL Image, https://huggingface.co/docs/datasets/en/image_load
 
-    # TODO(jianiw): Check the output size, (3, 256, 256) ??
-    assert img.shape[0] == img.shape[1] == output_size
-    return torch.Tensor()
+    prompt = sample["txt"]
+
+    if img.width < output_size or img.height < output_size:
+        logger.info("Skip dataset sample because of image is too small.")
+        return prompt, None
+
+    width, height = img.size
+    if width >= height:
+        # resize height to be equal to output_size, then crop
+        new_width, new_height = math.ceil(output_size / height * width), output_size
+        img = img.resize((new_width, new_height))
+        left = random.randint(0, new_width - output_size)
+        resized_img = img.crop((left, 0, left + output_size, output_size))
+    else:
+        # resize width to be equal to output_size, the crop
+        new_width, new_height = (
+            output_size,
+            math.ceil(output_size / width * height),
+        )
+        img = img.resize((new_width, new_height))
+        lower = random.randint(0, new_width - output_size)
+        resized_img = img.crop((0, lower, output_size, lower + output_size))
+
+    assert resized_img.size[0] == resized_img.size[1] == output_size
+    return prompt, resized_img
 
 
 @dataclass
 class MultiModalDatasetConfig:
     path: str
     loader: Callable
-    text_processor: Callable
-    image_processor: Callable
+    data_processor: Callable
 
 
 # Add your dataset here here - more information at docs/datasets.md
 DATASETS = {
     "cc12m": MultiModalDatasetConfig(
         path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train"),
-        text_processor=lambda sample: sample["text"],
-        image_processor=_process_cc12m_image,
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        data_processor=_process_cc12m_image,
     ),
 }
 
 
 def _validate_dataset(
     dataset_name: str, dataset_path: Optional[str] = None
-) -> tuple[str, Callable, Callable, Callable]:
+) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
     if dataset_name not in DATASETS:
         raise ValueError(
@@ -72,7 +94,7 @@ def _validate_dataset(
     config = DATASETS[dataset_name]
     path = dataset_path or config.path
     logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.text_processor, config.image_processor
+    return path, config.loader, config.data_processor
 
 
 def _get_noise_latent(
@@ -93,13 +115,12 @@ def _get_noise_latent(
     )
 
 
-class FLUXDataLoader(StatefulDataLoader, Stateful):
+class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
     def __init__(
         self,
         dataset_name: str,
         dataset_path: Optional[str],
         embedder: List[HFEmbedder],  # Tokenizer for text
-        seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -109,12 +130,11 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
-        path, dataset_loader, text_processor, image_processor = _validate_dataset(
+        path, dataset_loader, data_processor = _validate_dataset(
             dataset_name, dataset_path
         )
         ds = dataset_loader(path)
 
-        # TODO(jianiw): Switch to use toml config to set the seed
         self.seed = seed
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
@@ -123,17 +143,14 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
 
         self._t5_embedder = embedder[0]
         self._clip_embedder = embedder[1]
-        self._text_processor = text_processor
-        self._image_processor = image_processor  # TODO(jianiw)
+        self._data_processor = data_processor
+        self._image_transformer = transforms.ToTensor()
 
-        self.seq_len = seq_len
         self.infinite = infinite
         self.batch_size = batch_size
 
-        # NOTE(jianiw): No need at this moment
-        # # Variables for checkpointing
+        # Variables for checkpointing
         self._sample_idx = 0
-        # self._all_tokens: list[int] = []
         self._all_target_imgs: list[torch.Tensor] = []
         self._all_prompts: list[str] = []
 
@@ -146,12 +163,13 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
             next(it)
         return it
 
-    def _prepare(self):
-        target_img = torch.stack(self._all_target_imgs)
+    def _prepare(self, device="cuda"):
+        # TODO: update to device operation
+        target_img = torch.stack(self._all_target_imgs).to(device)
 
         sample_t5_embedding = self._t5_embedder(self._all_prompts)
         txt_ids = torch.zeros(self.batch_size, sample_t5_embedding.shape[1], 3)
-        sample_clip_embedding = self._clip_tokenizer(self._all_prompts)
+        sample_clip_embedding = self._clip_embedder(self._all_prompts)
 
         noise_latent = _get_noise_latent(
             self.batch_size,
@@ -173,11 +191,11 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
         img_ids = repeat(img_ids, "h w c -> b (h w) c", b=self.batch_size)
 
         return {
-            "img": noise_latent,
-            "img_ids": img_ids,
-            "txt": sample_t5_embedding,
-            "txt_ids": txt_ids,
-            "vec": sample_clip_embedding,
+            "img": noise_latent.to(device),
+            "img_ids": img_ids.to(device),
+            "txt": sample_t5_embedding.to(device),
+            "txt_ids": txt_ids.to(device),
+            "vec": sample_clip_embedding.to(device),
             "target": target_img,
         }
 
@@ -186,15 +204,17 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
 
         while True:
             for sample in self._get_data_iter():
-                samples_cnt += 1
+                self._sample_idx += 1
 
                 # Use the dataset-specific text processor
-                sample_promt = self._text_processor(sample)
-                sample_image = self._image_processor(sample)
+                sample_prompt, sample_image = self._data_processor(sample)
+                if sample_prompt is None or sample_image is None:
+                    continue
 
-                self._all_target_imgs.extend(sample_image)
-                self._all_prompts.extend(sample_promt)
-                self._sample_idx += 1
+                samples_cnt += 1
+
+                self._all_target_imgs.extend(self._image_transformer(sample_image))
+                self._all_prompts.extend(sample_prompt)
 
                 if samples_cnt == self.batch_size:
                     batched_data = self._prepare()
@@ -212,11 +232,16 @@ class FLUXDataLoader(StatefulDataLoader, Stateful):
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
 
     def load_state_dict(self, state_dict):
-        # TODO(jianiw): Check if we need this function
-        pass
+        self._sample_idx = state_dict["sample_idx"]
+        self._all_target_imgs = state_dict["img_buffer"]
+        self._all_prompts = state_dict["txt_buffer"]
 
     def state_dict(self):
-        pass
+        return {
+            "img_buffer": self._all_target_imgs,
+            "txt_buffer": self._all_prompts,
+            "sample_idx": self._sample_idx,
+        }
 
 
 def build_flux_dataloader(
@@ -230,14 +255,12 @@ def build_flux_dataloader(
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
-    seq_len = job_config.training.seq_len
     seed = job_config.training.seed
 
     return FLUXDataLoader(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         embedder=embedder,
-        seq_len=seq_len,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
