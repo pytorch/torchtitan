@@ -22,8 +22,8 @@ logging.basicConfig(
 
 # Try to import the optimized implementations
 try:
-    from mg_backward import grouped_gemm_backward
-    from mg_forward import grouped_gemm_forward
+    from mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
+
 except ImportError:
     logging.error(
         "Error importing MG grouped GEMM modules. Make sure the implementation files are in the correct path."
@@ -79,7 +79,7 @@ def compute_reference_forward(x, w, m_sizes):
         args={
             "M": 8192,  # Batch dimension, fixed for all tests
             "K": 7168,  # Hidden dimension, fixed for all tests
-            "G": 4,  # Number of groups
+            "G": 8,  # Number of groups
             "dtype": torch.float16,
             "device": "cuda",
         },
@@ -106,6 +106,8 @@ def benchmark_forward(M, K, N, G, provider, dtype=torch.float16, device="cuda"):
     remainder = M % G
     M_sizes = [base_size + (1 if i < remainder else 0) for i in range(G)]
     m_sizes = torch.tensor(M_sizes, device=device, dtype=torch.int32)
+
+    print(f"N: {N}, M: {M}, K: {K}, G: {G}, dtype: {dtype}, device: {device}")
 
     # Create input and weight tensors
     x = torch.randn(M, K, dtype=dtype, device=device)
