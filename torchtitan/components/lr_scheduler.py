@@ -142,15 +142,17 @@ def build_lr_schedulers(
         to ensure the learning rate does not drop below this minimum value.
         """
         warmup_stable_steps = warmup_steps + stable_steps
-        if current_step <= warmup_steps:
+        if current_step < warmup_steps:
             # linear warmup
-            # 1-indexed step
-            curr_adjustment = float(current_step / warmup_steps)
-        elif current_step <= warmup_stable_steps:
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            curr_adjustment = float(current_step / (warmup_steps + 1))
+        elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
-            assert decay_steps != 0, "decay_steps must be greater than 0"
-            progress = float(current_step - warmup_stable_steps) / decay_steps
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            progress = float(current_step - warmup_stable_steps) / (decay_steps + 1)
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress
