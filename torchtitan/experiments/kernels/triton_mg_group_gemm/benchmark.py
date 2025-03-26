@@ -68,8 +68,8 @@ def compute_reference_forward(x, w, m_sizes):
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["N"],  # We'll vary the output dimension
-        # x_vals=[1024, 2048, 4096, 8192, 16384],  # Different output dimensions to test
-        x_vals=[8192, 16384],
+        x_vals=[1024, 2048, 4096, 8192, 16384],  # Different output dimensions to test
+        # x_vals=[8192, 16384],
         line_arg="provider",  # We'll compare different providers
         line_vals=["pytorch_reference", "M*G grouped GEMM"],
         line_names=["PyTorch Reference", "M*G grouped Kernel"],
@@ -79,7 +79,7 @@ def compute_reference_forward(x, w, m_sizes):
         args={
             "M": 8192,  # Batch dimension, fixed for all tests
             "K": 7168,  # Hidden dimension, fixed for all tests
-            "G": 4,  # Number of groups
+            "G": 8,  # Number of groups
             "dtype": torch.float16,
             "device": "cuda",
         },

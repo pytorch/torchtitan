@@ -472,6 +472,140 @@ Forward pass for grouped GEMM with Triton, where grouping is M*G
     prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
+def _kernel_mg_forward_hopper_bf16(
+    a_desc_ptr,
+    b_desc_ptr,
+    c_ptr,
+    workspace,
+    m_sizes,
+    # problem sizes
+    G: tl.constexpr,
+    M_BUCKET: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    # config
+    NUM_SMS: tl.constexpr,
+    TMA_SIZE: tl.constexpr,
+    USE_EPILOGUE_SUBTILING: tl.constexpr,
+    # tiles
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    """
+    Flat index style forward kernel for Hopper.
+    For simplicity, we always use TMA Load and TMA Store
+    """
+    tbidx = tl.program_id(0)  # thread block index
+
+    c_dtype = c_ptr.dtype.element_ty  # output dtype
+
+    c_desc_ptr = workspace + (tbidx * TMA_SIZE)  # for TMA Store
+
+    M_end = 0
+    M_start = 0
+    processed_tiles = 0
+
+    for g in range(G):
+        # Move down along groups
+        # reset to new M offset
+        M_start = M_end
+        m_size = tl.load(m_sizes + g)
+        M_end = M_start + m_size
+
+        if m_size > 0:
+            # Process this group
+            n_size = N
+
+            # Acquire hold on c_desc_ptr for TMA Store
+            tl.extra.cuda.experimental_device_tensormap_create2d(
+                desc_ptr=c_desc_ptr,
+                global_address=c_ptr + M_start * N,
+                load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+                global_size=[m_size, n_size],
+                element_ty=c_dtype,
+            )
+            tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(c_desc_ptr)
+
+            # tiles for this group
+            num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
+            num_n_tiles = tl.cdiv(n_size, BLOCK_SIZE_N)
+            group_num_tiles = num_m_tiles * num_n_tiles
+
+            while tbidx >= processed_tiles and tbidx < (
+                processed_tiles + group_num_tiles
+            ):
+                group_index = tbidx - processed_tiles
+
+                # columnwise
+                tile_m_index = group_index % num_m_tiles
+                tile_n_index = group_index // num_m_tiles
+
+                accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+                m_offset = (M_start + (tile_m_index * BLOCK_SIZE_M)).to(tl.int32)
+                n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
+
+                for k_offset in range(0, K, BLOCK_SIZE_K):
+                    # input block [M,K]
+                    a = tl._experimental_descriptor_load(
+                        a_desc_ptr,
+                        [m_offset, k_offset],
+                        [BLOCK_SIZE_M, BLOCK_SIZE_K],
+                        c_dtype,
+                    )
+                    # weight block [N, K]
+                    b = tl._experimental_descriptor_load(
+                        b_desc_ptr,
+                        [n_offset, k_offset],
+                        [BLOCK_SIZE_N, BLOCK_SIZE_K],
+                        c_dtype,
+                    )
+
+                    accumulator += tl.dot(a, b.T)
+
+                # Store using TMA
+                """
+                if EPILOGUE_SUBTILE:
+            acc = tl.reshape(accumulator, (BLOCK_SIZE_M, 2, BLOCK_SIZE_N // 2))
+            acc = tl.permute(acc, (0, 2, 1))
+            acc0, acc1 = tl.split(acc)
+            c0 = acc0.to(dtype)
+            tl._experimental_descriptor_store(c_desc_ptr, c0, [offs_am_c, offs_bn_c])
+            c1 = acc1.to(dtype)
+            tl._experimental_descriptor_store(c_desc_ptr, c1, [offs_am_c, offs_bn_c + BLOCK_SIZE_N // 2])
+                """
+                m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
+                if USE_EPILOGUE_SUBTILING:
+                    acc = tl.reshape(accumulator, (BLOCK_SIZE_M, 2, BLOCK_SIZE_N // 2))
+                    acc = tl.permute(acc, (0, 2, 1))
+                    acc0, acc1 = tl.split(acc)
+                    c0 = acc0.to(c_dtype)
+                    tl._experimental_descriptor_store(
+                        c_desc_ptr, c0, [m_offset, n_offset]
+                    )
+                    c1 = acc1.to(c_dtype)
+                    tl._experimental_descriptor_store(
+                        c_desc_ptr, c1, [m_offset, n_offset + BLOCK_SIZE_N // 2]
+                    )
+                else:
+                    tl._experimental_descriptor_store(
+                        c_desc_ptr,
+                        accumulator.to(c_dtype),
+                        [m_offset, n_offset],
+                    )
+                # move to next tile in group
+                tbidx += NUM_SMS
+            # Update the total tiles count for the next group
+            processed_tiles += group_num_tiles
+
+
+@triton.autotune(
+    configs=_NV_CONFIGS,
+    key=["G", "M_BUCKET", "N", "K"],
+    prune_configs_by={"early_config_prune": early_config_prune},
+)
+@triton.jit
 def _kernel_mg_forward_tma(
     a_desc_ptr,
     b_desc_ptr,
@@ -1378,6 +1512,7 @@ def grouped_gemm_forward(
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
     USE_TMA_STORE = True
+    USE_EPILOGUE_SUBTILING = True
 
     if x_scale is not None and w_scale is not None:
         using_fp8 = True
@@ -1439,24 +1574,20 @@ def grouped_gemm_forward(
 
     M_BUCKET = triton.next_power_of_2(M_total)
     # print(f"{M_BUCKET=}")
-    _kernel_mg_forward_tma[grid](  #
+    _kernel_mg_forward_hopper_bf16[grid](  #
         # _kernel_grouped_gemm_flat_indexing[grid](  # _kernel_grouped_gemm[grid](
         desc_x,
         desc_w,
         y,
         workspace,
         m_sizes,
-        x_scale,
-        w_scale,
         G,
         M_BUCKET,
         N,
         K,
         NUM_SMS,
-        USE_TMA_LOAD,
-        USE_TMA_STORE,
         TMA_SIZE=tma_size,
-        USE_FP8=using_fp8,
+        USE_EPILOGUE_SUBTILING=USE_EPILOGUE_SUBTILING,
     )
 
     return y
