@@ -627,8 +627,7 @@ class MoE(nn.Module):
             gatherd_idxs = (
                 gatherd_idxs.repeat_interleave(tokens_per_expert_group)
                 % self.experts_per_rank
-            ) + self.ep_rank * self.experts_per_rank
-
+            )
 
         # Prepare buffer for tokens processed by experts
         if self.shuffle_method == "symm_mem":
