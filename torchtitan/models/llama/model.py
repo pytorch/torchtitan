@@ -16,8 +16,7 @@ from torch import nn
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-
-from torchtitan.models.attention import SDPA
+from torchtitan.models.attention import build_attention, init_attention_bias
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
@@ -41,6 +40,8 @@ class TransformerModelArgs(BaseModelArgs):
     norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
+    attn_bias_type: str = "causal"
+    eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type
@@ -194,7 +195,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = SDPA(model_args.use_flex_attn)
+        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_bias_type)
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -388,6 +389,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+        self.eos_id = model_args.eos_id
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -468,6 +470,8 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        init_attention_bias(tokens, eos_id=self.eos_id)
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
