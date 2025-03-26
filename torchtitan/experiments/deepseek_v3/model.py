@@ -535,10 +535,12 @@ class MoE(nn.Module):
         # backward through the graph a second time. To avoid this, we detach the
         # buffer from the graph. `detach()` returns a new tensor, which shares
         # the same storage with the original one.
+        self.token_send_buf.grad = None
         return self.token_send_buf.detach()
 
     def get_gather_buf(self):
         # See [Why detach?] in `get_send_buf`
+        self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
     def forward(self, hidden_states):
