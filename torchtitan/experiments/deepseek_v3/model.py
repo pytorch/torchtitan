@@ -620,14 +620,14 @@ class MoE(nn.Module):
         # the tokens in `gathered_tokens` are headed for. This part doesn't need
         # gradient.
         with torch.no_grad():
-            gatherd_idxs = torch.arange(
-                tokens_per_expert_group.numel(),
-                device=tokens_per_expert_group.device,
-            )
             gatherd_idxs = (
-                gatherd_idxs.repeat_interleave(tokens_per_expert_group)
+                torch.arange(
+                    tokens_per_expert_group.numel(),
+                    device=tokens_per_expert_group.device,
+                )
                 % self.experts_per_rank
             )
+            gatherd_idxs = gatherd_idxs.repeat_interleave(tokens_per_expert_group)
 
         # Prepare buffer for tokens processed by experts
         if self.shuffle_method == "symm_mem":
