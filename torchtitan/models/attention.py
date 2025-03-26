@@ -91,7 +91,7 @@ class FlexAttn(torch.nn.Module):
 
 
 class SDPA(torch.nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, attn_bias_type: str) -> None:
         super().__init__()
         if attn_bias_type != "causal":
             raise ValueError(
