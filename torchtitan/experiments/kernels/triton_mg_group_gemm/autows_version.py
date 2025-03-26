@@ -372,6 +372,7 @@ _NV_CONFIGS = [
             "BLOCK_SIZE_M": block_size_m,
             "BLOCK_SIZE_N": block_size_n,
             "BLOCK_SIZE_K": block_size_k,
+            "NUM_CONSUMER_GROUPS": 1,
         },
         num_stages=num_stages,
         num_warps=num_warps,
@@ -383,6 +384,28 @@ _NV_CONFIGS = [
     for num_stages in [3, 4]
     for num_warps in [4, 8]
     for num_ctas in [1]
+    for num_consumer_groups in [1]
+]
+
+_NV_WS_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": block_size_m,
+            "BLOCK_SIZE_N": block_size_n,
+            "BLOCK_SIZE_K": block_size_k,
+            "NUM_CONSUMER_GROUPS": num_consumer_groups,
+        },
+        num_stages=num_stages,
+        num_warps=4,
+        num_ctas=1,
+        num_consumer_groups=num_consumer_groups,
+        num_buffers_warp_spec=num_stages,
+    )
+    for block_size_m in [64, 128]
+    for block_size_n in [64, 128, 256]
+    for block_size_k in [64, 128, 256]
+    for num_stages in [2, 3, 4]
+    for num_consumer_groups in [2]
 ]
 
 
@@ -406,11 +429,12 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
     pruned_configs = []
     for config in configs:
         kw = config.kwargs
-        BLOCK_M, BLOCK_N, BLOCK_K, num_stages = (
+        BLOCK_M, BLOCK_N, BLOCK_K, num_stages, NUM_CONSUMER_GROUPS = (
             kw["BLOCK_SIZE_M"],
             kw["BLOCK_SIZE_N"],
             kw["BLOCK_SIZE_K"],
             config.num_stages,
+            config.num_consumer_groups,
         )
         G, M, N, K = (
             named_args["G"],
@@ -428,10 +452,16 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
         if required_shared_memory > max_shared_memory:
             continue
 
+        using_warp_spec = NUM_CONSUMER_GROUPS > 0
+
         M_PER_GROUP = M // G
         MIN_M_TILES = 64
         # 2. make sure we don't load M tiles that are too big
-        if BLOCK_M > MIN_M_TILES and BLOCK_M > (M_PER_GROUP * 2):
+        if (
+            not using_warp_spec
+            and BLOCK_M > MIN_M_TILES
+            and BLOCK_M > (M_PER_GROUP * 2)
+        ):
             continue
         # 3. make sure we don't load N tiles that are too small
         if BLOCK_M < 128 and BLOCK_M < (M_PER_GROUP // 2):
@@ -443,7 +473,7 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
         N_TILES = N // BLOCK_N
         MIN_N_TILES = 64
         # 4. make sure we don't load N tiles that are too big
-        if BLOCK_N > MIN_N_TILES and M * N_TILES < num_sm:
+        if not using_warp_spec and BLOCK_N > MIN_N_TILES and M * N_TILES < num_sm:
             continue
         # 5. make sure we don't load N tiles that are too small
         if BLOCK_N < 128 and M * N_TILES > 2 * num_sm:
@@ -451,7 +481,12 @@ def early_config_prune(configs, named_args, dtsize=None, dtype=None, **kwargs):
         # 6. make sure K can be evenly divided
         if K % BLOCK_K != 0:
             continue
-
+        # 7. make sure we can partition for WS
+        if using_warp_spec:
+            m_slice = BLOCK_M // NUM_CONSUMER_GROUPS
+            n_slice = BLOCK_N // NUM_CONSUMER_GROUPS
+            if m_slice < 64 and n_slice < 256:
+                continue
         pruned_configs.append(config)
 
     return pruned_configs
@@ -467,7 +502,7 @@ Forward pass for grouped GEMM with Triton, where grouping is M*G
 
 
 @triton.autotune(
-    configs=_NV_CONFIGS,
+    configs=_NV_WS_CONFIGS,
     key=["G", "M_BUCKET", "N", "K"],
     prune_configs_by={"early_config_prune": early_config_prune},
 )
@@ -491,6 +526,7 @@ def _kernel_mg_forward_hopper_bf16(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    NUM_CONSUMER_GROUPS: tl.constexpr,
 ) -> None:
     """
     Flat index style forward kernel for Hopper.
@@ -565,7 +601,6 @@ def _kernel_mg_forward_hopper_bf16(
                     accumulator += tl.dot(a, b.T)
 
                 # Store using TMA
-
                 m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
 
                 if USE_EPILOGUE_SUBTILING:
@@ -1504,7 +1539,7 @@ def grouped_gemm_forward(
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
     USE_TMA_STORE = True
-    USE_EPILOGUE_SUBTILING = False
+    USE_EPILOGUE_SUBTILING = True
 
     if x_scale is not None and w_scale is not None:
         using_fp8 = True
@@ -1548,7 +1583,7 @@ def grouped_gemm_forward(
                 x.data_ptr(),
                 M_total,
                 K,
-                META["BLOCK_SIZE_M"],
+                META["BLOCK_SIZE_M"] // META["NUM_CONSUMER_GROUPS"],
                 META["BLOCK_SIZE_K"],
                 x.element_size(),
             )
