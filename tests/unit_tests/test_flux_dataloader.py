@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import pynvml as nvml
 import torch
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.flux_datasets import build_flux_dataloader
