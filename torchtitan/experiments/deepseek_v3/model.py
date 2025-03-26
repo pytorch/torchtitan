@@ -29,8 +29,6 @@
 import math
 from typing import Optional, Tuple
 
-import numpy as np
-
 import torch
 import torch.distributed as dist
 
@@ -622,12 +620,15 @@ class MoE(nn.Module):
         # the tokens in `gathered_tokens` are headed for. This part doesn't need
         # gradient.
         with torch.no_grad():
-            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
-            s = 0
-            # TODO: remove `tolist()`
-            for i, k in enumerate(tokens_per_expert_group.tolist()):
-                gatherd_idxs[s : s + k] = i % self.experts_per_rank
-                s += k
+            gatherd_idxs = torch.arange(
+                tokens_per_expert_group.numel(),
+                device=tokens_per_expert_group.device,
+            )
+            gatherd_idxs = (
+                gatherd_idxs.repeat_interleave(tokens_per_expert_group)
+                % self.experts_per_rank
+            ) + self.ep_rank * self.experts_per_rank
+
 
         # Prepare buffer for tokens processed by experts
         if self.shuffle_method == "symm_mem":
