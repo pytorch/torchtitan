@@ -48,6 +48,7 @@ class TransformerModelArgs(BaseModelArgs):
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
+        self.attn_bias_type = job_config.model.attn_bias_type
 
     def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
         l, h, q, t = (
