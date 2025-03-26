@@ -520,11 +520,6 @@ def _kernel_mg_forward_tma(
             # Process this group
             n_size = N
 
-            # tiles for this group
-            num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
-            num_n_tiles = tl.cdiv(n_size, BLOCK_SIZE_N)
-            group_num_tiles = num_m_tiles * num_n_tiles
-
             # TMA Store prep
             tl.extra.cuda.experimental_device_tensormap_create2d(
                 desc_ptr=c_desc_ptr,
@@ -534,6 +529,11 @@ def _kernel_mg_forward_tma(
                 element_ty=c_dtype,
             )
             tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(c_desc_ptr)
+
+            # tiles for this group
+            num_m_tiles = tl.cdiv(m_size, BLOCK_SIZE_M)
+            num_n_tiles = tl.cdiv(n_size, BLOCK_SIZE_N)
+            group_num_tiles = num_m_tiles * num_n_tiles
 
             while tbidx >= processed_tiles and tbidx < (
                 processed_tiles + group_num_tiles
@@ -567,6 +567,7 @@ def _kernel_mg_forward_tma(
                     accumulator += tl.dot(a, b.T)
 
                 # Store using TMA
+
                 m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
                 # n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
 
