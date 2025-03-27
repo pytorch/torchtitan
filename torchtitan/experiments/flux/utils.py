@@ -1,21 +1,16 @@
-import os
-from dataclasses import dataclass
+import math
 
 import torch
 from einops import rearrange
 from huggingface_hub import hf_hub_download
 from PIL import ExifTags, Image
 from safetensors.torch import load_file as load_sft
-from torchtitan.config_manager import JobConfig
+from torch import Tensor
 
-from torchtitan.datasets.flux_datasets import build_flux_dataloader
-from torchtitan.datasets.tokenizer.HFEmbedder import HFEmbedder
+from torchtitan.experiments.flux.model import FluxModel
 
-from torchtitan.experiments.flux.model import Flux, FluxParams
-from torchtitan.experiments.flux.modules.autoencoder import (
-    AutoEncoder,
-    AutoEncoderParams,
-)
+from torchtitan.experiments.flux.modules.autoencoder import AutoEncoder
+from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
 
 
 def save_image(
@@ -88,79 +83,6 @@ def load_ae(
     return ae
 
 
-@dataclass
-class ModelSpec:
-    params: FluxParams
-    ae_params: AutoEncoderParams
-    ckpt_path: str | None
-    lora_path: str | None
-    ae_path: str | None
-    repo_id: str | None
-    repo_flow: str | None
-    repo_ae: str | None
-
-
-configs = {
-    "flux-dev": ModelSpec(
-        repo_id="black-forest-labs/FLUX.1-dev",
-        repo_flow="flux1-dev.safetensors",
-        repo_ae="ae.safetensors",
-        ckpt_path=os.getenv("FLUX_DEV"),
-        lora_path=None,
-        params=FluxParams(
-            in_channels=64,
-            out_channels=64,
-            vec_in_dim=768,
-            context_in_dim=512,  # ??????????????
-            hidden_size=3072,
-            mlp_ratio=4.0,
-            num_heads=24,
-            depth=19,
-            depth_single_blocks=38,
-            axes_dim=[16, 56, 56],
-            theta=10_000,
-            qkv_bias=True,
-            guidance_embed=True,
-        ),
-        ae_path=os.getenv("AE"),
-        ae_params=AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            ch=128,
-            out_ch=3,
-            ch_mult=[1, 2, 4, 4],
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
-        ),
-    )
-}
-
-
-def load_flow_model(
-    name: str,
-    device: str | torch.device = "cuda",
-    hf_download: bool = False,
-    verbose: bool = False,
-) -> Flux:
-    # Loading Flux from init status
-    print("Init model")
-    ckpt_path = configs[name].ckpt_path
-    if (
-        ckpt_path is None
-        and configs[name].repo_id is not None
-        and configs[name].repo_flow is not None
-        and hf_download
-    ):
-        ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
-
-    with torch.device(device):
-        model = Flux(configs[name].params).to(torch.bfloat16)
-
-    return model
-
-
 def load_t5(device: str = "cpu", max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
     return HFEmbedder(
@@ -175,33 +97,61 @@ def load_clip(device: str = "cpu") -> HFEmbedder:
     ).to(device)
 
 
-def build_dataloader(
-    dataset_name,
-    t5,
-    clip,
-    batch_size,
-    world_size,
-    rank,
-    seed,
-    device="cpu",
+def denoise(
+    model: FluxModel,
+    # model input
+    img: Tensor,
+    img_ids: Tensor,
+    txt: Tensor,
+    txt_ids: Tensor,
+    vec: Tensor,
+    target: Tensor,  # TODO(jianiw): This is place holder now
+    # sampling parameters
+    timesteps: list[float],
+    guidance: float = 4.0,
+    # extra img tokens
+    img_cond: Tensor | None = None,
 ):
-    config = JobConfig()
-    config.parse_args(
-        [
-            "--training.dataset",
-            dataset_name,
-            "--training.batch_size",
-            str(batch_size),
-            "--training.seed",
-            str(seed),
-        ]
+    # this is ignored for schnell
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
+    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        pred = model(
+            img=torch.cat((img, img_cond), dim=-1) if img_cond is not None else img,
+            img_ids=img_ids,
+            txt=txt,
+            txt_ids=txt_ids,
+            y=vec,
+            timesteps=t_vec,
+            guidance=guidance_vec,
+        )
 
-    return build_flux_dataloader(
-        dp_world_size=world_size,
-        dp_rank=rank,
-        embedder=[t5, clip],
-        job_config=config,
-        infinite=False,
-        device=device,
+        img = img + (t_prev - t_curr) * pred
+
+    return img
+
+
+def unpack_latent(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
+    """
+    Rearrange latents from a sequence of patches into an image-like format.
+
+    Args:
+        x (Tensor): The packed latents.
+            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+        latent_height (int): The height of the unpacked latents.
+        latent_width (int): The width of the unpacked latents.
+
+    Returns:
+        Tensor: The unpacked latents.
+            Shape: [bsz, ch, latent height, latent width]
+    """
+    return rearrange(
+        x,
+        "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+        h=math.ceil(latent_height / 16),
+        w=math.ceil(latent_width / 16),
+        ph=2,
+        pw=2,
     )

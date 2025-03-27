@@ -11,10 +11,6 @@ from torchtitan.experiments.flux.modules.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
-from torchtitan.experiments.flux.modules.lora import (
-    LinearLora,
-    replace_linear_with_lora,
-)
 
 
 @dataclass
@@ -34,7 +30,7 @@ class FluxParams:
     guidance_embed: bool
 
 
-class Flux(nn.Module):
+class FluxModel(nn.Module):
     """
     Transformer model for flow matching on sequences.
     """
@@ -92,6 +88,10 @@ class Flux(nn.Module):
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
+    def _init_weight(self):
+        for param in self.parameters():
+            param.data.uniform_(0, 0.1)
+
     def forward(
         self,
         img: Tensor,
@@ -106,7 +106,9 @@ class Flux(nn.Module):
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
-        img = self.img_in(img)
+        img = self.img_in(
+            img
+        )  # img: (BSZ, H/16, W/16, 64) -> (BSZ, H/16, W/16, self.hidden_size)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         if self.params.guidance_embed:
             if guidance is None:
@@ -114,7 +116,9 @@ class Flux(nn.Module):
                     "Didn't get guidance strength for guidance distilled model."
                 )
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
-        vec = vec + self.vector_in(y)
+        vec = vec + self.vector_in(
+            y
+        )  # clips_embedding: (BSZ, 768???, ) -> (BSZ, self.hidden_size,)
         txt = self.txt_in(
             txt
         )  # mat1 and mat2 shapes cannot be multiplied (114688x512 and 4096x3072)
@@ -132,27 +136,3 @@ class Flux(nn.Module):
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
-
-
-class FluxLoraWrapper(Flux):
-    def __init__(
-        self,
-        lora_rank: int = 128,
-        lora_scale: float = 1.0,
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-
-        self.lora_rank = lora_rank
-
-        replace_linear_with_lora(
-            self,
-            max_rank=lora_rank,
-            scale=lora_scale,
-        )
-
-    def set_lora_scale(self, scale: float) -> None:
-        for module in self.modules():
-            if isinstance(module, LinearLora):
-                module.set_scale(scale=scale)
