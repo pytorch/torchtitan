@@ -106,9 +106,7 @@ class FluxModel(nn.Module):
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
-        img = self.img_in(
-            img
-        )  # img: (BSZ, H/16, W/16, 64) -> (BSZ, H/16, W/16, self.hidden_size)
+        img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         if self.params.guidance_embed:
             if guidance is None:
