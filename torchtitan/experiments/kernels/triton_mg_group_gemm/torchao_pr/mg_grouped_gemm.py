@@ -722,9 +722,6 @@ def grouped_gemm_forward(
     w: torch.Tensor,
     m_sizes: torch.Tensor,
     tma_size: int = 128,
-    using_fp8: bool = False,
-    x_scale: Optional[torch.Tensor] = None,
-    w_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     M*G style grouped GEMM with TMA and Float8 support.
@@ -760,21 +757,7 @@ def grouped_gemm_forward(
     USE_TMA_STORE = True
     USE_EPILOGUE_SUBTILING = False
 
-    if x_scale is not None and w_scale is not None:
-        using_fp8 = True
-
-    # TODO: not clear if we should integrate FP8 by handling here in the wrapper
-    # or if we should expect scales to be passed in.
-    """if using_fp8 and x_scale is None and w_scale is None:
-        print(f"FP8 scaling in progress...")
-        x_fp8, x_scales = triton_quantize_fp8_row(x)
-        w_fp8, w_scales = triton_quantize_fp8_row(w)
-        x = x_fp8
-        w = w_fp8
-        x_scale = x_scales
-        w_scale = w_scales
-    """
-    # print(f"{x_scale=}")
+    # TMA descriptor helper
     desc_helper = None
     desc_x = x
     desc_w = w
@@ -901,7 +884,7 @@ def grouped_gemm_backward(
         logging.info("TMA requested but not supported on this device")
         use_tma = False
 
-    # Compute grad_x using optimized implementation
+    # Compute grad_x using flat linear implementation
     try:
         logging.info(f"Computing grad_x with flat linear kernel")
 
@@ -1115,14 +1098,11 @@ def grouped_gemm_dw_tma(
     # Create output tensor (grad_w) with shape [N, K]
     grad_w = torch.zeros((N, K_x), device=x.device, dtype=x.dtype)
 
-    # Get number of SMs
-    NUM_SMS = CudaUtils.get_num_sms()
+    NUM_SMS = num_sms
 
-    # Set TMA flags based on hardware support
+    # TODO  - hardcoded for now...but should set TMA flags based on hardware support
     USE_TMA_LOAD = True  # has_tma_support
     USE_TMA_STORE = True  # has_tma_support
-
-    # Handle FP8 scaling if needed
 
     # Set up TMA descriptors or direct pointers
     if USE_TMA_LOAD or USE_TMA_STORE:
