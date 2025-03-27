@@ -3,19 +3,23 @@ import re
 import time
 from dataclasses import dataclass
 from glob import iglob
+from random import sample
 
 import torch
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets.flux_datasets import build_flux_dataloader
+from torchtitan.datasets.flux_dataset import build_flux_dataloader
 from torchtitan.experiments.flux.model_builder import configs, load_flow_model
 
 from torchtitan.experiments.flux.sampling import get_schedule
 from torchtitan.experiments.flux.utils import (
+    create_position_encoding_for_latents,
     denoise,
+    generate_noise_latent,
     load_ae,
     load_clip,
     load_t5,
+    pack_latents,
     save_image,
     unpack_latent,
 )
@@ -38,8 +42,8 @@ class SamplingOptions:
 @torch.inference_mode()
 def generate_image(
     name: str = "flux-dev",
-    width: int = 512,
-    height: int = 512,
+    img_width: int = 512,
+    img_height: int = 512,
     seed: int | None = None,
     prompt: str = (
         "a photo of a forest with mist swirling around the tree trunks. The word "
@@ -54,12 +58,11 @@ def generate_image(
     add_sampling_metadata: bool = True,
 ):
     """
-    Sample the flux model. Either interactively (set `--loop`) or run for a
-    single image.
+    Run Forward pass of flux model to generate an image.
 
     Args:
         name: Name of the model to load
-        height: height of the sample in pixels (should be a multiple of 16)
+        img_height: height of the sample in pixels (should be a multiple of 16)
         width: width of the sample in pixels (should be a multiple of 16)
         seed: Set a seed for sampling
         output_name: where to save the output image, `{idx}` will be replaced
@@ -97,8 +100,8 @@ def generate_image(
         num_steps = 4 if name == "flux-schnell" else 50
 
     # allow for packing and conversion to latent space
-    height = 16 * (height // 16)
-    width = 16 * (width // 16)
+    img_height = 16 * (img_height // 16)
+    img_width = 16 * (img_width // 16)
 
     output_name = os.path.join(output_dir, "img_{idx}.jpg")
     if not os.path.exists(output_dir):
@@ -124,8 +127,8 @@ def generate_image(
     rng = torch.Generator(device="cpu")
     opts = SamplingOptions(
         prompt=prompt,
-        width=width,
-        height=height,
+        width=img_width,
+        height=img_height,
         num_steps=num_steps,
         guidance=guidance,
         seed=seed,
@@ -138,68 +141,68 @@ def generate_image(
         t0 = time.perf_counter()
 
         # prepare input
-        dataloader = build_dataloader(
-            dataset_name="cc12m",
-            t5=t5,
-            clip=clip,
-            batch_size=1,
-            world_size=1,  # total number of nodes: https://huggingface.co/docs/datasets/en/package_reference/main_classes
-            rank=0,
-            seed=opts.seed,
-            device=torch_device,
-        )
-
+        # # TODO(jianiw): Replace this dummy JobConfig with a real one
         config = JobConfig()
         config.parse_args(
             [
                 "--training.dataset",
                 "cc12m",
                 "--training.batch_size",
-                "1",
+                "16",
                 "--training.seed",
                 str(opts.seed),
             ]
         )
 
         dataloader = build_flux_dataloader(
-            dp_world_size=1,
-            dp_rank=0,  # TODO(jianiw): change this rank
+            dp_world_size=1,  # TODO(jianiw): Change world size
+            dp_rank=0,  # TODO(jianiw): Change rank
             t5_encoder=t5,
             clip_encoder=clip,
             job_config=config,
             infinite=False,
-            device=torch_device,
         )
 
-        inp = next(iter(dataloader))
+        # TODO(jianiw): Remove this hack to continue loading the next batch
+        sample_data = next(iter(dataloader))
 
-        for k, v in inp.items():
-            print(f"shape of {k} is {v.shape}")
+        bsz = sample_data["clip_encodings"].shape[0]
+        latents = generate_noise_latent(
+            bsz,
+            img_height,
+            img_width,
+            device=torch_device,
+            dtype=torch.bfloat16,
+            seed=opts.seed,
+        )
+        _, latent_channels, latent_height, latent_width = latents.shape
 
-        opts.seed = None
-        if offload:
-            ae = ae.cpu()
-            torch.cuda.empty_cache()
-            t5, clip = t5.to(torch_device), clip.to(torch_device)
+        latent_pos_enc = create_position_encoding_for_latents(
+            bsz, latent_height, latent_width
+        ).to(latents)
+        text_pos_enc = torch.zeros(bsz, sample_data["t5_encodings"].shape[1], 3).to(
+            latents
+        )
+
+        # Convert latent into a sequence of patches
+        latents = pack_latents(latents)
 
         timesteps = get_schedule(
-            opts.num_steps, inp["img"].shape[1], shift=(name != "flux-schnell")
+            opts.num_steps, latent_channels, shift=(name != "flux-schnell")
         )
 
-        # offload TEs to CPU, load model to gpu
-        if offload:
-            t5, clip = t5.cpu(), clip.cpu()
-            torch.cuda.empty_cache()
-            model = model.to(torch_device)
-
         # denoise initial noise
-        x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
-
-        # offload model, load autoencoder to gpu
-        if offload:
-            model.cpu()
-            torch.cuda.empty_cache()
-            ae.decoder.to(x.device)
+        x = denoise(
+            model,
+            img=latents,
+            img_ids=latent_pos_enc.to(latents),
+            txt=sample_data["t5_encodings"].to(latents),
+            txt_ids=text_pos_enc.to(latents),
+            vec=sample_data["clip_encodings"].to(latents),
+            target=sample_data["image"].to(latents),
+            timesteps=timesteps,
+            guidance=opts.guidance,
+        )
 
         # decode latents to pixel space
         x = unpack_latent(x.float(), opts.height, opts.width)
