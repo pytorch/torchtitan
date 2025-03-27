@@ -9,43 +9,26 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-import torch
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
-from einops import rearrange, repeat
+from PIL import Image
 
-from PIL.Image import Transform
 from torch.distributed.checkpoint.stateful import Stateful
+
 from torch.utils.data import IterableDataset
+from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.config_manager import JobConfig
+from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
 from torchtitan.tools.logging import logger
 from torchvision import transforms
 
 
 def _process_cc12m_image(
-    sample: dict[str, Any], output_size: int = 256
-) -> tuple[str, torch.Tensor]:
-    """
-    Preprocess CC12M dataset sample image.
-    Preprocess Steps:
-        1. Ignore all the images smaller than output_size * output_size.
-        2. Resize and crop the image to output_size * output_size.
-
-    Args:
-        sample: A sample from dataset.
-        output_size: The output image size.
-
-    Returns:
-        A tuple of (prompt, image).
-
-    """
-    img = sample["jpg"]
-    prompt = sample["txt"]
-
-    if img.width < output_size or img.height < output_size:
-        logger.info("Skip dataset sample because of image is too small.")
-        return prompt, None
+    img: Image.Image,
+    output_size: int = 256,
+) -> Image.Image:
+    """Process CC12M image to the desired size."""
 
     width, height = img.size
     if width >= height:
@@ -65,7 +48,32 @@ def _process_cc12m_image(
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
-    return prompt, resized_img
+    return resized_img
+
+
+def _flux_data_processor(
+    sample: dict[str, Any],
+    t5_encoder: HFEmbedder,
+    clip_encoder: HFEmbedder,
+    output_size: int = 256,
+) -> dict[str, Any]:
+    """
+    Preprocess CC12M dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        t5_encoder: T5 encoder
+        clip_encoder: CLIP encoder
+        output_size: The output image size
+
+    """
+
+    img = _process_cc12m_image(sample["jpg"], output_size=output_size)
+    img = transforms.ToTensor()(img)
+    t5_tokens = t5_encoder(sample["txt"])
+    clip_tokens = clip_encoder(sample["txt"])
+
+    return {"image": img, "clip_tokens": clip_tokens, "t5_tokens": t5_tokens}
 
 
 @dataclass
@@ -79,7 +87,7 @@ DATASETS = {
     "cc12m": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
-        data_processor=_process_cc12m_image,
+        data_processor=_flux_data_processor,
     ),
 }
 
@@ -100,14 +108,13 @@ def _validate_dataset(
     return path, config.loader, config.data_processor
 
 
-class TextToImageDataset(IterableDataset, Stateful):
-    """Dataset for text-to-image dataset.
+class FluxDataset(IterableDataset, Stateful):
+    """Dataset for FLUX text-to-image model.
 
     Args:
     dataset_name (str): Name of the dataset.
     dataset_path (str): Path to the dataset.
     model_transform (Transform): Callable that applies model-specific preprocessing to the sample.
-            See :class:`~.torchtitan.experiments.flux.FluxTransform` for an example.
     dp_rank (int): Data parallel rank.
     dp_world_size (int): Data parallel world size.
     infinite (bool): Whether to loop over the dataset infinitely.
@@ -117,7 +124,8 @@ class TextToImageDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        model_transform: Transform,
+        t5_encoder: HFEmbedder,
+        clip_encoder: HFEmbedder,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -134,11 +142,10 @@ class TextToImageDataset(IterableDataset, Stateful):
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
+        # TODO(jianiw): put the two encoders and data in the same device
+        self._t5_encoder = t5_encoder
+        self._clip_encoder = clip_encoder
         self._data_processor = data_processor
-        self._image_transformer = (
-            transforms.ToTensor()
-        )  # TODO(jianiw): merge the image transformer into the model transformer
-        self._model_transformer = model_transform
 
         self.infinite = infinite
 
@@ -160,18 +167,14 @@ class TextToImageDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 self._sample_idx += 1
 
-                # Use the dataset-specific text processor
-                sample_prompt, sample_image = self._data_processor(sample)
-                if sample_prompt is None or sample_image is None:
-                    continue
+                # Use the dataset-specific preprocessor
+                sample_dict = self._data_processor(
+                    sample, self._t5_encoder, self._clip_encoder, output_size=256
+                )
 
-                self._all_target_imgs.extend(self._image_transformer(sample_image))
-                self._all_prompts.extend(sample_prompt)
+                self._all_samples.extend(sample_dict)
 
-                yield {
-                    "image": self._image_transformer(sample_image),
-                    "text": sample_prompt,
-                }
+                yield sample_dict
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -183,20 +186,20 @@ class TextToImageDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
-        self._all_target_imgs = state_dict["img_buffer"]
-        self._all_prompts = state_dict["txt_buffer"]
+        self._all_samples = state_dict["all_samples"]
 
     def state_dict(self):
         return {
-            "img_buffer": self._all_target_imgs,
-            "txt_buffer": self._all_prompts,
+            "all_samples": self._all_samples,
             "sample_idx": self._sample_idx,
         }
 
 
-def text_to_image_dataloader(
+def build_flux_dataloader(
     dp_world_size: int,
     dp_rank: int,
+    t5_encoder: HFEmbedder,
+    clip_encoder: HFEmbedder,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
@@ -205,9 +208,11 @@ def text_to_image_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
 
-    ds = TextToImageDataset(
+    ds = FluxDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
+        t5_encoder=t5_encoder,
+        clip_encoder=clip_encoder,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,

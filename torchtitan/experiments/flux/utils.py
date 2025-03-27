@@ -13,6 +13,13 @@ from torchtitan.experiments.flux.modules.autoencoder import AutoEncoder
 from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
 
 
+# CONSTANTS FOR FLUX PREPROCESSING
+PATCH_HEIGHT, PATCH_WIDTH = 2, 2
+POSITION_DIM = 3
+LATENT_CHANNELS = 16
+IMG_LATENT_SIZE_RATIO = 8
+
+
 def save_image(
     nsfw_classifier,
     name: str,
@@ -95,6 +102,81 @@ def load_clip(device: str = "cpu") -> HFEmbedder:
     return HFEmbedder(
         "openai/clip-vit-large-patch14", max_length=77, torch_dtype=torch.bfloat16
     ).to(device)
+
+
+def get_noise_latent(
+    num_samples: int,
+    height: int,
+    width: int,
+    dtype: torch.dtype,
+    seed: int,
+):
+    return torch.randn(
+        num_samples,
+        16,  # NOTE(jianiw): From the paper, d=16, h = H/8, w = W/8
+        # allow for packing
+        2 * math.ceil(height / 16),
+        2 * math.ceil(width / 16),
+        dtype=dtype,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
+def create_position_encoding_for_latents(
+    bsz: int, latent_height: int, latent_width: int
+) -> Tensor:
+    """
+    Create the packed latents' position encodings for the Flux flow model.
+    Args:
+        bsz (int): The batch size.
+        latent_height (int): The height of the latent.
+        latent_width (int): The width of the latent.
+    Returns:
+        Tensor: The position encodings.
+            Shape: [bsz, (latent_height // PATCH_HEIGHT) * (latent_width // PATCH_WIDTH), POSITION_DIM)
+    """
+    height = latent_height // PATCH_HEIGHT
+    width = latent_width // PATCH_WIDTH
+
+    position_encoding = torch.zeros(height, width, POSITION_DIM)
+
+    row_indices = torch.arange(height)
+    position_encoding[:, :, 1] = row_indices.unsqueeze(1)
+
+    col_indices = torch.arange(width)
+    position_encoding[:, :, 2] = col_indices.unsqueeze(0)
+
+    # Flatten and repeat for the full batch
+    # [height, width, 3] -> [bsz, height * width, 3]
+    position_encoding = position_encoding.view(1, height * width, POSITION_DIM)
+    position_encoding = position_encoding.repeat(bsz, 1, 1)
+
+    return position_encoding
+
+
+def pack_latents(x: Tensor) -> Tensor:
+    """
+    Rearrange latents from an image-like format into a sequence of patches.
+    Equivalent to `einops.rearrange("b c (h ph) (w pw) -> b (h w) (c ph pw)")`.
+    Args:
+        x (Tensor): The unpacked latents.
+            Shape: [bsz, ch, latent height, latent width]
+    Returns:
+        Tensor: The packed latents.
+            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+    """
+    b, c, latent_height, latent_width = x.shape
+    h = latent_height // PATCH_HEIGHT
+    w = latent_width // PATCH_WIDTH
+
+    # [b, c, h*ph, w*ph] -> [b, c, h, w, ph, pw]
+    x = x.unfold(2, PATCH_HEIGHT, PATCH_HEIGHT).unfold(3, PATCH_WIDTH, PATCH_WIDTH)
+
+    # [b, c, h, w, ph, PW] -> [b, h, w, c, ph, PW]
+    x = x.permute(0, 2, 3, 1, 4, 5)
+
+    # [b, h, w, c, ph, PW] -> [b, h*w, c*ph*PW]
+    return x.reshape(b, h * w, c * PATCH_HEIGHT * PATCH_WIDTH)
 
 
 def denoise(
