@@ -829,10 +829,10 @@ We compute gradients with respect to both input (`grad_x`) and weights (`grad_w`
 )
 @triton.jit
 def _kernel_mg_dx_tma(
-    grad_output_desc_ptr,  # grad_output descriptor [M_total, N]
-    w_desc_ptr,  # weight descriptor [N, K]
-    grad_input_ptr,  # output grad_x [M_total, K]
-    workspace,  # workspace for TMA store
+    grad_output_desc_ptr,  # [MG, N]
+    w_desc_ptr,  # [N, K]
+    grad_input_ptr,  # output grad_x [MG, K]
+    workspace,  # for TMA store
     m_sizes,  # group sizes [G]
     # problem sizes
     G: tl.constexpr,
@@ -854,8 +854,10 @@ def _kernel_mg_dx_tma(
     For the forward pass Y = X @ W.T, the backward for input is:
     grad_X = grad_Y @ W
 
+    This maps to [MG, N] @ [N, K] -> [MG, K]
+
     Key differences from forward:
-    1. W is used directly (not transposed)
+    1. W is used directly and not transposed
     2. The reduction dimension is now N (not K)
     3. Output is [M, K] instead of [M, N]
     """
@@ -899,7 +901,7 @@ def _kernel_mg_dx_tma(
                 tile_m_index = group_index % num_m_tiles
                 tile_k_index = group_index // num_m_tiles
 
-                # Initialize accumulator for grad_input block [M, K]
+                # for grad_input block [M, K]
                 accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
 
                 # Position in full matrix
@@ -930,7 +932,7 @@ def _kernel_mg_dx_tma(
 
                 # Store using TMA
                 m_offset = (tile_m_index * BLOCK_SIZE_M).to(tl.int32)
-                k_offset = (tile_k_index * BLOCK_SIZE_K).to(tl.int32)
+                # k_offset = (tile_k_index * BLOCK_SIZE_K).to(tl.int32)
 
                 tl._experimental_descriptor_store(
                     c_desc_ptr,
