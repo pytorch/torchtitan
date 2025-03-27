@@ -57,10 +57,15 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
         assert (
             wait >= 0
         ), "profile_freq must be greater than or equal to warmup + active"
+        gpu_device_profiled = None
+        if torch.cuda.is_available():
+            gpu_device_profiled = torch.profiler.ProfilerActivity.CUDA
+        elif torch.xpu.is_available():
+            gpu_device_profiled = torch.profiler.ProfilerActivity.XPU
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
+                gpu_device_profiled,
             ],
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
