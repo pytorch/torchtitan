@@ -150,7 +150,9 @@ def build_lr_schedulers(
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
-            progress = float(current_step - warmup_stable_steps) / decay_steps
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            progress = float(current_step - warmup_stable_steps) / (decay_steps + 1)
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress
