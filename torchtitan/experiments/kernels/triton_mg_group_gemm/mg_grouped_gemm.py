@@ -1438,6 +1438,341 @@ def grouped_gemm_dw_optimized(
     return grad_w
 
 
+# ========= Experiments =============
+
+
+@triton.autotune(
+    configs=_NV_CONFIGS,
+    key=["G", "M_BUCKET", "N", "K"],
+    prune_configs_by={"early_config_prune": early_config_prune},
+)
+@triton.jit
+def _kernel_mg_dw_improved_tma(
+    x_desc_ptr,  # input descriptor [M_total, K]
+    grad_output_desc_ptr,  # grad_output descriptor [M_total, N]
+    grad_weight_ptr,  # output grad_w [N, K]
+    workspace,  # workspace for TMA store
+    m_sizes,  # group sizes [G]
+    # problem sizes
+    G: tl.constexpr,
+    M_BUCKET: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    # config
+    NUM_SMS: tl.constexpr,
+    USE_TMA_LOAD: tl.constexpr,
+    USE_TMA_STORE: tl.constexpr,
+    TMA_SIZE: tl.constexpr,
+    # tiles
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,  # block size for reduction dimension
+) -> None:
+    """
+    Improved TMA-optimized kernel for computing gradients with respect to weights (dw).
+    Uses flat index structure similar to forward.
+
+    For the forward pass Y = X @ W.T,
+    the backward for weights is:
+    grad_W = grad_Y.T @ X
+
+    Where:
+    - grad_Y is [MG, N]
+    - X is [MG, K]
+    - grad_W is [N, K]
+    - we return [N,K]
+    """
+    # Get thread block index l
+    tbidx = tl.program_id(0)
+
+    # Get output data type
+    c_dtype = grad_weight_ptr.dtype.element_ty
+
+    # Calculate number of output tiles
+    num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
+    num_k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    total_output_tiles = num_n_tiles * num_k_tiles
+
+    # Process tiles in strided manner across SMs
+    for tile_idx in range(tbidx, total_output_tiles, NUM_SMS):
+        # Calculate tile indices
+        tile_n_idx = tile_idx % num_n_tiles
+        tile_k_idx = tile_idx // num_n_tiles
+
+        # Calculate global offsets
+        n_offset = tile_n_idx * BLOCK_SIZE_N
+        k_offset = tile_k_idx * BLOCK_SIZE_K
+
+        # Initialize accumulator for this output tile [N, K]
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
+
+        # Process each group
+        M_end = 0
+        for g in range(G):
+            # Get group boundaries
+            M_start = M_end
+            m_size = tl.load(m_sizes + g)
+            M_end = M_start + m_size
+
+            # Only process if group is non-empty
+            if m_size > 0:
+                # Process this group in chunks along the M dimension
+                for m_offset in range(0, m_size, BLOCK_SIZE_M):
+                    # Calculate actual block size (handling boundary)
+                    m_block_size = tl.minimum(BLOCK_SIZE_M, m_size - m_offset)
+
+                    # Only process if we have actual work to do
+                    if m_block_size > 0:
+                        # Global offset for this chunk
+                        m_global_offset = M_start + m_offset
+
+                        if USE_TMA_LOAD:
+                            # Load input chunk [M_chunk, K] using TMA
+                            x_block = tl._experimental_descriptor_load(
+                                x_desc_ptr,
+                                [m_global_offset, k_offset],
+                                [BLOCK_SIZE_M, BLOCK_SIZE_K],
+                                c_dtype,
+                            )
+
+                            # Load grad_output chunk [M_chunk, N] using TMA
+                            grad_output_block = tl._experimental_descriptor_load(
+                                grad_output_desc_ptr,
+                                [m_global_offset, n_offset],
+                                [BLOCK_SIZE_M, BLOCK_SIZE_N],
+                                c_dtype,
+                            )
+
+                            # Apply masks for valid regions
+                            offs_m = tl.arange(0, BLOCK_SIZE_M)
+                            m_mask = offs_m < m_block_size
+
+                            # Zero out invalid elements
+                            x_block = tl.where(m_mask[:, None], x_block, 0.0)
+                            grad_output_block = tl.where(
+                                m_mask[:, None], grad_output_block, 0.0
+                            )
+                        else:
+                            # Manual load with bounds checking
+                            offs_m = tl.arange(0, BLOCK_SIZE_M)
+                            offs_n = tl.arange(0, BLOCK_SIZE_N)
+                            offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+                            # Create masks
+                            m_mask = offs_m < m_block_size
+                            n_mask = offs_n < N - n_offset
+                            k_mask = offs_k < K - k_offset
+
+                            # Combined masks
+                            mk_mask = m_mask[:, None] & k_mask[None, :]
+                            mn_mask = m_mask[:, None] & n_mask[None, :]
+
+                            # Global offsets for loading
+                            m_global_offs = m_global_offset + offs_m
+
+                            # Load x block [M_chunk, K]
+                            x_block = tl.load(
+                                x_desc_ptr
+                                + m_global_offs[:, None] * K
+                                + (k_offset + offs_k)[None, :],
+                                mask=mk_mask,
+                                other=0.0,
+                            )
+
+                            # Load grad_output block [M_chunk, N]
+                            grad_output_block = tl.load(
+                                grad_output_desc_ptr
+                                + m_global_offs[:, None] * N
+                                + (n_offset + offs_n)[None, :],
+                                mask=mn_mask,
+                                other=0.0,
+                            )
+
+                        # Compute partial contribution: grad_W += grad_Y.T @ X
+                        # transpose grad_output for the matmul
+                        contribution = tl.dot(
+                            grad_output_block.to(tl.float32).T,  # [N, M_chunk]
+                            x_block.to(tl.float32),  # [M_chunk, K]
+                        )
+
+                        # Accumulate
+                        accumulator += contribution
+
+        # Store the result
+        if USE_TMA_STORE:
+            # Store using TMA
+            tl._experimental_descriptor_store(
+                workspace,  # TMA store descriptor
+                accumulator.to(c_dtype),
+                [n_offset, k_offset],
+            )
+        else:
+            # Manual store with bounds checking
+            offs_n = tl.arange(0, BLOCK_SIZE_N)
+            offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+            # Create masks for bounds checking
+            n_mask = offs_n < N - n_offset
+            k_mask = offs_k < K - k_offset
+            output_mask = n_mask[:, None] & k_mask[None, :]
+
+            # Store the result
+            tl.store(
+                grad_weight_ptr
+                + (n_offset + offs_n)[:, None] * K
+                + (k_offset + offs_k)[None, :],
+                accumulator.to(c_dtype),
+                mask=output_mask,
+            )
+
+
+def grouped_gemm_dw_improved(
+    x: torch.Tensor,
+    grad_output: torch.Tensor,
+    m_sizes: torch.Tensor,
+    tma_size: int = 128,
+) -> torch.Tensor:
+    """
+    Optimized computation of gradients with respect to weights (dw) using TMA.
+    For the forward pass Y = X @ W.T, the backward for weights is:
+    grad_W = grad_Y.T @ X
+
+    Args:
+        x: Input tensor, shape [M_total, K]
+        grad_output: Gradient of output, shape [M_total, N]
+        m_sizes: Group sizes tensor, shape [G]
+        tma_size: Size of TMA descriptor in bytes
+
+
+    Returns:
+        grad_w: Gradient with respect to weights, shape [N, K]
+    """
+    # Check TMA support
+    has_tma_support = CudaUtils.verify_tma()
+
+    # Get group count
+    G = m_sizes.shape[0]
+
+    # Ensure contiguous tensors
+    x = x.contiguous()
+    grad_output = grad_output.contiguous()
+    m_sizes = m_sizes.contiguous()
+
+    # Get dimensions
+    M_total, K_x = x.shape
+    M_grad, N = grad_output.shape
+
+    # Check dimensions
+    assert M_total == M_grad, f"x M ({M_total}) must match grad_output M ({M_grad})"
+
+    # Verify that the sum of m_sizes matches M_total
+    sum_m_sizes = m_sizes.sum().item()
+    assert (
+        sum_m_sizes == M_total
+    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+
+    # Create output tensor (grad_w) with shape [N, K]
+    grad_w = torch.zeros((N, K_x), device=x.device, dtype=x.dtype)
+
+    # Get number of SMs
+    NUM_SMS = CudaUtils.get_num_sms()
+
+    # Set TMA flags based on hardware support
+    USE_TMA_LOAD = True  # has_tma_support
+    USE_TMA_STORE = True  # has_tma_support
+
+    # Handle FP8 scaling if needed
+
+    # Set up TMA descriptors or direct pointers
+    if USE_TMA_LOAD or USE_TMA_STORE:
+        desc_helper = TmaDescriptorHelper(tma_size=tma_size)
+
+        if USE_TMA_LOAD:
+            desc_helper.init_tma_descriptor("x")
+            desc_helper.init_tma_descriptor("grad_output")
+            x_desc = desc_helper.get_tma_descriptor_kernel_param("x")
+            grad_output_desc = desc_helper.get_tma_descriptor_kernel_param(
+                "grad_output"
+            )
+        else:
+            x_desc = x
+            grad_output_desc = grad_output
+
+        if USE_TMA_STORE:
+            desc_helper.init_tma_descriptor("grad_w")
+            workspace = desc_helper.get_tma_descriptor_kernel_param("grad_w")
+        else:
+            workspace = torch.empty(1, device=x.device, dtype=torch.uint8)
+    else:
+        # If not using TMA, just use the tensors directly
+        x_desc = x
+        grad_output_desc = grad_output
+        workspace = torch.empty(1, device=x.device, dtype=torch.uint8)
+
+    # M_BUCKET for grid size
+    M_BUCKET = triton.next_power_of_2(M_total)
+
+    # Define grid for kernel launch
+    def grid(META):
+        if USE_TMA_LOAD or USE_TMA_STORE:
+
+            if USE_TMA_LOAD:
+                desc_helper.fill_2d_tma_descriptor(
+                    "x",
+                    x.data_ptr(),
+                    M_total,
+                    K_x,
+                    META["BLOCK_SIZE_M"],
+                    META["BLOCK_SIZE_K"],
+                    x.element_size(),
+                )
+
+                desc_helper.fill_2d_tma_descriptor(
+                    "grad_output",
+                    grad_output.data_ptr(),
+                    M_total,
+                    N,
+                    META["BLOCK_SIZE_M"],
+                    META["BLOCK_SIZE_N"],
+                    grad_output.element_size(),
+                )
+
+            if USE_TMA_STORE:
+                desc_helper.fill_2d_tma_descriptor(
+                    "grad_w",
+                    grad_w.data_ptr(),
+                    N,
+                    K_x,
+                    META["BLOCK_SIZE_N"],
+                    META["BLOCK_SIZE_K"],
+                    grad_w.element_size(),
+                )
+
+        # Return grid size - one block per SM for balanced work distribution
+        return (NUM_SMS,)
+
+    # Launch the optimized kernel
+    _kernel_mg_dw_improved_tma[grid](
+        x_desc,
+        grad_output_desc,
+        grad_w,
+        workspace,
+        m_sizes,
+        G,
+        M_BUCKET,
+        N,
+        K_x,
+        NUM_SMS,
+        USE_TMA_LOAD,
+        USE_TMA_STORE,
+        TMA_SIZE=tma_size,
+    )
+
+    return grad_w
+
+
+# ======== End Experiment dx Backwards Wrapper Functions =============
+
 # ======== End Backwards Wrapper Functions =============
 
 # ======== PyTorch wrapper functions ========
@@ -1652,13 +1987,15 @@ def grouped_gemm_backward(
     try:
         logging.info(f"Computing grad_w with optimized kernel (TMA={can_use_tma})")
 
-        grad_w = grouped_gemm_dw_optimized(
+        """grad_w = grouped_gemm_dw_optimized(
             x=x,
             grad_output=grad_output,
             m_sizes=m_sizes,
             num_sms=NUM_SMS,
             tma_size=tma_size,
         )
+        """
+        grad_w = grouped_gemm_dw_improved(x, grad_output, m_sizes)
     except Exception as e:
         logging.error(f"Error in grad_w computation: {e}")
         raise
