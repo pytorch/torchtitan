@@ -6,9 +6,10 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from collections.abc import Callable
 import pickle
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -39,6 +40,7 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_rank: Data parallelism rank for this dataloader.
         dp_world_size: The world size of the data parallelism.
         batch_size: The batch size to use for each iteration.
+        collate_fn: Optional function to collate samples in a batch.
     """
 
     dp_rank: int
@@ -51,11 +53,13 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_rank: int,
         dp_world_size: int,
         batch_size: int,
+        collate_fn:Optional[Callable]=None,
     ):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.batch_size = batch_size
-        super().__init__(dataset, batch_size)
+        self.collate_fn = collate_fn
+        super().__init__(dataset, batch_size, collate_fn=collate_fn)
         self._rank_id = f"dp_rank_{dp_rank}"
 
     def state_dict(self) -> dict[str, Any]:
