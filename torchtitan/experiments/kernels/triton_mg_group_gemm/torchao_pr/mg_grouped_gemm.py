@@ -47,7 +47,7 @@ logging.basicConfig(
     prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
-def _kernel_mg_forward_hopper_bf16(
+def _kernel_mg_forward_hopper(
     a_desc_ptr,
     b_desc_ptr,
     c_ptr,
@@ -714,6 +714,226 @@ def _kernel_mg_dw_tma(
 
 # ======== Triton wrapper functions ========
 
+# ----- main forward pass wrapper -----
+
+
+def grouped_gemm_forward(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    m_sizes: torch.Tensor,
+    tma_size: int = 128,
+    using_fp8: bool = False,
+    x_scale: Optional[torch.Tensor] = None,
+    w_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    M*G style grouped GEMM with TMA and Float8 support.
+    # Removed for now - FP8 support is triggered by passing x_scale and w_scale tensors.
+
+    """
+    if not CudaUtils.verify_tma():
+        raise NotImplementedError("Grouped GEMM without TMA is not supported yet")
+
+    G = m_sizes.shape[0]
+
+    assert x.is_contiguous()
+    assert w.is_contiguous()
+    assert m_sizes.is_contiguous()
+
+    # Total input size is now [M_total, K] where M_total is the sum of all group sizes
+    M_total, K = x.shape
+    N = w.shape[0]  # N is now the same for all groups
+
+    assert K == w.shape[1], f"Input K ({K}) must match weight K ({w.shape[1]})"
+
+    # Verify that the sum of m_sizes matches M_total
+    sum_m_sizes = m_sizes.sum().item()
+    assert (
+        M_total == sum_m_sizes
+    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+
+    # Create output tensor with correct shape [M_total, N]
+    y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
+
+    NUM_SMS = CudaUtils.get_num_sms()
+    USE_TMA_LOAD = True
+    USE_TMA_STORE = True
+    USE_EPILOGUE_SUBTILING = False
+
+    if x_scale is not None and w_scale is not None:
+        using_fp8 = True
+
+    # TODO: not clear if we should integrate FP8 by handling here in the wrapper
+    # or if we should expect scales to be passed in.
+    """if using_fp8 and x_scale is None and w_scale is None:
+        print(f"FP8 scaling in progress...")
+        x_fp8, x_scales = triton_quantize_fp8_row(x)
+        w_fp8, w_scales = triton_quantize_fp8_row(w)
+        x = x_fp8
+        w = w_fp8
+        x_scale = x_scales
+        w_scale = w_scales
+    """
+    # print(f"{x_scale=}")
+    desc_helper = None
+    desc_x = x
+    desc_w = w
+    workspace = None
+
+    if USE_TMA_LOAD:
+        desc_helper = TmaDescriptorHelper(tma_size=tma_size)
+        desc_helper.init_tma_descriptor("x")
+        desc_helper.init_tma_descriptor("w")
+        desc_x = desc_helper.get_tma_descriptor_kernel_param("x")
+        desc_w = desc_helper.get_tma_descriptor_kernel_param("w")
+
+    if USE_TMA_STORE:
+        workspace = torch.empty(
+            NUM_SMS * desc_helper.tma_size,
+            device=x.device,
+            dtype=torch.uint8,
+        )
+
+    def grid(META):
+        if USE_TMA_LOAD:
+            nonlocal desc_helper
+            desc_helper.fill_2d_tma_descriptor(
+                "x",
+                x.data_ptr(),
+                M_total,
+                K,
+                META["BLOCK_SIZE_M"],
+                META["BLOCK_SIZE_K"],
+                x.element_size(),
+            )
+
+            desc_helper.fill_2d_tma_descriptor(
+                "w",
+                w.data_ptr(),
+                N,
+                K,
+                META["BLOCK_SIZE_N"],
+                META["BLOCK_SIZE_K"],
+                w.element_size(),
+            )
+        return (NUM_SMS,)
+
+    M_BUCKET = triton.next_power_of_2(M_total)
+
+    _kernel_mg_forward_hopper[grid](
+        desc_x,
+        desc_w,
+        y,
+        workspace,
+        m_sizes,
+        G,
+        M_BUCKET,
+        N,
+        K,
+        NUM_SMS,
+        TMA_SIZE=tma_size,
+        USE_EPILOGUE_SUBTILING=USE_EPILOGUE_SUBTILING,
+    )
+
+    return y
+
+
+# ======== Improved Backward =============
+def grouped_gemm_backward(
+    grad_output: torch.Tensor,
+    x: torch.Tensor,
+    w: torch.Tensor,
+    m_sizes: torch.Tensor,
+    use_tma: bool = True,
+    tma_size: int = 128,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Unified backward pass for grouped GeMM with M*G grouping.
+    Uses optimized TMA-based implementations for both dx and dw when available.
+
+    Args:
+        grad_output: Gradient of output, shape [M_total, N]
+        x: Input tensor from forward pass, shape [M_total, K]
+        w: Weight tensor from forward pass, shape [N, K]
+        m_sizes: Group sizes tensor, shape [G]
+        use_tma: Whether to try using TMA acceleration (if available)
+        tma_size: Size of TMA descriptor in bytes
+
+
+    Returns:
+        Tuple of gradients with respect to x and w: (grad_x, grad_w)
+    """
+    logging.info("Starting unified grouped_gemm_backward")
+
+    # do this once, seems expensive
+    NUM_SMS = CudaUtils.get_num_sms()
+
+    # Basic validation
+    G = m_sizes.shape[0]
+    M_total, K_x = x.shape
+    M_grad, N = grad_output.shape
+    N_w, K_w = w.shape
+
+    # Check dimensions
+    if K_x != K_w:
+        raise ValueError(f"K dimension mismatch: x has K={K_x}, w has K={K_w}")
+    if M_total != M_grad:
+        raise ValueError(
+            f"M dimension mismatch: x has M={M_total}, grad_output has M={M_grad}"
+        )
+
+    # Check total M matches sum of group sizes
+    sum_m_sizes = m_sizes.sum().item()
+    if M_total != sum_m_sizes:
+        raise ValueError(
+            f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+        )
+
+    # Make sure inputs are contiguous
+    grad_output = grad_output.contiguous()
+    x = x.contiguous()
+    w = w.contiguous()
+    m_sizes = m_sizes.contiguous()
+
+    # Check TMA support
+    can_use_tma = use_tma and CudaUtils.verify_tma()
+    if use_tma and not can_use_tma:
+        logging.info("TMA requested but not supported on this device")
+        use_tma = False
+
+    # Compute grad_x using optimized implementation
+    try:
+        logging.info(f"Computing grad_x with flat linear kernel")
+
+        # Use TMA-optimized implementation
+        grad_x = grouped_gemm_dx_tma(
+            grad_output=grad_output,
+            w=w,
+            m_sizes=m_sizes,
+            num_sms=NUM_SMS,
+            tma_size=tma_size,
+        )
+
+    except Exception as e:
+        logging.error(f"Error in grad_x computation: {e}")
+        raise
+
+    # Compute grad_w using flat linear style implementation
+    try:
+        logging.info(f"Computing grad_w with flat linear kernel")
+
+        grad_w = grouped_gemm_dw_tma(
+            x, grad_output, m_sizes, num_sms=NUM_SMS, tma_size=tma_size
+        )
+    except Exception as e:
+        logging.error(f"Error in grad_w computation: {e}")
+        raise
+
+    return grad_x, grad_w
+
+
+# ----- dx backward pass wrapper -----
+
 
 def grouped_gemm_dx_tma(
     grad_output: torch.Tensor,
@@ -823,7 +1043,7 @@ def grouped_gemm_dx_tma(
 
     M_BUCKET = triton.next_power_of_2(M_total)
 
-    # Launch the optimized kernel for computing grad_x
+    # Launch the flat linear kernel for computing grad_x
     _kernel_mg_dx_tma[grid](
         desc_grad_output,
         desc_w,
@@ -843,135 +1063,9 @@ def grouped_gemm_dx_tma(
     return grad_x
 
 
-# ======== End Backwards Wrapper Functions =============
-
-# ======== PyTorch wrapper functions ========
-
-
-def grouped_gemm_forward(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    m_sizes: torch.Tensor,
-    tma_size: int = 128,
-    using_fp8: bool = False,
-    x_scale: Optional[torch.Tensor] = None,
-    w_scale: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    M*G style grouped GEMM with TMA and Float8 support.
-    # Removed for now - FP8 support is triggered by passing x_scale and w_scale tensors.
-
-    """
-    if not CudaUtils.verify_tma():
-        raise NotImplementedError("Grouped GEMM without TMA is not supported yet")
-
-    G = m_sizes.shape[0]
-
-    assert x.is_contiguous()
-    assert w.is_contiguous()
-    assert m_sizes.is_contiguous()
-
-    # Total input size is now [M_total, K] where M_total is the sum of all group sizes
-    M_total, K = x.shape
-    N = w.shape[0]  # N is now the same for all groups
-
-    assert K == w.shape[1], f"Input K ({K}) must match weight K ({w.shape[1]})"
-
-    # Verify that the sum of m_sizes matches M_total
-    sum_m_sizes = m_sizes.sum().item()
-    assert (
-        M_total == sum_m_sizes
-    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
-
-    # Create output tensor with correct shape [M_total, N]
-    y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
-
-    NUM_SMS = CudaUtils.get_num_sms()
-    USE_TMA_LOAD = True
-    USE_TMA_STORE = True
-    USE_EPILOGUE_SUBTILING = False
-
-    if x_scale is not None and w_scale is not None:
-        using_fp8 = True
-
-    # TODO: not clear if we should integrate FP8 by handling here in the wrapper
-    # or if we should expect scales to be passed in.
-    """if using_fp8 and x_scale is None and w_scale is None:
-        print(f"FP8 scaling in progress...")
-        x_fp8, x_scales = triton_quantize_fp8_row(x)
-        w_fp8, w_scales = triton_quantize_fp8_row(w)
-        x = x_fp8
-        w = w_fp8
-        x_scale = x_scales
-        w_scale = w_scales
-    """
-    # print(f"{x_scale=}")
-    desc_helper = None
-    desc_x = x
-    desc_w = w
-    workspace = None
-
-    if USE_TMA_LOAD:
-        desc_helper = TmaDescriptorHelper(tma_size=tma_size)
-        desc_helper.init_tma_descriptor("x")
-        desc_helper.init_tma_descriptor("w")
-        desc_x = desc_helper.get_tma_descriptor_kernel_param("x")
-        desc_w = desc_helper.get_tma_descriptor_kernel_param("w")
-
-    if USE_TMA_STORE:
-        workspace = torch.empty(
-            NUM_SMS * desc_helper.tma_size,
-            device=x.device,
-            dtype=torch.uint8,
-        )
-
-    def grid(META):
-        if USE_TMA_LOAD:
-            nonlocal desc_helper
-            desc_helper.fill_2d_tma_descriptor(
-                "x",
-                x.data_ptr(),
-                M_total,
-                K,
-                META["BLOCK_SIZE_M"],
-                META["BLOCK_SIZE_K"],
-                x.element_size(),
-            )
-
-            desc_helper.fill_2d_tma_descriptor(
-                "w",
-                w.data_ptr(),
-                N,
-                K,
-                META["BLOCK_SIZE_N"],
-                META["BLOCK_SIZE_K"],
-                w.element_size(),
-            )
-        return (NUM_SMS,)
-
-    M_BUCKET = triton.next_power_of_2(M_total)
-    # print(f"{M_BUCKET=}")
-    _kernel_mg_forward_hopper_bf16[grid](  #
-        # _kernel_grouped_gemm_flat_indexing[grid](  # _kernel_grouped_gemm[grid](
-        desc_x,
-        desc_w,
-        y,
-        workspace,
-        m_sizes,
-        G,
-        M_BUCKET,
-        N,
-        K,
-        NUM_SMS,
-        TMA_SIZE=tma_size,
-        USE_EPILOGUE_SUBTILING=USE_EPILOGUE_SUBTILING,
-    )
-
-    return y
-
-
 # ======== dw wrapper function ==========
-# TODO - this needs to be merged into bw wrapper...
+
+
 def grouped_gemm_dw_tma(
     x: torch.Tensor,
     grad_output: torch.Tensor,
@@ -1118,101 +1212,9 @@ def grouped_gemm_dw_tma(
     return grad_w
 
 
-# ======== Improved Backward =============
-def grouped_gemm_backward(
-    grad_output: torch.Tensor,
-    x: torch.Tensor,
-    w: torch.Tensor,
-    m_sizes: torch.Tensor,
-    use_tma: bool = False,
-    tma_size: int = 128,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Unified backward pass for grouped matrix multiplication with M*G distribution.
-    Uses optimized TMA-based implementations for both dx and dw when available.
+# ======== End Backwards Wrapper Functions =============
 
-    Args:
-        grad_output: Gradient of output, shape [M_total, N]
-        x: Input tensor from forward pass, shape [M_total, K]
-        w: Weight tensor from forward pass, shape [N, K]
-        m_sizes: Group sizes tensor, shape [G]
-        use_tma: Whether to try using TMA acceleration (if available)
-        tma_size: Size of TMA descriptor in bytes
-        using_fp8: Whether to use FP8 quantization
-        x_scale: Scale for x in FP8 mode
-        w_scale: Scale for w in FP8 mode
-        grad_output_scale: Scale for grad_output in FP8 mode
-
-    Returns:
-        Tuple of gradients with respect to x and w: (grad_x, grad_w)
-    """
-    logging.info("Starting unified grouped_gemm_backward")
-
-    # do this once, seems expensive
-    NUM_SMS = CudaUtils.get_num_sms()
-
-    # Basic validation
-    G = m_sizes.shape[0]
-    M_total, K_x = x.shape
-    M_grad, N = grad_output.shape
-    N_w, K_w = w.shape
-
-    # Check dimensions
-    if K_x != K_w:
-        raise ValueError(f"K dimension mismatch: x has K={K_x}, w has K={K_w}")
-    if M_total != M_grad:
-        raise ValueError(
-            f"M dimension mismatch: x has M={M_total}, grad_output has M={M_grad}"
-        )
-
-    # Check total M matches sum of group sizes
-    sum_m_sizes = m_sizes.sum().item()
-    if M_total != sum_m_sizes:
-        raise ValueError(
-            f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
-        )
-
-    # Make sure inputs are contiguous
-    grad_output = grad_output.contiguous()
-    x = x.contiguous()
-    w = w.contiguous()
-    m_sizes = m_sizes.contiguous()
-
-    # Check TMA support
-    can_use_tma = use_tma and CudaUtils.verify_tma()
-    if use_tma and not can_use_tma:
-        logging.info("TMA requested but not supported on this device")
-        use_tma = False
-
-    # Compute grad_x using optimized implementation
-    try:
-        logging.info(f"Computing grad_x with flat linear kernel")
-
-        # Use TMA-optimized implementation
-        grad_x = grouped_gemm_dx_tma(
-            grad_output=grad_output,
-            w=w,
-            m_sizes=m_sizes,
-            num_sms=NUM_SMS,
-            tma_size=tma_size,
-        )
-
-    except Exception as e:
-        logging.error(f"Error in grad_x computation: {e}")
-        raise
-
-    # Compute grad_w using flat linear style implementation
-    try:
-        logging.info(f"Computing grad_w with flat linear kernel")
-
-        grad_w = grouped_gemm_dw_tma(
-            x, grad_output, m_sizes, num_sms=NUM_SMS, tma_size=tma_size
-        )
-    except Exception as e:
-        logging.error(f"Error in grad_w computation: {e}")
-        raise
-
-    return grad_x, grad_w
+# ======== PyTorch wrapper functions ========
 
 
 class GroupedGEMM_mg(torch.autograd.Function):
@@ -1222,7 +1224,7 @@ class GroupedGEMM_mg(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, w, m_sizes, use_tma=True, tma_size=128, using_fp8=False):
+    def forward(ctx, x, w, m_sizes, use_tma=True, tma_size=128):
         """
         Forward pass of GroupedGEMM.
 
@@ -1237,40 +1239,18 @@ class GroupedGEMM_mg(torch.autograd.Function):
         Returns:
             Output tensor, shape [M_total, N]
         """
-        # Handle FP8 quantization if needed
-        x_scale = None
-        w_scale = None
 
-        if using_fp8:
-            # Quantize inputs to FP8 and save scales for backward
-            x_fp8, x_scale = triton_quantize_fp8_row(x)
-            w_fp8, w_scale = triton_quantize_fp8_row(w)
-
-            # Use quantized tensors for forward pass
-            output = grouped_gemm_forward(
-                x=x_fp8,
-                w=w_fp8,
-                m_sizes=m_sizes,
-                tma_size=tma_size,
-                using_fp8=True,
-                x_scale=x_scale,
-                w_scale=w_scale,
-            )
-        else:
-            # Use regular forward without quantization
-            output = grouped_gemm_forward(
-                x=x, w=w, m_sizes=m_sizes, tma_size=tma_size, using_fp8=False
-            )
+        # Use regular forward without quantization
+        output = grouped_gemm_forward(
+            x=x, w=w, m_sizes=m_sizes, tma_size=tma_size, using_fp8=False
+        )
 
         # Save inputs and parameters for backward pass
         ctx.save_for_backward(x, w, m_sizes)
         ctx.use_tma = use_tma
         ctx.tma_size = tma_size
-        ctx.using_fp8 = using_fp8
 
         ctx.save_for_backward(x, w, m_sizes)
-        ctx.x_scale = None
-        ctx.w_scale = None
 
         return output
 
@@ -1292,16 +1272,11 @@ class GroupedGEMM_mg(torch.autograd.Function):
 
         """
         # Retrieve saved tensors and parameters
-        if ctx.using_fp8:
-            x, w, m_sizes, x_scale, w_scale = ctx.saved_tensors
-        else:
-            x, w, m_sizes = ctx.saved_tensors
-            x_scale = None
-            w_scale = None
+
+        x, w, m_sizes = ctx.saved_tensors
 
         use_tma = ctx.use_tma
         tma_size = ctx.tma_size
-        using_fp8 = ctx.using_fp8
 
         # Compute gradients using the unified implementation
         grad_x, grad_w = grouped_gemm_backward(
@@ -1314,7 +1289,7 @@ class GroupedGEMM_mg(torch.autograd.Function):
         )
 
         # Return gradients for all inputs (None for non-differentiable parameters)
-        return grad_x, grad_w, None, None, None, None
+        return grad_x, grad_w, None, None
 
 
 def mg_grouped_gemm(
