@@ -9,6 +9,7 @@
 
 # pyre-unsafe
 import functools
+import logging
 
 import os
 import sys
@@ -30,6 +31,14 @@ from tma_autotuning import (
     early_config_prune,
     TmaDescriptorHelper,
 )
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# ==============  Start Triton Kernels ===============
 
 
 @triton.autotune(
