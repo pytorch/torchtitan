@@ -6,17 +6,18 @@ from glob import iglob
 
 import torch
 
-from fire import Fire
+from torchtitan.config_manager import JobConfig
+from torchtitan.datasets.flux_datasets import build_flux_dataloader
+from torchtitan.experiments.flux.model_builder import configs, load_flow_model
 
-from torchtitan.experiments.flux.sampling import denoise, get_schedule, unpack
+from torchtitan.experiments.flux.sampling import get_schedule
 from torchtitan.experiments.flux.utils import (
-    build_dataloader,
-    configs,
+    denoise,
     load_ae,
     load_clip,
-    load_flow_model,
     load_t5,
     save_image,
+    unpack_latent,
 )
 from transformers import pipeline
 
@@ -35,7 +36,7 @@ class SamplingOptions:
 
 
 @torch.inference_mode()
-def main(
+def generate_image(
     name: str = "flux-dev",
     width: int = 512,
     height: int = 512,
@@ -51,9 +52,6 @@ def main(
     offload: bool = False,
     output_dir: str = "output",
     add_sampling_metadata: bool = True,
-    trt: bool = False,
-    trt_transformer_precision: str = "bf16",
-    **kwargs: dict | None,
 ):
     """
     Sample the flux model. Either interactively (set `--loop`) or run for a
@@ -72,8 +70,6 @@ def main(
         loop: start an interactive session and sample multiple times
         guidance: guidance value used for guidance distillation
         add_sampling_metadata: Add the prompt to the image Exif metadata
-        trt: use TensorRT backend for optimized inference
-        kwargs: additional arguments for TensorRT support
     """
 
     prompt = prompt.split("|")
@@ -153,7 +149,32 @@ def main(
             device=torch_device,
         )
 
+        config = JobConfig()
+        config.parse_args(
+            [
+                "--training.dataset",
+                "cc12m",
+                "--training.batch_size",
+                "1",
+                "--training.seed",
+                str(opts.seed),
+            ]
+        )
+
+        dataloader = build_flux_dataloader(
+            dp_world_size=1,
+            dp_rank=0,  # TODO(jianiw): change this rank
+            t5_encoder=t5,
+            clip_encoder=clip,
+            job_config=config,
+            infinite=False,
+            device=torch_device,
+        )
+
         inp = next(iter(dataloader))
+
+        for k, v in inp.items():
+            print(f"shape of {k} is {v.shape}")
 
         opts.seed = None
         if offload:
@@ -181,7 +202,7 @@ def main(
             ae.decoder.to(x.device)
 
         # decode latents to pixel space
-        x = unpack(x.float(), opts.height, opts.width)
+        x = unpack_latent(x.float(), opts.height, opts.width)
         with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16):
             x = ae.decode(x)
 
@@ -197,9 +218,5 @@ def main(
         )
 
 
-def app():
-    Fire(main)
-
-
 if __name__ == "__main__":
-    app()
+    generate_image()
