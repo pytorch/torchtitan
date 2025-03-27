@@ -960,8 +960,6 @@ def _kernel_mg_dw_tma(
     grad_weight_ptr,  # output grad_w [N, K]
     workspace,  # workspace for TMA store
     m_sizes,  # group sizes [G]
-    # x_scale_ptr,  # Optional scale for x in FP8
-    # grad_output_scale_ptr,  # Optional scale for grad_output in FP8
     # problem sizes
     G: tl.constexpr,
     M_BUCKET: tl.constexpr,
@@ -978,8 +976,9 @@ def _kernel_mg_dw_tma(
     BLOCK_SIZE_M: tl.constexpr,  # block size for reduction dimension
 ) -> None:
     """
-    TMA-optimized kernel for computing gradients with respect to weights (dw).
-    For the forward pass Y = X @ W.T, the backward for weights is:
+    TMA-optimized (but TMA is not working here...) kernel for computing gradients with respect to weights (dw).
+    For the forward pass Y = X @ W.T,
+    the backward for weights is:
     grad_W = grad_Y.T @ X
 
     Key differences from forward and dx:
@@ -1050,11 +1049,11 @@ def _kernel_mg_dw_tma(
 
                     # Load input chunk [M_chunk, K] using TMA if available
                     if USE_TMA_LOAD:
-                        # Load using TMA descriptor - always load full blocks with TMA
+                        # Load using TMA descriptor
                         x_block = tl._experimental_descriptor_load(
                             x_desc_ptr,
                             [m_global_offset, k_offset],
-                            [BLOCK_SIZE_M, BLOCK_SIZE_K],  # Always load full block size
+                            [BLOCK_SIZE_M, BLOCK_SIZE_K],
                             c_dtype,
                         )
 
@@ -1089,7 +1088,7 @@ def _kernel_mg_dw_tma(
                         x_ptr = x_desc_ptr
                         grad_output_ptr = grad_output_desc_ptr
                     if USE_TMA_LOAD:
-                        # Load using TMA descriptor
+
                         grad_output_block = tl._experimental_descriptor_load(
                             grad_output_desc_ptr,
                             [m_global_offset, n_offset],
@@ -1375,21 +1374,6 @@ def grouped_gemm_dw_optimized(
         x_desc = x
         grad_output_desc = grad_output
 
-    """# Choose block sizes based on dimensions
-    if max(N, K_x) <= 512:
-        BLOCK_SIZE_N = min(64, N)
-        BLOCK_SIZE_K = min(64, K_x)
-        BLOCK_SIZE_M = 128  # Reduction dimension can be larger
-    else:
-        BLOCK_SIZE_N = min(128, N)
-        BLOCK_SIZE_K = min(128, K_x)
-        BLOCK_SIZE_M = 64  # Smaller for large tensors to avoid register pressure
-
-    # Make block sizes powers of 2 for better performance
-    BLOCK_SIZE_N = triton.next_power_of_2(BLOCK_SIZE_N)
-    BLOCK_SIZE_K = triton.next_power_of_2(BLOCK_SIZE_K)
-    BLOCK_SIZE_M = triton.next_power_of_2(BLOCK_SIZE_M)
-    """
     # Allocate workspace for TMA store
     if USE_TMA_STORE:
         num_tiles = triton.cdiv(N, BLOCK_SIZE_N) * triton.cdiv(K_x, BLOCK_SIZE_K)
@@ -1441,8 +1425,6 @@ def grouped_gemm_dw_optimized(
         grad_w,
         workspace,
         m_sizes,
-        # x_scale,
-        # grad_output_scale,
         G,
         M_BUCKET,
         N,
@@ -1451,10 +1433,6 @@ def grouped_gemm_dw_optimized(
         USE_TMA_LOAD,
         USE_TMA_STORE,
         TMA_SIZE=tma_size,
-        # USE_FP8=using_fp8,
-        # BLOCK_SIZE_N=BLOCK_SIZE_N,
-        # BLOCK_SIZE_K=BLOCK_SIZE_K,
-        # BLOCK_SIZE_M=BLOCK_SIZE_M,
     )
 
     return grad_w
