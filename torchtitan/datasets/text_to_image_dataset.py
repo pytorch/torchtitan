@@ -13,11 +13,12 @@ import torch
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from einops import rearrange, repeat
-from torchdata.stateful_dataloader import StatefulDataLoader
 
-from torchtitan.components.dataloader import BaseDataLoader
+from PIL.Image import Transform
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import IterableDataset
+
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
 from torchtitan.tools.logging import logger
 from torchvision import transforms
 
@@ -27,9 +28,17 @@ def _process_cc12m_image(
 ) -> tuple[str, torch.Tensor]:
     """
     Preprocess CC12M dataset sample image.
-    Steps:
+    Preprocess Steps:
         1. Ignore all the images smaller than output_size * output_size.
         2. Resize and crop the image to output_size * output_size.
+
+    Args:
+        sample: A sample from dataset.
+        output_size: The output image size.
+
+    Returns:
+        A tuple of (prompt, image).
+
     """
     img = sample["jpg"]
     prompt = sample["txt"]
@@ -60,14 +69,14 @@ def _process_cc12m_image(
 
 
 @dataclass
-class MultiModalDatasetConfig:
+class TextToImageDatasetConfig:
     path: str
     loader: Callable
     data_processor: Callable
 
 
 DATASETS = {
-    "cc12m": MultiModalDatasetConfig(
+    "cc12m": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_process_cc12m_image,
@@ -91,39 +100,29 @@ def _validate_dataset(
     return path, config.loader, config.data_processor
 
 
-def _get_noise_latent(
-    num_samples: int,
-    height: int,
-    width: int,
-    dtype: torch.dtype,
-    seed: int,
-):
-    return torch.randn(
-        num_samples,
-        16,  # NOTE(jianiw): From the paper, d=16, h = H/8, w = W/8
-        # allow for packing
-        2 * math.ceil(height / 16),
-        2 * math.ceil(width / 16),
-        dtype=dtype,
-        generator=torch.Generator().manual_seed(seed),
-    )
+class TextToImageDataset(IterableDataset, Stateful):
+    """Dataset for text-to-image dataset.
 
+    Args:
+    dataset_name (str): Name of the dataset.
+    dataset_path (str): Path to the dataset.
+    model_transform (Transform): Callable that applies model-specific preprocessing to the sample.
+            See :class:`~.torchtitan.experiments.flux.FluxTransform` for an example.
+    dp_rank (int): Data parallel rank.
+    dp_world_size (int): Data parallel world size.
+    infinite (bool): Whether to loop over the dataset infinitely.
+    """
 
-class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
     def __init__(
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        t5_encoder: HFEmbedder,
-        clip_encoder: HFEmbedder,
+        model_transform: Transform,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
-        batch_size: int = 1,
-        seed: int = 0,
-        device: str = "cpu",
-        job_config: JobConfig = None,
     ) -> None:
+
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
@@ -132,24 +131,20 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         )
         ds = dataset_loader(path)
 
-        self.seed = seed
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
-        self._t5_encoder = t5_encoder
-        self._clip_encoder = clip_encoder
         self._data_processor = data_processor
-        self._image_transformer = transforms.ToTensor()
+        self._image_transformer = (
+            transforms.ToTensor()
+        )  # TODO(jianiw): merge the image transformer into the model transformer
+        self._model_transformer = model_transform
 
         self.infinite = infinite
-        self.batch_size = batch_size
-        self.device = device
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_target_imgs: list[torch.Tensor] = []
-        self._all_prompts: list[str] = []
-        self.job_config = job_config
+        self._all_samples: list[dict[str, Any]] = []
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
@@ -160,46 +155,7 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
             next(it)
         return it
 
-    def _preprocess(self):
-        target_img = torch.stack(self._all_target_imgs).to(self.device)
-
-        sample_t5_embedding = self._t5_encoder(self._all_prompts)
-        txt_ids = torch.zeros(self.batch_size, sample_t5_embedding.shape[1], 3)
-        sample_clip_embedding = self._clip_encoder(self._all_prompts)
-
-        noise_latent = _get_noise_latent(
-            self.batch_size,
-            target_img.shape[0],
-            target_img.shape[1],
-            dtype=torch.bfloat16,
-            seed=self.seed,
-        )
-
-        _, _, h, w = noise_latent.shape  # (bsz, 16, 256/8, 256/8) = (bsz, 16, 32, 32)
-        # patchify the noise latent, p = 2
-        noise_latent = rearrange(
-            noise_latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2
-        )  # (bsz, 16, 32, 32) -> (bsz, 16, 16, 64)
-
-        img_ids = torch.zeros(h // 2, w // 2, 3)
-        img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-        img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
-        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=self.batch_size)
-
-        output = {
-            "img": noise_latent.to(self.device),
-            "img_ids": img_ids.to(self.device),
-            "txt": sample_t5_embedding.to(self.device),
-            "txt_ids": txt_ids.to(self.device),
-            "vec": sample_clip_embedding.to(self.device),
-            "target": target_img,
-        }
-
-        return output
-
     def __iter__(self):
-        samples_cnt = 0
-
         while True:
             for sample in self._get_data_iter():
                 self._sample_idx += 1
@@ -209,17 +165,13 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
                 if sample_prompt is None or sample_image is None:
                     continue
 
-                samples_cnt += 1
-
                 self._all_target_imgs.extend(self._image_transformer(sample_image))
                 self._all_prompts.extend(sample_prompt)
 
-                if samples_cnt == self.batch_size:
-                    batched_data = self._preprocess()
-                    samples_cnt = 0
-                    self._all_prompts = []
-                    self._all_target_imgs = []
-                    yield batched_data
+                yield {
+                    "image": self._image_transformer(sample_image),
+                    "text": sample_prompt,
+                }
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -242,31 +194,28 @@ class FLUXDataLoader(StatefulDataLoader, BaseDataLoader):
         }
 
 
-def build_flux_dataloader(
+def text_to_image_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    t5_encoder: HFEmbedder,
-    clip_encoder: HFEmbedder,
     job_config: JobConfig,
     infinite: bool = True,
-    device: str = "cpu",
-) -> FLUXDataLoader:
+) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
-    seed = job_config.training.seed
 
-    return FLUXDataLoader(
+    ds = TextToImageDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
-        t5_encoder=t5_encoder,
-        clip_encoder=clip_encoder,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
         batch_size=batch_size,
-        seed=seed,
-        device=device,
-        job_config=job_config,
     )
