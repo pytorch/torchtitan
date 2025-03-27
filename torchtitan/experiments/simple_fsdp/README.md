@@ -20,7 +20,7 @@ Some of the features require the updates from PyTorch, with which we are working
 |Activation Checkpointing| ✅ |
 |Mixed Precision Training| 🚧 |
 |Tensor Parallelism| 🚧 |
-|Context Parallelism| 🚧 |
+|Context Parallelism| ✅ |
 |Pipeline Parallelism| ✅ |
 |Distributed Checkpointing| 🚧 |
 |Float8 Training| ❌ |
