@@ -8,6 +8,7 @@ from safetensors.torch import load_file as load_sft
 from torch import Tensor
 
 from torchtitan.experiments.flux.model import FluxModel
+from torchtitan.experiments.flux.model_builder import configs
 
 from torchtitan.experiments.flux.modules.autoencoder import AutoEncoder
 from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
@@ -34,7 +35,7 @@ def save_image(
     print(f"Saving {fn}")
     # bring into PIL format and save
     x = x.clamp(-1, 1)
-    x = embed_watermark(x.float())
+    # x = embed_watermark(x.float())
     x = rearrange(x[0], "c h w -> h w c")
 
     img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
@@ -69,6 +70,14 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
 def load_ae(
     name: str, device: str | torch.device = "cuda", hf_download: bool = False
 ) -> AutoEncoder:
+    """
+    Load the autoencoder from the given model name.
+    Args:
+        name (str): The name of the autoencoder.
+        device (str or torch.device): The device to load the autoencoder to.
+    Returns:
+        AutoEncoder: The loaded autoencoder.
+    """
     ckpt_path = configs[name].ae_path
     if (
         ckpt_path is None
@@ -104,10 +113,11 @@ def load_clip(device: str = "cpu") -> HFEmbedder:
     ).to(device)
 
 
-def get_noise_latent(
+def generate_noise_latent(
     num_samples: int,
     height: int,
     width: int,
+    device: str | torch.device,
     dtype: torch.dtype,
     seed: int,
 ):
@@ -119,7 +129,7 @@ def get_noise_latent(
         2 * math.ceil(width / 16),
         dtype=dtype,
         generator=torch.Generator().manual_seed(seed),
-    )
+    ).to(device)
 
 
 def create_position_encoding_for_latents(

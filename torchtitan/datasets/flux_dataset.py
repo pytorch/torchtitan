@@ -73,7 +73,11 @@ def _flux_data_processor(
     t5_tokens = t5_encoder(sample["txt"])
     clip_tokens = clip_encoder(sample["txt"])
 
-    return {"image": img, "clip_tokens": clip_tokens, "t5_tokens": t5_tokens}
+    return {
+        "image": img,
+        "clip_encodings": clip_tokens.squeeze(0),
+        "t5_encodings": t5_tokens.squeeze(0),
+    }
 
 
 @dataclass
