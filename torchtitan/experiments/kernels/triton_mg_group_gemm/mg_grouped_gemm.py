@@ -1593,10 +1593,6 @@ def grouped_gemm_backward(
     m_sizes: torch.Tensor,
     use_tma: bool = False,
     tma_size: int = 128,
-    using_fp8: bool = False,
-    x_scale: Optional[torch.Tensor] = None,
-    w_scale: Optional[torch.Tensor] = None,
-    grad_output_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Unified backward pass for grouped matrix multiplication with M*G distribution.
@@ -1666,9 +1662,6 @@ def grouped_gemm_backward(
             m_sizes=m_sizes,
             num_sms=NUM_SMS,
             tma_size=tma_size,
-            # using_fp8=using_fp8,
-            # grad_output_scale=grad_output_scale,
-            # w_scale=w_scale,
         )
 
     except Exception as e:
@@ -1685,9 +1678,6 @@ def grouped_gemm_backward(
             m_sizes=m_sizes,
             num_sms=NUM_SMS,
             tma_size=tma_size,
-            # using_fp8=using_fp8,
-            # x_scale=x_scale,
-            # grad_output_scale=grad_output_scale,
         )
     except Exception as e:
         logging.error(f"Error in grad_w computation: {e}")
