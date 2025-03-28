@@ -9,6 +9,8 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+import torch
+
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from PIL import Image
@@ -19,7 +21,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
+from torchtitan.experiments.flux.model.modules.hf_embedder import HFEmbedder
 from torchtitan.tools.logging import logger
 from torchvision import transforms
 
@@ -199,11 +201,25 @@ class FluxDataset(IterableDataset, Stateful):
         }
 
 
+def _load_t5(t5_encoder_name, device: str = "cpu", max_length: int = 512) -> HFEmbedder:
+    # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
+    return HFEmbedder(
+        t5_encoder_name,
+        max_length=max_length,
+        torch_dtype=torch.bfloat16,
+    ).to(device)
+
+
+def _load_clip(clip_encoder_name, device: str = "cpu") -> HFEmbedder:
+    # The max length is set to be 77
+    return HFEmbedder(clip_encoder_name, max_length=77, torch_dtype=torch.bfloat16).to(
+        device
+    )
+
+
 def build_flux_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    t5_encoder: HFEmbedder,
-    clip_encoder: HFEmbedder,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
@@ -211,6 +227,16 @@ def build_flux_dataloader(
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
+
+    t5_encoder_name = job_config.encoder.t5_encoder
+    clip_encoder_name = job_config.encoder.clip_encoder
+    encoder_device = job_config.encoder.encoder_device  # "cuda" or "cpu"
+    max_encoding_len = job_config.encoder.max_encoding_len
+
+    t5_encoder = _load_t5(
+        t5_encoder_name, device=encoder_device, max_length=max_encoding_len
+    )
+    clip_encoder = _load_clip(clip_encoder_name, device=encoder_device)
 
     ds = FluxDataset(
         dataset_name=dataset_name,

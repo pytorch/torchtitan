@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn, Tensor
 
-from torchtitan.experiments.flux.modules.layers import (
+from torchtitan.experiments.flux.model.modules.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
@@ -30,7 +30,7 @@ class FluxParams:
     guidance_embed: bool
 
 
-class FluxModel(nn.Module):
+class FluxModel(nn.Module):  # TODO(jianiw): Inherit from ModelProtol
     """
     Transformer model for flow matching on sequences.
     """
@@ -89,6 +89,7 @@ class FluxModel(nn.Module):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
     def _init_weight(self):
+        # TODO(jianiw): replace placeholder with real weight init
         for param in self.parameters():
             param.data.uniform_(0, 0.1)
 

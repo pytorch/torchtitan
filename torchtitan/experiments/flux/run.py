@@ -24,7 +24,7 @@ from torchtitan.experiments.flux.utils import (
     generate_noise_latent,
     pack_latents,
     save_image,
-    unpack_latent,
+    unpack_latents,
 )
 
 
@@ -200,7 +200,7 @@ def generate_image(
         )
 
         # decode latents to pixel space
-        x = unpack_latent(x.float(), opts.height, opts.width)
+        x = unpack_latents(x.float(), opts.height, opts.width)
         with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16):
             x = ae.decode(x)
 

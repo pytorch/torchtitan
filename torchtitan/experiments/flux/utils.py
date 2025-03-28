@@ -153,7 +153,37 @@ def pack_latents(x: Tensor) -> Tensor:
     return x.reshape(b, h * w, c * PATCH_HEIGHT * PATCH_WIDTH)
 
 
-def denoise(
+def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
+    """
+    Rearrange latents from a sequence of patches into an image-like format.
+    Equivalent to `einops.rearrange("b (h w) (c ph pw) -> b c (h ph) (w pw)")`.
+
+    Args:
+        x (Tensor): The packed latents.
+            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
+        latent_height (int): The height of the unpacked latents.
+        latent_width (int): The width of the unpacked latents.
+
+    Returns:
+        Tensor: The unpacked latents.
+            Shape: [bsz, ch, latent height, latent width]
+    """
+    b, _, c_ph_pw = x.shape
+    h = latent_height // PATCH_HEIGHT
+    w = latent_width // PATCH_WIDTH
+    c = c_ph_pw // (PATCH_HEIGHT * PATCH_WIDTH)
+
+    # [b, h*w, c*ph*pw] -> [b, h, w, c, ph, pw]
+    x = x.reshape(b, h, w, c, PATCH_HEIGHT, PATCH_WIDTH)
+
+    # [b, h, w, c, ph, pw] -> [b, c, h, ph, w, pw]
+    x = x.permute(0, 3, 1, 4, 2, 5)
+
+    # [b, c, h, ph, w, pw] -> [b, c, h*ph, w*pw]
+    return x.reshape(b, c, h * PATCH_HEIGHT, w * PATCH_WIDTH)
+
+
+def denosie(
     model: FluxModel,
     # model input
     img: Tensor,
@@ -161,7 +191,6 @@ def denoise(
     txt: Tensor,
     txt_ids: Tensor,
     vec: Tensor,
-    target: Tensor,  # TODO(jianiw): This is place holder now
     # sampling parameters
     timesteps: list[float],
     guidance: float = 4.0,
@@ -189,25 +218,59 @@ def denoise(
     return img
 
 
-def unpack_latent(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
+def predict_noise(
+    model: FluxModel,
+    latents: Tensor,
+    clip_encodings: Tensor,
+    t5_encodings: Tensor,
+    timesteps: Tensor,
+    guidance: Optional[Tensor] = None,
+) -> Tensor:
     """
-    Rearrange latents from a sequence of patches into an image-like format.
-
+    Use Flux's flow-matching model to predict the noise in image latents.
     Args:
-        x (Tensor): The packed latents.
-            Shape: (bsz, (latent_height // ph) * (latent_width // pw), ch * ph * pw)
-        latent_height (int): The height of the unpacked latents.
-        latent_width (int): The width of the unpacked latents.
-
+        model (FluxFlowModel): The Flux flow model.
+        latents (Tensor): Image encodings from the Flux autoencoder.
+            Shape: [bsz, 16, latent height, latent width]
+        clip_encodings (Tensor): CLIP text encodings.
+            Shape: [bsz, 768]
+        t5_encodings (Tensor): T5 text encodings.
+            Shape: [bsz, sequence length, 256 or 512]
+        timesteps (Tensor): The amount of noise (0 to 1).
+            Shape: [bsz]
+        guidance (Optional[Tensor]): The guidance value (1.5 to 4) if guidance-enabled model.
+            Shape: [bsz]
+            Default: None
+        model_ctx (ContextManager): Optional context to wrap the model call (e.g. for activation offloading)
+            Default: nullcontext
     Returns:
-        Tensor: The unpacked latents.
-            Shape: [bsz, ch, latent height, latent width]
+        Tensor: The noise prediction.
+            Shape: [bsz, 16, latent height, latent width]
     """
-    return rearrange(
-        x,
-        "b (h w) (c ph pw) -> b c (h ph) (w pw)",
-        h=math.ceil(latent_height / 16),
-        w=math.ceil(latent_width / 16),
-        ph=2,
-        pw=2,
+    bsz, _, latent_height, latent_width = latents.shape
+
+    with torch.no_grad():
+        # Create positional encodings
+        latent_pos_enc = create_position_encoding_for_latents(
+            bsz, latent_height, latent_width
+        )
+        text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
+
+        # Convert latent into a sequence of patches
+        latents = pack_latents(latents)
+
+    # Predict noise
+    latent_noise_pred = model(
+        img=latents,
+        img_ids=latent_pos_enc.to(latents),
+        txt=t5_encodings.to(latents),
+        txt_ids=text_pos_enc.to(latents),
+        y=clip_encodings.to(latents),
+        timesteps=timesteps.to(latents),
+        guidance=guidance.to(latents) if guidance is not None else None,
     )
+
+    # Convert sequence of patches to latent shape
+    latent_noise_pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+
+    return latent_noise_pred

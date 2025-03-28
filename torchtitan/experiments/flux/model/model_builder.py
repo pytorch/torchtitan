@@ -6,16 +6,16 @@ import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 
-from torchtitan.experiments.flux.model import FluxModel, FluxParams
-from torchtitan.experiments.flux.modules.autoencoder import (
+from torchtitan.experiments.flux.model.model import FluxModel, FluxParams
+from torchtitan.experiments.flux.model.modules.autoencoder import (
     AutoEncoder,
     AutoEncoderParams,
 )
-from torchtitan.experiments.flux.modules.embedder import HFEmbedder
+from torchtitan.protocols.train_spec import BaseModelArgs
 
 
 @dataclass
-class ModelSpec:
+class FluxModelArg:  # TODO(jianiw): Fit this class into BaseModelArgs, then pass this class to model.py
     params: FluxParams
     ae_params: AutoEncoderParams
     ckpt_path: str | None
@@ -24,19 +24,15 @@ class ModelSpec:
     repo_id: str | None
     repo_flow: str | None
     repo_ae: str | None
-    t5_encoder: str | None
-    clip_encoder: str | None
 
 
 configs = {
-    "flux-dev": ModelSpec(
+    "flux-dev": FluxModelArg(
         repo_id="black-forest-labs/FLUX.1-dev",
         repo_flow="flux1-dev.safetensors",
         repo_ae="ae.safetensors",
         ckpt_path=os.getenv("FLUX_DEV"),
         lora_path=None,
-        t5_encoder="google/t5-v1_1-small",
-        clip_encoder="openai/clip-vit-large-patch14",
         params=FluxParams(
             in_channels=64,
             out_channels=64,
@@ -66,24 +62,6 @@ configs = {
         ),
     )
 }
-
-
-def load_t5(model_name, device: str = "cpu", max_length: int = 512) -> HFEmbedder:
-    # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    assert configs[model_name].t5_encoder is not None
-    return HFEmbedder(
-        configs[model_name].t5_encoder,
-        max_length=max_length,
-        torch_dtype=torch.bfloat16,
-    ).to(device)
-
-
-def load_clip(model_name, device: str = "cpu") -> HFEmbedder:
-    # The max length is set to be 77
-    assert configs[model_name].clip_encoder is not None
-    return HFEmbedder(
-        configs[model_name].clip_encoder, max_length=77, torch_dtype=torch.bfloat16
-    ).to(device)
 
 
 def load_flow_model(
