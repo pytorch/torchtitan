@@ -389,9 +389,9 @@ def find_supported_resolutions(
 
 
 # NOTE Copied from torchtune.data._utils.py
-def load_image(image_loc: Union[Path, str]) -> "PIL.Image.Image":
+def load_image(image_loc: Union[Path, str]) -> torch.Tensor:
     """
-    Convenience method to load an image in PIL format from a local file path or remote source.
+    Convenience method to load an image in torch.Tensor format from a local file path or remote source.
 
     Args:
         image_loc (Union[Path, str]): Local file path or remote source pointing to the image
@@ -402,8 +402,8 @@ def load_image(image_loc: Union[Path, str]) -> "PIL.Image.Image":
         to start with "http" or "https" e.g. "https://www.wikipedia.org/en/bird.jpg".
 
     Raises:
-        ValueError: If the image cannot be loaded from remote source.
-        ValueError: If the image cannot be opened as a :class:`~PIL.Image.Image`.
+        ValueError: If the image cannot be loaded from remote source, **or**
+        if the image cannot be opened as a :class:`~torch.Tensor`.
 
     Examples:
         >>> # Load from remote source
@@ -413,46 +413,25 @@ def load_image(image_loc: Union[Path, str]) -> "PIL.Image.Image":
         >>> image = load_image(Path("/home/user/bird.jpg"))
 
     Returns:
-        PIL.Image.Image: The loaded image.
+        torch.Tensor: The loaded image.
     """
-    # Hackily import PIL to avoid burdensome import in the main module
-    # TODO: Fix this
-    from PIL import Image
 
     # If pointing to remote source, try to load to local
     if isinstance(image_loc, str) and image_loc.startswith("http"):
         try:
-            image_loc = request.urlopen(image_loc)
+            image_loc = request.urlopen(image_loc).read()
+            image = torchvision.io.decode_image(
+                torch.frombuffer(image_loc, dtype=torch.uint8),
+                mode="RGB",
+            )
         except Exception as e:
-            raise ValueError(f"Failed to load image from {image_loc}") from e
+            raise ValueError("Failed to load remote image as torch.Tensor") from e
 
-    # Open the local image as a PIL image
-    try:
-        image = Image.open(image_loc)
-    except Exception as e:
-        raise ValueError(f"Failed to open image as PIL Image from {image_loc}") from e
+    # Open the local image as a Tensor image
+    else:
+        try:
+            image = torchvision.io.decode_image(image_loc, mode="RGB")
+        except Exception as e:
+            raise ValueError("Failed to load local image as torch.Tensor") from e
 
     return image
-
-
-def format_obelics(sample: Dict, image_token: str = "<|image|>") -> Dict:
-    """
-    This function formats samples from the OBELICS dataset to be processed with `Llama3VisionTransform`
-    Returns:
-        Dict[str, Any]: The transformed sample with the following fields:
-            - images: List[PIL.Image.Image] with the loaded images
-            - text: str with the text of the sample ready to be tokenized including the image tokens
-    Example:
-        >>> formatted_sample = format_obelics(sample, image_token="<|image|>")
-        >>> print(formatted_sample["text"])
-        ... "<|image|><|image|><|image|> The elephant look cute!<|image|><|image|> The cats are sad :("
-    """
-    # TODO(tj.solergibert) Optimization: Drop images at the end as they are useless!
-    sample_images = [image for image in sample["images"] if image is not None]
-    sample_text = [
-        text if text is not None else image_token for text in sample["texts"]
-    ]
-    return {
-        "images": [load_image(image) for image in sample_images],
-        "text": "".join(map(str, sample_text)),
-    }
