@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
+
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.model_builder import load_clip, load_t5
+from torchtitan.experiments.flux.flux_dataset import build_flux_dataloader
 
 
 class TestFluxDataLoader:
@@ -32,21 +33,30 @@ class TestFluxDataLoader:
     def _build_dataloader(
         self, dataset_name, batch_size, world_size, rank, device="cpu"
     ):
+        path = "torchtitan.experiments.flux.flux_argparser"
+        sys.argv.append(f"--experimental.custom_args_module={path}")
         config = JobConfig()
+        config.maybe_add_custom_args()
         config.parse_args(
             [
                 "--training.dataset",
                 dataset_name,
                 "--training.batch_size",
                 str(batch_size),
+                "--encoder.t5_encoder",
+                "google/t5-v1_1-small",
+                "--encoder.clip_encoder",
+                "openai/clip-vit-large-patch14",
+                "--encoder.encoder_device",
+                "cuda",
+                "--encoder.max_encoding_len",
+                "512",
             ]
         )
 
         return build_flux_dataloader(
             dp_world_size=world_size,
             dp_rank=rank,
-            t5_encoder=load_t5("flux-dev", max_length=512).to(device),
-            clip_encoder=load_clip("flux-dev").to(device),
             job_config=config,
             infinite=False,
         )
