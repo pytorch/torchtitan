@@ -6,11 +6,11 @@
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.utils import load_clip, load_t5
+from torchtitan.experiments.flux.model_builder import load_clip, load_t5
 
 
-class TestFLUXDataLoader:
-    def test_FLUX_dataloader(self):
+class TestFluxDataLoader:
+    def test_flux_dataloader(self):
         dataset_name = "cc12m"
         batch_size = 32
         world_size = 4
@@ -45,8 +45,8 @@ class TestFLUXDataLoader:
         return build_flux_dataloader(
             dp_world_size=world_size,
             dp_rank=rank,
-            t5_encoder=load_t5(max_length=512).to(device),
-            clip_encoder=load_clip().to(device),
+            t5_encoder=load_t5("flux-dev", max_length=512).to(device),
+            clip_encoder=load_clip("flux-dev").to(device),
             job_config=config,
             infinite=False,
         )
