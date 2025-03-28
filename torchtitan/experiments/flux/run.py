@@ -9,24 +9,23 @@ import torch
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.model_builder import configs, load_flow_model
+from torchtitan.experiments.flux.model_builder import (
+    configs,
+    load_ae,
+    load_clip,
+    load_flow_model,
+    load_t5,
+)
 
 from torchtitan.experiments.flux.sampling import get_schedule
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     denoise,
     generate_noise_latent,
-    load_ae,
-    load_clip,
-    load_t5,
     pack_latents,
     save_image,
     unpack_latent,
 )
-from transformers import pipeline
-
-
-NSFW_THRESHOLD = 0.85
 
 
 @dataclass
@@ -63,7 +62,7 @@ def generate_image(
     Args:
         name: Name of the model to load
         img_height: height of the sample in pixels (should be a multiple of 16)
-        width: width of the sample in pixels (should be a multiple of 16)
+        img_width: width of the sample in pixels (should be a multiple of 16)
         seed: Set a seed for sampling
         output_name: where to save the output image, `{idx}` will be replaced
             by the index of the sample
@@ -86,10 +85,6 @@ def generate_image(
     assert not (
         (additional_prompts is not None) and loop
     ), "Do not provide additional prompts and set loop to True"
-
-    nsfw_classifier = pipeline(
-        "image-classification", model="Falconsai/nsfw_image_detection", device=device
-    )
 
     if name not in configs:
         available = ", ".join(configs.keys())
@@ -119,8 +114,8 @@ def generate_image(
             idx = 0
 
     # init all components
-    t5 = load_t5(torch_device, max_length=256 if name == "flux-schnell" else 512)
-    clip = load_clip(torch_device)
+    t5 = load_t5(name, torch_device, max_length=256 if name == "flux-schnell" else 512)
+    clip = load_clip(name, torch_device)
     model = load_flow_model(name, device="cpu" if offload else torch_device)
     ae = load_ae(name, device="cpu" if offload else torch_device)
 
@@ -141,7 +136,7 @@ def generate_image(
         t0 = time.perf_counter()
 
         # prepare input
-        # # TODO(jianiw): Replace this dummy JobConfig with a real one
+        # TODO(jianiw): Replace this dummy JobConfig with a real one
         config = JobConfig()
         config.parse_args(
             [
@@ -216,9 +211,7 @@ def generate_image(
         fn = output_name.format(idx=idx)
         print(f"Done in {t1 - t0:.1f}s. Saving {fn}")
 
-        idx = save_image(
-            nsfw_classifier, name, output_name, idx, x, add_sampling_metadata, prompt
-        )
+        idx = save_image(name, output_name, idx, x, add_sampling_metadata, prompt)
 
 
 if __name__ == "__main__":
