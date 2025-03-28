@@ -14,7 +14,7 @@ from torchtitan.tools.logging import logger
 
 from mm_dataloader import MultiModalCollator, ParallelAwareDataloaderWithCollator
 from utils import load_image
-from llama3_transform import Llama3VisionFormatter
+from llama3_transform import VisionFormatter
 
 def _load_obelics_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
@@ -99,6 +99,9 @@ class MultiModalDataset(IterableDataset, Stateful):
         dataset_name: str,
         dataset_path: Optional[str],
         tokenizer: Tokenizer,
+        image_token: str = "<|image|>",
+        tile_size: int = 448,
+        max_num_tiles: int = 4,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -119,19 +122,15 @@ class MultiModalDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self.image_token = "<|image|>"
-
-        self.format = Llama3VisionFormatter(
+        self.image_token = image_token # TODO(tj.solergibert) Add `image_token` to JobConfig
+        # TODO(tj.solergibert) Add `tile_size` & `max_num_tiles` to JobConfig
+        self.format = VisionFormatter(
             tokenizer=tokenizer,
-            tile_size=448,
-            patch_size=14,
-            max_num_tiles=4,
-            image_mean=(0.48145466, 0.4578275, 0.40821073),
+            tile_size=tile_size,
+            max_num_tiles=max_num_tiles,
+            image_mean=(0.48145466, 0.4578275, 0.40821073), # TODO(tj.solergibert) What should we do with `image_mean` & `image_std`?
             image_std=(0.26862954, 0.26130258, 0.27577711),
         )
-        # NOTE(tj.solergibert) 560 for Instruct models, 448 for pretrain
-        # https://github.com/pytorch/torchtune/blob/0cc1b1f6a2a9c54ca640c4eb0a4d0b94ba94bb04/torchtune/models/llama3_2_vision/_model_builders.py#L92
-        # https://huggingface.co/meta-llama/Llama-3.2-11B-Vision/blob/3f2e93603aaa5dd142f27d34b06dfa2b6e97b8be/preprocessor_config.json#L22
 
         # variables for checkpointing
         self._sample_idx = 0
@@ -187,6 +186,8 @@ def build_mm_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
     seq_len = job_config.training.seq_len
+    pad_max_tiles = 4 # TODO(tj.solergibert) Add `pad_max_tiles` to JobConfig
+    padding_idx = 128004 # TODO(tj.solergibert) Add `padding_idx` to JobConfig
 
     hf_ds = MultiModalDataset(
         dataset_name=dataset_name,
@@ -198,7 +199,7 @@ def build_mm_dataloader(
         infinite=infinite,
     )
 
-    collate_fn = MultiModalCollator(padding_idx=0, pad_max_tiles=4)
+    collate_fn = MultiModalCollator(padding_idx=padding_idx, pad_max_tiles=pad_max_tiles)
 
     return ParallelAwareDataloaderWithCollator(
         dataset=hf_ds,

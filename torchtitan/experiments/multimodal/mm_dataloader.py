@@ -81,7 +81,7 @@ class ParallelAwareDataloaderWithCollator(StatefulDataLoader, BaseDataLoader):
         # keep this for backward compatibility.
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
 
-def padded_collate_sft(
+def padded_collate(
     batch: List[Dict[str, List[int]]],
     padding_idx: int = 0,
     ignore_idx: int = -100,  # NOTE(tj.solergibert) Hardcoded!
@@ -143,7 +143,7 @@ def padded_collate_sft(
 # NOTE Inspired from torchtune.data._collate.py
 @dataclass
 class MultiModalCollator:
-    padding_idx: int = 0
+    padding_idx: int = 128004
     ignore_idx: int = IGNORE_INDEX
     pad_max_tiles: Optional[int] = None
     pad_max_images: Optional[int] = None
@@ -250,7 +250,7 @@ class MultiModalCollator:
         text_only = [
             {"tokens": sample["tokens"], "labels": sample["labels"]} for sample in batch
         ]
-        collated_text = padded_collate_sft(text_only, self.padding_idx, self.ignore_idx)
+        collated_text = padded_collate(text_only, self.padding_idx, self.ignore_idx)
 
         max_seq_len = collated_text["tokens"].shape[-1]
         bsz = len(batch)
@@ -281,67 +281,38 @@ class MultiModalCollator:
         tile_len = []  # DEBUG(tj.solergibert)
         for sample in batch:
             sample_images = []
-            sample_masks = []
             token_len.append(len(sample["tokens"]))  # DEBUG(tj.solergibert)
             image_len.append(
                 len(sample["encoder_input"]["images"])
             )  # DEBUG(tj.solergibert)
             tmp_tile_len = []  # DEBUG(tj.solergibert)
-            for image, mask in zip(
-                sample["encoder_input"]["images"], sample["encoder_mask"]
-            ):
+            for image in sample["encoder_input"]["images"]:
                 # Single image in each sample has shape (n_tiles, c, h, w)
                 n_tiles = image.shape[0]
                 tmp_tile_len.append(n_tiles)  # DEBUG(tj.solergibert)
                 # Single mask in each sample corresponds to a single image and has shape (text_seq_len, image_seq_len)
                 # where image_seq_len = n_tiles * tokens_per_tile
-                text_seq_len, image_seq_len = mask.shape
-                tokens_per_tile = image_seq_len // n_tiles
                 padding_tiles = max_num_tiles - n_tiles
 
                 # Image should now have shape (max_num_tiles, c, h, w)
                 padded_image = F.pad(
                     image, (0, 0, 0, 0, 0, 0, 0, padding_tiles), value=0
                 )
-                # Mask should now have shape (max_seq_len, max_image_seq_len), where
-                # max_image_seq_len = max_num_tiles * tokens_per_tile
-                padded_mask = F.pad(
-                    mask,
-                    (
-                        0,
-                        padding_tiles * tokens_per_tile,
-                        0,
-                        max_seq_len - text_seq_len,
-                    ),
-                    value=0,
-                )
 
                 sample_images.append(padded_image)
-                sample_masks.append(padded_mask)
             tile_len.append(tmp_tile_len)  # DEBUG(tj.solergibert)
             # Stack multiple images and masks per sample in num_images dimension
             batch_images.append(torch.stack(sample_images))
-            batch_masks.append(torch.stack(sample_masks))
             batch_aspect_ratios.append(
                 torch.stack(sample["encoder_input"]["aspect_ratio"])
             )
         # Finally, pad images, masks, aspect ratios to max number of images in batch
         # (bsz, max_num_images, max_num_tiles, c, h, w)
         collated_images = pad_sequence(batch_images, batch_first=True, padding_value=0)
-        # (bsz, max_num_images, max_seq_len, max_image_seq_len)
-        collated_masks = pad_sequence(batch_masks, batch_first=True, padding_value=0)
         # (bsz, max_num_images, 2)
         collated_aspect_ratios = pad_sequence(
             batch_aspect_ratios, batch_first=True, padding_value=1
         )
-
-        # Concatenate masks for multiple images across image_seq_len dimension
-        concat_masks = collated_masks.view(bsz, max_seq_len, -1)
-        if self.pad_max_images is not None:
-            _, _, img_seq = concat_masks.shape
-            concat_masks = F.pad(
-                concat_masks, (0, self.pad_max_images * image_seq_len - img_seq)
-            )
 
         batch_dict = {
             "tokens": collated_text["tokens"],
@@ -350,7 +321,6 @@ class MultiModalCollator:
                 "images": collated_images,
                 "aspect_ratio": collated_aspect_ratios,
             },
-            "encoder_mask": concat_masks,
             "token_len": torch.tensor(token_len),  # DEBUG(tj.solergibert)
             "image_len": torch.tensor(image_len),  # DEBUG(tj.solergibert)
             "tile_len": tile_len,  # DEBUG(tj.solergibert)

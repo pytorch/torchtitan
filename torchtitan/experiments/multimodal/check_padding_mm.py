@@ -18,7 +18,7 @@ def main():
     init_logger()
     job_config = JobConfig()
     job_config.parse_args(["--training.dataset", "OBELICS",
-                           "--training.batch_size", "16",
+                           "--training.batch_size", "4",
                            "--training.seq_len", "2048",
     "--model.tokenizer_path", PATH_TO_TOKENIZER])
     tokenizer = build_tiktoken_tokenizer(job_config)
@@ -63,16 +63,6 @@ def main():
         f'Padded tiles: {total_images_in_batch*4-total_number_of_tiles}, {(1-(total_number_of_tiles/(total_images_in_batch*4-total_number_of_tiles)))*100:.2f}% (Each with shape {list(batch["encoder_input"]["images"][0,0,0].shape)})'
     )
     print(40 * "#")
-    # CrossAttentionMask
-    original_cross_attention_mask_elements = (
-        total_number_of_tiles * 1025 * total_input_ids
-    )  # NOTE(tj.solergibert) We have 1024+1 image tokens per tile
-    print(
-        f"Unpadded cross attention mask elements: {original_cross_attention_mask_elements}, Total cross attention mask elements: {total_images_in_batch*4*1025*total_tokens_in_batch}"
-    )  # TODO(tj.solergibert) Each element is a `bool`
-    print(
-        f"Padded cross attention mask elements: {total_images_in_batch*4*1025*total_tokens_in_batch-original_cross_attention_mask_elements}, {100*((total_images_in_batch*4*1025*total_tokens_in_batch-original_cross_attention_mask_elements)/(total_images_in_batch*4*1025*total_tokens_in_batch)):.2f}%"
-    )
 
 
 if __name__ == "__main__":
