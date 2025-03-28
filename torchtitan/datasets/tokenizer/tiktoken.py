@@ -23,8 +23,8 @@ from typing import (
     Sequence,
     Union,
 )
+import torch
 
-import numpy as np
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
@@ -33,7 +33,7 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
 IMAGE_TOKEN_ID = 128256
-
+IGNORE_INDEX = -100
 
 class TikTokenizer(Tokenizer):
     """
@@ -210,15 +210,13 @@ class TikTokenizer(Tokenizer):
         tokens = self.encode(
             text, bos=True, eos=True, allowed_special=set(["<|image|>"])
         )
-        input_ids = tokens[:-1]
-        labels = tokens[1:]
-        labels = list(
-            np.where(
-                np.isin(labels, [self.bos_id, self.eos_id, self.image_id]),
-                -100,  # TODO(tj.solergibert) Hardcoded!
-                labels,
-            )
-        )
+        input_ids = torch.LongTensor(tokens[:-1])
+        labels = torch.LongTensor(tokens[1:])
+        labels = torch.where(
+                    torch.isin(labels, torch.LongTensor([self.bos_id, self.eos_id, self.image_id])),
+                    IGNORE_INDEX,
+                    labels,
+                )
 
         assert len(input_ids) == len(labels)  # TODO(tj.solergibert) Delete
 

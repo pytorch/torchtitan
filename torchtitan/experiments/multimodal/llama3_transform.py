@@ -6,24 +6,24 @@
 
 from typing import Any, Mapping, Optional, Tuple
 
-from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
+from torchtitan.datasets.tokenizer.tiktoken import IMAGE_TOKEN_ID, TikTokenizer
 
 from clip import CLIPPreprocess
 from vision_attention_mask import VisionCrossAttentionMask
 
 # NOTE Inspired from torchtune.models.llama3_2_vision._transform.py
-class Llama3VisionTransform:
+class Llama3VisionFormatter:
     """
     This class combines the transforms for the different modalities of Llama 3.2 Vision. It
     performs the following transforms:
     - Tokenizing the text field using :class:`torchtitan.datasets.tokenizer.titoken.TikTokenizer`
-    - Preprocessing the images for the CLIP encoder using :class:`torchtitan.datasets.multimodal.clip.ClipPreprocess`
+    - Preprocessing the images for the CLIP encoder using :class:`torchtitan.experiments.multimodal.clip.ClipPreprocess`
     - Generating the Vision Cross Attention mask for the Fused layers
         using :class:`torchtitan.datasets.multimodal.utils.VisionCrossAttentionMask`
 
     Args:
         tokenizer (Tokenizer):
-            Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+            Tokenizer used to encode data. Tokenize must implement an `encode_multimodal` method.
         tile_size (int): Size of the tiles to divide the image into.
         patch_size (int): Size of the patches used in the CLIP vision tranformer model. This is
             used to calculate the number of image embeddings per image.
@@ -36,7 +36,7 @@ class Llama3VisionTransform:
         image_std (Optional[Tuple[float, float, float]]): Standard deviations for each channel, used for normalization.
 
     Examples:
-        >>> model_transform = Llama3VisionTransform("/path/to/tokenizer.model", tile_size=224, patch_size=14)
+        >>> model_transform = Llama3VisionFormatter(tokenizer, tile_size=224, patch_size=14)
         >>> transformed_data = model_transform({"messages": user_message, "images": [img1, img2]})
         >>> print(transformed_data["tokens"])
         [1, 31587, 29644, 102, 2]
@@ -67,7 +67,7 @@ class Llama3VisionTransform:
         self.xattn_mask = VisionCrossAttentionMask(
             tile_size=tile_size,
             patch_size=patch_size,
-            image_token_id=128256,  # TODO(tj.solergibert) Hardcoded?
+            image_token_id=IMAGE_TOKEN_ID, 
             max_num_tiles=max_num_tiles,
         )
 

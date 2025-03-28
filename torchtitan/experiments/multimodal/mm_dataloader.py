@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchtitan.components.dataloader import BaseDataLoader
-
+from torchtitan.datasets.tokenizer.tiktoken import IGNORE_INDEX
 
 class ParallelAwareDataloaderWithCollator(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
@@ -113,12 +113,12 @@ def padded_collate_sft(
         >>> tensor([[4, 5, 6], [10, -100, -100]])
     """
     input_ids = pad_sequence(
-        [torch.tensor(x["tokens"]) for x in batch],
+        [x["tokens"] for x in batch],
         batch_first=True,
         padding_value=padding_idx,
     )
     labels = pad_sequence(
-        [torch.tensor(x["labels"]) for x in batch],
+        [x["labels"] for x in batch],
         batch_first=True,
         padding_value=ignore_idx,
     )
@@ -137,14 +137,14 @@ def padded_collate_sft(
             (0, labels_seq_len - input_ids_seq_len),
             value=padding_idx,
         )
-    return {"tokens": input_ids.long(), "labels": labels.long()}
+    return {"tokens": input_ids, "labels": labels}
 
 
 # NOTE Inspired from torchtune.data._collate.py
 @dataclass
 class MultiModalCollator:
     padding_idx: int = 0
-    ignore_idx: int = -100  # NOTE(tj.solergibert) Hardcoded!
+    ignore_idx: int = IGNORE_INDEX
     pad_max_tiles: Optional[int] = None
     pad_max_images: Optional[int] = None
 
@@ -222,7 +222,8 @@ class MultiModalCollator:
             ...         "encoder_mask": [torch.ones(2, 5 * 4)],
             ...     },
             ... ]
-            >>> model_inputs = padded_collate_tiled_images_and_mask(batch=batch)
+            ... collator = MultiModalCollator(pad_max_tiles=4)
+            >>> model_inputs = collator(batch=batch)
             >>> print(model_inputs["tokens"])
             tensor([[1, 2, 1, 3],
                     [1, 4, 0, 0]])

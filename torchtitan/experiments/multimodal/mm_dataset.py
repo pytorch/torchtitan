@@ -14,7 +14,7 @@ from torchtitan.tools.logging import logger
 
 from mm_dataloader import MultiModalCollator, ParallelAwareDataloaderWithCollator
 from utils import load_image
-from llama3_transform import Llama3VisionTransform
+from llama3_transform import Llama3VisionFormatter
 
 def _load_obelics_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
@@ -119,9 +119,9 @@ class MultiModalDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self.image_token = "<|image|>"  # TODO(tj.solergibert) Hardcoded!
+        self.image_token = "<|image|>"
 
-        self.transform = Llama3VisionTransform(
+        self.format = Llama3VisionFormatter(
             tokenizer=tokenizer,
             tile_size=448,
             patch_size=14,
@@ -149,8 +149,7 @@ class MultiModalDataset(IterableDataset, Stateful):
                     "text"
                 ].count(self.image_token)
                 self._sample_idx += 1
-                # Transform sample
-                processed_sample = self.transform(processed_sample)
+                processed_sample = self.format(processed_sample)
                 yield processed_sample
 
             if not self.infinite:

@@ -10,7 +10,6 @@ import torch
 
 import torchvision
 
-from PIL import Image
 from utils import (
     find_supported_resolutions,
     get_canvas_best_fit,
@@ -45,7 +44,7 @@ class CLIPPreprocess:
     best_resolution = (448, 1344) # canvas that allows maximum upscaling, with minimum padding, up to 16 tiles
     image is resized without distortion (300,800) -> (448, 1194) #448 is the limiting side for the resize
     image is padded (448, 1194) -> (448, 1344)
-    Image is tiled 2x5, for a final output shape of (10, 3, 224, 224)
+    Image is tiled 2x6, for a final output shape of (10, 3, 224, 224)
 
     Args:
         image_mean (Optional[List[float]]): Mean values of each channel, used for normalization.
@@ -106,7 +105,7 @@ class CLIPPreprocess:
         # get_canvas_best_fit
         assert (
             possible_resolutions is not None or max_num_tiles is not None
-        ), f"Either possible_resolutions or max_num_tiles must be given. Got {possible_resolutions=} and {max_num_tiles=}"
+        ), f"Either possible_resolutions or max_num_tiles must be given. Got {possible_resolutions} and {max_num_tiles}"
 
         # If possible_resolutions are not given, then calculate possible ones based on max_num_tiles
         if not possible_resolutions and max_num_tiles:
@@ -145,18 +144,14 @@ class CLIPPreprocess:
         Args:
             sample (Mapping[str, Any]): A sample with an "image" field containing
                 a List[Message] to tokenize
-            inference (bool): Whether the template is being used for inference or not.
 
         Returns:
             Mapping[str, Any]: The sample with an updated "image" filed and added
                 "aspect_ratio" field.
         """
         image = sample["image"]
-        assert isinstance(image, Image.Image), "Input image must be a PIL image."
+        assert isinstance(image, torch.Tensor), "Input image must be a torch.Tensor."
 
-        # Make image torch.tensor((3, H, W), dtype=dtype), 0<=values<=1
-        if hasattr(image, "mode") and image.mode == "RGBA":
-            image = image.convert("RGB")
         image = F.to_image(image)
         image = F.grayscale_to_rgb_image(image)
         image = F.to_dtype(image, dtype=self.dtype, scale=True)
