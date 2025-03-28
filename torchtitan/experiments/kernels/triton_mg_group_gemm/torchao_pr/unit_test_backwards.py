@@ -75,8 +75,8 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
         )
 
         # Verify gradient correctness
-        grad_a_close = analyze_tensor_differences(grad_a, expected_grad_a, "grad_a")
-        grad_b_close = analyze_tensor_differences(grad_b, expected_grad_b, "grad_b")
+        grad_a_close = analyze_tensor_differences(grad_a, expected_grad_a, "grad_x")
+        grad_b_close = analyze_tensor_differences(grad_b, expected_grad_b, "grad_w")
 
         self.assertTrue(grad_a_close)
         self.assertTrue(grad_b_close)
@@ -93,7 +93,7 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
                     rtol=1e-2,
                 )
 
-    '''def test_MG_grouped_gemm_backward_deepseek_shapes(self) -> None:
+    def test_MG_grouped_gemm_backward_deepseek_shapes(self) -> None:
         """Test backward pass with shapes from Deepseek model."""
         deepseek_shapes = [
             (4, 2048, 4096, 7168),  # G, M, N, K
@@ -110,9 +110,8 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
                 f"Testing BF16 M*G Deepseek Backward shape: G={G}, M={M}, N={N}, K={K}"
             )
             self._run_grouped_gemm_backward_test(
-                shape, device, dtype=torch.bfloat16, atol=1e-2, rtol=1e-2
+                shape, device, dtype=torch.float16, atol=1e-2, rtol=1e-2
             )
-    '''
 
     def test_MG_dx(self) -> None:
         """Test specifically the dx (gradient w.r.t. input) computation."""
