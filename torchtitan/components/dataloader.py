@@ -6,9 +6,9 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from collections.abc import Callable
 import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, Optional
 
 from torch.distributed.checkpoint.stateful import Stateful
@@ -53,7 +53,7 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_rank: int,
         dp_world_size: int,
         batch_size: int,
-        collate_fn:Optional[Callable]=None,
+        collate_fn: Optional[Callable] = None,
     ):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
