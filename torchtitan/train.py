@@ -388,9 +388,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     @record
     def train(self):
+        job_config = self.job_config
+
+        trainer.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info("Training starts at step {self.step + 1}.")
 
-        job_config = self.job_config
         with maybe_enable_profiling(
             job_config, global_step=self.step
         ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -460,7 +462,6 @@ if __name__ == "__main__":
             trainer.checkpointer.save(curr_step=0, force=True)
             logger.info("Created seed checkpoint")
         else:
-            trainer.checkpointer.load(step=config.checkpoint.load_step)
             trainer.train()
     finally:
         if trainer:
