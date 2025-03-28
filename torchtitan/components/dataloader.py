@@ -14,6 +14,7 @@ from typing import Any, Optional
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torchtitan.tools.logging import logger
 
 
 class BaseDataLoader(Stateful, ABC):
