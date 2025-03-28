@@ -352,7 +352,7 @@ class JobConfig:
             "--training.mixed_precision_reduce",
             type=str,
             default="float32",
-            choices=["float32"],
+            choices=["bfloat16", "float32"],
             help="""
                 torch dtype to use for reductions when applying mixed precision via FSDP.
                 This feature only takes effect when data_parallel_shard_degree > 1
