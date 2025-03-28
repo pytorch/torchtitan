@@ -417,7 +417,7 @@ class MoEGate(nn.Module):
                 ~score_mask.bool(), 0.0
             )  # [n, e]
             _, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
-            topk_weight = scores.gather(1, topk_idx)
+            topk_weight = scores.detach().gather(1, topk_idx)
         elif self.topk_method == "greedy":
             topk_weight, topk_idx = torch.topk(
                 scores, k=self.top_k, dim=-1, sorted=False
