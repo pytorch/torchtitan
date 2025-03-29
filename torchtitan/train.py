@@ -391,7 +391,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config = self.job_config
 
         trainer.checkpointer.load(step=job_config.checkpoint.load_step)
-        logger.info("Training starts at step {self.step + 1}.")
+        logger.info(f"Training starts at step {self.step + 1}.")
 
         with maybe_enable_profiling(
             job_config, global_step=self.step
