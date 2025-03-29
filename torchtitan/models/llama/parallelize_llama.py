@@ -72,15 +72,20 @@ def parallelize_llama(
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
-        if (
-            job_config.activation_checkpoint.mode == "selective"
-            and job_config.model.use_flex_attn
-        ):
+    if job_config.model.use_flex_attn:
+        if job_config.activation_checkpoint.mode == "selective":
             raise ValueError(
                 "FlexAttention is not compatible with selective AC yet. "
                 "See https://github.com/pytorch/pytorch/issues/147879"
             )
+
+        if parallel_dims.cp_enabled:
+            raise ValueError(
+                "FlexAttention is not compatible with CP yet. "
+                "We are still working on this."
+            )
+
+    if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
