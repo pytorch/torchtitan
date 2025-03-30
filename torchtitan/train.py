@@ -46,6 +46,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     train_context: Generator[None, None, None]
 
     model_parts: list[torch.nn.Module]
+    loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
@@ -186,6 +187,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             init_device = device_type
             buffer_device = None
 
+        self.loss_fn = self.train_spec.build_loss_fn(job_config)
+
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -208,7 +211,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.device,
                 model_args,
                 self.train_spec.parallelize_fn,
-                self.train_spec.loss_fn,
+                self.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
@@ -351,7 +354,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 pred = model_parts[0](inputs)
-                loss = self.train_spec.loss_fn(pred, labels)
+                loss = self.loss_fn(pred, labels)
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred

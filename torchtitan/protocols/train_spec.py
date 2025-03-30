@@ -10,10 +10,10 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Type, TypeAlias
 
-import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -59,7 +59,7 @@ OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig], OptimizersContainer
 ]
 LRSchedulersBuilder: TypeAlias = Callable[[OptimizersContainer], LRSchedulersContainer]
-LossFunction: TypeAlias = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+LossFunctionBuilder: TypeAlias = Callable[[...], LossFunction]
 
 
 @dataclass
@@ -75,7 +75,7 @@ class TrainSpec:
     build_lr_schedulers_fn: LRSchedulersBuilder
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder
-    loss_fn: LossFunction
+    build_loss_fn: LossFunctionBuilder
     build_metrics_processor_fn: Optional[MetricsProcessorBuilder] = None
 
 
