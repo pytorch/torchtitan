@@ -7,7 +7,7 @@ import torch
 
 # Import the contiguous grouped GEMM implementation
 # Make sure this file is in the same directory or in your Python path
-from cntg_foward import CudaUtils, moe_contiguous_grouped_gemm
+from cg_forward import cg_grouped_gemm, CudaUtils
 
 # Set of benchmark configurations from DeepSeek paper
 CONTIGUOUS_CONFIGS = [
@@ -173,7 +173,7 @@ def run_benchmark_config(
     if verbose:
         print(f"Running {warmup_iters} warmup iterations...")
     for _ in range(warmup_iters):
-        output_triton = moe_contiguous_grouped_gemm(
+        output_triton = cg_grouped_gemm(
             inputs, expert_weights, expert_indices, use_tma=use_tma
         )
         torch.cuda.synchronize()
@@ -189,7 +189,7 @@ def run_benchmark_config(
     start_event.record()
 
     for _ in range(benchmark_iters):
-        output_triton = moe_contiguous_grouped_gemm(
+        output_triton = cg_grouped_gemm(
             inputs, expert_weights, expert_indices, use_tma=use_tma
         )
 

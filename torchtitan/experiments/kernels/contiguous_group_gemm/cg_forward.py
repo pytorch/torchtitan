@@ -746,7 +746,7 @@ class ContiguousGroupedGEMM(torch.autograd.Function):
         raise NotImplementedError("Backward pass not implemented")
 
 
-def moe_contiguous_grouped_gemm(
+def cg_grouped_gemm(
     inputs: torch.Tensor,
     expert_weights: torch.Tensor,
     expert_indices: torch.Tensor,
@@ -800,7 +800,7 @@ def test_contiguous_grouped_gemm():
     print(f"Running on Hopper GPU: {has_hopper}")
 
     # Run with TMA if on Hopper
-    output = moe_contiguous_grouped_gemm(
+    output = cg_grouped_gemm(
         inputs=inputs,
         expert_weights=expert_weights,
         expert_indices=expert_indices,
