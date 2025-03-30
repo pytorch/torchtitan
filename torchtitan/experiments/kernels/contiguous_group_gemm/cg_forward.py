@@ -210,7 +210,7 @@ HOPPER_CONFIGS = [
 ]
 
 
-# Standard non-TMA kernel with optimizations
+# =====
 @triton.autotune(
     configs=HOPPER_CONFIGS,
     key=["NUM_GROUPS", "M_TOTAL", "N", "K"],
@@ -235,16 +235,16 @@ def _kernel_cg_forward(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    # TODO Use  prefetching
-    USE_PREFETCHING: tl.constexpr = False,
     # Group size (for aligned loads)
     GROUP_SIZE_M: tl.constexpr = 128,
+    # Use prefetching
+    USE_PREFETCHING: tl.constexpr = False,
 ):
     """
     non-TMA contiguous grouped GEMM kernel for MoE forward pass.
-
     Computes: C[i] = A[i] @ B[indices[i]].T for each token i.
-
+    Assumes tokens are grouped in contiguous blocks of size GROUP_SIZE_M,
+    with all tokens in a block assigned to the same expert.
     """
     # Get thread block index
     pid = tl.program_id(0)
@@ -252,130 +252,82 @@ def _kernel_cg_forward(
     # data type of output
     c_dtype = c_ptr.dtype.element_ty
 
-    # Number of tiles in output
-    num_m_tiles = tl.cdiv(M_TOTAL, BLOCK_SIZE_M)
+    # Number of tiles in each dimension
     num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
+    num_m_tiles = tl.cdiv(M_TOTAL, BLOCK_SIZE_M)
     total_tiles = num_m_tiles * num_n_tiles
 
     # Process tiles in a grid strided pattern (each SM handles multiple tiles)
     for tile_idx in range(pid, total_tiles, NUM_SMS):
         # Convert linear index to 2D tile coordinates
-        tile_m = tile_idx % num_m_tiles
-        tile_n = tile_idx // num_m_tiles
+        tile_n = tile_idx % num_n_tiles
+        tile_m = tile_idx // num_n_tiles
 
-        # starting indices for this tile
+        # Starting indices for this tile
         m_start = tile_m * BLOCK_SIZE_M
         n_start = tile_n * BLOCK_SIZE_N
 
-        # accumulator for this tile
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-        # Get the expert index for this block
-        # All rows in a block must use the same expert (GROUP_SIZE_M-row alignment)
-        # Optimize to access aligned GROUP_SIZE_M boundary
-        block_start_idx = (m_start // GROUP_SIZE_M) * GROUP_SIZE_M
-        expert_idx = tl.load(indices_ptr + block_start_idx)
-
-        # offsets for this tile
+        # Offsets for this tile
         offs_m = m_start + tl.arange(0, BLOCK_SIZE_M)
         offs_n = n_start + tl.arange(0, BLOCK_SIZE_N)
 
-        # masks
+        # Masks for out-of-bounds checking
         mask_m = offs_m < M_TOTAL
         mask_n = offs_n < N
 
-        # TODO - this hangs atm...: Prefetch the first K tile
-        next_k_start = 0
-        next_offs_k = next_k_start + tl.arange(0, BLOCK_SIZE_K)
-        next_mask_k = next_offs_k < K
+        # Calculate the group index based on the start of the M block
+        # This is determined by the GROUP_SIZE_M alignment constraint
+        group_idx = m_start // GROUP_SIZE_M
 
-        next_mask_a = mask_m[:, None] & next_mask_k[None, :]
-        next_mask_b = mask_n[:, None] & next_mask_k[None, :]
+        # Get the expert index for this group's expert
+        # We load a single expert index for the entire group since all tokens
+        # in the same GROUP_SIZE_M block use the same expert
+        expert_idx = tl.load(indices_ptr + group_idx * GROUP_SIZE_M)
 
-        next_a_ptrs = a_ptr + offs_m[:, None] * K + next_offs_k[None, :]
-        next_b_ptrs = (
-            b_ptr + expert_idx * N * K + offs_n[:, None] * K + next_offs_k[None, :]
-        )
-
-        # if USE_PREFETCHING and BLOCK_SIZE_K < K:
-        #    next_a = tl.load(next_a_ptrs, mask=next_mask_a, other=0.0)
-        #    next_b = tl.load(next_b_ptrs, mask=next_mask_b, other=0.0)
+        # Accumulator for this tile
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
         # Process the matmul in tiles along K dimension
         for k_idx in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
             k_start = k_idx * BLOCK_SIZE_K
-            # Current k tiles become the prefetched tiles
-            if False:  # USE_PREFETCHING and k_idx > 0:
-                a = next_a
-                b = next_b
+            offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
+            mask_k = offs_k < K
 
-                # Update masks for current iteration
-                offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
-                mask_k = offs_k < K
-                mask_a = mask_m[:, None] & mask_k[None, :]
-                mask_b = mask_n[:, None] & mask_k[None, :]
-            else:
-                # Create offsets and mask for K dimension
-                offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
-                mask_k = offs_k < K
+            # Combined masks for bounds checking
+            mask_a = mask_m[:, None] & mask_k[None, :]
+            mask_b = mask_n[:, None] & mask_k[None, :]
 
-                # Create combined masks
-                mask_a = mask_m[:, None] & mask_k[None, :]
-                mask_b = mask_n[:, None] & mask_k[None, :]
+            # Load input matrix A - shape [BLOCK_SIZE_M, BLOCK_SIZE_K]
+            a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+            a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
-                # Compute pointers with pointer arithmetic optimization
-                a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
-                b_ptrs = (
-                    b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
-                )
-
-                # Load the tiles with bounds checking
-                a = tl.load(a_ptrs, mask=mask_a, other=0.0)
-                b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-
-            # OPTIMIZATION: Prefetch the next K tile if not the last iteration
-            next_k_start = k_start + BLOCK_SIZE_K
-            if USE_PREFETCHING and next_k_start < K:
-                next_offs_k = next_k_start + tl.arange(0, BLOCK_SIZE_K)
-                next_mask_k = next_offs_k < K
-
-                next_mask_a = mask_m[:, None] & next_mask_k[None, :]
-                next_mask_b = mask_n[:, None] & next_mask_k[None, :]
-
-                next_a_ptrs = a_ptr + offs_m[:, None] * K + next_offs_k[None, :]
-                next_b_ptrs = (
-                    b_ptr
-                    + expert_idx * N * K
-                    + offs_n[:, None] * K
-                    + next_offs_k[None, :]
-                )
-
-                next_a = tl.load(next_a_ptrs, mask=next_mask_a, other=0.0)
-                next_b = tl.load(next_b_ptrs, mask=next_mask_b, other=0.0)
+            # Load expert weight matrix B - shape [BLOCK_SIZE_N, BLOCK_SIZE_K]
+            # Use the correct expert index for the entire block
+            b_ptrs = b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
+            b = tl.load(b_ptrs, mask=mask_b, other=0.0)
 
             # Perform matrix multiplication for this K tile
+            # A[M,K] @ B[N,K].T -> C[M,N]
             accumulator += tl.dot(a, b.T)
 
-        # Store results
+        # Store results back to C
         c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
         mask_c = mask_m[:, None] & mask_n[None, :]
         tl.store(c_ptrs, accumulator.to(c_dtype), mask=mask_c)
 
 
 # Improved contiguous grouped GEMM forward function
-def contiguous_grouped_gemm_forward(
+def cg_grouped_gemm_forward(
     inputs: torch.Tensor,  # [M_total, K]
     expert_weights: torch.Tensor,  # [num_experts, N, K]
     expert_indices: torch.Tensor,  # [M_total]
     use_tma: bool = True,
-    use_prefetching: bool = False,
-    use_double_buffering: bool = False,
     group_size_m: int = 128,
 ) -> torch.Tensor:
     """
     Optimized contiguous grouped GEMM forward pass for Mixture of Experts.
 
-    For each token i, computes out[i] = inputs[i] @ expert_weights[indices[i]].T
+    For each token group i, computes out[i] = inputs[i] @ expert_weights[indices[i]].T
     All tokens mapped to the same expert must be in contiguous blocks of size group_size_m.
 
     Args:
@@ -383,8 +335,6 @@ def contiguous_grouped_gemm_forward(
         expert_weights: Expert weight tensor of shape [num_experts, N, K]
         expert_indices: Indices tensor of shape [M_total] mapping each token to its expert
         use_tma: Whether to use TMA optimization (if on Hopper)
-        use_prefetching: Whether to use software prefetching for non-TMA kernel
-        use_double_buffering: Whether to use double buffering for TMA kernel
         group_size_m: Size of contiguous token blocks for each expert (default: 128)
 
     Returns:
@@ -402,6 +352,14 @@ def contiguous_grouped_gemm_forward(
     # Get dimensions
     M_total, K = inputs.shape
     num_experts, N, K_weights = expert_weights.shape
+    print(f"Input shape: {inputs.shape}")
+    print(f"Expert weights shape: {expert_weights.shape}")
+    print(f"Expert indices shape: {expert_indices.shape}")
+    print(f"M_total: {M_total}")
+    # Validate group size
+    assert (
+        M_total % group_size_m == 0
+    ), f"M_total must be a multiple of group_size_m ({group_size_m})"
 
     # Validate dimensions
     assert K == K_weights, f"Input K ({K}) must match weight K ({K_weights})"
@@ -413,88 +371,43 @@ def contiguous_grouped_gemm_forward(
     output = torch.empty((M_total, N), device=inputs.device, dtype=inputs.dtype)
 
     # Get number of SMs
-    num_sms = 132  # get_num_sms()
+    num_sms = CudaUtils.get_num_sms() if torch.cuda.is_available() else 108
 
-    # Check if we're on a Hopper GPU
-    has_hopper = True
+    # Grid function for the standard kernel with proper autotuning
+    def grid(META):
+        # Calculate optimal grid size based on matrix dimensions and block sizes
+        block_size_m = META["BLOCK_SIZE_M"]
+        block_size_n = META["BLOCK_SIZE_N"]
 
-    # Use TMA only if on Hopper and user wants it
-    can_use_tma = use_tma and has_hopper
+        # Calculate tiles in each dimension - NOTE: We've flipped the tile ordering
+        # to ensure better memory locality
+        num_n_tiles = triton.cdiv(N, block_size_n)
+        num_m_tiles = triton.cdiv(M_total, block_size_m)
 
-    # Choose kernel based on hardware capabilities
-    if False:  # can_use_tma:
-        # TODO - Create TMA descriptor helper for the TMA kernel
-        return
-        tma_desc_size = 128
+        # For autotuning, make sure we have enough work for each SM
+        total_tiles = num_m_tiles * num_n_tiles
+        grid_size = min(total_tiles, num_sms)
 
-        # Allocate workspace for TMA descriptors (one per SM)
-        workspace = torch.empty(
-            num_sms * tma_desc_size, device=inputs.device, dtype=torch.uint8
-        )
+        return (grid_size,)
 
-        # Grid function for the TMA kernel with proper autotuning
-        def grid(META):
-            # Calculate optimal grid size based on matrix dimensions and block sizes
-            block_size_m = META["BLOCK_SIZE_M"]
-            block_size_n = META["BLOCK_SIZE_N"]
-
-            # Efficient grid calculation
-            num_m_tiles = triton.cdiv(M_total, block_size_m)
-            num_n_tiles = triton.cdiv(N, block_size_n)
-            total_tiles = num_m_tiles * num_n_tiles
-
-            # Return grid size with proper work distribution
-            return (min(total_tiles, num_sms),)
-
-        # Launch TMA kernel with optimizations
-        contiguous_grouped_gemm_tma_kernel[grid](
-            inputs,
-            expert_weights,
-            output,
-            workspace,
-            expert_indices,
-            M_TOTAL=M_total,
-            N=N,
-            K=K,
-            NUM_GROUPS=num_experts,
-            NUM_SMS=num_sms,
-            TMA_SIZE=tma_desc_size,
-            GROUP_SIZE_M=group_size_m,
-            USE_DOUBLE_BUFFERING=use_double_buffering,
-        )
-    else:
-        # Grid function for the standard kernel with proper autotuning
-        def grid(META):
-            # Calculate optimal grid size based on matrix dimensions and block sizes
-            block_size_m = META["BLOCK_SIZE_M"]
-            block_size_n = META["BLOCK_SIZE_N"]
-
-            # Calculate tiles in each dimension
-            num_m_tiles = triton.cdiv(M_total, block_size_m)
-            num_n_tiles = triton.cdiv(N, block_size_n)
-
-            # For autotuning, we want to make sure we have enough work for each SM
-            total_tiles = num_m_tiles * num_n_tiles
-            grid_size = min(total_tiles, num_sms)
-
-            return (grid_size,)
-
-        # Launch standard kernel with prefetching
-        _kernel_cg_forward[grid](
-            inputs,
-            expert_weights,
-            output,
-            expert_indices,
-            M_TOTAL=M_total,
-            N=N,
-            K=K,
-            NUM_GROUPS=num_experts,
-            NUM_SMS=num_sms,
-            USE_PREFETCHING=False,  # use_prefetching,
-            GROUP_SIZE_M=group_size_m,
-        )
+    # Launch standard kernel
+    _kernel_cg_forward[grid](
+        inputs,
+        expert_weights,
+        output,
+        expert_indices,
+        M_TOTAL=M_total,
+        N=N,
+        K=K,
+        NUM_GROUPS=num_experts,
+        NUM_SMS=num_sms,
+        GROUP_SIZE_M=group_size_m,
+    )
 
     return output
+
+
+# ======
 
 
 class ContiguousGroupedGEMM(torch.autograd.Function):
@@ -507,7 +420,7 @@ class ContiguousGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs, expert_weights, expert_indices, use_tma=True):
         """Forward pass for contiguous grouped GEMM."""
-        return contiguous_grouped_gemm_forward(
+        return cg_grouped_gemm_forward(
             inputs=inputs,
             expert_weights=expert_weights,
             expert_indices=expert_indices,
@@ -556,7 +469,7 @@ def test_contiguous_grouped_gemm():
 
     # Create test data
     batch_size = 4
-    seq_len = 10
+    seq_len = 32
     hidden_dim = 128  # K dimension
     output_dim = 256  # N dimension
     num_experts = 4
