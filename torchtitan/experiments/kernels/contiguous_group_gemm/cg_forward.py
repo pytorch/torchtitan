@@ -517,8 +517,7 @@ class ContiguousGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Backward pass would go here for a complete implementation.
-        Not implemented for this example.
+        Backward pass
         """
         raise NotImplementedError("Backward pass not implemented")
 
@@ -530,7 +529,7 @@ def cg_grouped_gemm(
     use_tma: bool = True,
 ) -> torch.Tensor:
     """
-    User-friendly interface for contiguous grouped GEMM.
+    interface for contiguous grouped GEMM.
 
     Args:
         inputs: Input tensor of shape [M_total, K]
@@ -539,7 +538,7 @@ def cg_grouped_gemm(
         use_tma: Whether to use TMA optimization (if on Hopper)
 
     Returns:
-        Output tensor of shape [M_total, N]
+        Output tensor, [M_total, N]
     """
     # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
@@ -548,7 +547,7 @@ def cg_grouped_gemm(
     return ContiguousGroupedGEMM.apply(inputs, expert_weights, expert_indices, use_tma)
 
 
-# Example usage:
+# Example usage and verify correctness:
 def test_contiguous_grouped_gemm():
     # Create test data
     batch_size = 4
