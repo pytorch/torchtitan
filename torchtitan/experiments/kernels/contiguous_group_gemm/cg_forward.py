@@ -217,7 +217,7 @@ HOPPER_CONFIGS = [
     prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
-def contiguous_grouped_gemm_kernel(
+def _kernel_cg_forward(
     # Pointers to matrices
     a_ptr,
     b_ptr,
@@ -235,21 +235,21 @@ def contiguous_grouped_gemm_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    # Optional: Use software prefetching
-    USE_PREFETCHING: tl.constexpr = True,
-    # Optional: Group size (for aligned loads)
+    # TODO Use  prefetching
+    USE_PREFETCHING: tl.constexpr = False,
+    # Group size (for aligned loads)
     GROUP_SIZE_M: tl.constexpr = 128,
 ):
     """
-    Optimized non-TMA contiguous grouped GEMM kernel for MoE forward pass.
+    non-TMA contiguous grouped GEMM kernel for MoE forward pass.
 
     Computes: C[i] = A[i] @ B[indices[i]].T for each token i.
-    Includes prefetching and memory access optimizations.
+
     """
     # Get thread block index
     pid = tl.program_id(0)
 
-    # Get data type of output
+    # data type of output
     c_dtype = c_ptr.dtype.element_ty
 
     # Number of tiles in output
@@ -257,34 +257,34 @@ def contiguous_grouped_gemm_kernel(
     num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_m_tiles * num_n_tiles
 
-    # Process tiles in a strided pattern (each SM handles multiple tiles)
+    # Process tiles in a grid strided pattern (each SM handles multiple tiles)
     for tile_idx in range(pid, total_tiles, NUM_SMS):
         # Convert linear index to 2D tile coordinates
         tile_m = tile_idx % num_m_tiles
         tile_n = tile_idx // num_m_tiles
 
-        # Calculate starting indices for this tile
+        # starting indices for this tile
         m_start = tile_m * BLOCK_SIZE_M
         n_start = tile_n * BLOCK_SIZE_N
 
-        # Initialize accumulator for this tile
+        # accumulator for this tile
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
         # Get the expert index for this block
-        # Note: All rows in a block must use the same expert (GROUP_SIZE_M-row alignment)
+        # All rows in a block must use the same expert (GROUP_SIZE_M-row alignment)
         # Optimize to access aligned GROUP_SIZE_M boundary
         block_start_idx = (m_start // GROUP_SIZE_M) * GROUP_SIZE_M
         expert_idx = tl.load(indices_ptr + block_start_idx)
 
-        # Create offsets for this tile
+        # offsets for this tile
         offs_m = m_start + tl.arange(0, BLOCK_SIZE_M)
         offs_n = n_start + tl.arange(0, BLOCK_SIZE_N)
 
-        # Create masks for bounds checking
+        # masks
         mask_m = offs_m < M_TOTAL
         mask_n = offs_n < N
 
-        # OPTIMIZATION: Prefetch the first K tile
+        # TODO - this hangs atm...: Prefetch the first K tile
         next_k_start = 0
         next_offs_k = next_k_start + tl.arange(0, BLOCK_SIZE_K)
         next_mask_k = next_offs_k < K
@@ -362,230 +362,6 @@ def contiguous_grouped_gemm_kernel(
         tl.store(c_ptrs, accumulator.to(c_dtype), mask=mask_c)
 
 
-# TMA-optimized kernel version for Hopper with additional optimizations
-@triton.autotune(
-    configs=HOPPER_CONFIGS,
-    key=["NUM_GROUPS", "M_TOTAL", "N", "K"],
-    prune_configs_by={"early_config_prune": early_config_prune},
-)
-@triton.jit
-def contiguous_grouped_gemm_tma_kernel(
-    # Pointers to matrices
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    # Workspace for TMA descriptors
-    workspace,
-    # Pointer to indices array
-    indices_ptr,
-    # Matrix dimensions
-    M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
-    N: tl.constexpr,  # N dimension
-    K: tl.constexpr,  # K dimension
-    NUM_GROUPS: tl.constexpr,  # Number of expert groups
-    # Kernel configuration
-    NUM_SMS: tl.constexpr,  # Number of SMs to use
-    TMA_SIZE: tl.constexpr,  # Size of TMA descriptor
-    # Tiling parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    # Optional: Group size (for aligned loads)
-    GROUP_SIZE_M: tl.constexpr = 128,
-    # Optional: Enable double buffering
-    USE_DOUBLE_BUFFERING: tl.constexpr = True,
-):
-    """
-    Optimized TMA contiguous grouped GEMM kernel for MoE forward pass.
-
-    Computes: C[i] = A[i] @ B[indices[i]].T for each token i.
-    Uses TMA for efficient memory access on Hopper GPUs with double buffering.
-    """
-    # Get thread block index
-    pid = tl.program_id(0)
-
-    # Get data type of output
-    c_dtype = c_ptr.dtype.element_ty
-
-    # Create local ptr for TMA descriptor (we'll reuse it for all operations)
-    tma_desc_ptr = workspace + (pid * TMA_SIZE)
-
-    # Number of tiles in output
-    num_m_tiles = tl.cdiv(M_TOTAL, BLOCK_SIZE_M)
-    num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_m_tiles * num_n_tiles
-
-    # Process tiles in a strided pattern (each SM handles multiple tiles)
-    for tile_idx in range(pid, total_tiles, NUM_SMS):
-        # Convert linear index to 2D tile coordinates using more efficient math
-        # Using direct integer division/modulo operations
-        tile_m = tile_idx % num_m_tiles
-        tile_n = tile_idx // num_m_tiles
-
-        # Calculate starting indices for this tile
-        m_start = tile_m * BLOCK_SIZE_M
-        n_start = tile_n * BLOCK_SIZE_N
-
-        # Calculate actual sizes accounting for boundaries
-        m_size = tl.minimum(BLOCK_SIZE_M, M_TOTAL - m_start)
-        n_size = tl.minimum(BLOCK_SIZE_N, N - n_start)
-
-        # Only process if we have actual work
-        if m_size <= 0 or n_size <= 0:
-            continue
-
-        # Initialize accumulator for this tile
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-        # Get the expert index for this block
-        # OPTIMIZATION: Align to GROUP_SIZE_M boundary for better memory access
-        block_start_idx = (m_start // GROUP_SIZE_M) * GROUP_SIZE_M
-        expert_idx = tl.load(indices_ptr + block_start_idx)
-
-        # Create TMA descriptor for output matrix
-        tl.extra.cuda.experimental_device_tensormap_create2d(
-            desc_ptr=tma_desc_ptr,
-            global_address=c_ptr + m_start * N + n_start,
-            load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
-            global_size=[m_size, n_size],
-            element_ty=c_dtype,
-        )
-
-        # Acquire exclusive access to TMA descriptor
-        tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(tma_desc_ptr)
-
-        # OPTIMIZATION: Set up double buffering for K tiles
-        # Allocate shared memory buffers for double buffering
-        if USE_DOUBLE_BUFFERING:
-            buffer_a0 = tl.alloc_shared((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
-            buffer_b0 = tl.alloc_shared((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
-            buffer_a1 = tl.alloc_shared((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
-            buffer_b1 = tl.alloc_shared((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
-
-        # Prepare offsets for this tile
-        offs_m = tl.arange(0, BLOCK_SIZE_M)
-        offs_n = tl.arange(0, BLOCK_SIZE_N)
-        mask_m = offs_m < m_size
-        mask_n = offs_n < n_size
-
-        # Process the matmul in tiles along K dimension
-        total_k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-
-        # OPTIMIZATION: Prefetch first K tile for double buffering
-        if USE_DOUBLE_BUFFERING and total_k_tiles > 1:
-            k_start = 0
-            k_size = tl.minimum(BLOCK_SIZE_K, K - k_start)
-
-            # Skip empty tiles
-            if k_size > 0:
-                # Load first tile into buffer 0
-                offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
-                mask_k = offs_k < K
-                mask_a = mask_m[:, None] & mask_k[None, :]
-                mask_b = mask_n[:, None] & mask_k[None, :]
-
-                a_ptrs = a_ptr + (m_start + offs_m)[:, None] * K + offs_k[None, :]
-                b_ptrs = (
-                    b_ptr
-                    + expert_idx * N * K
-                    + (n_start + offs_n)[:, None] * K
-                    + offs_k[None, :]
-                )
-
-                buffer_a0[:, :] = tl.load(a_ptrs, mask=mask_a, other=0.0)
-                buffer_b0[:, :] = tl.load(b_ptrs, mask=mask_b, other=0.0)
-
-        # Process K dimension using double buffering if enabled
-        for k_idx, k_start in enumerate(range(0, K, BLOCK_SIZE_K)):
-            k_size = tl.minimum(BLOCK_SIZE_K, K - k_start)
-
-            # Skip empty tiles
-            if k_size <= 0:
-                continue
-
-            if USE_DOUBLE_BUFFERING and total_k_tiles > 1:
-                # Determine which buffer to use for computation and which for loading
-                compute_buffer_idx = k_idx % 2
-                prefetch_buffer_idx = (k_idx + 1) % 2
-
-                # Load next tile if not the last iteration
-                next_k_start = k_start + BLOCK_SIZE_K
-                if next_k_start < K:
-                    next_k_size = tl.minimum(BLOCK_SIZE_K, K - next_k_start)
-
-                    if next_k_size > 0:
-                        next_offs_k = next_k_start + tl.arange(0, BLOCK_SIZE_K)
-                        next_mask_k = next_offs_k < K
-                        next_mask_a = mask_m[:, None] & next_mask_k[None, :]
-                        next_mask_b = mask_n[:, None] & next_mask_k[None, :]
-
-                        next_a_ptrs = (
-                            a_ptr
-                            + (m_start + offs_m)[:, None] * K
-                            + next_offs_k[None, :]
-                        )
-                        next_b_ptrs = (
-                            b_ptr
-                            + expert_idx * N * K
-                            + (n_start + offs_n)[:, None] * K
-                            + next_offs_k[None, :]
-                        )
-
-                        # Load into the appropriate buffer
-                        if prefetch_buffer_idx == 0:
-                            buffer_a0[:, :] = tl.load(
-                                next_a_ptrs, mask=next_mask_a, other=0.0
-                            )
-                            buffer_b0[:, :] = tl.load(
-                                next_b_ptrs, mask=next_mask_b, other=0.0
-                            )
-                        else:
-                            buffer_a1[:, :] = tl.load(
-                                next_a_ptrs, mask=next_mask_a, other=0.0
-                            )
-                            buffer_b1[:, :] = tl.load(
-                                next_b_ptrs, mask=next_mask_b, other=0.0
-                            )
-
-                # Use the compute buffer for the current iteration
-                if compute_buffer_idx == 0:
-                    a = buffer_a0
-                    b = buffer_b0
-                else:
-                    a = buffer_a1
-                    b = buffer_b1
-
-                # Sync to ensure data is ready
-                tl.debug_barrier()
-            else:
-                # Standard loading without double buffering
-                offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
-                mask_k = offs_k < K
-                mask_a = mask_m[:, None] & mask_k[None, :]
-                mask_b = mask_n[:, None] & mask_k[None, :]
-
-                a_ptrs = a_ptr + (m_start + offs_m)[:, None] * K + offs_k[None, :]
-                b_ptrs = (
-                    b_ptr
-                    + expert_idx * N * K
-                    + (n_start + offs_n)[:, None] * K
-                    + offs_k[None, :]
-                )
-
-                a = tl.load(a_ptrs, mask=mask_a, other=0.0)
-                b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-
-            # Perform matrix multiplication for this K tile
-            # OPTIMIZATION: Use proper TF32 instructions on Hopper
-            accumulator += tl.dot(a, b.T)
-
-        # Store results using TMA
-        tl._experimental_descriptor_store(tma_desc_ptr, accumulator.to(c_dtype), [0, 0])
-
-        # Release TMA descriptor
-        tl.extra.cuda.experimental_tensormap_fenceproxy_release(tma_desc_ptr)
-
-
 # Improved contiguous grouped GEMM forward function
 def contiguous_grouped_gemm_forward(
     inputs: torch.Tensor,  # [M_total, K]
@@ -646,8 +422,9 @@ def contiguous_grouped_gemm_forward(
     can_use_tma = use_tma and has_hopper
 
     # Choose kernel based on hardware capabilities
-    if can_use_tma:
-        # Create TMA descriptor helper for the TMA kernel
+    if False:  # can_use_tma:
+        # TODO - Create TMA descriptor helper for the TMA kernel
+        return
         tma_desc_size = 128
 
         # Allocate workspace for TMA descriptors (one per SM)
@@ -703,7 +480,7 @@ def contiguous_grouped_gemm_forward(
             return (grid_size,)
 
         # Launch standard kernel with prefetching
-        contiguous_grouped_gemm_kernel[grid](
+        _kernel_cg_forward[grid](
             inputs,
             expert_weights,
             output,
