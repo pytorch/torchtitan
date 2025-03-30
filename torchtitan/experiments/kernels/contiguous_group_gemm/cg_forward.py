@@ -297,15 +297,15 @@ def _kernel_cg_forward(
             b_ptr + expert_idx * N * K + offs_n[:, None] * K + next_offs_k[None, :]
         )
 
-        if USE_PREFETCHING and BLOCK_SIZE_K < K:
-            next_a = tl.load(next_a_ptrs, mask=next_mask_a, other=0.0)
-            next_b = tl.load(next_b_ptrs, mask=next_mask_b, other=0.0)
+        # if USE_PREFETCHING and BLOCK_SIZE_K < K:
+        #    next_a = tl.load(next_a_ptrs, mask=next_mask_a, other=0.0)
+        #    next_b = tl.load(next_b_ptrs, mask=next_mask_b, other=0.0)
 
         # Process the matmul in tiles along K dimension
         for k_idx in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
             k_start = k_idx * BLOCK_SIZE_K
             # Current k tiles become the prefetched tiles
-            if USE_PREFETCHING and k_idx > 0:
+            if False:  # USE_PREFETCHING and k_idx > 0:
                 a = next_a
                 b = next_b
 
@@ -368,8 +368,8 @@ def contiguous_grouped_gemm_forward(
     expert_weights: torch.Tensor,  # [num_experts, N, K]
     expert_indices: torch.Tensor,  # [M_total]
     use_tma: bool = True,
-    use_prefetching: bool = True,
-    use_double_buffering: bool = True,
+    use_prefetching: bool = False,
+    use_double_buffering: bool = False,
     group_size_m: int = 128,
 ) -> torch.Tensor:
     """
@@ -490,7 +490,7 @@ def contiguous_grouped_gemm_forward(
             K=K,
             NUM_GROUPS=num_experts,
             NUM_SMS=num_sms,
-            USE_PREFETCHING=use_prefetching,
+            USE_PREFETCHING=False,  # use_prefetching,
             GROUP_SIZE_M=group_size_m,
         )
 
@@ -548,7 +548,12 @@ def cg_grouped_gemm(
 
 
 # Example usage and verify correctness:
+
+
 def test_contiguous_grouped_gemm():
+    # Import reference implementation
+    from cg_reference import reference_moe_forward
+
     # Create test data
     batch_size = 4
     seq_len = 10
@@ -567,7 +572,6 @@ def test_contiguous_grouped_gemm():
     )
 
     # Create dummy expert assignment (one expert per token)
-
     expert_indices = torch.randint(
         0, num_experts, (batch_size * seq_len,), dtype=torch.int32, device="cuda"
     )
@@ -576,18 +580,25 @@ def test_contiguous_grouped_gemm():
     print(f"Running on Hopper GPU: {has_hopper}")
 
     # Run with TMA if on Hopper
-    output = cg_grouped_gemm(
+    output_custom = cg_grouped_gemm(
         inputs=inputs,
         expert_weights=expert_weights,
         expert_indices=expert_indices,
         use_tma=False,  # Will automatically fall back if not on Hopper
     )
 
-    # Verify output shape
-    assert output.shape == (batch_size * seq_len, output_dim)
-    print(f"Output shape: {output.shape}")
+    # Run reference implementation
+    output_ref = reference_moe_forward(inputs, expert_weights, expert_indices)
 
-    return output
+    # Compare results
+    forward_match = torch.allclose(output_custom, output_ref, rtol=1e-2, atol=1e-2)
+    print(f"Forward outputs match: {forward_match}")
+
+    # Verify output shape
+    assert output_custom.shape == (batch_size * seq_len, output_dim)
+    print(f"Output shape: {output_custom.shape}")
+
+    return output_custom
 
 
 if __name__ == "__main__":
