@@ -2,27 +2,22 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from glob import iglob
 
 import torch
 
-from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
+
 from torchtitan.experiments.flux.model.model_builder import (
     configs,
     load_ae,
     load_flow_model,
 )
 
-from torchtitan.experiments.flux.sampling import get_schedule
+from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import (
-    create_position_encoding_for_latents,
-    denoise,
-    generate_noise_latent,
-    pack_latents,
+    generate_images,
+    preprocess_data,
     save_image,
-    unpack_latents,
 )
 
 
@@ -37,8 +32,8 @@ class SamplingOptions:
 
 
 @torch.inference_mode()
-def generate_image(
-    model: FluxModel,
+def test_generate_image(
+    name: str = "flux-dev",
     img_width: int = 512,
     img_height: int = 512,
     seed: int | None = None,
@@ -50,7 +45,6 @@ def generate_image(
     num_steps: int | None = None,
     loop: bool = False,
     guidance: float = 3.5,
-    offload: bool = False,
     output_dir: str = "output",
     add_sampling_metadata: bool = True,
 ):
@@ -86,30 +80,25 @@ def generate_image(
 
     torch_device = torch.device(device)
     if num_steps is None:
-        num_steps = 4 if name == "flux-schnell" else 50
+        num_steps = 30
 
     # allow for packing and conversion to latent space
     img_height = 16 * (img_height // 16)
     img_width = 16 * (img_width // 16)
 
-    output_name = os.path.join(output_dir, "img_{idx}.jpg")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        idx = 0
-    else:
-        fns = [
-            fn
-            for fn in iglob(output_name.format(idx="*"))
-            if re.search(r"img_[0-9]+\.jpg$", fn)
-        ]
-        if len(fns) > 0:
-            idx = max(int(fn.split("_")[-1].split(".")[0]) for fn in fns) + 1
-        else:
-            idx = 0
-
     # init all components
-    model = load_flow_model(name, device="cpu" if offload else torch_device)
-    ae = load_ae(name, device="cpu" if offload else torch_device)
+    model = load_flow_model(name, device=torch_device).to(dtype=torch.bfloat16)
+    ae = load_ae(name, device=torch_device).to(dtype=torch.bfloat16)
+    clip_tokenizer = FluxTokenizer(
+        model_path="openai/clip-vit-large-patch14", max_length=77
+    )
+    t5_tokenizer = FluxTokenizer(model_path="google/t5-v1_1-small", max_length=512)
+    clip_encoder = FluxEmbedder(version="openai/clip-vit-large-patch14").to(
+        torch_device, dtype=torch.bfloat16
+    )
+    t5_encoder = FluxEmbedder(version="google/t5-v1_1-small").to(
+        torch_device, dtype=torch.bfloat16
+    )
 
     rng = torch.Generator(device="cpu")
     opts = SamplingOptions(
@@ -121,91 +110,50 @@ def generate_image(
         seed=seed,
     )
 
-    while opts is not None:
-        if opts.seed is None:
-            opts.seed = rng.seed()
-        print(f"Generating with seed {opts.seed}:\n{opts.prompt}")
-        t0 = time.perf_counter()
+    if opts.seed is None:
+        opts.seed = rng.seed()
+    print(f"Generating with seed {opts.seed}:\n{opts.prompt}")
+    t0 = time.perf_counter()
+    output_name = os.path.join(output_dir, f"img_{opts.seed}.jpg")
 
-        # prepare input
-        # TODO(jianiw): Replace this dummy JobConfig with a real one
-        config = JobConfig()
-        config.parse_args(
-            [
-                "--training.dataset",
-                "cc12m",
-                "--training.batch_size",
-                "16",
-                "--training.seed",
-                str(opts.seed),
-            ]
-        )
+    # Tokenize the prompt, on CPU
+    clip_tokens = clip_tokenizer.encode(opts.prompt)
+    t5_tokens = t5_tokenizer.encode(opts.prompt)
 
-        # TODO(jianiw): This will fail now because we don't have a real JobConfig to pass t5 and clip encoder
-        dataloader = build_flux_dataloader(
-            dp_world_size=1,  # TODO(jianiw): Change world size
-            dp_rank=0,  # TODO(jianiw): Change rank
-            # t5_encoder=t5,
-            # clip_encoder=clip,
-            job_config=config,
-            infinite=False,
-        )
+    batch = preprocess_data(
+        device=torch_device,
+        dtype=torch.bfloat16,
+        autoencoder=None,
+        clip_encoder=clip_encoder,
+        t5_encoder=t5_encoder,
+        batch={
+            "clip_tokens": clip_tokens,
+            "t5_tokens": t5_tokens,
+        },
+    )
 
-        # TODO(jianiw): Remove this hack to continue loading the next batch
-        sample_data = next(iter(dataloader))
+    img = generate_images(
+        device=torch_device,
+        dtype=torch.bfloat16,
+        model=model,
+        decoder=ae,
+        img_width=opts.width,
+        img_height=opts.height,
+        denoising_steps=opts.num_steps,
+        seed=opts.seed,
+        clip_encodings=batch["clip_encodings"],
+        t5_encodings=batch["t5_encodings"],
+        guidance=opts.guidance,
+    )
 
-        bsz = sample_data["clip_encodings"].shape[0]
-        latents = generate_noise_latent(
-            bsz,
-            img_height,
-            img_width,
-            device=torch_device,
-            dtype=torch.bfloat16,
-            seed=opts.seed,
-        )
-        _, latent_channels, latent_height, latent_width = latents.shape
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t1 = time.perf_counter()
 
-        latent_pos_enc = create_position_encoding_for_latents(
-            bsz, latent_height, latent_width
-        ).to(latents)
-        text_pos_enc = torch.zeros(bsz, sample_data["t5_encodings"].shape[1], 3).to(
-            latents
-        )
+    print(f"Done in {t1 - t0:.1f}s.")
 
-        # Convert latent into a sequence of patches
-        latents = pack_latents(latents)
-
-        timesteps = get_schedule(
-            opts.num_steps, latent_channels, shift=(name != "flux-schnell")
-        )
-
-        # denoise initial noise
-        x = denoise(
-            model,
-            img=latents,
-            img_ids=latent_pos_enc.to(latents),
-            txt=sample_data["t5_encodings"].to(latents),
-            txt_ids=text_pos_enc.to(latents),
-            vec=sample_data["clip_encodings"].to(latents),
-            target=sample_data["image"].to(latents),
-            timesteps=timesteps,
-            guidance=opts.guidance,
-        )
-
-        # decode latents to pixel space
-        x = unpack_latents(x.float(), opts.height, opts.width)
-        with torch.autocast(device_type=torch_device.type, dtype=torch.bfloat16):
-            x = ae.decode(x)
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t1 = time.perf_counter()
-
-        fn = output_name.format(idx=idx)
-        print(f"Done in {t1 - t0:.1f}s. Saving {fn}")
-
-        idx = save_image(name, output_name, idx, x, add_sampling_metadata, prompt)
+    save_image(name, output_name, img, add_sampling_metadata, prompt)
 
 
 if __name__ == "__main__":
-    generate_image()
+    test_generate_image()

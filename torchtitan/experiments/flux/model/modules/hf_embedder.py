@@ -64,7 +64,10 @@ class FluxEmbedder(nn.Module):
 
     def forward(self, batch_tokens: Tensor) -> Tensor:
         """
-        batch_tokens: [bsz, seq_len]
+        batch_tokens: [bsz, embedding_length]
+
+        For T5 Encoder, embeding_length is 768
+        For CLIP, embedding_length is 256
         """
         outputs = self.hf_module(
             input_ids=batch_tokens.to(self.hf_module.device),

@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 
 import torch
 from einops import rearrange
@@ -7,9 +8,10 @@ from PIL import ExifTags, Image
 
 from torch import Tensor
 
-from torchtitan.experiments.flux.model import FluxModel
-
-from torchtitan.experiments.flux.modules.HFEmbedder import HFEmbedder
+from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.model.modules.autoencoder import AutoEncoder
+from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
+from torchtitan.experiments.flux.sampling import get_schedule
 
 
 # CONSTANTS FOR FLUX PREPROCESSING
@@ -22,13 +24,11 @@ IMG_LATENT_SIZE_RATIO = 8
 def save_image(
     name: str,
     output_name: str,
-    idx: int,
     x: torch.Tensor,
     add_sampling_metadata: bool,
     prompt: str,
-) -> int:
-    fn = output_name.format(idx=idx)
-    print(f"Saving {fn}")
+):
+    print(f"Saving {output_name}")
     # bring into PIL format and save
     x = x.clamp(-1, 1)
     x = rearrange(x[0], "c h w -> h w c")
@@ -41,10 +41,7 @@ def save_image(
     exif_data[ExifTags.Base.Model] = name
     if add_sampling_metadata:
         exif_data[ExifTags.Base.ImageDescription] = prompt
-    img.save(fn, exif=exif_data, quality=95, subsampling=0)
-    idx += 1
-
-    return idx
+    img.save(output_name, exif=exif_data, quality=95, subsampling=0)
 
 
 def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
@@ -58,8 +55,48 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
+def preprocess_data(
+    # arguments from the recipe
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    # arguments from the config
+    autoencoder: Optional[AutoEncoder],
+    clip_encoder: FluxEmbedder,
+    t5_encoder: FluxEmbedder,
+    batch: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    """
+    Take a batch of inputs and
+    Args:
+        device (torch.device): device to do preprocessing on
+        dtype (torch.dtype): data type to do preprocessing in
+        autoencoer
+        clip_encoder
+        t5_encoder
+        batch (dict[str, Tensor]): batch of data to preprocess
+    """
+
+    # The input of encoder should be torch.int type
+    clip_tokens = batch["clip_tokens"].to(device=device, dtype=torch.int)
+    t5_tokens = batch["t5_tokens"].to(device=device, dtype=torch.int)
+
+    clip_text_encodings = clip_encoder(clip_tokens)
+    t5_text_encodings = t5_encoder(t5_tokens)
+
+    if autoencoder is not None:
+        images = batch["image"].to(device=device, dtype=dtype)
+        img_encodings = autoencoder.encode(images)
+        batch["img_encodings"] = img_encodings
+
+    batch["clip_encodings"] = clip_text_encodings.to(dtype)
+    batch["t5_encodings"] = t5_text_encodings.to(dtype)
+
+    return batch
+
+
 def generate_noise_latent(
-    num_samples: int,
+    bsz: int,
     height: int,
     width: int,
     device: str | torch.device,
@@ -69,7 +106,7 @@ def generate_noise_latent(
     """Generate noise latents for the Flux flow model.
 
     Args:
-        num_samples (int): Equal to batch_size.
+        bsz (int): batch_size.
         height (int): The height of the image.
         width (int): The width of the image.
         device (str | torch.device): The device to use.
@@ -83,7 +120,7 @@ def generate_noise_latent(
     """
 
     return torch.randn(
-        num_samples,
+        bsz,
         LATENT_CHANNELS,
         height // IMG_LATENT_SIZE_RATIO,
         width // IMG_LATENT_SIZE_RATIO,
@@ -183,38 +220,58 @@ def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
     return x.reshape(b, c, h * PATCH_HEIGHT, w * PATCH_WIDTH)
 
 
-def denoise(
+def generate_images(
+    device: torch.device,
+    dtype: torch.dtype,
     model: FluxModel,
-    # model input
-    img: Tensor,
-    img_ids: Tensor,
-    txt: Tensor,
-    txt_ids: Tensor,
-    vec: Tensor,
-    # sampling parameters
-    timesteps: list[float],
+    decoder: AutoEncoder,
+    # image params:
+    img_width: int,
+    img_height: int,
+    # sampling params:
+    denoising_steps: int,
+    seed: int,
+    clip_encodings: Tensor,
+    t5_encodings: Tensor,
     guidance: float = 4.0,
-    # extra img tokens
-    img_cond: Tensor | None = None,
 ):
+
+    bsz = clip_encodings.shape[0]
+    latents = generate_noise_latent(bsz, img_height, img_width, device, dtype, seed)
+    _, latent_channels, latent_height, latent_width = latents.shape
+
+    # create denoising schedule
+    timesteps = get_schedule(denoising_steps, latent_channels, shift=True)
+
+    # create positional encodings
+    latent_pos_enc = create_position_encoding_for_latents(
+        bsz, latent_height, latent_width
+    ).to(latents)
+    text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
+
+    # convert img-like latents into sequences of patches
+    latents = pack_latents(latents)
+
     # this is ignored for schnell
-    guidance_vec = torch.full(
-        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
-    )
+    guidance_vec = torch.full((bsz,), guidance, device=device, dtype=dtype)
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
-        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        t_vec = torch.full((bsz,), t_curr, dtype=dtype, device=device)
         pred = model(
-            img=torch.cat((img, img_cond), dim=-1) if img_cond is not None else img,
-            img_ids=img_ids,
-            txt=txt,
-            txt_ids=txt_ids,
-            y=vec,
+            img=latents,
+            img_ids=latent_pos_enc,
+            txt=t5_encodings,
+            txt_ids=text_pos_enc,
+            y=clip_encodings,
             timesteps=t_vec,
             guidance=guidance_vec,
         )
 
-        img = img + (t_prev - t_curr) * pred
+        latents = latents + (t_prev - t_curr) * pred
 
+    # convert sequences of patches into img-like latents
+    latents = unpack_latents(latents, latent_height, latent_width)
+
+    img = decoder.decode(latents)
     return img
 
 

@@ -7,7 +7,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 
-from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs, FluxParams
+from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs
 from torchtitan.experiments.flux.model.modules.autoencoder import (
     AutoEncoder,
     AutoEncoderParams,
@@ -16,7 +16,7 @@ from torchtitan.experiments.flux.model.modules.autoencoder import (
 
 @dataclass
 class ModelSpec:  # TODO(jianiw): Fit this class into BaseModelArgs, then pass this class to model.py
-    params: FluxParams
+    params: FluxModelArgs
     ae_params: AutoEncoderParams
     ckpt_path: str | None
     lora_path: str | None
@@ -31,7 +31,7 @@ configs = {
         repo_id="black-forest-labs/FLUX.1-dev",
         repo_flow="flux1-dev.safetensors",
         repo_ae="ae.safetensors",
-        ckpt_path=os.getenv("FLUX_DEV"),
+        ckpt_path=None,
         lora_path=None,
         params=FluxModelArgs(),
         ae_path=os.getenv("AE"),
@@ -50,7 +50,7 @@ configs = {
 }
 
 
-def load_flow_model_from_ckpt(
+def load_flow_model(
     name: str,
     device: str | torch.device = "cuda",
     hf_download: bool = False,
