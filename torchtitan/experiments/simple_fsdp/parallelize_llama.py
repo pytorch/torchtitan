@@ -24,7 +24,8 @@ def parallelize_llama(
     job_config: JobConfig,
 ):
     """
-    Apply activation checkpointing, torch.compile, and simplefsdp to the model.
+    Apply tensor parallelism, activation checkpointing, torch.compile, and data
+    parallelism to the model.
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
@@ -59,16 +60,22 @@ def parallelize_llama(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    if parallel_dims.dp_shard_enabled or parallel_dims.dp_replicate_enabled:
-        if parallel_dims.dp_replicate_enabled and parallel_dims.dp_shard_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-            fsdp_mode = "hybrid_shard"
-        elif parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate",)
-            fsdp_mode = "replicate"
+    # apply data parallel
+    if (
+        parallel_dims.dp_replicate_enabled
+        or parallel_dims.dp_shard_enabled
+        or parallel_dims.cp_enabled
+    ):
+        if parallel_dims.dp_replicate_enabled:
+            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mode = "hybrid_shard"
+            else:
+                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mode = "replicate"
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
-            fsdp_mode = "fully_shard"
+            dp_mode = "fully_shard"
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -78,11 +85,11 @@ def parallelize_llama(
         model = data_parallel(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
-            mode=fsdp_mode,
+            mode=dp_mode,
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
         )
-        logger.info("Applied SimpleFSDP (fsdp mode=%s) to the model", fsdp_mode)
+        logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
 
     if job_config.training.compile:
         torch._inductor.config.reorder_for_peak_memory = False

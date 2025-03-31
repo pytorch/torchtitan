@@ -22,8 +22,8 @@ Some of the features require the updates from PyTorch, with which we are working
 |Tensor Parallelism| 🚧 |
 |Context Parallelism| ✅ |
 |Pipeline Parallelism| ✅ |
-|Distributed Checkpointing|  🚧 |
-|Float8 Training| ❌|
+|Distributed Checkpointing| 🚧 |
+|Float8 Training| ❌ |
 
 
 ### Citation

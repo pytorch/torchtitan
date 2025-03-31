@@ -8,7 +8,7 @@ import importlib
 import os
 import time
 from datetime import timedelta
-from typing import Any, Iterable, Optional
+from typing import Any, Generator, Iterable, Optional
 
 import torch
 
@@ -43,6 +43,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     dataloader: train_spec_module.BaseDataLoader
     metrics_processor: train_spec_module.MetricsProcessor
     checkpointer: CheckpointManager
+    train_context: Generator[None, None, None]
 
     model_parts: list[torch.nn.Module]
     optimizers: train_spec_module.OptimizersContainer
@@ -276,32 +277,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ft_manager=ft_manager,
         )
 
-        if job_config.checkpoint.create_seed_checkpoint:
-            assert (
-                world_size == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding"
-            assert (
-                job_config.checkpoint.enable_checkpoint
-            ), "Must enable checkpointing when creating a seed checkpoint"
-            self.checkpointer.save(curr_step=0, force=True)
-            logger.info("Created seed checkpoint")
-            return
-
-        self.checkpointer.load(step=job_config.checkpoint.load_step)
-
         self.train_context = dist_utils.get_train_context(
             parallel_dims.loss_parallel_enabled,
             parallelism_config.enable_compiled_autograd,
         )
 
         logger.info(
-            "Trainer initialized. "
-            f"Training starts at step {self.step + 1}, "
-            f"with local batch size {job_config.training.batch_size}, "
+            "Trainer is initialized with "
+            f"local batch size {job_config.training.batch_size}, "
             f"global batch size {job_config.training.batch_size * dp_degree}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
-            f"(warmup {job_config.lr_scheduler.warmup_steps})"
+            f"(warmup {job_config.lr_scheduler.warmup_steps})."
         )
 
     def next_batch(self, data_iterator: Iterable) -> tuple[torch.Tensor, torch.Tensor]:
@@ -402,6 +389,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     @record
     def train(self):
         job_config = self.job_config
+
+        trainer.checkpointer.load(step=job_config.checkpoint.load_step)
+        logger.info(f"Training starts at step {self.step + 1}.")
+
         with maybe_enable_profiling(
             job_config, global_step=self.step
         ) as torch_profiler, maybe_enable_memory_snapshot(
@@ -460,7 +451,18 @@ if __name__ == "__main__":
 
     try:
         trainer = Trainer(config)
-        trainer.train()
+
+        if config.checkpoint.create_seed_checkpoint:
+            assert int(
+                os.environ["WORLD_SIZE"]
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable_checkpoint
+            ), "Must enable checkpointing when creating a seed checkpoint."
+            trainer.checkpointer.save(curr_step=0, force=True)
+            logger.info("Created seed checkpoint")
+        else:
+            trainer.train()
     finally:
         if trainer:
             trainer.close()
