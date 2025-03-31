@@ -9,7 +9,7 @@ import math
 from collections import defaultdict
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 from urllib import request
 
 import torch

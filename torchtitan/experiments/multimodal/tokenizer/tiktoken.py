@@ -23,9 +23,9 @@ from typing import (
     Sequence,
     Union,
 )
-import torch
 
 import tiktoken
+import torch
 from tiktoken.load import load_tiktoken_bpe
 
 from torchtitan.components.tokenizer import Tokenizer
@@ -34,6 +34,7 @@ from torchtitan.tools.logging import logger
 
 IMAGE_TOKEN_ID = 128256
 IGNORE_INDEX = -100
+
 
 class TikTokenizer(Tokenizer):
     """
@@ -213,10 +214,12 @@ class TikTokenizer(Tokenizer):
         input_ids = torch.LongTensor(tokens[:-1])
         labels = torch.LongTensor(tokens[1:])
         labels = torch.where(
-                    torch.isin(labels, torch.LongTensor([self.bos_id, self.eos_id, self.image_id])),
-                    IGNORE_INDEX,
-                    labels,
-                )
+            torch.isin(
+                labels, torch.LongTensor([self.bos_id, self.eos_id, self.image_id])
+            ),
+            IGNORE_INDEX,
+            labels,
+        )
 
         assert len(input_ids) == len(labels)  # TODO(tj.solergibert) Delete
 

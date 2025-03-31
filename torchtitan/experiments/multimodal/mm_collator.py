@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
+from tokenizer.tiktoken import IGNORE_INDEX
+
 from torch.nn.utils.rnn import pad_sequence
 
-from tokenizer.tiktoken import IGNORE_INDEX
 
 def padded_collate(
     batch: List[Dict[str, List[int]]],
@@ -171,20 +172,18 @@ class MultiModalCollator:
         """
         # Text tokens can be handled independently by existing collaters
         text_only = [
-            {"input_ids": sample["input_ids"], "labels": sample["labels"]} for sample in batch
+            {"input_ids": sample["input_ids"], "labels": sample["labels"]}
+            for sample in batch
         ]
         collated_text = padded_collate(text_only, self.padding_idx, self.ignore_idx)
 
         if self.pad_max_tiles is None:
             # Get max number of tiles in batch
-            max_num_tiles = max(
-                sample["images_tiles"].shape[0]
-                for sample in batch
-            )
+            max_num_tiles = max(sample["images_tiles"].shape[0] for sample in batch)
         else:
             max_num_tiles = self.pad_max_tiles
 
-        # Second loop: pad images and aspect ratios to max number of tiles, max text seq len in batch
+        # Pad images and aspect ratios to max number of tiles
         batch_images = []
         batch_aspect_ratios = []
 

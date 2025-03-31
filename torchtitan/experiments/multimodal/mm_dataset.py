@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -5,26 +11,29 @@ import torch
 
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
+
+from mm_collator import MultiModalCollator
+from tokenizer.tiktoken import IGNORE_INDEX, Tokenizer
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
+from transform import CLIPTransform
+from utils import load_image
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
-from mm_collator import MultiModalCollator
-from utils import load_image
-from tokenizer.tiktoken import Tokenizer, IGNORE_INDEX
-from transform import CLIPTransform
 
 def _load_obelics_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
     return load_dataset(dataset_path, split="train", streaming=True)
 
 
-def _process_obelics_sample(sample: dict[str, Any], image_token: str = "<|image|>") -> Dict[str, List[Union[str, "PIL.Image.Image"]]]:
+def _process_obelics_sample(
+    sample: dict[str, Any], image_token: str = "<|image|>"
+) -> Dict[str, List[Union[str, "PIL.Image.Image"]]]:
     """
-    This function formats samples from the OBELICS dataset to be processed with `Llama3VisionTransform`
+    This function formats samples from the OBELICS dataset
     Returns:
         Dict[str, Any]: The transformed sample with the following fields:
             - images: List[PIL.Image.Image] with the loaded images
@@ -34,7 +43,6 @@ def _process_obelics_sample(sample: dict[str, Any], image_token: str = "<|image|
         >>> print(formatted_sample["text"])
         ... "<|image|><|image|><|image|> The elephant look cute!<|image|><|image|> The cats are sad :("
     """
-    # TODO(tj.solergibert) Optimization: Drop images at the end as they are useless!
     sample_images = [image for image in sample["images"] if image is not None]
     sample_text = [
         text if text is not None else image_token for text in sample["texts"]
@@ -44,11 +52,13 @@ def _process_obelics_sample(sample: dict[str, Any], image_token: str = "<|image|
         "text": "".join(map(str, sample_text)),
     }
 
+
 @dataclass
 class DatasetConfig:
     path: str
     loader: Callable
     sample_processor: Callable
+
 
 # Add your dataset here here - more information at docs/datasets.md
 MM_DATASETS = {
@@ -74,6 +84,7 @@ def _validate_mm_dataset(
     path = dataset_path or config.path
     logger.info(f"Preparing {dataset_name} dataset from {path}")
     return path, config.loader, config.sample_processor
+
 
 class MultiModalDataset(IterableDataset, Stateful):
     """PyTorch MultiModal Dataset.
@@ -123,10 +134,16 @@ class MultiModalDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
-        self.image_token = image_token # TODO(tj.solergibert) Add `image_token` to JobConfig
+        self.image_token = (
+            image_token  # TODO(tj.solergibert) Add `image_token` to JobConfig
+        )
         # TODO(tj.solergibert) Add `tile_size` & `max_num_tiles` to JobConfig
         self.transform_image = CLIPTransform(
-            image_mean=(0.48145466, 0.4578275, 0.40821073), # TODO(tj.solergibert) What should we do with `image_mean` & `image_std`?,
+            image_mean=(
+                0.48145466,
+                0.4578275,
+                0.40821073,
+            ),  # TODO(tj.solergibert) What should we do with `image_mean` & `image_std`?,
             image_std=(0.26862954, 0.26130258, 0.27577711),
             tile_size=tile_size,
             possible_resolutions=None,
@@ -142,14 +159,14 @@ class MultiModalDataset(IterableDataset, Stateful):
 
         while True:
             for sample in self._get_data_iter():
-                # Format sample into `Llama3VisionTransform` format
                 try:
-                    sample = self._sample_processor(sample, image_token=self.image_token)
+                    sample = self._sample_processor(
+                        sample, image_token=self.image_token
+                    )
                 except Exception:
                     continue
-                assert len(sample["images"]) == sample["text"].count(self.image_token)
                 self._sample_idx += 1
-                
+
                 # CLIP Transform
                 encoder_input = {"images": [], "aspect_ratio": []}
                 for image in sample["images"]:
@@ -159,15 +176,34 @@ class MultiModalDataset(IterableDataset, Stateful):
                 sample["encoder_input"] = encoder_input
 
                 # Tokenize
-                tokens = self._tokenizer.encode(sample["text"], bos=True, eos=True, allowed_special=set(["<|image|>"]))
+                tokens = self._tokenizer.encode(
+                    sample["text"],
+                    bos=True,
+                    eos=True,
+                    allowed_special=set(["<|image|>"]),
+                )
                 sample["input_ids"] = torch.LongTensor(tokens[:-1])
                 sample["labels"] = torch.LongTensor(tokens[1:])
-                sample["labels"] = torch.where(torch.isin(sample["labels"], 
-                            torch.LongTensor([self._tokenizer.bos_id, self._tokenizer.eos_id, self._tokenizer.image_id])),
-                            IGNORE_INDEX,
-                            sample["labels"])
+                # Mask BOS, EOS & image tokens from the loss
+                sample["labels"] = torch.where(
+                    torch.isin(
+                        sample["labels"],
+                        torch.LongTensor(
+                            [
+                                self._tokenizer.bos_id,
+                                self._tokenizer.eos_id,
+                                self._tokenizer.image_id,
+                            ]
+                        ),
+                    ),
+                    IGNORE_INDEX,
+                    sample["labels"],
+                )
                 # Truncate
-                sample["input_ids"], sample["labels"] = sample["input_ids"][:self.seq_len], sample["labels"][:self.seq_len]
+                sample["input_ids"], sample["labels"] = (
+                    sample["input_ids"][: self.seq_len],
+                    sample["labels"][: self.seq_len],
+                )
                 yield sample
 
             if not self.infinite:
@@ -193,6 +229,7 @@ class MultiModalDataset(IterableDataset, Stateful):
     def state_dict(self):
         return {"sample_idx": self._sample_idx}
 
+
 def build_mm_dataloader(
     dp_world_size: int,
     dp_rank: int,
@@ -205,8 +242,8 @@ def build_mm_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
     seq_len = job_config.training.seq_len
-    pad_max_tiles = 4 # TODO(tj.solergibert) Add `pad_max_tiles` to JobConfig
-    padding_idx = 128004 # TODO(tj.solergibert) Add `padding_idx` to JobConfig
+    pad_max_tiles = 4  # TODO(tj.solergibert) Add `pad_max_tiles` to JobConfig
+    padding_idx = 128004  # TODO(tj.solergibert) Add `padding_idx` to JobConfig
 
     hf_ds = MultiModalDataset(
         dataset_name=dataset_name,
@@ -218,7 +255,9 @@ def build_mm_dataloader(
         infinite=infinite,
     )
 
-    collate_fn = MultiModalCollator(padding_idx=padding_idx, pad_max_tiles=pad_max_tiles)
+    collate_fn = MultiModalCollator(
+        padding_idx=padding_idx, pad_max_tiles=pad_max_tiles
+    )
 
     return ParallelAwareDataloader(
         dataset=hf_ds,

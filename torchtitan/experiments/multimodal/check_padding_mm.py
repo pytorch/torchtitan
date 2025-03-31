@@ -36,7 +36,7 @@ def main(dataset: str,
     tokenizer = build_tiktoken_tokenizer(job_config)
     dl = build_mm_dataloader(dp_world_size=dp_world_size, dp_rank=dp_rank, tokenizer=tokenizer, job_config=job_config)
     dl_iter = iter(dl)
-    
+
     for _ in range(batch_number):
         batch = next(dl_iter)
 
@@ -52,7 +52,7 @@ def main(dataset: str,
         f"Padded text tokens: {total_input_ids-total_non_padding_tokens}, {(total_input_ids-total_non_padding_tokens)/total_input_ids*100:.2f}%"
     )
     print(80 * "#")
-    ## Images    
+    ## Images
     padded_images = 0
     padded_tiles = 0
     for sample in batch["encoder_input"]["images"]:
@@ -62,9 +62,9 @@ def main(dataset: str,
             for tile in image:
                 if int(tile.sum()) == 0:
                     padded_tiles += 1
-    
+
     total_images = batch["encoder_input"]["images"].shape[0] * batch["encoder_input"]["images"].shape[1]
-    
+
     print(
         f"Unpadded images: {total_images-padded_images}, Total images in batch: {total_images}"
     )
