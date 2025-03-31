@@ -5,7 +5,7 @@ import torch
 import triton
 
 # Import our implementation
-from cg_forward import cg_grouped_gemm, contiguous_grouped_gemm_forward
+from cg_forward import cg_grouped_gemm, cg_grouped_gemm_forward
 
 
 def create_aligned_test_data(
@@ -153,8 +153,8 @@ def test_small():
     )
 
     # Run our implementation
-    output_triton = contiguous_grouped_gemm_forward(
-        inputs, expert_weights, expert_indices, use_tma=False, group_size_m=group_size_m
+    output_triton = cg_grouped_gemm_forward(
+        inputs, expert_weights, expert_indices, group_size_m=group_size_m
     )
 
     # Run reference
@@ -186,8 +186,8 @@ def test_medium():
 
     # Run our implementation
     print("Running Triton implementation...")
-    output_triton = contiguous_grouped_gemm_forward(
-        inputs, expert_weights, expert_indices, use_tma=False, group_size_m=group_size_m
+    output_triton = cg_grouped_gemm_forward(
+        inputs, expert_weights, expert_indices, group_size_m=group_size_m
     )
     print(f"Output shape: {output_triton.shape}")
     print("Triton implementation finished")
@@ -228,8 +228,8 @@ def test_large():
     )
 
     # Run our implementation
-    output_triton = contiguous_grouped_gemm_forward(
-        inputs, expert_weights, expert_indices, use_tma=False, group_size_m=group_size_m
+    output_triton = cg_grouped_gemm_forward(
+        inputs, expert_weights, expert_indices, group_size_m=group_size_m
     )
 
     # Run reference
@@ -260,11 +260,11 @@ def benchmark_performance():
 
     # Warmup
     for _ in range(5):
-        output_triton = contiguous_grouped_gemm_forward(
+        output_triton = cg_grouped_gemm_forward(
             inputs,
             expert_weights,
             expert_indices,
-            use_tma=False,
+            # use_tma=False,
             group_size_m=group_size_m,
         )
         output_pytorch = pytorch_reference(
@@ -277,11 +277,11 @@ def benchmark_performance():
     torch.cuda.synchronize()
     start = time.time()
     for _ in range(num_runs):
-        output_triton = contiguous_grouped_gemm_forward(
+        output_triton = cg_grouped_gemm_forward(
             inputs,
             expert_weights,
             expert_indices,
-            use_tma=False,
+            # use_tma=False,
             group_size_m=group_size_m,
         )
         torch.cuda.synchronize()
