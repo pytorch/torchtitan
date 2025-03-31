@@ -187,20 +187,12 @@ class MultiModalCollator:
         # Second loop: pad images and aspect ratios to max number of tiles, max text seq len in batch
         batch_images = []
         batch_aspect_ratios = []
-        token_len = []  # DEBUG(tj.solergibert)
-        image_len = []  # DEBUG(tj.solergibert)
-        tile_len = []  # DEBUG(tj.solergibert)
+
         for sample in batch:
             sample_images = []
-            token_len.append(len(sample["input_ids"]))  # DEBUG(tj.solergibert)
-            image_len.append(
-                len(sample["encoder_input"]["images"])
-            )  # DEBUG(tj.solergibert)
-            tmp_tile_len = []  # DEBUG(tj.solergibert)
             for image in sample["encoder_input"]["images"]:
                 # Single image in each sample has shape (n_tiles, c, h, w)
                 n_tiles = image.shape[0]
-                tmp_tile_len.append(n_tiles)  # DEBUG(tj.solergibert)
                 # Single mask in each sample corresponds to a single image and has shape (text_seq_len, image_seq_len)
                 # where image_seq_len = n_tiles * tokens_per_tile
                 padding_tiles = max_num_tiles - n_tiles
@@ -211,7 +203,6 @@ class MultiModalCollator:
                 )
 
                 sample_images.append(padded_image)
-            tile_len.append(tmp_tile_len)  # DEBUG(tj.solergibert)
             # Stack multiple images and masks per sample in num_images dimension
             batch_images.append(torch.stack(sample_images))
             batch_aspect_ratios.append(
@@ -232,9 +223,6 @@ class MultiModalCollator:
                 "images": collated_images,
                 "aspect_ratio": collated_aspect_ratios,
             },
-            "token_len": torch.tensor(token_len),  # DEBUG(tj.solergibert)
-            "image_len": torch.tensor(image_len),  # DEBUG(tj.solergibert)
-            "tile_len": tile_len,  # DEBUG(tj.solergibert)
         }
 
         return batch_dict
