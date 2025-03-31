@@ -6,85 +6,20 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import pickle
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
 
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import IterableDataset
-from torchdata.stateful_dataloader import StatefulDataLoader
 
-from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.datasets.tokenizer.tiktoken import IGNORE_INDEX
-
-class ParallelAwareDataloaderWithCollator(StatefulDataLoader, BaseDataLoader):
-    """Dataloader that is aware of distributed data parallelism.
-
-    This dataloader is used to load data in a distributed data parallel fashion. It also
-    utilizes ``torchdata.stateful_dataloader.StatefulDataLoader`` to implement the necessary
-    methods such as ``__iter__``.
-
-    Args:
-        dataset (IterableDataset): The dataset to iterate over.
-        dp_rank: Data parallelism rank for this dataloader.
-        dp_world_size: The world size of the data parallelism.
-        batch_size: The batch size to use for each iteration.
-    """
-
-    dp_rank: int
-    dp_world_size: int
-    batch_size: int
-
-    def __init__(
-        self,
-        dataset: IterableDataset,
-        dp_rank: int,
-        dp_world_size: int,
-        batch_size: int,
-        collate_fn: Callable
-    ):
-        self.dp_world_size = dp_world_size
-        self.dp_rank = dp_rank
-        self.batch_size = batch_size
-        super().__init__(dataset, batch_size, collate_fn=collate_fn) # TODO(tj.solergibert) Delete collate_fn=?
-        self._rank_id = f"dp_rank_{dp_rank}"
-
-    def state_dict(self) -> dict[str, Any]:
-        # Store state only for dp rank to avoid replicating the same state across other dimensions.
-        return {
-            # We don't have to use pickle as DCP will serialize the state_dict. However,
-            # we have to keep this for backward compatibility.
-            self._rank_id: pickle.dumps(super().state_dict()),
-            "world_size": self.dp_world_size,
-        }
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # State being empty is valid.
-        if not state_dict:
-            return
-
-        if self._rank_id not in state_dict:
-            logger.warning( # NOTE(tj.solergibert) Missing import?
-                f"DataLoader state is empty for dp rank {self.dp_rank}, "
-                "expected key {self._rank_id}"
-            )
-            return
-
-        assert self.dp_world_size == state_dict["world_size"], (
-            "dp_degree is inconsistent before and after checkpoint, "
-            "dataloader resharding is not supported yet."
-        )
-        # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
-        # keep this for backward compatibility.
-        super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
+from tokenizer.tiktoken import IGNORE_INDEX
 
 def padded_collate(
     batch: List[Dict[str, List[int]]],
     padding_idx: int = 0,
-    ignore_idx: int = -100,  # NOTE(tj.solergibert) Hardcoded!
+    ignore_idx: int = -100,
 ) -> Dict[str, torch.Tensor]:
     """Pad a batch of sequences to the longest sequence length in the batch, and
     convert integer lists to tensors.
@@ -99,21 +34,21 @@ def padded_collate(
 
     Example:
         >>> token_pairs = [
-        >>>    {"tokens": [1, 2, 3], "labels": [4, 5, 6]},
-        >>>    {"tokens": [7,], "labels": [10,]},
+        >>>    {"input_ids": [1, 2, 3], "labels": [4, 5, 6]},
+        >>>    {"input_ids": [7,], "labels": [10,]},
         >>> ]
         >>> collated = padded_collate(
         >>>    batch=token_pairs,
         >>>    padding_idx=padding_idx,
         >>>    ignore_idx=ignore_idx,
         >>> )
-        >>> collated["tokens"]
+        >>> collated["input_ids"]
         >>> tensor([[1, 2, 3], [7, 0, 0]])
         >>> collated["labels"]
         >>> tensor([[4, 5, 6], [10, -100, -100]])
     """
     input_ids = pad_sequence(
-        [x["tokens"] for x in batch],
+        [x["input_ids"] for x in batch],
         batch_first=True,
         padding_value=padding_idx,
     )
@@ -137,7 +72,7 @@ def padded_collate(
             (0, labels_seq_len - input_ids_seq_len),
             value=padding_idx,
         )
-    return {"tokens": input_ids, "labels": labels}
+    return {"input_ids": input_ids, "labels": labels}
 
 
 # NOTE Inspired from torchtune.data._collate.py
@@ -153,12 +88,11 @@ class MultiModalCollator:
         and cross attention masks. This can be used for both training and inference.
 
         ``batch`` is expected to be a list of sample dicts containing the following::
-            - "tokens": List[int] of length text_seq_len, varies across samples
+            - "input_ids": List[int] of length text_seq_len, varies across samples
             - "labels": List[int] of length text_seq_len, varies across samples
             - "encoder_input": Dict[str, List[torch.Tensor]]
                 - "images": List[torch.Tensor], each with shape (n_tiles, c, h, w)
                 - "aspect_ratio": List[torch.Tensor], each with shape (2, ) to indicate h_ratio, w_ratio
-            - "encoder_mask": List[Tensor], each with shape (text_seq_len, image_seq_len)
 
         Shape notation:
             - c = channel dim
@@ -166,7 +100,7 @@ class MultiModalCollator:
             - w = weight dim
 
         Note:
-            For each element in the batch, ``len(images) == len(encoder_mask) == len(aspect_ratio)``.
+            For each element in the batch, ``len(images) == len(aspect_ratio)``.
 
         This collater does the following:
             (1) Pad text sequence and encoder mask to the longest sequence length in the batch
@@ -176,8 +110,8 @@ class MultiModalCollator:
             (4) Pad aspect ratios with (1,1) for all added padding images
 
         Args:
-            batch (List[Dict[str, Any]]): A list of sample dicts containing tokens,
-                labels, images, encoder_mask, and aspect_ratio.
+            batch (List[Dict[str, Any]]): A list of sample dicts containing input_ids,
+                labels, images, and aspect_ratio.
             padding_idx (int): Padding index for input token ids. Defaults to 0.
             ignore_idx (int): Padding index for labels. Defaults to -100.
             pad_max_tiles (Optional[int]): Maximum number of tiles to pad to. If None, will pad to the largest number of tiles
@@ -186,15 +120,11 @@ class MultiModalCollator:
                 in the batch. Defaults to None.
 
         Returns:
-            Dict[str, Tensor]: Collated tokens, labels, images, encoder_mask, aspect_ratio tensors.
+            Dict[str, Tensor]: Collated tokens, labels, images, aspect_ratio tensors.
                 - tokens: Tensor of shape (bsz, max_seq_len)
                 - labels: Tensor of shape (bsz, max_seq_len)
                 - images: Tensor of shape (bsz, max_num_images, max_num_tiles, c, h, w)
-                - encoder_mask: Tensor of shape (bsz, max_seq_len, tokens_per_tile * max_num_tiles * max_num_images)
                 - aspect_ratio: Tensor of shape (bsz, max_num_images, 2)
-
-        Raises:
-            ValueError: if pad_max_tiles is set to a value less than the largest number of tiles in an image.
 
         Example:
             >>> image_id = 1
@@ -202,29 +132,25 @@ class MultiModalCollator:
             >>> c, h, w = 1, 1, 1
             >>> batch = [
             ...     {
-            ...         "tokens": [1, 2, 1, 3], "labels": [4, 5, 6, 7],
+            ...         "input_ids": [1, 2, 1, 3], "labels": [4, 5, 6, 7],
             ...         "encoder_input": {
             ...             # One image with two tiles, one image with three tiles
             ...             "images": [torch.ones(2, c, h, w), torch.ones(3, c, h, w)],
             ...             "aspect_ratio": [torch.tensor([1, 2]), torch.tensor([1, 3])],
             ...         },
-            ...         # Mask is shape (text_seq_len, tokens_per_tile * n_tiles)
-            ...         "encoder_mask": [torch.ones(4, 5 * 2), torch.ones(4, 5 * 3)],
             ...     },
             ...     {
-            ...         "tokens": [1, 4], "labels": [8, 9],
+            ...         "input_ids": [1, 4], "labels": [8, 9],
             ...         "encoder_input": {
             ...             # One image with four tiles
             ...             "images": [torch.ones(4, c, h, w)],
             ...             "aspect_ratio": [torch.tensor([2, 2])],
             ...         },
-            ...         # Mask is shape (text_seq_len, tokens_per_tile * n_tiles)
-            ...         "encoder_mask": [torch.ones(2, 5 * 4)],
             ...     },
             ... ]
             ... collator = MultiModalCollator(pad_max_tiles=4)
             >>> model_inputs = collator(batch=batch)
-            >>> print(model_inputs["tokens"])
+            >>> print(model_inputs["input_ids"])
             tensor([[1, 2, 1, 3],
                     [1, 4, 0, 0]])
             >>> print(model_inputs["labels"])
@@ -232,9 +158,6 @@ class MultiModalCollator:
                     [8, 9, -100, -100]])
             >>> print(model_inputs["encoder_input"]["images"].shape)  # (bsz, max_num_images, max_num_tiles, c, h, w)
             torch.Size([2, 2, 4, 1, 1, 1])
-            >>> print(model_inputs["encoder_mask"].shape)
-            >>> # (bsz, max_text_seq_len, tokens_per_tile * max_num_tiles * max_num_images)
-            torch.Size([2, 4, 40])
             >>> print(model_inputs["encoder_input"]["aspect_ratio"].shape)  # (bsz, max_num_images, 2)
             torch.Size([2, 2, 2])
             >>> print(model_inputs["encoder_input"]["images"][0, 0, ...])  # Image with two tiles got padded to four
@@ -248,40 +171,28 @@ class MultiModalCollator:
         """
         # Text tokens can be handled independently by existing collaters
         text_only = [
-            {"tokens": sample["tokens"], "labels": sample["labels"]} for sample in batch
+            {"input_ids": sample["input_ids"], "labels": sample["labels"]} for sample in batch
         ]
         collated_text = padded_collate(text_only, self.padding_idx, self.ignore_idx)
-
-        max_seq_len = collated_text["tokens"].shape[-1]
-        bsz = len(batch)
-
-        # TODO: Figure out how to make this more efficient or vectorized. Setting
-        # max_num_tiles beforehand will save one nested for loop but may incur more
-        # memory and compute costs in attention if max_num_tiles > batch_max_num_tiles
 
         if self.pad_max_tiles is None:
             # Get max number of tiles in batch
             max_num_tiles = max(
-                image.shape[0]
+                sample["images_tiles"].shape[0]
                 for sample in batch
-                for image in sample["encoder_input"]["images"]
             )
-            if self.pad_max_tiles < max_num_tiles:
-                raise ValueError(
-                    f"More tiles in image {max_num_tiles}, than pad_max_tiles {self.pad_max_tiles}"
-                )
-        max_num_tiles = self.pad_max_tiles
+        else:
+            max_num_tiles = self.pad_max_tiles
 
-        # Second loop: pad images and masks to max number of tiles, max text seq len in batch
+        # Second loop: pad images and aspect ratios to max number of tiles, max text seq len in batch
         batch_images = []
-        batch_masks = []
         batch_aspect_ratios = []
         token_len = []  # DEBUG(tj.solergibert)
         image_len = []  # DEBUG(tj.solergibert)
         tile_len = []  # DEBUG(tj.solergibert)
         for sample in batch:
             sample_images = []
-            token_len.append(len(sample["tokens"]))  # DEBUG(tj.solergibert)
+            token_len.append(len(sample["input_ids"]))  # DEBUG(tj.solergibert)
             image_len.append(
                 len(sample["encoder_input"]["images"])
             )  # DEBUG(tj.solergibert)
@@ -315,7 +226,7 @@ class MultiModalCollator:
         )
 
         batch_dict = {
-            "tokens": collated_text["tokens"],
+            "input_ids": collated_text["input_ids"],
             "labels": collated_text["labels"],
             "encoder_input": {
                 "images": collated_images,

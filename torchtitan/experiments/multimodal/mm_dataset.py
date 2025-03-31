@@ -8,13 +8,14 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
-from mm_dataloader import MultiModalCollator, ParallelAwareDataloaderWithCollator
+from mm_collator import MultiModalCollator
 from utils import load_image
-from llama3_transform import VisionFormatter
+from tokenizer.tiktoken import Tokenizer, IGNORE_INDEX
+from transform import CLIPTransform
 
 def _load_obelics_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
@@ -124,12 +125,14 @@ class MultiModalDataset(IterableDataset, Stateful):
         self._sample_processor = sample_processor
         self.image_token = image_token # TODO(tj.solergibert) Add `image_token` to JobConfig
         # TODO(tj.solergibert) Add `tile_size` & `max_num_tiles` to JobConfig
-        self.format = VisionFormatter(
-            tokenizer=tokenizer,
-            tile_size=tile_size,
-            max_num_tiles=max_num_tiles,
-            image_mean=(0.48145466, 0.4578275, 0.40821073), # TODO(tj.solergibert) What should we do with `image_mean` & `image_std`?
+        self.transform_image = CLIPTransform(
+            image_mean=(0.48145466, 0.4578275, 0.40821073), # TODO(tj.solergibert) What should we do with `image_mean` & `image_std`?,
             image_std=(0.26862954, 0.26130258, 0.27577711),
+            tile_size=tile_size,
+            possible_resolutions=None,
+            max_num_tiles=max_num_tiles,
+            resample="bilinear",
+            resize_to_max_canvas=False,
         )
 
         # variables for checkpointing
@@ -141,15 +144,31 @@ class MultiModalDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Format sample into `Llama3VisionTransform` format
                 try:
-                    processed_sample = self._sample_processor(sample, image_token=self.image_token)
+                    sample = self._sample_processor(sample, image_token=self.image_token)
                 except Exception:
                     continue
-                assert len(processed_sample["images"]) == processed_sample[
-                    "text"
-                ].count(self.image_token)
+                assert len(sample["images"]) == sample["text"].count(self.image_token)
                 self._sample_idx += 1
-                processed_sample = self.format(processed_sample)
-                yield processed_sample
+                
+                # CLIP Transform
+                encoder_input = {"images": [], "aspect_ratio": []}
+                for image in sample["images"]:
+                    out = self.transform_image(image)
+                    encoder_input["images"].append(out["image"])
+                    encoder_input["aspect_ratio"].append(out["aspect_ratio"])
+                sample["encoder_input"] = encoder_input
+
+                # Tokenize
+                tokens = self._tokenizer.encode(sample["text"], bos=True, eos=True, allowed_special=set(["<|image|>"]))
+                sample["input_ids"] = torch.LongTensor(tokens[:-1])
+                sample["labels"] = torch.LongTensor(tokens[1:])
+                sample["labels"] = torch.where(torch.isin(sample["labels"], 
+                            torch.LongTensor([self._tokenizer.bos_id, self._tokenizer.eos_id, self._tokenizer.image_id])),
+                            IGNORE_INDEX,
+                            sample["labels"])
+                # Truncate
+                sample["input_ids"], sample["labels"] = sample["input_ids"][:self.seq_len], sample["labels"][:self.seq_len]
+                yield sample
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -180,7 +199,7 @@ def build_mm_dataloader(
     tokenizer: Tokenizer,
     job_config: JobConfig,
     infinite: bool = True,
-) -> ParallelAwareDataloaderWithCollator:
+) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
@@ -201,7 +220,7 @@ def build_mm_dataloader(
 
     collate_fn = MultiModalCollator(padding_idx=padding_idx, pad_max_tiles=pad_max_tiles)
 
-    return ParallelAwareDataloaderWithCollator(
+    return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,

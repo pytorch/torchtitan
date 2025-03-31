@@ -11,16 +11,19 @@ import os
 from pathlib import Path
 from typing import (
     AbstractSet,
+    Any,
     cast,
     Collection,
     Dict,
     Iterator,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Union,
 )
+import torch
 
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
@@ -29,6 +32,8 @@ from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
+IMAGE_TOKEN_ID = 128256
+IGNORE_INDEX = -100
 
 class TikTokenizer(Tokenizer):
     """
@@ -68,6 +73,7 @@ class TikTokenizer(Tokenizer):
         self.special_tokens = {
             token: num_base_tokens + i for i, token in enumerate(special_tokens)
         }
+        self.special_tokens["<|image|>"] = IMAGE_TOKEN_ID
         self.model = tiktoken.Encoding(
             name=Path(model_path).name,
             pat_str=self.pat_str,
@@ -80,12 +86,13 @@ class TikTokenizer(Tokenizer):
         self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
         self.eos_id: int = self.special_tokens["<|end_of_text|>"]
         self.pad_id: int = -1
+        self.image_id = IMAGE_TOKEN_ID
         self.stop_tokens = {
             self.special_tokens["<|end_of_text|>"],
             self.special_tokens["<|eot_id|>"],
         }
         logger.info(
-            f"TikTokenizer built: #words {self.n_words}, BOS ID {self.bos_id}, EOS ID {self.eos_id}"
+            f"TikTokenizer built: #words {self.n_words}, BOS ID {self.bos_id}, EOS ID {self.eos_id}, IMAGE ID {self.image_id}"
         )
 
     def encode(
@@ -191,6 +198,31 @@ class TikTokenizer(Tokenizer):
                     slice_start = i
                     current_slice_len = 1
         yield s[slice_start:]
+
+    def encode_multimodal(self, sample: Mapping[str, Any]) -> List[int]:
+        """
+        Tokenizes a `str` of text and creates `labels` masking BOS, EOS and `image_id` tokens.
+        """
+        # TODO(tj.solergibert) Should we keep `input_ids` OR `tokens` across this class, VisionCrossAttentionMask & the collator?
+        # For me it makes more sense to split `tokens` between `input_ids` & `labels` as in train.py BUT the `MultimodalDecoder`
+        # & everything else expects `tokens`
+        text = sample["text"]
+        tokens = self.encode(
+            text, bos=True, eos=True, allowed_special=set(["<|image|>"])
+        )
+        input_ids = torch.LongTensor(tokens[:-1])
+        labels = torch.LongTensor(tokens[1:])
+        labels = torch.where(
+                    torch.isin(labels, torch.LongTensor([self.bos_id, self.eos_id, self.image_id])),
+                    IGNORE_INDEX,
+                    labels,
+                )
+
+        assert len(input_ids) == len(labels)  # TODO(tj.solergibert) Delete
+
+        sample.update({"tokens": input_ids, "labels": labels})
+
+        return sample
 
 
 def build_tiktoken_tokenizer(job_config: JobConfig) -> TikTokenizer:
