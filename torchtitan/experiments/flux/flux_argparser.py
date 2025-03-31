@@ -27,7 +27,7 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Where to load the encoder, cpu or cuda.",
     )
     parser.add_argument(
-        "--encoder.max_encoding_len",
+        "--encoder.max_t5_encoding_len",
         type=int,
         default=512,
         help="Maximum length of the T5 encoding.",

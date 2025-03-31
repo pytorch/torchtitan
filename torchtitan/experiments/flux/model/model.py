@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn, Tensor
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
 
 from torchtitan.experiments.flux.model.modules.layers import (
     DoubleStreamBlock,
@@ -12,77 +14,93 @@ from torchtitan.experiments.flux.model.modules.layers import (
     timestep_embedding,
 )
 
+from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
+
 
 @dataclass
-class FluxParams:
-    in_channels: int
-    out_channels: int
-    vec_in_dim: int
-    context_in_dim: int
-    hidden_size: int
-    mlp_ratio: float
-    num_heads: int
-    depth: int
-    depth_single_blocks: int
-    axes_dim: list[int]
-    theta: int
-    qkv_bias: bool
-    guidance_embed: bool
+class FluxModelArgs(BaseModelArgs):
+    in_channels: int = 64
+    out_channels: int = 64
+    vec_in_dim: int = 768
+    context_in_dim: int = 512
+    hidden_size: int = 3072
+    mlp_ratio: float = 4.0
+    num_heads: int = 24
+    depth: int = 19
+    depth_single_blocks: int = 38
+    axes_dim: tuple = (16, 56, 56)
+    theta: int = 10_000
+    qkv_bias: bool = True
+    guidance_embed: bool = True
+
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        # context_in_dim is the same as the T5 embedding dimension
+        self.context_in_dim = job_config.encoder.max_t5_encoding_len
+
+    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+        # TODO(jianiw): Add the number of flops for the autoencoder
+        return 0
 
 
-class FluxModel(nn.Module):  # TODO(jianiw): Inherit from ModelProtol
+class FluxModel(nn.Module, ModelProtocol):
     """
     Transformer model for flow matching on sequences.
+
+    Agrs:
+        model_args: FluxModelArgs.
+
+    Attributes:
+        model_args (TransformerModelArgs): Model configuration arguments.
     """
 
-    def __init__(self, params: FluxParams):
+    def __init__(self, model_args: FluxModelArgs):
         super().__init__()
 
-        self.params = params
-        self.in_channels = params.in_channels
-        self.out_channels = params.out_channels
-        if params.hidden_size % params.num_heads != 0:
+        self.model_args = model_args
+        self.in_channels = model_args.in_channels
+        self.out_channels = model_args.out_channels
+        if model_args.hidden_size % model_args.num_heads != 0:
             raise ValueError(
-                f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
+                f"Hidden size {model_args.hidden_size} must be divisible by num_heads {model_args.num_heads}"
             )
-        pe_dim = params.hidden_size // params.num_heads
-        if sum(params.axes_dim) != pe_dim:
+        pe_dim = model_args.hidden_size // model_args.num_heads
+        if sum(model_args.axes_dim) != pe_dim:
             raise ValueError(
-                f"Got {params.axes_dim} but expected positional dim {pe_dim}"
+                f"Got {model_args.axes_dim} but expected positional dim {pe_dim}"
             )
-        self.hidden_size = params.hidden_size
-        self.num_heads = params.num_heads
+        self.hidden_size = model_args.hidden_size
+        self.num_heads = model_args.num_heads
         self.pe_embedder = EmbedND(
-            dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
+            dim=pe_dim, theta=model_args.theta, axes_dim=model_args.axes_dim
         )
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
+        self.vector_in = MLPEmbedder(model_args.vec_in_dim, self.hidden_size)
         self.guidance_in = (
             MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-            if params.guidance_embed
+            if model_args.guidance_embed
             else nn.Identity()
         )
-        self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
+        self.txt_in = nn.Linear(model_args.context_in_dim, self.hidden_size)
 
         self.double_blocks = nn.ModuleList(
             [
                 DoubleStreamBlock(
                     self.hidden_size,
                     self.num_heads,
-                    mlp_ratio=params.mlp_ratio,
-                    qkv_bias=params.qkv_bias,
+                    mlp_ratio=model_args.mlp_ratio,
+                    qkv_bias=model_args.qkv_bias,
                 )
-                for _ in range(params.depth)
+                for _ in range(model_args.depth)
             ]
         )
 
         self.single_blocks = nn.ModuleList(
             [
                 SingleStreamBlock(
-                    self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio
+                    self.hidden_size, self.num_heads, mlp_ratio=model_args.mlp_ratio
                 )
-                for _ in range(params.depth_single_blocks)
+                for _ in range(model_args.depth_single_blocks)
             ]
         )
 
@@ -109,18 +127,14 @@ class FluxModel(nn.Module):  # TODO(jianiw): Inherit from ModelProtol
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
-        if self.params.guidance_embed:
+        if self.model_args.guidance_embed:
             if guidance is None:
                 raise ValueError(
                     "Didn't get guidance strength for guidance distilled model."
                 )
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
-        vec = vec + self.vector_in(
-            y
-        )  # clips_embedding: (BSZ, 768???, ) -> (BSZ, self.hidden_size,)
-        txt = self.txt_in(
-            txt
-        )  # mat1 and mat2 shapes cannot be multiplied (114688x512 and 4096x3072)
+        vec = vec + self.vector_in(y)
+        txt = self.txt_in(txt)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
@@ -135,3 +149,17 @@ class FluxModel(nn.Module):  # TODO(jianiw): Inherit from ModelProtol
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
+
+    @classmethod
+    def from_model_args(cls, model_args: FluxModelArgs) -> "FluxModel":
+        """
+        Initialize a Flux model from a FluxModelArgs object.
+
+        Args:
+            model_args (FluxModelArgs): Model configuration arguments.
+
+        Returns:
+            FluxModel: FluxModel model.
+
+        """
+        return cls(model_args)

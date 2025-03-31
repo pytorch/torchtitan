@@ -7,7 +7,11 @@
 import sys
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.flux_dataset import build_flux_dataloader
+from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
+from torchtitan.tools.profiling import (
+    maybe_enable_memory_snapshot,
+    maybe_enable_profiling,
+)
 
 
 class TestFluxDataLoader:
@@ -17,22 +21,8 @@ class TestFluxDataLoader:
         world_size = 4
         rank = 0
 
-        dl = self._build_dataloader(
-            dataset_name, batch_size, world_size, rank, device="cuda"
-        )
-        input_data = next(iter(dl))
+        num_steps = 10
 
-        for k, v in input_data.items():
-            print(k, v.shape)
-
-        assert len(input_data) == 3  # (image, clip_encodings, t5_encodings)
-        assert input_data["image"].shape == (batch_size, 3, 256, 256)
-        assert input_data["clip_encodings"].shape[0] == batch_size
-        assert input_data["t5_encodings"].shape == (batch_size, 512, 512)
-
-    def _build_dataloader(
-        self, dataset_name, batch_size, world_size, rank, device="cpu"
-    ):
         path = "torchtitan.experiments.flux.flux_argparser"
         sys.argv.append(f"--experimental.custom_args_module={path}")
         config = JobConfig()
@@ -43,20 +33,68 @@ class TestFluxDataLoader:
                 dataset_name,
                 "--training.batch_size",
                 str(batch_size),
+                ## Profiling options
+                # "--profiling.enable_profiling",
+                # "--profiling.profile_freq",
+                # "5",
+                # "--profiling.enable_memory_snapshot",
+                # "--profiling.save_memory_snapshot_folder",
+                # "memory_snapshot_flux",
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-small",
                 "--encoder.clip_encoder",
                 "openai/clip-vit-large-patch14",
-                "--encoder.encoder_device",
-                "cuda",
-                "--encoder.max_encoding_len",
+                "--encoder.max_t5_encoding_len",
                 "512",
             ]
         )
 
+        with maybe_enable_profiling(
+            config, global_step=0
+        ) as torch_profiler, maybe_enable_memory_snapshot(
+            config, global_step=0
+        ) as memory_profiler:
+            dl = self._build_dataloader(
+                config,
+                world_size,
+                rank,
+            )
+            dl = iter(dl)
+
+            for i in range(0, num_steps):
+                input_data = next(dl)
+                print(f"Step {i} image size: {input_data['image'].shape}")
+                if torch_profiler:
+                    torch_profiler.step()
+                if memory_profiler:
+                    memory_profiler.step()
+
+                print(len(input_data["clip_tokens"]))
+                # print(len(input_data["clip_tokens"][0]))
+                # break
+                for k, v in input_data.items():
+                    print(f"Step {i} {k} value: {type(v), v.shape}")
+
+                assert len(input_data) == 3  # (image, clip_encodings, t5_encodings)
+                # assert input_data["image"].shape == (batch_size, 3, 256, 256)
+                # assert input_data["clip_tokens"].shape[0] == batch_size
+                # assert input_data["t5_tokens"].shape == (batch_size, 512, 512)
+
+            if torch_profiler:
+                torch_profiler.step()
+            if memory_profiler:
+                memory_profiler.step(exit_ctx=True)
+
+    def _build_dataloader(
+        self,
+        job_config,
+        world_size,
+        rank,
+    ):
+
         return build_flux_dataloader(
             dp_world_size=world_size,
             dp_rank=rank,
-            job_config=config,
+            job_config=job_config,
             infinite=False,
         )

@@ -1,21 +1,21 @@
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 
-from torchtitan.experiments.flux.model.model import FluxModel, FluxParams
+from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs, FluxParams
 from torchtitan.experiments.flux.model.modules.autoencoder import (
     AutoEncoder,
     AutoEncoderParams,
 )
-from torchtitan.protocols.train_spec import BaseModelArgs
 
 
 @dataclass
-class FluxModelArg:  # TODO(jianiw): Fit this class into BaseModelArgs, then pass this class to model.py
+class ModelSpec:  # TODO(jianiw): Fit this class into BaseModelArgs, then pass this class to model.py
     params: FluxParams
     ae_params: AutoEncoderParams
     ckpt_path: str | None
@@ -27,27 +27,13 @@ class FluxModelArg:  # TODO(jianiw): Fit this class into BaseModelArgs, then pas
 
 
 configs = {
-    "flux-dev": FluxModelArg(
+    "flux-dev": ModelSpec(
         repo_id="black-forest-labs/FLUX.1-dev",
         repo_flow="flux1-dev.safetensors",
         repo_ae="ae.safetensors",
         ckpt_path=os.getenv("FLUX_DEV"),
         lora_path=None,
-        params=FluxParams(
-            in_channels=64,
-            out_channels=64,
-            vec_in_dim=768,  # This dimension should be the same as the CLIP embedding dimension
-            context_in_dim=512,  # This dimension should be the same as the T5 embedding dimension
-            hidden_size=3072,
-            mlp_ratio=4.0,
-            num_heads=24,
-            depth=19,
-            depth_single_blocks=38,
-            axes_dim=[16, 56, 56],
-            theta=10_000,
-            qkv_bias=True,
-            guidance_embed=True,
-        ),
+        params=FluxModelArgs(),
         ae_path=os.getenv("AE"),
         ae_params=AutoEncoderParams(
             resolution=256,
@@ -64,7 +50,7 @@ configs = {
 }
 
 
-def load_flow_model(
+def load_flow_model_from_ckpt(
     name: str,
     device: str | torch.device = "cuda",
     hf_download: bool = False,
@@ -92,7 +78,7 @@ def load_flow_model(
         ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
 
     with torch.device(device):
-        model = FluxModel(configs[name].params).to(torch.bfloat16)
+        model = FluxModel(model_args=configs[name].params).to(torch.bfloat16)
 
     return model
 

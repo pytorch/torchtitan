@@ -11,20 +11,19 @@ from abc import ABC, abstractmethod
 
 class Tokenizer(ABC):
     # basic tokenizer interface, for typing purpose mainly
-    def __init__(self, tokenizer_path: str):
-        assert os.path.exists(
-            tokenizer_path
-        ), f"The tokenizer path does not exist: {tokenizer_path}"
-        assert os.path.isfile(tokenizer_path), tokenizer_path
+    def __init__(self, tokenizer_path: str, from_pretrained: bool = False):
+        if not from_pretrained:
+            assert os.path.exists(
+                tokenizer_path
+            ), f"The tokenizer path does not exist: {tokenizer_path}"
+            assert os.path.isfile(tokenizer_path), tokenizer_path
         self._n_words = 8
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> list[int]:
-        ...
+    def encode(self, *args, **kwargs) -> list[int]: ...
 
     @abstractmethod
-    def decode(self, *args, **kwargs) -> str:
-        ...
+    def decode(self, *args, **kwargs) -> str: ...
 
     @property
     def n_words(self) -> int:

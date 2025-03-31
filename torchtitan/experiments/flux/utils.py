@@ -183,7 +183,7 @@ def unpack_latents(x: Tensor, latent_height: int, latent_width: int) -> Tensor:
     return x.reshape(b, c, h * PATCH_HEIGHT, w * PATCH_WIDTH)
 
 
-def denosie(
+def denoise(
     model: FluxModel,
     # model input
     img: Tensor,

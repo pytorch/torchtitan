@@ -30,7 +30,7 @@ dataset = "cc12m"  # supported datasets: c4_test (2K), c4 (177M)
 t5_encoder="google/t5-v1_1-small",
 clip_encoder="openai/clip-vit-large-patch14",
 encoder_device="cuda",
-max_encoding_len=512
+max_t5_encoding_len=512
 
 [parallelism]
 data_parallel_replicate_degree = 1

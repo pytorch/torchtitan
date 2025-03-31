@@ -3,18 +3,16 @@ import re
 import time
 from dataclasses import dataclass
 from glob import iglob
-from random import sample
 
 import torch
 
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.model_builder import (
+from torchtitan.experiments.flux.flux_dataset import build_flux_dataloader
+from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.model.model_builder import (
     configs,
     load_ae,
-    load_clip,
     load_flow_model,
-    load_t5,
 )
 
 from torchtitan.experiments.flux.sampling import get_schedule
@@ -40,7 +38,7 @@ class SamplingOptions:
 
 @torch.inference_mode()
 def generate_image(
-    name: str = "flux-dev",
+    model: FluxModel,
     img_width: int = 512,
     img_height: int = 512,
     seed: int | None = None,
@@ -57,7 +55,7 @@ def generate_image(
     add_sampling_metadata: bool = True,
 ):
     """
-    Run Forward pass of flux model to generate an image.
+    Run a forward pass of flux model to generate an image.
 
     Args:
         name: Name of the model to load
@@ -86,10 +84,6 @@ def generate_image(
         (additional_prompts is not None) and loop
     ), "Do not provide additional prompts and set loop to True"
 
-    if name not in configs:
-        available = ", ".join(configs.keys())
-        raise ValueError(f"Got unknown model name: {name}, chose from {available}")
-
     torch_device = torch.device(device)
     if num_steps is None:
         num_steps = 4 if name == "flux-schnell" else 50
@@ -114,8 +108,6 @@ def generate_image(
             idx = 0
 
     # init all components
-    t5 = load_t5(name, torch_device, max_length=256 if name == "flux-schnell" else 512)
-    clip = load_clip(name, torch_device)
     model = load_flow_model(name, device="cpu" if offload else torch_device)
     ae = load_ae(name, device="cpu" if offload else torch_device)
 
@@ -149,11 +141,12 @@ def generate_image(
             ]
         )
 
+        # TODO(jianiw): This will fail now because we don't have a real JobConfig to pass t5 and clip encoder
         dataloader = build_flux_dataloader(
             dp_world_size=1,  # TODO(jianiw): Change world size
             dp_rank=0,  # TODO(jianiw): Change rank
-            t5_encoder=t5,
-            clip_encoder=clip,
+            # t5_encoder=t5,
+            # clip_encoder=clip,
             job_config=config,
             infinite=False,
         )
