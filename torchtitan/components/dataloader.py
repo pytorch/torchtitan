@@ -77,7 +77,7 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
             return
 
         if self._rank_id not in state_dict:
-            logger.warning(  # NOTE(tj.solergibert) Missing import?
+            logger.warning(
                 f"DataLoader state is empty for dp rank {self.dp_rank}, "
                 "expected key {self._rank_id}"
             )
