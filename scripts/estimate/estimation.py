@@ -194,7 +194,7 @@ def estimate_memory(job_config: JobConfig):
         )
         print(f"Tracker Max: {tracker_peak / gib} GiB")
         if job_config.memory_estimation.disable_fake_mode and peak_active > 0:
-            print(f"Tracker Accuracy: {tracker_peak/peak_active}")
+            print(f"Tracker Accuracy: {tracker_peak / peak_active}")
         gc.enable()
 
 
