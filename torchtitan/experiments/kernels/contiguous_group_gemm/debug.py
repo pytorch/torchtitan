@@ -249,7 +249,7 @@ def benchmark_performance():
     print("\nRunning performance benchmark...")
 
     # Use dimensions from the paper
-    batch_size, seq_len = 32, 128  # 4096 tokens
+    batch_size, seq_len = 32, 1024  # 4096 tokens
     hidden_dim, output_dim = 4096, 7168
     num_experts = 8
     group_size_m = 128

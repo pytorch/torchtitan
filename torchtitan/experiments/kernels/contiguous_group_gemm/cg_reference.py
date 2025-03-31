@@ -7,26 +7,32 @@
 import torch
 
 
-def reference_moe_forward(inputs, weights, indices):
+# Simple reference implementation for verification
+def pytorch_reference(
+    inputs: torch.Tensor,
+    expert_weights: torch.Tensor,
+    expert_indices: torch.Tensor,
+    group_size_m: int = 128,
+) -> torch.Tensor:
     """
-    Reference implementation of MoE forward pass using PyTorch.
-
-    Args:
-        inputs: Input tensor of shape [M, K]
-        weights: Expert weight tensor of shape [num_experts, N, K]
-        indices: Indices tensor of shape [M] mapping each token to its expert
-
-    Returns:
-        Output tensor of shape [M, N]
+    Reference implementation using PyTorch for verification.
     """
-    result = torch.zeros(
-        (inputs.shape[0], weights.shape[1]),
-        device=inputs.device,
-        dtype=inputs.dtype,
-    )
+    M_total, K = inputs.shape
+    num_experts, N, _ = expert_weights.shape
 
-    for i in range(inputs.shape[0]):
-        expert_idx = indices[i].item()
-        result[i] = inputs[i] @ weights[expert_idx].T
+    output = torch.empty((M_total, N), device=inputs.device, dtype=inputs.dtype)
 
-    return result
+    # Process each group
+    for i in range(0, M_total, group_size_m):
+        end_idx = min(i + group_size_m, M_total)
+
+        # Get expert index for this group
+        expert_idx = expert_indices[i].item()
+
+        # Get expert weights
+        expert_weight = expert_weights[expert_idx]
+
+        # Compute output for this group
+        output[i:end_idx] = torch.matmul(inputs[i:end_idx], expert_weight.T)
+
+    return output
