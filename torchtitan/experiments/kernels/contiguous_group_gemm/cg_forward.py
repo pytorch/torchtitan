@@ -282,7 +282,7 @@ def _kernel_cg_forward_aligned(
     GROUP_SIZE_M: tl.constexpr = 128,
 ):
     """
-    Optimized contiguous grouped GEMM kernel forward.
+    Contiguous Grouped GEMM kernel forward.
     IMPORTANT: Assumes GROUP_SIZE_M is a multiple of BLOCK_SIZE_M or vice versa,
     and all inputs are pre-aligned to these block boundaries.
     """

@@ -113,7 +113,7 @@ def run_benchmark_config(
     k: int,
     warmup_iters: int = 10,
     benchmark_iters: int = 100,
-    use_tma: bool = True,
+    # use_tma: bool = True,
     run_pytorch_ref: bool = True,
     verify_output: bool = True,
     verbose: bool = True,
@@ -174,7 +174,9 @@ def run_benchmark_config(
         print(f"Running {warmup_iters} warmup iterations...")
     for _ in range(warmup_iters):
         output_triton = cg_grouped_gemm(
-            inputs, expert_weights, expert_indices, use_tma=use_tma
+            inputs,
+            expert_weights,
+            expert_indices,  # use_tma=use_tma
         )
         torch.cuda.synchronize()
 
@@ -190,7 +192,9 @@ def run_benchmark_config(
 
     for _ in range(benchmark_iters):
         output_triton = cg_grouped_gemm(
-            inputs, expert_weights, expert_indices, use_tma=use_tma
+            inputs,
+            expert_weights,
+            expert_indices,  # use_tma=use_tma
         )
 
     # End timing
@@ -355,7 +359,7 @@ def benchmark_all_configs(
                 k=k,
                 warmup_iters=warmup_iters,
                 benchmark_iters=benchmark_iters,
-                use_tma=use_tma,
+                # use_tma=use_tma,
                 run_pytorch_ref=run_pytorch_ref,
                 verify_output=verify_output,
                 verbose=verbose,
