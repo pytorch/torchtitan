@@ -217,7 +217,7 @@ HOPPER_CONFIGS = [
     prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
-def _kernel_cg_forward(
+def _kernel_cg_forward_aligned(
     # Pointers to matrices
     a_ptr,
     b_ptr,
@@ -237,87 +237,80 @@ def _kernel_cg_forward(
     BLOCK_SIZE_K: tl.constexpr,
     # Group size (for aligned loads)
     GROUP_SIZE_M: tl.constexpr = 128,
-    # Use prefetching
-    USE_PREFETCHING: tl.constexpr = False,
 ):
     """
-    non-TMA contiguous grouped GEMM kernel for MoE forward pass.
+    Optimized contiguous grouped GEMM kernel for MoE forward pass.
+    Assumes perfect alignment: GROUP_SIZE_M is a multiple of BLOCK_SIZE_M,
+    and all inputs are pre-aligned to these block boundaries.
+
     Computes: C[i] = A[i] @ B[indices[i]].T for each token i.
-    Assumes tokens are grouped in contiguous blocks of size GROUP_SIZE_M,
-    with all tokens in a block assigned to the same expert.
     """
     # Get thread block index
     pid = tl.program_id(0)
 
-    # data type of output
+    # Data type of output
     c_dtype = c_ptr.dtype.element_ty
 
     # Number of tiles in each dimension
-    num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
     num_m_tiles = tl.cdiv(M_TOTAL, BLOCK_SIZE_M)
+    num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_m_tiles * num_n_tiles
 
     # Process tiles in a grid strided pattern (each SM handles multiple tiles)
     for tile_idx in range(pid, total_tiles, NUM_SMS):
         # Convert linear index to 2D tile coordinates
-        tile_n = tile_idx % num_n_tiles
         tile_m = tile_idx // num_n_tiles
+        tile_n = tile_idx % num_n_tiles
 
         # Starting indices for this tile
         m_start = tile_m * BLOCK_SIZE_M
         n_start = tile_n * BLOCK_SIZE_N
 
-        # Offsets for this tile
-        offs_m = m_start + tl.arange(0, BLOCK_SIZE_M)
-        offs_n = n_start + tl.arange(0, BLOCK_SIZE_N)
+        # Create offset arrays
+        offs_m = tl.arange(0, BLOCK_SIZE_M) + m_start
+        offs_n = tl.arange(0, BLOCK_SIZE_N) + n_start
 
-        # Masks for out-of-bounds checking
+        # Create masks for bounds checking
         mask_m = offs_m < M_TOTAL
         mask_n = offs_n < N
 
-        # Calculate the group index based on the start of the M block
-        # This is determined by the GROUP_SIZE_M alignment constraint
+        # Get the expert index for this block
+        # This assumes alignment, so the whole block uses the same expert
+        # We derive the group index from the m_start
         group_idx = m_start // GROUP_SIZE_M
-
-        # Get the expert index for this group's expert
-        # We load a single expert index for the entire group since all tokens
-        # in the same GROUP_SIZE_M block use the same expert
         expert_idx = tl.load(indices_ptr + group_idx * GROUP_SIZE_M)
 
-        # Accumulator for this tile
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        # Initialize accumulator
+        acc = tl.zeros([BLOCK_SIZE_M, BLOCK_SIZE_N], dtype=tl.float32)
 
-        # Process the matmul in tiles along K dimension
-        for k_idx in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-            k_start = k_idx * BLOCK_SIZE_K
-            offs_k = k_start + tl.arange(0, BLOCK_SIZE_K)
+        # Process the matrix multiplication in tiles along K dimension
+        for k in range(0, K, BLOCK_SIZE_K):
+            # Create offsets for the K dimension
+            offs_k = tl.arange(0, BLOCK_SIZE_K) + k
             mask_k = offs_k < K
 
-            # Combined masks for bounds checking
-            mask_a = mask_m[:, None] & mask_k[None, :]
-            mask_b = mask_n[:, None] & mask_k[None, :]
-
-            # Load input matrix A - shape [BLOCK_SIZE_M, BLOCK_SIZE_K]
+            # Load A (inputs) - shape: [BLOCK_SIZE_M, BLOCK_SIZE_K]
             a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+            mask_a = mask_m[:, None] & mask_k[None, :]
             a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
-            # Load expert weight matrix B - shape [BLOCK_SIZE_N, BLOCK_SIZE_K]
-            # Use the correct expert index for the entire block
+            # Load B (expert weights) for the expert assigned to this block
+            # Shape: [BLOCK_SIZE_N, BLOCK_SIZE_K]
             b_ptrs = b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
+            mask_b = mask_n[:, None] & mask_k[None, :]
             b = tl.load(b_ptrs, mask=mask_b, other=0.0)
 
-            # Perform matrix multiplication for this K tile
-            # A[M,K] @ B[N,K].T -> C[M,N]
-            accumulator += tl.dot(a, b.T)
+            # Compute matrix multiplication for this K tile
+            acc += tl.dot(a, b.T)
 
-        # Store results back to C
+        # Store results
         c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
         mask_c = mask_m[:, None] & mask_n[None, :]
-        tl.store(c_ptrs, accumulator.to(c_dtype), mask=mask_c)
+        tl.store(c_ptrs, acc.to(c_dtype), mask=mask_c)
 
 
-# Improved contiguous grouped GEMM forward function
-def cg_grouped_gemm_forward(
+# Improved contiguous grouped GEMM forward function for aligned inputs
+def contiguous_grouped_gemm_forward_aligned(
     inputs: torch.Tensor,  # [M_total, K]
     expert_weights: torch.Tensor,  # [num_experts, N, K]
     expert_indices: torch.Tensor,  # [M_total]
@@ -325,10 +318,12 @@ def cg_grouped_gemm_forward(
     group_size_m: int = 128,
 ) -> torch.Tensor:
     """
-    Optimized contiguous grouped GEMM forward pass for Mixture of Experts.
+    Optimized contiguous grouped GEMM forward pass for Mixture of Experts,
+    optimized for inputs aligned to block boundaries.
 
-    For each token group i, computes out[i] = inputs[i] @ expert_weights[indices[i]].T
-    All tokens mapped to the same expert must be in contiguous blocks of size group_size_m.
+    This function assumes that:
+    1. GROUP_SIZE_M is a multiple of block size used in the kernel
+    2. All tokens in a group use the same expert
 
     Args:
         inputs: Input tensor of shape [M_total, K]
@@ -345,21 +340,21 @@ def cg_grouped_gemm_forward(
     assert expert_weights.is_contiguous(), "Expert weights tensor must be contiguous"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
 
+    # Calculate number of groups
+    M_total, K = inputs.shape
+    num_groups = (M_total + group_size_m - 1) // group_size_m
+
+    # Validate alignment assumptions
+    assert (
+        M_total % group_size_m == 0
+    ), "M_total must be a multiple of group_size_m for aligned kernel"
+
     # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
 
     # Get dimensions
-    M_total, K = inputs.shape
     num_experts, N, K_weights = expert_weights.shape
-    print(f"Input shape: {inputs.shape}")
-    print(f"Expert weights shape: {expert_weights.shape}")
-    print(f"Expert indices shape: {expert_indices.shape}")
-    print(f"M_total: {M_total}")
-    # Validate group size
-    assert (
-        M_total % group_size_m == 0
-    ), f"M_total must be a multiple of group_size_m ({group_size_m})"
 
     # Validate dimensions
     assert K == K_weights, f"Input K ({K}) must match weight K ({K_weights})"
@@ -379,10 +374,9 @@ def cg_grouped_gemm_forward(
         block_size_m = META["BLOCK_SIZE_M"]
         block_size_n = META["BLOCK_SIZE_N"]
 
-        # Calculate tiles in each dimension - NOTE: We've flipped the tile ordering
-        # to ensure better memory locality
-        num_n_tiles = triton.cdiv(N, block_size_n)
+        # Calculate tiles in each dimension
         num_m_tiles = triton.cdiv(M_total, block_size_m)
+        num_n_tiles = triton.cdiv(N, block_size_n)
 
         # For autotuning, make sure we have enough work for each SM
         total_tiles = num_m_tiles * num_n_tiles
@@ -390,8 +384,8 @@ def cg_grouped_gemm_forward(
 
         return (grid_size,)
 
-    # Launch standard kernel
-    _kernel_cg_forward[grid](
+    # Launch aligned kernel
+    _kernel_cg_forward_aligned[grid](
         inputs,
         expert_weights,
         output,
@@ -407,31 +401,87 @@ def cg_grouped_gemm_forward(
     return output
 
 
-# ======
+# Wrapper function that can handle both aligned and non-aligned cases
+def contiguous_grouped_gemm_forward(
+    inputs: torch.Tensor,  # [M_total, K]
+    expert_weights: torch.Tensor,  # [num_experts, N, K]
+    expert_indices: torch.Tensor,  # [M_total]
+    use_tma: bool = True,
+    group_size_m: int = 128,
+) -> torch.Tensor:
+    """
+    Optimized contiguous grouped GEMM forward pass for Mixture of Experts.
+    Automatically selects the best kernel based on input alignment.
+
+    Args:
+        inputs: Input tensor of shape [M_total, K]
+        expert_weights: Expert weight tensor of shape [num_experts, N, K]
+        expert_indices: Indices tensor of shape [M_total] mapping each token to its expert
+        use_tma: Whether to use TMA optimization (if on Hopper)
+        group_size_m: Size of contiguous token blocks for each expert (default: 128)
+
+    Returns:
+        Output tensor of shape [M_total, N]
+    """
+    M_total = inputs.shape[0]
+
+    # Check if inputs are perfectly aligned for the optimized kernel
+    is_aligned = M_total % group_size_m == 0
+
+    # Use the aligned kernel if possible
+    if is_aligned:
+        return contiguous_grouped_gemm_forward_aligned(
+            inputs, expert_weights, expert_indices, use_tma, group_size_m
+        )
+    else:
+        # Fallback to a manual implementation for non-aligned cases
+        # This is a simple reference implementation
+        device = inputs.device
+        dtype = inputs.dtype
+        N = expert_weights.shape[1]
+
+        output = torch.empty((M_total, N), device=device, dtype=dtype)
+
+        # Process each group
+        for group_idx in range(0, (M_total + group_size_m - 1) // group_size_m):
+            start_idx = group_idx * group_size_m
+            end_idx = min(start_idx + group_size_m, M_total)
+
+            # Get expert index for this group
+            expert_idx = expert_indices[start_idx].item()
+
+            # Get inputs and weights
+            group_inputs = inputs[start_idx:end_idx]
+            expert_weight = expert_weights[expert_idx]
+
+            # Compute output
+            output[start_idx:end_idx] = torch.matmul(group_inputs, expert_weight.t())
+
+        return output
 
 
+# Example of how to use the updated kernel with ContiguousGroupedGEMM class
 class ContiguousGroupedGEMM(torch.autograd.Function):
     """
-    Autograd function for contiguous grouped GEMM.
-    This allows for integration with PyTorch's autograd system.
-    Note: This implementation only provides the forward pass.
+    Autograd function for contiguous grouped GEMM with improved block alignment.
     """
 
     @staticmethod
-    def forward(ctx, inputs, expert_weights, expert_indices, use_tma=True):
+    def forward(
+        ctx, inputs, expert_weights, expert_indices, use_tma=True, group_size_m=128
+    ):
         """Forward pass for contiguous grouped GEMM."""
-        return cg_grouped_gemm_forward(
+        return contiguous_grouped_gemm_forward(
             inputs=inputs,
             expert_weights=expert_weights,
             expert_indices=expert_indices,
             use_tma=use_tma,
+            group_size_m=group_size_m,
         )
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Backward pass
-        """
+        """Backward pass not implemented."""
         raise NotImplementedError("Backward pass not implemented")
 
 
@@ -440,24 +490,17 @@ def cg_grouped_gemm(
     expert_weights: torch.Tensor,
     expert_indices: torch.Tensor,
     use_tma: bool = True,
+    group_size_m: int = 128,
 ) -> torch.Tensor:
     """
-    interface for contiguous grouped GEMM.
-
-    Args:
-        inputs: Input tensor of shape [M_total, K]
-        expert_weights: Expert weight tensor of shape [num_experts, N, K]
-        expert_indices: Indices tensor of shape [M_total] mapping each token to its expert
-        use_tma: Whether to use TMA optimization (if on Hopper)
-
-    Returns:
-        Output tensor, [M_total, N]
+    Interface for contiguous grouped GEMM.
     """
-    # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
 
-    return ContiguousGroupedGEMM.apply(inputs, expert_weights, expert_indices, use_tma)
+    return ContiguousGroupedGEMM.apply(
+        inputs, expert_weights, expert_indices, use_tma, group_size_m
+    )
 
 
 # Example usage and verify correctness:
@@ -469,7 +512,7 @@ def test_contiguous_grouped_gemm():
 
     # Create test data
     batch_size = 4
-    seq_len = 32
+    seq_len = 64
     hidden_dim = 128  # K dimension
     output_dim = 256  # N dimension
     num_experts = 4
@@ -506,6 +549,28 @@ def test_contiguous_grouped_gemm():
     # Compare results
     forward_match = torch.allclose(output_custom, output_ref, rtol=1e-2, atol=1e-2)
     print(f"Forward outputs match: {forward_match}")
+    if not forward_match:
+        print("Output mismatch:")
+        print(f"Output custom: {output_custom}")
+        print(f"Output ref: {output_ref}")
+        print(f"Diff: {output_custom - output_ref}")
+        print(f"Max diff: {torch.max(output_custom - output_ref)}")
+        print(f"Min diff: {torch.min(output_custom - output_ref)}")
+        print(f"Mean diff: {torch.mean(output_custom - output_ref)}")
+        print(f"Std diff: {torch.std(output_custom - output_ref)}")
+        diff = output_custom - output_ref
+        zeros_in_custom = (output_custom == 0).sum().item()
+        zeros_in_ref = (output_ref == 0).sum().item()
+        nonzero_diff_count = (diff != 0).sum().item()
+        total_elements = diff.numel()
+
+        print(
+            f"Zeros in custom: {zeros_in_custom} ({zeros_in_custom/total_elements:.2%})"
+        )
+        print(f"Zeros in reference: {zeros_in_ref} ({zeros_in_ref/total_elements:.2%})")
+        print(
+            f"Elements with non-zero diff: {nonzero_diff_count} ({nonzero_diff_count/total_elements:.2%})"
+        )
 
     # Verify output shape
     assert output_custom.shape == (batch_size * seq_len, output_dim)
