@@ -242,6 +242,7 @@ class MixtureOfExperts(nn.Module):
         print(f"hidden_outputs shape after activation: {hidden_outputs.shape}")
 
         # Second layer: hidden -> output
+        """
         # Reshape hidden_outputs to match expected dimensions
         reshaped_hidden_outputs = []
         start_idx = 0
@@ -259,6 +260,7 @@ class MixtureOfExperts(nn.Module):
 
         # Concatenate all reshaped outputs
         hidden_outputs = torch.cat(reshaped_hidden_outputs, dim=0)
+        """
 
         # Reshape expert weights for second layer
         fc2_weight_reshaped = self.expert_fc2_weight.reshape(
@@ -272,6 +274,7 @@ class MixtureOfExperts(nn.Module):
         expert_outputs_combined = grouped_gemm_forward(
             hidden_outputs, fc2_weight_combined, m_sizes
         )
+        print(f"expert_outputs_combined shape: {expert_outputs_combined.shape}")
 
         # Initialize final output tensor with correct shape
         final_output = torch.zeros(total_tokens, self.output_dim, device=x.device)
