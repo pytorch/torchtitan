@@ -56,7 +56,8 @@ class ModelProtocol(Protocol):
     """
 
     @classmethod
-    def from_model_args(cls, args: BaseModelArgs) -> nn.Module: ...
+    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
+        ...
 
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
