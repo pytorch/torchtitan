@@ -1,3 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -6,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from cg_forward import cg_grouped_gemm_forward
+from triton_prep import prepare_tokens_triton
 
 
 def prepare_tokens_for_cg_gemm_topk(
@@ -242,19 +250,44 @@ def example_moe_with_cg_gemm_topk(
     router_logits = router(tokens)  # [batch_size, seq_len, num_experts]
 
     # Prepare tokens for contiguous grouped GEMM
+    # expanded_tokens_ref, expert_indices_ref, token_weights_ref, metadata_ref = (
+    #    prepare_tokens_for_cg_gemm_topk(
+    #        tokens, router_logits, top_k=top_k, group_size_m=group_size_m
+    #    )
+    # )
+
     expanded_tokens, expert_indices, token_weights, metadata = (
-        prepare_tokens_for_cg_gemm_topk(
+        # prepare_tokens_for_cg_gemm_topk(  #
+        prepare_tokens_triton(
             tokens, router_logits, top_k=top_k, group_size_m=group_size_m
         )
     )
 
+    """assert (
+        expanded_tokens.shape == expanded_tokens_ref.shape
+    ), f"{expanded_tokens.shape} vs {expanded_tokens_ref.shape}"
+    assert (
+        expert_indices.shape == expert_indices_ref.shape
+    ), f"{expert_indices.shape} vs {expert_indices_ref.shape}"
+    assert (
+        token_weights.shape == token_weights_ref.shape
+    ), f"{token_weights.shape} vs {token_weights_ref.shape}"
+    assert metadata == metadata_ref
+    """
     # Run contiguous grouped GEMM
     output = cg_forward_fn(
         expanded_tokens, expert_weights, expert_indices, group_size_m=group_size_m
     )
+    print(f"CG GEMM output shape: {output.shape}")
+    print(f"CG GEMM output dtype: {output.dtype}")
 
     # Restore original token order
+    from triton_restore import restore_output_triton
+
+    # final_output2 = restore_output_triton(output, token_weights, metadata)
     final_output = restore_output_from_cg_gemm_topk(output, token_weights, metadata)
+
+    # assert torch.allclose(final_output, final_output2, atol=1e-3, rtol=1e-3)
 
     return final_output
 
@@ -297,12 +330,12 @@ def demo_usage():
 
     # Parameters
     batch_size = 2
-    seq_len = 512
+    seq_len = 1024
     hidden_dim = 768
     num_experts = 8
     top_k = 6
     group_size_m = 128
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda"  # if torch.cuda.is_available() else "cpu"
     dtype = torch.float32
 
     # Create sample inputs
@@ -311,6 +344,8 @@ def demo_usage():
     expert_weights = torch.randn(
         (num_experts, hidden_dim, hidden_dim), device=device, dtype=dtype
     )
+
+    # from flatcg import cg_grouped_gemm_forward_flat
 
     # Run example
     output = example_moe_with_cg_gemm_topk(
