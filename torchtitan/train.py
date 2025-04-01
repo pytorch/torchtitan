@@ -12,10 +12,10 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -356,8 +356,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
+
                 pred = model_parts[0](inputs)
                 loss = self.loss_fn(pred, labels)
+
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred
