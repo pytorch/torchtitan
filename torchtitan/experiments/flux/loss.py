@@ -17,6 +17,7 @@ class FluxLossStep:
         pred: Tensor,
         target_imf: Tensor,  # target_
     ) -> Tensor:
+
         # latents = batch[
         #     "img_encoding"
         # ]  # This is the latent image after auto encoder. TODO(jianiw): setup auto encoder before this step
