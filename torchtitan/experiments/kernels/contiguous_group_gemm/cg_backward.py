@@ -23,7 +23,7 @@ from cg_forward import early_config_prune, STANDARD_CONFIGS
     prune_configs_by={"early_config_prune": early_config_prune},
 )
 @triton.jit
-def _kernel_cg_backward_inputs(
+def _kernel_cg_backward_dx(
     # Pointers to matrices
     grad_output_ptr,  # [M_TOTAL, N]
     b_ptr,  # expert weights [num_experts, N, K]
@@ -45,7 +45,7 @@ def _kernel_cg_backward_inputs(
 ):
     """
     Computes the gradient with respect to the inputs (backward pass).
-    Essentially performs: grad_input = grad_output @ expert_weights
+    Performs: grad_input = grad_output @ expert_weights
     """
     pid = tl.program_id(0)
 
@@ -111,107 +111,10 @@ def _kernel_cg_backward_inputs(
 # ============ Triton kernel for contiguous grouped GEMM backward weights ============
 
 
-@triton.autotune(
-    configs=STANDARD_CONFIGS,
-    key=["M_GROUP", "N", "K"],
-    prune_configs_by={"early_config_prune": early_config_prune},
-)
-@triton.jit
-def _kernel_cg_backward_weights_fixed(
-    # Pointers to matrices
-    grad_output_ptr,  # [M_TOTAL, N]
-    inputs_ptr,  # [M_TOTAL, K]
-    grad_weights_ptr,  # [num_experts, N, K]
-    # Pointer to indices array
-    indices_ptr,  # [M_TOTAL]
-    # Expert ID for this kernel
-    expert_idx: tl.constexpr,
-    # Group parameters
-    group_start: tl.constexpr,  # Start index of group
-    group_size: tl.constexpr,  # Size of group
-    # Matrix dimensions
-    M_GROUP: tl.constexpr,  # Group size (equals group_size)
-    N: tl.constexpr,  # N dimension
-    K: tl.constexpr,  # K dimension
-    # Tiling parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    """
-    Computes the gradient with respect to weights for a single expert group.
-    Fixed version with improved memory access patterns and computational stability.
-    """
-    pid = tl.program_id(0)
-
-    # Number of tiles in N and K dimensions
-    num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
-    num_k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-
-    # 2D tile index within the expert's grid
-    tile_n = pid // num_k_tiles
-    tile_k = pid % num_k_tiles
-
-    # Starting indices for this tile within the expert's weight matrix
-    n_start = tile_n * BLOCK_SIZE_N
-    k_start = tile_k * BLOCK_SIZE_K
-
-    # Only process if the indices are in bounds
-    if n_start < N and k_start < K:
-
-        # Offsets for this tile
-        offs_n = tl.arange(0, BLOCK_SIZE_N) + n_start
-        offs_k = tl.arange(0, BLOCK_SIZE_K) + k_start
-
-        # Masks for bounds checking
-        mask_n = offs_n < N
-        mask_k = offs_k < K
-
-        # Initialize accumulator for the gradient
-        grad_weights = tl.zeros([BLOCK_SIZE_N, BLOCK_SIZE_K], dtype=tl.float32)
-
-        # Process the group in tiles along M dimension
-        for m_offset in range(0, group_size, BLOCK_SIZE_M):
-            # Compute actual block size (might be smaller at the end)
-            actual_block_size = min(BLOCK_SIZE_M, group_size - m_offset)
-
-            # Load mask for this M block
-            mask_m = tl.arange(0, BLOCK_SIZE_M) < actual_block_size
-
-            # Global offsets for group's data
-            global_m_offset = group_start + m_offset
-            offs_m = tl.arange(0, BLOCK_SIZE_M) + global_m_offset
-
-            # Load grad_output [M, N]
-            go_ptrs = grad_output_ptr + offs_m[:, None] * N + offs_n[None, :]
-            mask_go = mask_m[:, None] & mask_n[None, :]
-            go = tl.load(go_ptrs, mask=mask_go, other=0.0)
-
-            # Load inputs [M, K]
-            in_ptrs = inputs_ptr + offs_m[:, None] * K + offs_k[None, :]
-            mask_in = mask_m[:, None] & mask_k[None, :]
-            inp = tl.load(in_ptrs, mask=mask_in, other=0.0)
-
-            # Compute gradient contribution
-            # Explicitly reshape for better numerical stability
-            go_t = tl.trans(go)
-            grad_weights += tl.dot(go_t, inp)
-
-        # Store results to expert's weight gradient matrix
-        grad_w_ptrs = (
-            grad_weights_ptr
-            + expert_idx * N * K
-            + offs_n[:, None] * K
-            + offs_k[None, :]
-        )
-        mask_gw = mask_n[:, None] & mask_k[None, :]
-        tl.atomic_add(grad_w_ptrs, grad_weights, mask=mask_gw)
-
-
 # =============== Functions for backward pass =================
 # ==== simpler approach =============
 @triton.jit
-def _kernel_cg_backward_weights_simple(
+def _kernel_cg_backward_dw(
     # Pointers to matrices
     grad_output_ptr,  # [M_TOTAL, N]
     inputs_ptr,  # [M_TOTAL, K]
@@ -359,7 +262,7 @@ def cg_grouped_gemm_backward_weights(
     grid = (num_experts * n_tiles * k_tiles,)
 
     # Launch kernel
-    _kernel_cg_backward_weights_simple[grid](
+    _kernel_cg_backward_dw[grid](
         grad_output,
         inputs,
         grad_weights,
@@ -421,7 +324,7 @@ def cg_grouped_gemm_backward_inputs(
     )
 
     # Launch kernel
-    _kernel_cg_backward_inputs[grid](
+    _kernel_cg_backward_dx[grid](
         grad_output,
         expert_weights,
         grad_inputs,
@@ -434,92 +337,6 @@ def cg_grouped_gemm_backward_inputs(
     )
 
     return grad_inputs
-
-
-def cg_grouped_gemm_backward_weights_old(
-    grad_output: torch.Tensor,  # [M_total, N]
-    inputs: torch.Tensor,  # [M_total, K]
-    expert_indices: torch.Tensor,  # [M_total]
-    num_experts: int,
-    group_size_m: int = 128,
-) -> torch.Tensor:
-    """
-    Backward pass for contiguous grouped GEMM with respect to expert weights.
-    Fixed version with improved stability.
-
-    Args:
-        grad_output: Gradient from output, shape [M_total, N]
-        inputs: Input tensor, shape [M_total, K]
-        expert_indices: Indices tensor mapping each token to its expert, shape [M_total]
-        num_experts: Number of experts
-        group_size_m: Size of contiguous token blocks for each expert (default: 128)
-
-    Returns:
-        grad_weights: Gradient with respect to expert weights, shape [num_experts, N, K]
-    """
-    # Validate inputs
-    assert grad_output.is_contiguous(), "Grad output tensor must be contiguous"
-    assert inputs.is_contiguous(), "Inputs tensor must be contiguous"
-    assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
-
-    # Get dimensions
-    M_total, N = grad_output.shape
-    _, K = inputs.shape
-
-    # Check if dimensions match
-    assert (
-        M_total % group_size_m == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({group_size_m})"
-
-    # Number of groups
-    num_groups = M_total // group_size_m
-
-    # Create output tensor for gradients (initialized to zeros)
-    grad_weights = torch.zeros(
-        (num_experts, N, K), device=grad_output.device, dtype=grad_output.dtype
-    )
-
-    # Process each group separately
-    for group_idx in range(num_groups):
-        # Get group boundaries
-        group_start = group_idx * group_size_m
-
-        # Get expert ID for this group - get expert index from the group start
-        # Using .item() can detach from computation graph, which could cause issues
-        expert_idx = int(expert_indices[group_start].item())
-
-        # Make sure the expert index is valid
-        if expert_idx < 0 or expert_idx >= num_experts:
-            raise ValueError(f"Invalid expert index {expert_idx} for group {group_idx}")
-
-        # Check that all tokens in this group use the same expert
-        group_end = (group_idx + 1) * group_size_m
-        group_indices = expert_indices[group_start:group_end]
-        if not (group_indices == expert_idx).all():
-            print(
-                f"Warning: Not all tokens in group {group_idx} use expert {expert_idx}"
-            )
-
-        # Grid for this kernel launch
-        grid = lambda meta: (
-            triton.cdiv(N, meta["BLOCK_SIZE_N"]) * triton.cdiv(K, meta["BLOCK_SIZE_K"]),
-        )
-
-        # Launch a kernel instance for this group
-        _kernel_cg_backward_weights_fixed[grid](
-            grad_output,
-            inputs,
-            grad_weights,
-            expert_indices,  # Pass indices even though we're not using them in the kernel
-            expert_idx=expert_idx,
-            group_start=group_start,
-            group_size=group_size_m,
-            M_GROUP=group_size_m,
-            N=N,
-            K=K,
-        )
-
-    return grad_weights
 
 
 # =============== Update the autograd function =================

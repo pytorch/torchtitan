@@ -283,8 +283,8 @@ def _kernel_cg_forward_aligned(
 ):
     """
     Contiguous Grouped GEMM kernel forward.
-    IMPORTANT: Assumes GROUP_SIZE_M is a multiple of BLOCK_SIZE_M or vice versa,
-    and all inputs are pre-aligned to these block boundaries.
+    IMPORTANT: Assumes GROUP_SIZE_M is a multiple of BLOCK_SIZE_M
+    and all inputs are pre-aligned/padded to these block boundaries.
     """
 
     pid = tl.program_id(0)
