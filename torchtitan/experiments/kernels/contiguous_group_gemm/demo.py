@@ -30,7 +30,7 @@ def prepare_tokens_for_cg_gemm_topk(
     Returns:
         Tuple of (
             expanded_tokens: [M_total, hidden_dim] where M_total = batch_size * seq_len * top_k,
-            expert_indices: [num_groups] where num_groups = M_total / group_size_m,
+            expert_indices: [M_total] expanded indices matching each token to its expert,
             token_weights: [M_total] weights for each token-expert combination,
             metadata: Dictionary with metadata for restoring the original order
         )
@@ -104,6 +104,12 @@ def prepare_tokens_for_cg_gemm_topk(
         torch.ones(total_padded_tokens, dtype=torch.int64, device=device) * -1
     )  # -1 indicates padding
 
+    # Create expanded expert indices with shape [M_total]
+    # This is different from the original code which created [num_groups]
+    expanded_expert_indices = torch.zeros(
+        total_padded_tokens, dtype=torch.int32, device=device
+    )
+
     # Fill in the padded arrays
     current_pos = 0
     next_pos = 0
@@ -128,26 +134,10 @@ def prepare_tokens_for_cg_gemm_topk(
                 sorted_original_indices[expert_indices]
             )
 
+            # Fill expert indices for all tokens in this expert's groups
+            expanded_expert_indices[current_pos : current_pos + padded_count] = e
+
         # Move to next position accounting for padding
-        current_pos += padded_count
-
-    # Step 3: Create expert indices array for the CG kernel
-    # an array where each entry represents the expert index for a block of tokens
-    num_groups = total_padded_tokens // group_size_m
-    expert_indices = torch.zeros(num_groups, dtype=torch.int32, device=device)
-
-    # Fill in expert indices for each group
-    current_pos = 0
-    group_idx = 0
-    for e in range(num_experts):
-        padded_count = padded_expert_counts[e].item()
-
-        # Assign the expert index to each group for this expert
-        num_groups_for_expert = padded_count // group_size_m
-        for _ in range(num_groups_for_expert):
-            expert_indices[group_idx] = e
-            group_idx += 1
-
         current_pos += padded_count
 
     # Prepare metadata for output reconstruction
@@ -160,7 +150,7 @@ def prepare_tokens_for_cg_gemm_topk(
         "num_original_tokens": total_original_tokens,
     }
 
-    return padded_tokens, expert_indices, padded_weights, metadata
+    return padded_tokens, expanded_expert_indices, padded_weights, metadata
 
 
 def restore_output_from_cg_gemm_topk(
