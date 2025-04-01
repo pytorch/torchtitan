@@ -319,6 +319,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
+        inputs = input_dict["input"]
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]

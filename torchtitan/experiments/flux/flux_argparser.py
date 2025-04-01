@@ -6,6 +6,8 @@
 
 import argparse
 
+import torch
+
 
 def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -21,9 +23,9 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Clip encoder to use, hugging face model name.",
     )
     parser.add_argument(
-        "--encoder.encoder_device",
-        type=str,
-        default="cpu",
+        "--encoder.encoder_dtype",
+        type=torch.dtype,
+        default=torch.bfloat16,
         help="Where to load the encoder, cpu or cuda.",
     )
     parser.add_argument(

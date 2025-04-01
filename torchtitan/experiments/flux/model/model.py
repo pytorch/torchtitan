@@ -5,6 +5,7 @@ from torch import nn, Tensor
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 
+from torchtitan.experiments.flux.model.modules.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.model.modules.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -32,6 +33,7 @@ class FluxModelArgs(BaseModelArgs):
     theta: int = 10_000
     qkv_bias: bool = True
     guidance_embed: bool = True
+    auto_encoder_params: AutoEncoderParams()
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         # context_in_dim is the same as the T5 embedding dimension

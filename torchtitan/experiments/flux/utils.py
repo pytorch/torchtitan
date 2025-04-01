@@ -85,6 +85,7 @@ def preprocess_flux_data(
         t5_encoder.to(device)
         if autoencoder is not None:
             autoencoder.to(device)
+
     clip_tokens = batch["clip_tokens"].to(device=device, dtype=torch.int)
     t5_tokens = batch["t5_tokens"].to(device=device, dtype=torch.int)
 

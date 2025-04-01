@@ -51,9 +51,8 @@ configs = {
 
 
 def load_flow_model(
-    name: str,
+    model_args: FluxModelArgs,
     device: str | torch.device = "cuda",
-    hf_download: bool = False,
 ) -> FluxModel:
     """
     FLUX model loader from checkpoint or repo. Load model according to the config.
@@ -66,19 +65,9 @@ def load_flow_model(
     Returns:
         FluxModel
     """
-    # Loading Flux from init status
-    print(f"Init FLUX model {name}")
-    ckpt_path = configs[name].ckpt_path
-    if (
-        ckpt_path is None
-        and configs[name].repo_id is not None
-        and configs[name].repo_flow is not None
-        and hf_download
-    ):
-        ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
 
     with torch.device(device):
-        model = FluxModel(model_args=configs[name].params).to(torch.bfloat16)
+        model = FluxModel(model_args=model_args).to(torch.bfloat16)
 
     return model
 
@@ -94,6 +83,8 @@ def load_ae(
     Returns:
         AutoEncoder: The loaded autoencoder.
     """
+
+    # Parameterize these AE params
     ckpt_path = configs[name].ae_path
     if (
         ckpt_path is None

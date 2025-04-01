@@ -7,15 +7,15 @@ from torch import nn, Tensor
 
 @dataclass
 class AutoEncoderParams:
-    resolution: int
-    in_channels: int
-    ch: int
-    out_ch: int
-    ch_mult: list[int]
-    num_res_blocks: int
-    z_channels: int
-    scale_factor: float
-    shift_factor: float
+    resolution: int = 256
+    in_channels: int = 3
+    ch: int = 128
+    out_ch: int = 3
+    ch_mult: list[int] = [1, 2, 4, 4]
+    num_res_blocks: int = 2
+    z_channels: int = 16
+    scale_factor: float = 0.3611
+    shift_factor: float = 0.1159
 
 
 def swish(x: Tensor) -> Tensor:

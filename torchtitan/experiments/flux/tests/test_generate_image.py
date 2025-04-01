@@ -7,6 +7,7 @@ import torch
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
+from torchtitan.experiments.flux.model.model import FluxModelArgs
 from torchtitan.experiments.flux.model.model_builder import (
     configs,
     load_ae,
@@ -87,7 +88,9 @@ def test_generate_image(
     img_width = 16 * (img_width // 16)
 
     # init all components
-    model = load_flow_model(name, device=torch_device).to(dtype=torch.bfloat16)
+    model = load_flow_model(FluxModelArgs(), device=torch_device).to(
+        dtype=torch.bfloat16
+    )
     ae = load_ae(name, device=torch_device).to(dtype=torch.bfloat16)
     clip_tokenizer = FluxTokenizer(
         model_path="openai/clip-vit-large-patch14", max_length=77
