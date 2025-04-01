@@ -6,7 +6,7 @@ import triton
 
 from cg_forward import cg_grouped_gemm, cg_grouped_gemm_forward
 
-# not passing yet - from sms_kernel import cg_grouped_gemm, cg_grouped_gemm_forward
+# from sms_kernel import cg_grouped_gemm, cg_grouped_gemm_forward
 
 
 def create_aligned_test_data(

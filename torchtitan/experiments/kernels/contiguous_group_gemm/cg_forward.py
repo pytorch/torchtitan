@@ -382,6 +382,9 @@ def cg_grouped_gemm_forward(
     assert (
         M_total % group_size_m == 0
     ), f"M_total ({M_total}) must be a multiple of group_size_m ({group_size_m})"
+    # assert (
+    #    expert_indices.shape[0] == M_total // group_size_m
+    # ), "Expert indices length must match number of groups"
 
     # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
@@ -395,6 +398,9 @@ def cg_grouped_gemm_forward(
     assert (
         expert_indices.shape[0] == M_total
     ), "Expert indices length must match M_total"
+    # assert (
+    #    expert_indices.shape[0] == M_total // group_size_m
+    # ), "Expert indices length must match number of groups"
 
     # Create output tensor
     output = torch.empty((M_total, N), device=inputs.device, dtype=inputs.dtype)
