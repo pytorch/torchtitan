@@ -1,13 +1,20 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
 import time
 from typing import Tuple
 
 import torch
 import triton
 
-# from cg_forward import cg_grouped_gemm, cg_grouped_gemm_forward
-from flatcg import (
-    cg_grouped_gemm_flat as cg_grouped_gemm,
-    cg_grouped_gemm_forward_flat as cg_grouped_gemm_forward,
+from cg_forward import cg_grouped_gemm, cg_grouped_gemm_forward
+#from flatcg import
+#     cg_grouped_gemm_flat as cg_grouped_gemm,
+#    cg_grouped_gemm_forward_flat as cg_grouped_gemm_forward,
 )
 
 # from sms_kernel import cg_grouped_gemm, cg_grouped_gemm_forward
