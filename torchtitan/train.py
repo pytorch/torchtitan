@@ -12,10 +12,10 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -293,21 +293,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
         )
 
-    def next_batch(self, data_iterator: Iterable) -> tuple[torch.Tensor, torch.Tensor]:
+    def next_batch(
+        self, data_iterator: Iterable
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         data_load_start = time.perf_counter()
         batch = next(data_iterator)
-        input_ids, labels = batch
+        input_dict, labels = batch
         self.metrics_processor.ntokens_since_last_log += labels.numel()
         self.metrics_processor.data_loading_times.append(
             time.perf_counter() - data_load_start
         )
 
         device_type = utils.device_type
-        input_ids = input_ids.to(device_type)
+        for k, _ in input_dict.items():
+            input_dict[k] = input_dict[k].to(device_type)
         labels = labels.to(device_type)
-        return input_ids, labels
+        return input_dict, labels
 
-    def train_step(self, inputs: torch.Tensor, labels: torch.Tensor):
+    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -318,6 +321,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
+        inputs = input_dict["input"]
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=world_mesh["cp"],

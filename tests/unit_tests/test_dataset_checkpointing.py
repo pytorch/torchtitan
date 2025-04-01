@@ -31,7 +31,7 @@ class TestDatasetCheckpointing:
         dl.load_state_dict(state)
         input_ids, labels = next(iter(dl))
 
-        assert torch.equal(input_ids, expected_input_ids)
+        assert torch.equal(input_ids["input"], expected_input_ids["input"])
         assert torch.equal(labels, expected_labels)
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
