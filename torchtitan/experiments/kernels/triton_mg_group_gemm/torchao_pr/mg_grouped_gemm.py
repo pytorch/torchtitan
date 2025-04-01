@@ -752,6 +752,9 @@ def grouped_gemm_forward(
     # Create output tensor with correct shape [M_total, N]
     y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
 
+    if M_total == 0:
+        return y
+
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
     USE_TMA_STORE = True

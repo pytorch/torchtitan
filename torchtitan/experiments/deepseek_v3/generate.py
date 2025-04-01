@@ -144,7 +144,7 @@ def create_model(dist_config: DistConfig):
 
 
 @torch.inference_mode()
-def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
+def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 1):
     rank = dist.get_rank()
 
     device_count = torch.cuda.device_count()

@@ -42,6 +42,7 @@ from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr.mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
 
 # Get model parallel subgroup by name:
 # e.g. "pp", "ep", None
@@ -547,7 +548,12 @@ class MoE(nn.Module):
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        y = self.moe_forward(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+        if self.shuffle_method == "symm_mem":
+            y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
+        else:  # "torch_all_to_all"
+            y = self.moe_forward(hidden_states, topk_idx, topk_weight)
+
+        y = y.view(*orig_shape)
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
@@ -660,6 +666,112 @@ class MoE(nn.Module):
                 output_splits.tolist(),
                 self.ep_group,
             )
+
+        output_tokens = torch.empty_like(returned_tokens)
+        output_tokens[idxs] = returned_tokens
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(returned_tokens.dtype)
+        )
+        return final_out
+
+
+    def moe_on_device(self, x, topk_ids, topk_weight):
+        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
+        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
+        # Since this is an "aritificial" index creation (final outcome being
+        # `idxs`), we don't need gradients here.
+        with torch.no_grad():
+            # [seq_len, n_routed_experts]
+            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
+            # Fill 1 to the selected experts
+            cnts.scatter_(1, topk_ids, 1)
+            tokens_per_expert = cnts.sum(dim=0)
+            # Token indices for each expert
+            idxs = topk_ids.view(-1).argsort()
+            sorted_tokens_shape = idxs.shape + x.shape[1:]
+
+        sorted_tokens = x[idxs // topk_ids.shape[1]]
+        assert sorted_tokens.shape == sorted_tokens_shape
+
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+        with torch.no_grad():
+            # Sum the tokens over local experts, then we get tokens per EP rank,
+            # which is the input splits
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+
+        # Move input to the `token_send_buf` symm mem
+        token_send_buf = self.get_send_buf()
+        token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+        # Note: `out=` avoids copy, but it is not differentiable
+        # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
+        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
+            token_send_buf,
+            input_splits,
+            self.ep_group,
+        )
+        with torch.no_grad():
+            # Received tokens from all other ranks. TODO: use mask instead
+            received = output_splits.sum()
+            print(f"{input_splits=}, {output_splits=}")
+        # TODO: don't use `received`
+        gathered_tokens = token_gather_buf[:received]
+        print(f"After first shuffle: {gathered_tokens.shape=}")
+
+        # Run the grouped GEMM
+        first_expert_id = self.ep_rank * self.experts_per_rank
+        m_sizes = output_splits.to(torch.int32)
+        expert = self.experts[str(first_expert_id)]
+        w1 = expert.up_proj.weight
+        hidden_outputs_1 = grouped_gemm_forward(
+            gathered_tokens, w1, m_sizes
+        )
+        print(f"After w1: {hidden_outputs_1.shape=}")
+
+        w3 = expert.gate_proj.weight
+        hidden_outputs_3 = grouped_gemm_forward(
+            gathered_tokens, w3, m_sizes
+        )
+        print(f"After w3: {hidden_outputs_3.shape=}")
+
+        # Apply activation
+        hidden_outputs = expert.act_fn(hidden_outputs_1 * hidden_outputs_3)
+
+        # Run the second grouped GEMM
+        w2 = expert.down_proj.weight
+        hidden_outputs = grouped_gemm_forward(
+            hidden_outputs, w2, m_sizes
+        )
+        print(f"After w2: {hidden_outputs.shape=}")
+
+        # Prepare buffer for tokens processed by experts
+        # Take necessary space from `token_gather_buf` symm mem because we are
+        # going to send them out after expert processing
+        processed_tokens = self.get_gather_buf()[: hidden_outputs.shape[0]]
+
+        # Move into Symmetric Memory for the return shuffle
+        processed_tokens.copy_(hidden_outputs)
+
+        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
+        # The input/output splits are just a reverse of the previous shuffle.
+        token_return_buf, _ = OnDeviceAllToAllV.apply(
+            processed_tokens,
+            output_splits,
+            self.ep_group,
+        )
+        returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
 
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[idxs] = returned_tokens

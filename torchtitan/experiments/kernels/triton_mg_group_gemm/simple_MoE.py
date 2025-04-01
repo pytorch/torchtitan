@@ -17,8 +17,8 @@ logging.basicConfig(
 
 # Try to import the optimized MG GEMM implementation
 try:
-    from mg_backward import grouped_gemm_backward
-    from mg_forward import grouped_gemm_forward
+    from torchao_pr.mg_grouped_gemm import grouped_gemm_backward
+    from torchao_pr.mg_grouped_gemm import grouped_gemm_forward
 
     has_mg_gemm = True
 except ImportError:
@@ -312,6 +312,7 @@ class MixtureOfExperts(nn.Module):
         return output, router_logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        print("============== Forward pass ==============")
         if self.use_mg_gemm and has_mg_gemm:
             return self.forward_mg_gemm(x)
         else:
