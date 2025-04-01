@@ -16,7 +16,7 @@ from torchtitan.experiments.flux.model.model_builder import (
 from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import (
     generate_images,
-    preprocess_data,
+    preprocess_flux_data,
     save_image,
 )
 
@@ -120,7 +120,7 @@ def test_generate_image(
     clip_tokens = clip_tokenizer.encode(opts.prompt)
     t5_tokens = t5_tokenizer.encode(opts.prompt)
 
-    batch = preprocess_data(
+    batch = preprocess_flux_data(
         device=torch_device,
         dtype=torch.bfloat16,
         autoencoder=None,

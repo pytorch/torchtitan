@@ -1,4 +1,5 @@
 import math
+from enum import auto
 from typing import Optional
 
 import torch
@@ -55,7 +56,7 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
-def preprocess_data(
+def preprocess_flux_data(
     # arguments from the recipe
     device: torch.device,
     dtype: torch.dtype,
@@ -65,6 +66,7 @@ def preprocess_data(
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],
+    offload: bool = False,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and
@@ -78,6 +80,11 @@ def preprocess_data(
     """
 
     # The input of encoder should be torch.int type
+    if offload:
+        clip_encoder.to(device)
+        t5_encoder.to(device)
+        if autoencoder is not None:
+            autoencoder.to(device)
     clip_tokens = batch["clip_tokens"].to(device=device, dtype=torch.int)
     t5_tokens = batch["t5_tokens"].to(device=device, dtype=torch.int)
 
@@ -91,6 +98,13 @@ def preprocess_data(
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
+
+    # offload encoders to cpu after preprocessing
+    if offload:
+        clip_encoder.to("cpu")
+        t5_encoder.to("cpu")
+        if autoencoder is not None:
+            autoencoder.to("cpu")
 
     return batch
 
