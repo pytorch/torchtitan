@@ -17,8 +17,6 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-BatchBlockMaskType = tuple[Optional[int], BlockMask]
-
 
 class FlexAttn(torch.nn.Module):
     # We registered flex_attention related attributes as class variables as we
@@ -33,7 +31,7 @@ class FlexAttn(torch.nn.Module):
     # new batch. We will use this to update the block mask when a
     # new batch is created. This also allows user to create different
     # block masks for different layers.
-    block_masks: ClassVar[dict[str, BatchBlockMaskType]] = {}
+    block_masks: ClassVar[dict[str, BlockMask]] = {}
 
     # Instance variables.
     attn_mask_type: str
@@ -48,7 +46,7 @@ class FlexAttn(torch.nn.Module):
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        block_mask = FlexAttn.block_masks[self.attn_mask_type][1]
+        block_mask = FlexAttn.block_masks[self.attn_mask_type]
         return FlexAttn.flex_attn(q, k, v, block_mask=block_mask)
 
     @classmethod
@@ -77,18 +75,12 @@ class FlexAttn(torch.nn.Module):
         cls, batch: torch.Tensor, eos_id: Optional[int] = None
     ) -> None:
         for attn_mask_type in cls.used_attn_mask_types:
-            block_mask = cls.block_masks.get(attn_mask_type, None)
-            if block_mask is not None:
-                batch_id = block_mask[0]
-                if batch_id is None or batch_id == id(batch):
-                    continue
-
             match attn_mask_type:
                 case "causal":
-                    batch_id = None
+                    if cls.block_masks.get(attn_mask_type, None) is not None:
+                        continue
                     mask_fn = cls._get_causal_mask_fn()
                 case "block_causal":
-                    batch_id = id(batch)
                     if eos_id is None:
                         raise RuntimeError(
                             "eos_id must be provided for block_causal mask."
@@ -101,7 +93,7 @@ class FlexAttn(torch.nn.Module):
             block_mask = cls.compiled_create_block_mask(
                 mask_fn, None, None, seq_len, seq_len
             )
-            cls.block_masks[attn_mask_type] = (batch_id, block_mask)
+            cls.block_masks[attn_mask_type] = block_mask
 
 
 class ScaledDotProductAttention(torch.nn.Module):
