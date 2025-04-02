@@ -246,10 +246,15 @@ STANDARD_CONFIGS = [
 def early_config_prune(configs, args, **kwargs):
     """Filter out configurations that would exceed shared memory capacity."""
     k = kwargs.get("K", 0)
-    configs = [
+    valid_configs = [
         config for config in configs if config.kwargs.get("BLOCK_SIZE_K", 0) <= k
     ]
-    return configs
+    # If all configs were filtered out, return at least one config
+    if not valid_configs and configs:
+        # Find the config with the smallest BLOCK_SIZE_K
+        return [min(configs, key=lambda c: c.kwargs.get("BLOCK_SIZE_K", float("inf")))]
+
+    return valid_configs
 
 
 # ============ Triton kernel for contiguous grouped GEMM ============
