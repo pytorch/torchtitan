@@ -324,6 +324,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 class MLP(nn.Module):
+    act_fn = nn.SiLU()
+
     def __init__(self, config, hidden_size=None, intermediate_size=None):
         super().__init__()
         self.config = config
@@ -335,7 +337,6 @@ class MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = nn.SiLU()
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -486,6 +487,17 @@ class MoE(nn.Module):
                 config=config, intermediate_size=intermediate_size
             )
 
+    def combine_experts(self, submod_name):
+        all_weights = []
+        for expert in self.experts.values():
+            lin = expert.get_submodule(submod_name)
+            all_weights.append(lin.weight)
+            lin.weight = None
+
+        concat_weight = torch.cat(all_weights)
+        self.register_parameter(f"{submod_name}_weight", nn.Parameter(concat_weight))
+        print(f"Combined weights of {submod_name}, shape = {concat_weight.shape}")
+
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
     # all_to_all APIs which requrie a GPU-to-CPU sync of the splits.  If a user
@@ -494,6 +506,11 @@ class MoE(nn.Module):
     def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
+
+        # Combine expert weights
+        self.combine_experts("gate_proj")
+        self.combine_experts("up_proj")
+        self.combine_experts("down_proj")
 
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
@@ -730,27 +747,46 @@ class MoE(nn.Module):
         gathered_tokens = token_gather_buf[:received]
         print(f"After first shuffle: {gathered_tokens.shape=}")
 
+        offsets = torch.cumsum(tokens_per_expert_group, 0)
+        offsets = offsets.tolist()
+        indices = [
+            torch.arange(0 if i == 0 else offsets[i-1], offsets[i]) for i in range(len(offsets))
+        ]
+        permuted_indices = []
+        for e in range(self.experts_per_rank):
+            for r in range(self.ep_size):
+                i = r * self.experts_per_rank + e
+                permuted_indices.append(indices[i])
+
+        permuted_indices = torch.cat(permuted_indices)
+        assert permuted_indices.shape[0] == gathered_tokens.shape[0]
+        # print(f"{self.experts_per_rank=}, {self.ep_size=}")
+        # print(f"{tokens_per_expert_group=}")
+        # print(f"{permuted_indices=}")
+
+        contig_tokens = gathered_tokens[permuted_indices]
+
         # Run the grouped GEMM
-        first_expert_id = self.ep_rank * self.experts_per_rank
-        m_sizes = output_splits.to(torch.int32)
-        expert = self.experts[str(first_expert_id)]
-        w1 = expert.up_proj.weight
+        m_sizes = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=0)
+        m_sizes = m_sizes.to(torch.int32)
+        print(f"{m_sizes=}")
+        w1 = self.get_parameter("up_proj_weight")
         hidden_outputs_1 = grouped_gemm_forward(
-            gathered_tokens, w1, m_sizes
+            contig_tokens, w1, m_sizes
         )
         print(f"After w1: {hidden_outputs_1.shape=}")
 
-        w3 = expert.gate_proj.weight
+        w3 = self.get_parameter("gate_proj_weight")
         hidden_outputs_3 = grouped_gemm_forward(
-            gathered_tokens, w3, m_sizes
+            contig_tokens, w3, m_sizes
         )
         print(f"After w3: {hidden_outputs_3.shape=}")
 
         # Apply activation
-        hidden_outputs = expert.act_fn(hidden_outputs_1 * hidden_outputs_3)
+        hidden_outputs = MLP.act_fn(hidden_outputs_1 * hidden_outputs_3)
 
         # Run the second grouped GEMM
-        w2 = expert.down_proj.weight
+        w2 = self.get_parameter("down_proj_weight")
         hidden_outputs = grouped_gemm_forward(
             hidden_outputs, w2, m_sizes
         )
@@ -762,7 +798,7 @@ class MoE(nn.Module):
         processed_tokens = self.get_gather_buf()[: hidden_outputs.shape[0]]
 
         # Move into Symmetric Memory for the return shuffle
-        processed_tokens.copy_(hidden_outputs)
+        processed_tokens[permuted_indices] = hidden_outputs
 
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
