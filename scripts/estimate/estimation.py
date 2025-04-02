@@ -153,13 +153,14 @@ def estimate_memory(job_config: JobConfig):
         fsdp_memtracker = FSDPMemTracker(mod=model, optm=optimizers.optimizers[0])
         fsdp_memtracker.track_inputs(batch)
 
+        loss_fn = train_spec.build_loss_fn(job_config)
         with fsdp_memtracker:
             for iter_idx in range(2):
                 input_ids, labels = batch
                 # train step
                 with train_context():
                     pred = model(input_ids)
-                    loss = train_spec.loss_fn(pred, labels)
+                    loss = loss_fn(pred, labels)
                     del pred
                     loss.backward()
 
