@@ -122,7 +122,7 @@ def build_attention(use_flex_attn: bool, attn_mask_type: str):
     if use_flex_attn:
         return FlexAttn(attn_mask_type)
     else:
-        return SDPA(attn_mask_type)
+        return ScaledDotProductAttention(attn_mask_type)
 
 
 def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
