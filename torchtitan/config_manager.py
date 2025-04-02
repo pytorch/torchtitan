@@ -474,6 +474,15 @@ class JobConfig:
                 but currently the split points must be specified manually.""",
         )
         self.parser.add_argument(
+            "--parallelism.pipeline_parallel_layers_per_stage",
+            type=int,
+            default=0,
+            help="""
+                The number of layers per stage. If specified, the split points will be calculated from
+                the number of layers and pipeline_parallel_degree. If not specified, the layers per stage will
+                be inferred from the model, schedule, and pipeline_parallel_degree.""",
+        )
+        self.parser.add_argument(
             "--parallelism.pipeline_parallel_schedule",
             type=str,
             default="1F1B",

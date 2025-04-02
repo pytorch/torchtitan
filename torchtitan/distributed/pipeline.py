@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import math
 import os
 from typing import Callable
 
@@ -25,7 +26,7 @@ __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_r
 # TODO: It's unclear if this API is general enough to be used by other models.
 # If not, we should move it to a Transformer-specific directory.
 def generate_split_points(
-    pipeline_parallel_schedule: str, pp_dim: int, num_layers: int
+    job_config: JobConfig, pp_dim: int, num_layers: int
 ) -> list[str]:
     """
     Generate a default split point based on the number of layers and
@@ -40,18 +41,43 @@ def generate_split_points(
         list[str]: A list of split point FQNs.
     """
 
+    pipeline_parallel_schedule = job_config.parallelism.pipeline_parallel_schedule
     schedule_class = get_schedule_class(pipeline_parallel_schedule)
+    is_single_stage_schedule = True
     if issubclass(schedule_class, PipelineScheduleSingle):
         num_stages_per_rank = 1
     elif issubclass(schedule_class, PipelineScheduleMulti):
         # Multi-stage schedules support more than 2 stages per rank, but this is the default if
         # no pipeline split is specified
         num_stages_per_rank = 2
+        is_single_stage_schedule = False
     else:
         raise ValueError(f"Unsupported pipeline schedule: {pipeline_parallel_schedule}")
-    total_stages = pp_dim * num_stages_per_rank
-    if total_stages > num_layers:
-        raise ValueError("Total stages cannot be greater than the number of layers")
+
+    # Determine the number of stages by:
+    # 1. Divide the total layers by the layers_per_stage (if pipeline_parallel_layers_per_stage is specified)
+    # or
+    # 2. pp_dim * num_stages_per_rank
+    if (
+        layers_per_stage := job_config.parallelism.pipeline_parallel_layers_per_stage
+    ) > 0:
+        total_stages = math.ceil(num_layers / layers_per_stage)
+        if is_single_stage_schedule and total_stages != pp_dim:
+            raise ValueError(
+                f"Number of stages ({total_stages}) was calculated from num_layers "
+                f"({num_layers}) / pipeline_parallel_layers_per_stage ({layers_per_stage}) and must be "
+                f"equal to the pipeline parallel dimension ({pp_dim})."
+            )
+        elif total_stages / pp_dim >= 2 and total_stages % pp_dim == 0:
+            raise ValueError(
+                f"Number of stages ({total_stages}) was calculated from num_layers \
+({num_layers}) / pipeline_parallel_layers_per_stage ({layers_per_stage}) and must be \
+divisible by the pipeline parallel dimension ({pp_dim})."
+            )
+    else:
+        total_stages = pp_dim * num_stages_per_rank
+        if total_stages > num_layers:
+            raise ValueError("Total stages cannot be greater than the number of layers")
 
     base_interval = num_layers // total_stages
     extra_layers = num_layers % total_stages
