@@ -26,6 +26,7 @@ from triton.runtime import driver  # @manual
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from tma_autotuning import (
+    ALIGN_SIZE_M,
     _NV_CONFIGS,
     CudaUtils,
     early_config_prune,
@@ -740,6 +741,8 @@ def grouped_gemm_forward(
     assert x.is_contiguous()
     assert w.is_contiguous()
     assert m_sizes.is_contiguous()
+    for m in m_sizes.tolist():
+        assert m % ALIGN_SIZE_M == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
 
     # Total input size is now [M_total, K] where M_total is the sum of all group sizes
     M_total, K = x.shape
