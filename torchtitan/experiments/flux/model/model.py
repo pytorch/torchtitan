@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
+
 from torch import nn, Tensor
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
@@ -33,7 +34,7 @@ class FluxModelArgs(BaseModelArgs):
     theta: int = 10_000
     qkv_bias: bool = True
     guidance_embed: bool = True
-    auto_encoder_params: AutoEncoderParams()
+    autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         # context_in_dim is the same as the T5 embedding dimension

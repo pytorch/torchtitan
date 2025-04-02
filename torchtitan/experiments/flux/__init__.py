@@ -10,6 +10,7 @@ from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
+from torchtitan.experiments.flux.dataset.tokenizer import build_flux_t5_tokenizer
 from torchtitan.experiments.flux.model.modules.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.parallelize_flux import parallelize_flux
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
@@ -39,12 +40,12 @@ flux_configs = {
         theta=10_000,
         qkv_bias=True,
         guidance_embed=True,
-        auto_encoder_params=AutoEncoderParams(
+        autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
             ch=3,
             out_ch=3,
-            ch_mult=[1, 2, 4, 4],
+            ch_mult=(1, 2, 4, 4),
             num_res_blocks=2,
             z_channels=16,
             scale_factor=0.3611,
@@ -64,7 +65,7 @@ register_train_spec(
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_flux_dataloader,
-        build_tokenizer_fn=None,
+        build_tokenizer_fn=build_flux_t5_tokenizer,
         loss_fn=cross_entropy_loss,
     )
 )

@@ -22,7 +22,7 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
-from torchtitan.experiments.flux.model.modules.hf_embedder import HFEmbedder
+from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.tools.logging import logger
 
 from torchtitan.tools.profiling import (
@@ -73,8 +73,8 @@ def _process_cc12m_image(
 
 def _flux_data_processor(
     sample: dict[str, Any],
-    t5_encoder: HFEmbedder,
-    clip_encoder: HFEmbedder,
+    t5_tokenizer: FluxTokenizer,
+    clip_tokenizer: FluxTokenizer,
     output_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -90,8 +90,8 @@ def _flux_data_processor(
     img = _process_cc12m_image(
         sample["jpg"], img_height=output_size, img_width=output_size
     )
-    t5_tokens = t5_encoder.encode(sample["txt"])
-    clip_tokens = clip_encoder.encode(sample["txt"])
+    t5_tokens = t5_tokenizer.encode(sample["txt"])
+    clip_tokens = clip_tokenizer.encode(sample["txt"])
 
     return {
         "image": img,
@@ -227,6 +227,7 @@ def build_flux_dataloader(
     dp_world_size: int,
     dp_rank: int,
     job_config: JobConfig,
+    tokenizer: FluxTokenizer,  # This parameter is not used, keep it for backward compatibility
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""

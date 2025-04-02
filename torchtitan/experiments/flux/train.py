@@ -1,40 +1,22 @@
-import importlib
 import os
 import time
-from datetime import timedelta
-from typing import Any, Generator, Iterable, Optional, overload
+from typing import Iterable, Optional
 
 import torch
 
-import torchtitan.components.ft as ft
-import torchtitan.protocols.train_spec as train_spec_module
-
-from torch.distributed.elastic.multiprocessing.errors import record
-from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.metrics import (
-    build_metrics_processor,
-    ensure_pp_loss_visible,
-)
-
 from torchtitan.config_manager import JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.flux.model.model_builder import load_ae
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.experiments.flux.model.modules.autoencoder import load_ae
 from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import predict_noise, preprocess_flux_data
-from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.train import Trainer
-from typing_extensions import override
 
 
 class FluxTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
-        super().__init__(self, job_config=job_config)
+        super().__init__(job_config)
 
         self.preprocess_fn = preprocess_flux_data
         # self.dtype = job_config.encoder.dtype
@@ -43,9 +25,13 @@ class FluxTrainer(Trainer):
         self._guidence = job_config.training.guidence
 
         # load components
+        model_config = self.train_spec.config[job_config.model.flavor]
         self.autoencoder = load_ae(
-            job_config.encoder.ae_name, device=self.torch_device
-        ).to(dtype=self.dtype)
+            job_config.encoder.auto_encoder_path,
+            model_config.autoencoder_params,
+            self.torch_device,
+            self._dtype,
+        )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
             self.torch_device, dtype=self._dtype
         )

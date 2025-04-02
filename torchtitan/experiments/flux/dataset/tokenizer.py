@@ -7,28 +7,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
-import os
-from pathlib import Path
-from typing import (
-    AbstractSet,
-    cast,
-    Collection,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Optional,
-    Sequence,
-    Union,
-)
 
-import tiktoken
-from tiktoken.load import load_tiktoken_bpe
-from torch import nn, Tensor
+from typing import List
 
 from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.tools.logging import logger
-from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer
+from torchtitan.config_manager import JobConfig
+from transformers import CLIPTokenizer, T5Tokenizer
 
 
 class FluxTokenizer(Tokenizer):
@@ -80,3 +64,25 @@ class FluxTokenizer(Tokenizer):
         Decode function. This function will not be called
         """
         return self._tokenizer.decode(t)
+
+
+def build_flux_t5_tokenizer(job_config: JobConfig) -> FluxTokenizer:
+    """
+    Build the tokenizer from the job config.
+    """
+    t5_tokenizer = FluxTokenizer(
+        model_path=job_config.encoder.t5_encoder,
+        max_length=job_config.encoder.max_t5_encoding_len,
+    )
+    return t5_tokenizer
+
+
+def build_flux_clip_tokenizer(job_config: JobConfig) -> FluxTokenizer:
+    """
+    Build the tokenizer from the job config.
+    """
+    clip_tokenizer = FluxTokenizer(
+        model_path=job_config.encoder.clip_encoder,
+        max_length=77,
+    )
+    return clip_tokenizer

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 from einops import rearrange
+from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
 
@@ -11,7 +12,7 @@ class AutoEncoderParams:
     in_channels: int = 3
     ch: int = 128
     out_ch: int = 3
-    ch_mult: list[int] = [1, 2, 4, 4]
+    ch_mult: tuple[int] = (1, 2, 4, 4)
     num_res_blocks: int = 2
     z_channels: int = 16
     scale_factor: float = 0.3611
@@ -342,3 +343,30 @@ class AutoEncoder(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.decode(self.encode(x))
+
+
+def load_ae(
+    ckpt_path: str,
+    autoencoder_params: AutoEncoderParams,
+    device: str | torch.device = "cuda",
+    dtype=torch.bfloat16,
+) -> AutoEncoder:
+    """
+    Load the autoencoder from the given model name.
+    Args:
+        name (str): The name of the autoencoder.
+        device (str or torch.device): The device to load the autoencoder to.
+    Returns:
+        AutoEncoder: The loaded autoencoder.
+    """
+
+    # Loading the autoencoder
+    print("Init AE")
+    with torch.device(device):
+        ae = AutoEncoder(autoencoder_params)
+
+    if ckpt_path is not None:
+        sd = load_sft(ckpt_path, device=str(device))
+        missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
+        # print_load_warning(missing, unexpected)
+    return ae.to(dtype=dtype)

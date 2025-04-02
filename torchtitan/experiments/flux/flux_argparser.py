@@ -11,6 +11,12 @@ import torch
 
 def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--training.guidance",
+        type=float,
+        default=3.5,
+        help="guidance value used for guidance distillation",
+    )
+    parser.add_argument(
         "--encoder.t5_encoder",
         type=str,
         default="google/t5-v1_1-small",

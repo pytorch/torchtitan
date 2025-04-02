@@ -1,5 +1,4 @@
 import os
-import re
 import time
 from dataclasses import dataclass
 
@@ -7,13 +6,12 @@ import torch
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
-from torchtitan.experiments.flux.model.model import FluxModelArgs
-from torchtitan.experiments.flux.model.model_builder import (
-    configs,
-    load_ae,
-    load_flow_model,
-)
+from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs
 
+from torchtitan.experiments.flux.model.modules.autoencoder import (
+    AutoEncoderParams,
+    load_ae,
+)
 from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import (
     generate_images,
@@ -88,10 +86,14 @@ def test_generate_image(
     img_width = 16 * (img_width // 16)
 
     # init all components
-    model = load_flow_model(FluxModelArgs(), device=torch_device).to(
-        dtype=torch.bfloat16
+    model = FluxModel(FluxModelArgs()).to(device=torch_device, dtype=torch.bfloat16)
+
+    ae = load_ae(
+        ckpt_path="assets/autoencoder/ae.safetensors",
+        autoencoder_params=AutoEncoderParams(),
+        device=torch_device,
+        dtype=torch.bfloat16,
     )
-    ae = load_ae(name, device=torch_device).to(dtype=torch.bfloat16)
     clip_tokenizer = FluxTokenizer(
         model_path="openai/clip-vit-large-patch14", max_length=77
     )
