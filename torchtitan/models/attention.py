@@ -17,32 +17,39 @@ from torch.nn.attention.flex_attention import (
 )
 
 
+BatchBlockMaskType = tuple[Optional[int], BlockMask]
+
+
 class FlexAttn(torch.nn.Module):
     # We registered flex_attention related attributes as class variables as we
-    # need to amortize the cost of compilation. Enabling per-instance flex_attention
-    # is not supported.
-    block_mask: ClassVar[Optional[BlockMask]] = None
-    flex_attn: ClassVar[Optional[Callable]] = None
-    attn_bias_type: ClassVar[Optional[str]] = None
-    compiled_create_block_mask: ClassVar[Optional[Callable]] = None
+    # need to amortize the cost of compilation.
+    flex_attn: ClassVar[Callable] = torch.compile(
+        flex_attention, mode="max-autotune-no-cudagraphs"
+    )
+    compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
+    used_attn_mask_types: ClassVar[set[str]] = set()
+    # Attention mask type to the created (id(batch), BlockMask).
+    # This allows us to keep track the created block masks for each
+    # new batch. We will use this to update the block mask when a
+    # new batch is created. This also allows user to create different
+    # block masks for different layers.
+    block_masks: ClassVar[dict[str, BatchBlockMaskType]] = {}
 
-    def __init__(self, attn_bias_type: str) -> None:
+    # Instance variables.
+    attn_mask_type: str
+
+    def __init__(self, attn_mask_type: str) -> None:
         super().__init__()
-        if FlexAttn.attn_bias_type is not None:
-            assert (
-                FlexAttn.attn_bias_type == attn_bias_type
-            ), "All FlexAttention must have the same configurations."
-        else:
-            if attn_bias_type not in ["causal", "block_causal"]:
-                raise ValueError(f"Unrecognized attn_bias_type {attn_bias_type}.")
-            FlexAttn.attn_bias_type = attn_bias_type
+        if attn_mask_type not in ["causal", "block_causal"]:
+            raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
+        self.attn_mask_type = attn_mask_type
+        FlexAttn.used_attn_mask_types.add(attn_mask_type)
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        assert FlexAttn.block_mask is not None
-        assert FlexAttn.flex_attn is not None
-        return FlexAttn.flex_attn(q, k, v, block_mask=FlexAttn.block_mask)
+        block_mask = FlexAttn.block_masks[self.attn_mask_type][1]
+        return FlexAttn.flex_attn(q, k, v, block_mask=block_mask)
 
     @classmethod
     def _get_causal_mask_fn(cls) -> Callable:
@@ -66,34 +73,41 @@ class FlexAttn(torch.nn.Module):
 
     @classmethod
     @torch.no_grad()
-    def init_attention_bias(
+    def init_attention_mask(
         cls, batch: torch.Tensor, eos_id: Optional[int] = None
     ) -> None:
-        if cls.block_mask is not None and cls.attn_bias_type == "causal":
-            # We don't need to create another block mask for causal masking if existed.
-            return
+        for attn_mask_type in cls.used_attn_mask_types:
+            block_mask = cls.block_masks.get(attn_mask_type, None)
+            if block_mask is not None:
+                batch_id = block_mask[0]
+                if batch_id is None or batch_id == id(batch):
+                    continue
 
-        match cls.attn_bias_type:
-            case "causal":
-                mask_fn = cls._get_causal_mask_fn()
-            case "block_causal":
-                mask_fn = cls._get_block_causal_mask_fn(batch, eos_id)
-            case _:
-                raise RuntimeError(f"Shouldn't reach here. {cls.attn_bias_type}")
+            match attn_mask_type:
+                case "causal":
+                    batch_id = None
+                    mask_fn = cls._get_causal_mask_fn()
+                case "block_causal":
+                    batch_id = id(batch)
+                    if eos_id is None:
+                        raise RuntimeError(
+                            "eos_id must be provided for block_causal mask."
+                        )
+                    mask_fn = cls._get_block_causal_mask_fn(batch, eos_id)
+                case _:
+                    raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
 
-        seq_len = batch.shape[1]
-        if cls.compiled_create_block_mask is None:
-            cls.compiled_create_block_mask = torch.compile(create_block_mask)
-        cls.block_mask = cls.compiled_create_block_mask(
-            mask_fn, None, None, seq_len, seq_len
-        )
-        cls.flex_attn = torch.compile(flex_attention, mode="max-autotune-no-cudagraphs")
+            seq_len = batch.shape[1]
+            block_mask = cls.compiled_create_block_mask(
+                mask_fn, None, None, seq_len, seq_len
+            )
+            cls.block_masks[attn_mask_type] = (batch_id, block_mask)
 
 
-class SDPA(torch.nn.Module):
-    def __init__(self, attn_bias_type: str) -> None:
+class ScaledDotProductAttention(torch.nn.Module):
+    def __init__(self, attn_mask_type: str) -> None:
         super().__init__()
-        if attn_bias_type != "causal":
+        if attn_mask_type != "causal":
             raise ValueError(
                 "TorchTitan with SDPA currently only supports causal mask."
             )
@@ -103,32 +117,13 @@ class SDPA(torch.nn.Module):
     ) -> torch.Tensor:
         return F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
-    @classmethod
-    @torch.no_grad()
-    def init_attention_bias(
-        cls,
-        batch: torch.Tensor,
-        eos_id: Optional[int] = None,
-    ) -> None:
-        # For SDPA, we don't need to do anything.
-        return
 
-
-_selected_attention = None
-
-
-def build_attention(use_flex_attn: bool, attn_bias_type: str):
-    global _selected_attention
+def build_attention(use_flex_attn: bool, attn_mask_type: str):
     if use_flex_attn:
-        assert _selected_attention is None or _selected_attention == FlexAttn
-        _selected_attention = FlexAttn
-        return FlexAttn(attn_bias_type)
+        return FlexAttn(attn_mask_type)
     else:
-        assert _selected_attention is None or _selected_attention == SDPA
-        _selected_attention = SDPA
-        return SDPA(attn_bias_type)
+        return SDPA(attn_mask_type)
 
 
-def init_attention_bias(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
-    global _selected_attention
-    _selected_attention.init_attention_bias(batch, eos_id)
+def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
+    FlexAttn.init_attention_mask(batch, eos_id)

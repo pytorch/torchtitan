@@ -196,10 +196,13 @@ class JobConfig:
         self.parser.add_argument(
             "--model.use_flex_attn",
             action="store_true",
-            help="Whether to use Flex Attention.",
+            help="""
+                Whether to use Flex Attention.
+                Mixed usage of SDPA and FlexAttention is not upported yet.
+            """,
         )
         self.parser.add_argument(
-            "--model.attn_bias_type",
+            "--model.attn_mask_type",
             type=str,
             default="causal",
             choices=["causal", "block_causal"],

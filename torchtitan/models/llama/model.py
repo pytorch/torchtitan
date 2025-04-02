@@ -16,7 +16,7 @@ from torch import nn
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.models.attention import build_attention, init_attention_bias
+from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
@@ -40,7 +40,7 @@ class TransformerModelArgs(BaseModelArgs):
     norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
-    attn_bias_type: str = "causal"
+    attn_mask_type: str = "causal"
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
@@ -48,7 +48,7 @@ class TransformerModelArgs(BaseModelArgs):
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
-        self.attn_bias_type = job_config.model.attn_bias_type
+        self.attn_mask_type = job_config.model.attn_mask_type
 
     def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
         l, h, q, t = (
@@ -196,7 +196,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_bias_type)
+        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -471,7 +471,7 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        init_attention_bias(tokens, eos_id=self.eos_id)
+        init_attention_mask(tokens, eos_id=self.eos_id)
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
