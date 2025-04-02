@@ -753,22 +753,37 @@ class MoE(nn.Module):
             torch.arange(0 if i == 0 else offsets[i-1], offsets[i]) for i in range(len(offsets))
         ]
         permuted_indices = []
+        m_sizes = []
+        ALIGNMENT = 128
+        pad_pos = -1
         for e in range(self.experts_per_rank):
+            agg_len = 0
+            indices_for_e = []
             for r in range(self.ep_size):
                 i = r * self.experts_per_rank + e
-                permuted_indices.append(indices[i])
+                indices_for_e.append(indices[i])
+                assert indices[i].shape[0] == tokens_per_expert_group[i]
+                agg_len += tokens_per_expert_group[i]
+
+            fill_len = (ALIGNMENT - agg_len % ALIGNMENT) % ALIGNMENT
+            # fill = torch.arange(pad_pos, pad_pos + fill_len)
+            # pad_pos += fill_len
+            fill = torch.full((fill_len,), pad_pos, dtype=torch.int32)
+            m_sizes.append(agg_len + fill_len)
+            print(f"{e=}, {agg_len=}, {fill_len=}, {m_sizes[-1]=}")
+            print(f"{indices_for_e=}")
+            indices_for_e.append(fill)
+            permuted_indices.append(torch.cat(indices_for_e))
 
         permuted_indices = torch.cat(permuted_indices)
-        assert permuted_indices.shape[0] == gathered_tokens.shape[0]
         # print(f"{self.experts_per_rank=}, {self.ep_size=}")
         # print(f"{tokens_per_expert_group=}")
         # print(f"{permuted_indices=}")
 
-        contig_tokens = gathered_tokens[permuted_indices]
+        contig_tokens = token_gather_buf[permuted_indices]
 
         # Run the grouped GEMM
-        m_sizes = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=0)
-        m_sizes = m_sizes.to(torch.int32)
+        m_sizes = torch.tensor(m_sizes, dtype=torch.int32, device=token_gather_buf.device)
         print(f"{m_sizes=}")
         w1 = self.get_parameter("up_proj_weight")
         hidden_outputs_1 = grouped_gemm_forward(
@@ -795,7 +810,7 @@ class MoE(nn.Module):
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are
         # going to send them out after expert processing
-        processed_tokens = self.get_gather_buf()[: hidden_outputs.shape[0]]
+        processed_tokens = self.get_gather_buf()  #[: hidden_outputs.shape[0]]
 
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs

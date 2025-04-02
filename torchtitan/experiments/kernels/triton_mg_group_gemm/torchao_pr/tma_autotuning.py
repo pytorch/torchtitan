@@ -144,7 +144,7 @@ class TmaDescriptorHelper:
 
 
 # ======  Autotuning utilities ======
-ALIGN_SIZE_M = 128
+ALIGN_SIZE_M = 64
 
 _NV_CONFIGS = [
     triton.Config(
@@ -157,7 +157,7 @@ _NV_CONFIGS = [
         num_warps=num_warps,
         num_ctas=num_ctas,
     )
-    for block_size_m in [ALIGN_SIZE_M // 2, ALIGN_SIZE_M]
+    for block_size_m in [ALIGN_SIZE_M, ]
     for block_size_n in [64, 128, 256]
     for block_size_k in [64, 128, 256]
     for num_stages in [1, 2]
