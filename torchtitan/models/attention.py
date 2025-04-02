@@ -17,8 +17,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-
-class FlexAttn(torch.nn.Module):
+class FlexAttention(torch.nn.Module):
     # We registered flex_attention related attributes as class variables as we
     # need to amortize the cost of compilation.
     flex_attn: ClassVar[Callable] = torch.compile(
@@ -41,13 +40,13 @@ class FlexAttn(torch.nn.Module):
         if attn_mask_type not in ["causal", "block_causal"]:
             raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
         self.attn_mask_type = attn_mask_type
-        FlexAttn.used_attn_mask_types.add(attn_mask_type)
+        FlexAttention.used_attn_mask_types.add(attn_mask_type)
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        block_mask = FlexAttn.block_masks[self.attn_mask_type]
-        return FlexAttn.flex_attn(q, k, v, block_mask=block_mask)
+        block_mask = FlexAttention.block_masks[self.attn_mask_type]
+        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
 
     @classmethod
     def _get_causal_mask_fn(cls) -> Callable:
@@ -112,10 +111,10 @@ class ScaledDotProductAttention(torch.nn.Module):
 
 def build_attention(use_flex_attn: bool, attn_mask_type: str):
     if use_flex_attn:
-        return FlexAttn(attn_mask_type)
+        return FlexAttention(attn_mask_type)
     else:
         return ScaledDotProductAttention(attn_mask_type)
 
 
 def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
-    FlexAttn.init_attention_mask(batch, eos_id)
+    FlexAttention.init_attention_mask(batch, eos_id)

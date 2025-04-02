@@ -471,6 +471,8 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        # TODO: We will to change forward() signature to allow tokens to
+        # be always passed in.
         if self.model_args.use_flex_attn:
             init_attention_mask(tokens, eos_id=self.eos_id)
 
