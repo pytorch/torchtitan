@@ -29,6 +29,6 @@ Weights and Biases will automatically send metrics to a remote server if you log
 
 So all you need to do is make sure that `metrics.enable_wandb` is enabled
 
-For an example you can inspect the Llama 3 [debug_model.toml](../torchtitan/models/llama/train_configs/debug_model.toml)
+For an example you can inspect the Llama 3 [debug_model.toml](../torchtitan/models/llama3/train_configs/debug_model.toml)
 
 Note that if both W&B and Tensorboard are enabled then we will prioritize W&B.

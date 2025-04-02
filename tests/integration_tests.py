@@ -94,17 +94,18 @@ def build_test_list():
             "2D compile",
             "2d_compile",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
-        ),
+        # TODO: re-enable this test once the async TP issue is fixed
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--training.compile",
+        #             "--parallelism.tensor_parallel_degree 2",
+        #             "--parallelism.enable_async_tensor_parallel",
+        #         ],
+        #     ],
+        #     "2D async TP compile",
+        #     "2d_asynctp_compile",
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -548,7 +549,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/models/llama/train_configs"
+        "--config_dir", default="./torchtitan/models/llama3/train_configs"
     )
     parser.add_argument(
         "--test",

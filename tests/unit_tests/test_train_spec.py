@@ -15,7 +15,7 @@ from torchtitan.components.optimizer import build_optimizers, OptimizersContaine
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
-from torchtitan.models.llama import parallelize_llama, pipeline_llama
+from torchtitan.models.llama3 import parallelize_llama, pipeline_llama
 from torchtitan.protocols.train_spec import (
     apply_to_train_specs,
     BaseModelArgs,

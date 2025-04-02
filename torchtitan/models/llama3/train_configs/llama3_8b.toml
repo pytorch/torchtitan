@@ -1,9 +1,9 @@
 # torchtitan Config.toml
-# NOTE: this toml config is a preset for 128 H100 GPUs.
+# NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 405B training"
+description = "Llama 3 8B training"
 
 [profiling]
 enable_profiling = true
@@ -17,32 +17,31 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3"
-flavor = "405B"
+flavor = "8B"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
-converters = "float8"
+# converters = "float8"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-5
+lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 600  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 200  # lr scheduler warm up
 
 [training]
-batch_size = 2
+batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 3000
-compile = true
+steps = 1000
+compile = false
 dataset = "c4"
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 8  # 8-way TP
-enable_async_tensor_parallel = true
+tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
@@ -55,9 +54,10 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'full' # ['none', 'selective', 'full']
+mode = 'selective'  # ['none', 'selective', 'full']
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
-enable_fsdp_float8_all_gather = true
-precompute_float8_dynamic_scale_for_fsdp = true
-filter_fqns = ["output"]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = "output"

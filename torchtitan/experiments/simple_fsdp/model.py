@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.models.llama import Transformer, TransformerModelArgs
+from torchtitan.models.llama3 import Transformer, TransformerModelArgs
 from .simple_fsdp import disable_data_parallel
 
 
