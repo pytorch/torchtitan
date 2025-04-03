@@ -7,9 +7,7 @@
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
 import copy
-from typing import Callable, Optional, Union
 
-import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
@@ -19,6 +17,7 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 
+from torchtitan.components.loss import LossFunction
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline import (
@@ -26,12 +25,10 @@ from torchtitan.distributed.pipeline import (
     generate_split_points,
     stage_ids_this_rank,
 )
+from torchtitan.protocols.train_spec import DeviceType, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 from .model import TransformerModelArgs
-
-
-DeviceType = Union[int, str, torch.device]
 
 
 def pipeline_llama(
@@ -41,8 +38,8 @@ def pipeline_llama(
     job_config: JobConfig,
     device: DeviceType,
     model_config: TransformerModelArgs,
-    parallelize_fn: Callable[[nn.Module], nn.Module],
-    loss_fn: Callable[..., torch.Tensor],
+    parallelize_fn: ParallelizeFunction,
+    loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = world_mesh["pp"]
 
@@ -103,8 +100,8 @@ def pipeline_llama_manual_split(
 
     def _build_stage(
         stage_idx: int,
-        start_layer: Optional[str],
-        stop_layer: Optional[str],
+        start_layer: str | None,
+        stop_layer: str | None,
         is_first: bool = False,
         is_last: bool = False,
     ) -> tuple[PipelineStage, nn.Module]:

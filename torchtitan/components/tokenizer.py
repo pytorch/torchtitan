@@ -7,7 +7,6 @@
 import os
 
 from abc import ABC, abstractmethod
-from typing import List
 
 
 class Tokenizer(ABC):
@@ -20,7 +19,7 @@ class Tokenizer(ABC):
         self._n_words = 8
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> List[int]:
+    def encode(self, *args, **kwargs) -> list[int]:
         ...
 
     @abstractmethod
