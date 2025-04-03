@@ -57,42 +57,46 @@ class FlexAttention(torch.nn.Module):
 
     @staticmethod
     def _get_block_causal_mask_fn(batch: torch.Tensor, eos_id: int) -> Callable:
+        # batch is [b, s, h, d] shape
         mask = batch == eos_id
         mask[:, -1] = True
-        acc_mask = torch.cumsum(torch.where(mask, 1, 0).flatten(), dim=0)
+        acc_mask = torch.cumsum(torch.where(mask, 1, 0), dim=1)
         seq_idx = torch.zeros_like(acc_mask, dtype=torch.int32)
-        seq_idx[1:] = acc_mask[:-1]
+        seq_idx[:, 1:] = acc_mask[:, :-1]
 
         def block_causal_mask(b, h, q_idx, kv_idx):
-            return (seq_idx[q_idx] == seq_idx[kv_idx]) & (q_idx >= kv_idx)
+            return (seq_idx[b, q_idx] == seq_idx[b, kv_idx]) & (q_idx >= kv_idx)
 
         return block_causal_mask
 
-    @classmethod
+    @staticmethod
     @torch.no_grad()
-    def init_attention_mask(
-        cls, batch: torch.Tensor, eos_id: Optional[int] = None
-    ) -> None:
-        for attn_mask_type in cls.used_attn_mask_types:
+    def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
+        # batch is [b, s, h, d] shape
+        for attn_mask_type in FlexAttention.used_attn_mask_types:
             match attn_mask_type:
                 case "causal":
-                    if cls.block_masks.get(attn_mask_type, None) is not None:
+                    if FlexAttention.block_masks.get(attn_mask_type, None) is not None:
                         continue
-                    mask_fn = cls._get_causal_mask_fn()
+                    # We don't care about batch dimension --
+                    # all samples have the same lower triangle mask.
+                    batch_dimension = 1
+                    mask_fn = FlexAttention._get_causal_mask_fn()
                 case "block_causal":
                     if eos_id is None:
                         raise RuntimeError(
                             "eos_id must be provided for block_causal mask."
                         )
-                    mask_fn = cls._get_block_causal_mask_fn(batch, eos_id)
+                    batch_dimension = batch.shape[0]
+                    mask_fn = FlexAttention._get_block_causal_mask_fn(batch, eos_id)
                 case _:
                     raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
 
             seq_len = batch.shape[1]
-            block_mask = cls.compiled_create_block_mask(
-                mask_fn, None, None, seq_len, seq_len
+            block_mask = FlexAttention.compiled_create_block_mask(
+                mask_fn, batch_dimension, None, seq_len, seq_len
             )
-            cls.block_masks[attn_mask_type] = block_mask
+            FlexAttention.block_masks[attn_mask_type] = block_mask
 
 
 class ScaledDotProductAttention(torch.nn.Module):
