@@ -46,6 +46,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     train_context: Generator[None, None, None]
 
     model_parts: list[torch.nn.Module]
+    loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
@@ -163,12 +164,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.metrics_processor = build_metrics_processor_fn(job_config, parallel_dims)
         color = self.metrics_processor.color
 
-        # log model size
-        model_param_count = utils.get_num_params(model)
-        self.metrics_processor.num_flop_per_token = model_args.get_num_flop_per_token(
-            utils.get_num_params(model, exclude_embedding=True),
-            job_config.training.seq_len,
-        )
+        # calculate model size and flops per token
+        (
+            model_param_count,
+            self.metrics_processor.num_flops_per_token,
+        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
             f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
@@ -185,6 +185,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             init_device = device_type
             buffer_device = None
+
+        self.loss_fn = self.train_spec.build_loss_fn(job_config)
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -208,7 +210,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.device,
                 model_args,
                 self.train_spec.parallelize_fn,
-                self.train_spec.loss_fn,
+                self.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
@@ -351,7 +353,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 pred = model_parts[0](inputs)
-                loss = self.train_spec.loss_fn(pred, labels)
+                loss = self.loss_fn(pred, labels)
                 # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred

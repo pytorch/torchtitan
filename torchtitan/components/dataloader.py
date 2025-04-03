@@ -9,7 +9,7 @@
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -54,7 +54,7 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_rank: int,
         dp_world_size: int,
         batch_size: int,
-        collate_fn: Optional[Callable] = None,
+        collate_fn: Callable | None = None,
     ):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank

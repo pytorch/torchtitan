@@ -78,7 +78,9 @@ def run_full_model(
     microbatches = pp_size * 2
 
     # Use Symmetric Memory for MoE token shuffle.
-    model.setup_symm_mem(torch.bfloat16, device)
+    # TODO: we are rewriting `moe_on_device` function. `setup_symm_mem` is
+    # currently supported for forward only. See `generate.py`.
+    # model.setup_symm_mem(torch.bfloat16, device)
 
     # Example inputs
     torch.manual_seed(ep_rank)

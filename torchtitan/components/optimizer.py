@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Dict, Generic, List, TypeVar
+from typing import Any, Generic, Iterator, TypeVar
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
     StateDictOptions,
 )
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
@@ -32,7 +33,7 @@ if has_torchft:
 T = TypeVar("T", bound=Optimizer)
 
 
-class OptimizersContainer(Optimizer, Generic[T]):
+class OptimizersContainer(Optimizer, Stateful, Generic[T]):
     """A container for multiple optimizers.
 
     This class is used to wrap multiple optimizers into a single object that can be
@@ -58,17 +59,17 @@ class OptimizersContainer(Optimizer, Generic[T]):
         name (str): Name of the optimizers.
     """
 
-    optimizers: List[T]
-    model_parts: List[nn.Module]
+    optimizers: list[T]
+    model_parts: list[nn.Module]
 
     def __init__(
         self,
-        model_parts: List[nn.Module],
+        model_parts: list[nn.Module],
         optimizer_cls: type[T],
-        optimizer_kwargs: Dict[str, Any],
+        optimizer_kwargs: dict[str, Any],
     ) -> None:
         all_params = []
-        self.optimizers: List[T] = []
+        self.optimizers = []
         self.model_parts = model_parts
         for model in self.model_parts:
             params = [p for p in model.parameters() if p.requires_grad]
@@ -77,7 +78,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
-    def __iter__(self) -> Optimizer:
+    def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)
 
     def __len__(self) -> int:
@@ -91,7 +92,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
         for optimizer in self.optimizers:
             optimizer.zero_grad(*args, **kwargs)
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         func = functools.partial(
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
@@ -102,7 +103,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
             for k, v in sd.items()
         }
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
             set_optimizer_state_dict,
             optim_state_dict=state_dict,
@@ -135,9 +136,9 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 
     def __init__(
         self,
-        model_parts: List[nn.Module],
+        model_parts: list[nn.Module],
         optimizer_cls: type[T],
-        optimizer_kwargs: Dict[str, Any],
+        optimizer_kwargs: dict[str, Any],
     ) -> None:
         all_params = []
         self.model_parts = model_parts
@@ -161,10 +162,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         self.optimizers = list(optim_dict.values())
 
         self._validate_length(
-            sum(
-                len([param for param in model.parameters()])
-                for model in self.model_parts
-            )
+            sum(len(list(model.parameters())) for model in self.model_parts)
         )
         self._post_init(all_params, optimizer_kwargs)
 
@@ -178,9 +176,9 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 class FTOptimizersContainer(OptimizersContainer):
     def __init__(
         self,
-        model_parts: List[nn.Module],
+        model_parts: list[nn.Module],
         optimizer_cls: type[T],
-        optimizer_kwargs: Dict[str, Any],
+        optimizer_kwargs: dict[str, Any],
         ft_manager: "ft.Manager",
     ) -> None:
         super().__init__(model_parts, optimizer_cls, optimizer_kwargs)
@@ -192,17 +190,17 @@ class FTOptimizersContainer(OptimizersContainer):
             for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
             for k, v in sd.items()
         }
-        self.cache_state_dict: Dict[str, Any] = {}
+        self.cache_state_dict: dict[str, Any] = {}
         self._ft_optimizer = ft.Optimizer(ft_manager, self)
         self._call_from_ft: bool = False
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # We have to invalidate the `cache_state_dict` because optimizer uses
         # assign instead of copy when doing `load_state_dict()`. Without
         # invalidating the `cache_state_dict`, there will be memory leakage.
@@ -238,7 +236,7 @@ class FTOptimizersContainer(OptimizersContainer):
 
 
 def build_optimizers(
-    model_parts: List[nn.Module],
+    model_parts: list[nn.Module],
     job_config: JobConfig,
     ft_manager: FTManager,
 ) -> OptimizersContainer:

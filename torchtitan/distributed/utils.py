@@ -7,8 +7,8 @@
 import contextlib
 import math
 import os
+from collections.abc import Generator, Iterable
 from datetime import timedelta
-from typing import Generator, Iterable, List, Optional, Set, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -42,9 +42,9 @@ def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
 
 
 def set_determinism(
-    world_mesh: Optional[DeviceMesh],
+    world_mesh: DeviceMesh | None,
     device: torch.device,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     deterministic: bool = False,
 ) -> None:
     """
@@ -112,9 +112,9 @@ def set_determinism(
 
 def create_context_parallel_ctx(
     cp_mesh: DeviceMesh,
-    cp_buffers: List[torch.Tensor],
-    cp_seq_dims: List[int],
-    cp_no_restore_buffers: Set[torch.Tensor],
+    cp_buffers: list[torch.Tensor],
+    cp_seq_dims: list[int],
+    cp_no_restore_buffers: set[torch.Tensor],
     cp_rotate_method: str,
 ):
     try:
@@ -139,7 +139,7 @@ def get_train_context(
     enable_loss_parallel: bool, enable_compiled_autograd: bool
 ) -> Generator[None, None, None]:
     @contextlib.contextmanager
-    def context(cp_context: Optional[Generator[None, None, None]] = None):
+    def context(cp_context: Generator[None, None, None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
@@ -178,7 +178,7 @@ def init_distributed(job_config):
 
     def _get_distributed_backend(job_config):
         backend = "nccl"
-        if device_type in torch.distributed.Backend.default_device_backend_map.keys():
+        if device_type in torch.distributed.Backend.default_device_backend_map:
             backend = torch.distributed.Backend.default_device_backend_map.get(
                 device_type
             )
@@ -247,12 +247,12 @@ def set_pg_timeouts(timeout, world_mesh):
 
 @torch.no_grad()
 def clip_grad_norm_(
-    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    parameters: torch.Tensor | Iterable[torch.Tensor],
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
-    foreach: Optional[bool] = None,
-    pp_mesh: Optional[DeviceMesh] = None,
+    foreach: bool | None = None,
+    pp_mesh: DeviceMesh | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.

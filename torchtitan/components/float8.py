@@ -13,8 +13,6 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
-from typing import List, Union
-
 import torch
 import torch.nn as nn
 
@@ -54,7 +52,7 @@ class Float8Converter(ModelConverter):
         ):
             logger.warning(
                 "Failed to swap to Float8Linear with recipe lookup because the torchao version "
-                + "is too old, please install torchao v0.9.0 or later and try again",
+                "is too old, please install torchao v0.9.0 or later and try again",
             )
             return
 
@@ -93,7 +91,7 @@ class Float8Converter(ModelConverter):
     def convert(self, model: nn.Module):
         return self.convert_to_float8_training(model)
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         return self.precompute_float8_dynamic_scale_for_fsdp(model)
 
     def convert_to_float8_training(self, model: nn.Module):
@@ -119,7 +117,7 @@ class Float8Converter(ModelConverter):
         )
 
     def precompute_float8_dynamic_scale_for_fsdp(
-        self, model: Union[nn.Module, List[nn.Module]]
+        self, model: nn.Module | list[nn.Module]
     ):
         if not self.enabled:
             return
