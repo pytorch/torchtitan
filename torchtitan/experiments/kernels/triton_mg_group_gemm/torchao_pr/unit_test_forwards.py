@@ -28,9 +28,9 @@ class TestMG_GroupedGEMM(unittest.TestCase):
         rtol: float = 1.6e-2,
     ) -> None:
         G, M, N, K = shape
-        # In M*G grouping, input is [M*G, K] and weights are [N, K]
+        # In M*G grouping, input is [M*G, K] and weights are [N*G, K]
         a = torch.randn(M * G, K, dtype=dtype, device=device)
-        b = torch.randn(N, K, dtype=dtype, device=device)
+        b = torch.randn(N * G, K, dtype=dtype, device=device)
 
         # Create equal-sized groups for simplicity
         m_size = M
@@ -40,10 +40,12 @@ class TestMG_GroupedGEMM(unittest.TestCase):
         self.assertTrue(result.shape == (M * G, N))
 
         expected_result = torch.zeros(M * G, N, dtype=dtype, device=device)
+        m_start = 0
         for g in range(G):
-            m_start = g * m_size
-            m_end = (g + 1) * m_size
-            expected_result[m_start:m_end, :] = a[m_start:m_end, :] @ b.T
+            m_end = m_start + m_sizes[g]
+            b_slice = b[N * g : N * (g+1), :]
+            expected_result[m_start:m_end, :] = a[m_start:m_end, :] @ b_slice.T
+            m_start = m_end
 
         # Convert result to match input dtype if needed
         result = result.to(dtype)
@@ -51,7 +53,7 @@ class TestMG_GroupedGEMM(unittest.TestCase):
 
     def test_MG_grouped_gemm_bf16(self) -> None:
         for G in (1, 4, 16):
-            for M in (64, 512, 1024):
+            for M in (128, 512, 1024):
                 print(f"Testing BF16 M*G GroupGeMM with G={G}, M={M}")
                 self._run_grouped_gemm_test(
                     (G, M, 1024, 1024),

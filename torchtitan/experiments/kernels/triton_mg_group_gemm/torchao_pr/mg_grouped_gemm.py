@@ -26,6 +26,7 @@ from triton.runtime import driver  # @manual
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from tma_autotuning import (
+    ALIGN_SIZE_M,
     _NV_CONFIGS,
     CudaUtils,
     early_config_prune,
@@ -80,6 +81,9 @@ def _kernel_mg_forward_hopper(
     M_end = 0
     M_start = 0
     processed_tiles = 0
+    # Size of individual weight matrix
+    n_size = N // G
+    n_start = 0
 
     for g in range(G):
         # Move down along groups
@@ -87,15 +91,15 @@ def _kernel_mg_forward_hopper(
         M_start = M_end
         m_size = tl.load(m_sizes + g)
         M_end = M_start + m_size
+        n_start = n_size * g
 
         if m_size > 0:
             # Process this group
-            n_size = N
 
             # Acquire hold on c_desc_ptr for TMA Store
             tl.extra.cuda.experimental_device_tensormap_create2d(
                 desc_ptr=c_desc_ptr,
-                global_address=c_ptr + M_start * N,
+                global_address=c_ptr + M_start * n_size,
                 load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
                 global_size=[m_size, n_size],
                 element_ty=c_dtype,
@@ -120,6 +124,7 @@ def _kernel_mg_forward_hopper(
 
                 m_offset = (M_start + (tile_m_index * BLOCK_SIZE_M)).to(tl.int32)
                 n_offset = (tile_n_index * BLOCK_SIZE_N).to(tl.int32)
+                global_n_offset = (n_start + n_offset).to(tl.int32)
 
                 for k_offset in range(0, K, BLOCK_SIZE_K):
                     # input block [M,K]
@@ -132,7 +137,7 @@ def _kernel_mg_forward_hopper(
                     # weight block [N, K]
                     b = tl._experimental_descriptor_load(
                         b_desc_ptr,
-                        [n_offset, k_offset],
+                        [global_n_offset, k_offset],
                         [BLOCK_SIZE_N, BLOCK_SIZE_K],
                         c_dtype,
                     )
@@ -743,14 +748,15 @@ def grouped_gemm_forward(
 
     assert K == w.shape[1], f"Input K ({K}) must match weight K ({w.shape[1]})"
 
-    # Verify that the sum of m_sizes matches M_total
-    sum_m_sizes = m_sizes.sum().item()
-    assert (
-        M_total == sum_m_sizes
-    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+    # Verify that all group sizes are multiples of ALIGN_SIZE_M
+    # TODO: remove this check because this is a GPU-CPU sync
+    assert torch.remainder(m_sizes, ALIGN_SIZE_M).max() == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
 
     # Create output tensor with correct shape [M_total, N]
-    y = torch.empty((M_total, N), device=x.device, dtype=x.dtype)
+    y = torch.empty((M_total, N // G), device=x.device, dtype=x.dtype)
+
+    if M_total == 0:
+        return y
 
     NUM_SMS = CudaUtils.get_num_sms()
     USE_TMA_LOAD = True
