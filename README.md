@@ -88,7 +88,7 @@ Once you have confirmed access, you can run the following command to download th
 # Get your HF token from https://huggingface.co/settings/tokens
 
 # Llama 3.1 tokenizer.model
-python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer --tokenizer_path "original" --hf_token=...
+python scripts/download_from_hf.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer --tokenizer_path "original" --hf_token=...
 ```
 
 ### Start a training run
