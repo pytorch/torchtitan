@@ -17,8 +17,8 @@ logging.basicConfig(
 
 # Try to import the optimized MG GEMM implementation
 try:
-    from mg_backward import grouped_gemm_backward
-    from mg_forward import grouped_gemm_forward
+    from torchao_pr.mg_grouped_gemm import grouped_gemm_backward
+    from torchao_pr.mg_grouped_gemm import grouped_gemm_forward
 
     has_mg_gemm = True
 except ImportError:
@@ -242,23 +242,6 @@ class MixtureOfExperts(nn.Module):
         print(f"hidden_outputs shape after activation: {hidden_outputs.shape}")
 
         # Second layer: hidden -> output
-        # Reshape hidden_outputs to match expected dimensions
-        reshaped_hidden_outputs = []
-        start_idx = 0
-
-        for expert_idx, count in enumerate(token_counts):
-            if count > 0:
-                end_idx = start_idx + count
-                # Take this expert's outputs and reshape to [count, hidden_dim]
-                expert_output = hidden_outputs[
-                    start_idx:end_idx,
-                    expert_idx * self.hidden_dim : (expert_idx + 1) * self.hidden_dim,
-                ]
-                reshaped_hidden_outputs.append(expert_output)
-                start_idx = end_idx
-
-        # Concatenate all reshaped outputs
-        hidden_outputs = torch.cat(reshaped_hidden_outputs, dim=0)
 
         # Reshape expert weights for second layer
         fc2_weight_reshaped = self.expert_fc2_weight.reshape(
@@ -312,6 +295,7 @@ class MixtureOfExperts(nn.Module):
         return output, router_logits
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        print("============== Forward pass ==============")
         if self.use_mg_gemm and has_mg_gemm:
             return self.forward_mg_gemm(x)
         else:
