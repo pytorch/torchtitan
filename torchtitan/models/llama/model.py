@@ -8,20 +8,15 @@
 
 
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.attention.flex_attention import (
-    BlockMask,
-    create_block_mask,
-    flex_attention,
-)
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-
+from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
@@ -45,12 +40,15 @@ class TransformerModelArgs(BaseModelArgs):
     norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
+    attn_mask_type: str = "causal"
+    eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
+        self.attn_mask_type = job_config.model.attn_mask_type
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
@@ -130,7 +128,7 @@ def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
 
@@ -145,7 +143,7 @@ def apply_rotary_emb(
         freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+        tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
@@ -186,13 +184,6 @@ class Attention(nn.Module):
 
     """
 
-    # We registered flex_attention related attributes as class variables as we
-    # need to amortize the cost of compilation. Enabling per-instance flex_attention
-    # is not supported.
-    block_mask: ClassVar[Optional[BlockMask]] = None
-    use_flex_attn: ClassVar[bool] = False
-    flex_attn: ClassVar[Optional[Callable]] = None
-
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -212,7 +203,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.use_flex_attn = model_args.use_flex_attn
+        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -256,34 +247,13 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        # we use casual mask for training
-        if self.use_flex_attn:
-            # assert False, (type(xq), type(xk), type(xv))
-            self._init_flex_attn(seqlen=seqlen)
-            output = self.flex_attn(xq, xk, xv, block_mask=self.block_mask)
-        else:
-            output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
+        output = self.sdpa(xq, xk, xv)
+
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
-
-    @torch.no_grad()
-    def _init_flex_attn(self, seqlen: int) -> None:
-        if self.block_mask is not None:
-            return
-
-        def causal_mask(b, h, q_idx, kv_idx):
-            return q_idx >= kv_idx
-
-        compiled_create_block_mask = torch.compile(create_block_mask)
-        self.block_mask = compiled_create_block_mask(
-            causal_mask, None, None, seqlen, seqlen
-        )
-        self.flex_attn = torch.compile(
-            flex_attention, mode="max-autotune-no-cudagraphs"
-        )
 
 
 class FeedForward(nn.Module):
@@ -427,6 +397,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+        self.eos_id = model_args.eos_id
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -507,6 +478,11 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
+        # TODO: We will to change forward() signature to allow tokens to
+        # be always passed in.
+        if self.model_args.use_flex_attn:
+            init_attention_mask(tokens, eos_id=self.eos_id)
+
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 

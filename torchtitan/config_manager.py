@@ -196,7 +196,21 @@ class JobConfig:
         self.parser.add_argument(
             "--model.use_flex_attn",
             action="store_true",
-            help="Whether to use Flex Attention.",
+            help="""
+                Whether to use Flex Attention.
+                Mixed usage of SDPA and FlexAttention is not upported yet.
+            """,
+        )
+        self.parser.add_argument(
+            "--model.attn_mask_type",
+            type=str,
+            default="causal",
+            choices=["causal", "block_causal"],
+            help="""
+                Specifies the type of bias/mask used for attention. If SDPA is used,
+                only the causal mask is supported by default. If FlexAttention is used,
+                both causal and block_causal masks are supported.
+            """,
         )
         self.parser.add_argument(
             "--model.tokenizer_path",
