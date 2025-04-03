@@ -52,7 +52,14 @@ class TransformerModelArgs(BaseModelArgs):
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
 
-    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
+        nparams = sum(p.numel() for p in model.parameters())
+        nparams_embedding = sum(
+            sum(p.numel() for p in m.parameters())
+            for m in model.children()
+            if isinstance(m, nn.Embedding)
+        )
+
         l, h, q, t = (
             self.n_layers,
             self.n_heads,
@@ -65,9 +72,9 @@ class TransformerModelArgs(BaseModelArgs):
         #    but recomputation should not be counted in calculating MFU           (+0)
         # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
         # 4. we follow the convention and do not account for sparsity in causal attention
-        flop_per_token = 6 * num_params + 12 * l * h * q * t
+        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
-        return flop_per_token
+        return nparams, num_flops_per_token
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:

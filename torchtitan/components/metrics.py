@@ -305,7 +305,7 @@ class MetricsProcessor:
     data_loading_times: list[float]
     time_last_log: float
 
-    num_flop_per_token: int
+    num_flops_per_token: int
     optimizers: Optional[OptimizersContainer]
     lr_schedulers: Optional[LRSchedulersContainer]
 
@@ -333,7 +333,7 @@ class MetricsProcessor:
         self.device_memory_monitor.reset_peak_stats()
 
         # These variables have to be set later as they depend on other components or model.
-        self.num_flop_per_token = -1
+        self.num_flops_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
 
@@ -341,7 +341,7 @@ class MetricsProcessor:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
 
     def log(self, step: int, global_avg_loss: float, global_max_loss: float):
-        assert self.num_flop_per_token > 0, "num_flop_per_token must be set"
+        assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
 
@@ -352,8 +352,8 @@ class MetricsProcessor:
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
-        mfu = 100 * self.num_flop_per_token * tps / self.gpu_peak_flops
-        tflops = self.num_flop_per_token * tps / 1e12
+        mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+        tflops = self.num_flops_per_token * tps / 1e12
 
         time_end_to_end = time_delta / self.job_config.metrics.log_freq
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)

@@ -36,7 +36,9 @@ class BaseModelArgs:
         pass
 
     @abstractmethod
-    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+    def get_nparams_and_flops(
+        self, model: nn.Module, seq_len: int
+    ) -> tuple[int, float]:
         pass
 
 
