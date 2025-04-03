@@ -124,7 +124,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
-                    yield input, label
+                    yield {"input": input}, label
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
