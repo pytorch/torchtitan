@@ -1,18 +1,26 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
 # Benchmark comparing reference PyTorch vs optimized M*G group GEMM implementation
 
 import argparse
 import logging
 import time
-from typing import Dict, List, Optional, Tuple
+
+# from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import triton
-import triton.language as tl
+
+# import triton.language as tl
 
 # Configure logging
 logging.basicConfig(
@@ -21,7 +29,7 @@ logging.basicConfig(
 
 # Try to import the optimized implementations
 try:
-    from torchao_pr.mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
+    from torchao_pr.mg_grouped_gemm import grouped_gemm_forward
 
 except ImportError:
     logging.error(
@@ -362,7 +370,7 @@ def benchmark_model_configs():
     dtype = torch.float16
 
     for config_idx, (M, K, N, G) in enumerate(configs):
-        logging.info(f"\n===== Benchmarking DeepSeek Config {config_idx+1} =====")
+        logging.info(f"\n===== Benchmarking DeepSeek Config {config_idx + 1} =====")
         logging.info(f"M={M}, K={K}, N={N}, G={G}")
 
         # Create group sizes for M dimension
@@ -414,7 +422,7 @@ def benchmark_model_configs():
         # Store results
         results.append(
             {
-                "config": f"Config {config_idx+1}",
+                "config": f"Config {config_idx + 1}",
                 "dimensions": f"M={M}, K={K}, N={N}, G={G}",
                 "pt_time_ms": pt_time * 1000,
                 "opt_time_ms": opt_time * 1000,
@@ -430,10 +438,10 @@ def benchmark_model_configs():
         )
 
         logging.info(
-            f"PyTorch Reference: {pt_time*1000:.2f} ms, {pt_tflops:.2f} TFLOPS, {pt_memory:.2f} MB"
+            f"PyTorch Reference: {pt_time * 1000:.2f} ms, {pt_tflops:.2f} TFLOPS, {pt_memory:.2f} MB"
         )
         logging.info(
-            f"Optimized Kernel: {opt_time*1000:.2f} ms, {opt_tflops:.2f} TFLOPS, {opt_memory:.2f} MB"
+            f"Optimized Kernel: {opt_time * 1000:.2f} ms, {opt_tflops:.2f} TFLOPS, {opt_memory:.2f} MB"
         )
         logging.info(
             f"Speedup: {speedup:.2f}x, Memory savings: {results[-1]['memory_savings']:.2f}%"
@@ -445,7 +453,8 @@ def benchmark_model_configs():
         f"{'Config':<10} | {'Time (ms)':<20} | {'TFLOPS':<20} | {'Speedup':<10} | {'Memory (MB)':<20} | {'Memory Saved':<12}"
     )
     logging.info(
-        f"{'':<10} | {'PyTorch':<9} {'Kernel':<9} | {'PyTorch':<9} {'Kernel':<9} | {'':<10} | {'PyTorch':<9} {'Kernel':<9} | {'':<12}"
+        f"{'':<10} | {'PyTorch':<9} {'Kernel':<9} | {'PyTorch':<9} {'Kernel':<9} | {'':<10} | "
+        f"{'PyTorch':<9} {'Kernel':<9} | {'':<12}"
     )
     logging.info("-" * 100)
 

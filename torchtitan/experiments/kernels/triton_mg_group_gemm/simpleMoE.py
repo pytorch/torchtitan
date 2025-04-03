@@ -1,16 +1,23 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import argparse
 import logging
 import math
 import time
-from typing import Dict, List, Optional, Tuple
 
-import numpy as np
-import torch
+from typing import Dict, List, Tuple
+
+# import numpy as np
+import torch  #
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from torchao_pr.mg_grouped_gemm import mg_grouped_gemm
+# from torchao_pr.mg_grouped_gemm import mg_grouped_gemm
 
 # Configure logging
 logging.basicConfig(
@@ -19,7 +26,9 @@ logging.basicConfig(
 
 # Try to import the optimized MG GEMM implementation
 try:
-    from torchao_pr.mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
+    from torchao_pr.mg_grouped_gemm import (  # grouped_gemm_backward,
+        grouped_gemm_forward,
+    )
 
     has_mg_gemm = True
 except ImportError:
@@ -483,7 +492,7 @@ def train_epoch(
         # Log progress
         if (i + 1) % 10 == 0:
             logging.info(
-                f"Batch {i+1}/{num_batches} | "
+                f"Batch {i + 1}/{num_batches} | "
                 f"Loss: {loss.item():.4f} | "
                 f"CE Loss: {ce_loss.item():.4f} | "
                 f"LB Loss: {lb_loss.item():.4f} | "
@@ -681,7 +690,7 @@ def compare_methods(args):
 
     # Log results
     logging.info("\n===== Performance Comparison =====")
-    logging.info(f"Model Configuration:")
+    logging.info("Model Configuration:")
     logging.info(f"  - Batch Size: {args.batch_size}")
     logging.info(f"  - Sequence Length: {args.seq_len}")
     logging.info(f"  - Embed Dimension: {args.embed_dim}")
@@ -690,14 +699,14 @@ def compare_methods(args):
     logging.info(f"  - Top-K: {args.top_k}")
     logging.info("")
 
-    logging.info(f"Manual Looping Method:")
+    logging.info("Manual Looping Method:")
     logging.info(f"  - Forward Time: {manual_perf['forward_time']:.2f} ms")
     logging.info(f"  - Backward Time: {manual_perf['backward_time']:.2f} ms")
     logging.info(f"  - Total Time: {manual_perf['total_time']:.2f} ms")
     logging.info("")
 
     if mg_model is not None:
-        logging.info(f"MG GEMM Method:")
+        logging.info("MG GEMM Method:")
         logging.info(f"  - Forward Time: {mg_perf['forward_time']:.2f} ms")
         logging.info(f"  - Backward Time: {mg_perf['backward_time']:.2f} ms")
         logging.info(f"  - Total Time: {mg_perf['total_time']:.2f} ms")
@@ -720,7 +729,7 @@ def compare_methods(args):
             else 0
         )
 
-        logging.info(f"Speedup (MG GEMM vs Manual):")
+        logging.info("Speedup (MG GEMM vs Manual):")
         logging.info(f"  - Forward Speedup: {forward_speedup:.2f}x")
         logging.info(f"  - Backward Speedup: {backward_speedup:.2f}x")
         logging.info(f"  - Total Speedup: {total_speedup:.2f}x")
@@ -748,7 +757,7 @@ def train_model(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Log model information
-    logging.info(f"Model configuration:")
+    logging.info("Model configuration:")
     logging.info(f"  - Vocabulary Size: {args.vocab_size}")
     logging.info(f"  - Embedding Dimension: {args.embed_dim}")
     logging.info(f"  - Hidden Dimension: {args.hidden_dim}")
@@ -758,7 +767,7 @@ def train_model(args):
 
     # Training loop
     for epoch in range(args.epochs):
-        logging.info(f"\nEpoch {epoch+1}/{args.epochs}")
+        logging.info(f"\nEpoch {epoch + 1}/{args.epochs}")
 
         # Train
         train_metrics = train_epoch(
