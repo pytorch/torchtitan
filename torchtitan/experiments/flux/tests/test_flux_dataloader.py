@@ -62,7 +62,7 @@ class TestFluxDataLoader:
             dl = iter(dl)
 
             for i in range(0, num_steps):
-                input_data = next(dl)
+                input_data, labels = next(dl)
                 print(f"Step {i} image size: {input_data['image'].shape}")
                 if torch_profiler:
                     torch_profiler.step()
@@ -73,8 +73,8 @@ class TestFluxDataLoader:
                 for k, v in input_data.items():
                     print(f"Step {i} {k} value: {type(v), v.shape}")
 
-                assert len(input_data) == 3  # (image, clip_encodings, t5_encodings)
-                # assert input_data["image"].shape == (batch_size, 3, 256, 256)
+                assert len(input_data) == 2  # (clip_encodings, t5_encodings)
+                assert labels.shape == (batch_size, 3, 256, 256)
                 # assert input_data["clip_tokens"].shape[0] == batch_size
                 # assert input_data["t5_tokens"].shape == (batch_size, 512, 512)
 
@@ -84,6 +84,7 @@ class TestFluxDataLoader:
                 memory_profiler.step(exit_ctx=True)
 
     def test_preprocess(self):
+        # TODO
         pass
 
     def _build_dataloader(

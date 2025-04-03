@@ -4,21 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from enum import auto
 from typing import Optional
 
 from requests.exceptions import HTTPError
 
 
 def hf_download(
-    repo_id: str, hf_file_path: str, local_dir: str, hf_token: Optional[str] = None
+    repo_id: str, tokenizer_path: str, local_dir: str, hf_token: Optional[str] = None
 ) -> None:
     from huggingface_hub import hf_hub_download
+
+    tokenizer_path = (
+        f"{tokenizer_path}/tokenizer.model" if tokenizer_path else "tokenizer.model"
+    )
 
     try:
         hf_hub_download(
             repo_id=repo_id,
-            filename=hf_file_path,
+            filename=tokenizer_path,
             local_dir=local_dir,
             local_dir_use_symlinks=False,
             token=hf_token,
@@ -43,26 +46,10 @@ if __name__ == "__main__":
         help="Repository ID to download from. default to Llama-3.1-8B",
     )
     parser.add_argument(
-        "--tokenizer",
-        action="store_true",
-        help="Download tokenizer or not. default to True",
-    )
-    parser.add_argument(
         "--tokenizer_path",
         type=str,
         default="original",
         help="the tokenizer.model path relative to repo_id",
-    )
-    parser.add_argument(
-        "--autoencoder",
-        action="store_true",
-        help="Download tokenizer or not. default to True",
-    )
-    parser.add_argument(
-        "--autoencoder_path",
-        type=str,
-        default="ae.saftensors",
-        help="the autoencoder path relative to repo_id",
     )
     parser.add_argument(
         "--hf_token", type=str, default=None, help="HuggingFace API token"
@@ -75,16 +62,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if args.tokenizer:
-        tokenizer_path = (
-            f"{args.tokenizer_path}/tokenizer.model"
-            if args.tokenizer_path
-            else "tokenizer.model"
-        )
-        hf_download(args.repo_id, tokenizer_path, args.local_dir, args.hf_token)
-    elif args.autoencoder:
-        hf_download(args.repo_id, args.autoencoder_path, args.local_dir, args.hf_token)
-    else:
-        print(
-            "You need to specify either --tokenizer or --autoencoder to download tokenizer or autoencoder."
-        )
+    hf_download(args.repo_id, args.tokenizer_path, args.local_dir, args.hf_token)

@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import math
 from enum import auto
 from typing import Optional
@@ -95,7 +101,7 @@ def preprocess_flux_data(
     if autoencoder is not None:
         images = batch["image"].to(device=device, dtype=dtype)
         img_encodings = autoencoder.encode(images)
-        batch["img_encodings"] = img_encodings
+        batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)

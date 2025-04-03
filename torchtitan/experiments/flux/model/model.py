@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from dataclasses import dataclass, field
 
 import torch
@@ -44,7 +50,7 @@ class FluxModelArgs(BaseModelArgs):
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
         logger.warning("FLUX model haven't implement get_nparams_and_flops() function")
-        return 0, 0
+        return 0, 1
 
 
 class FluxModel(nn.Module, ModelProtocol):

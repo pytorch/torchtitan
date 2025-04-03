@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
-import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -206,7 +204,8 @@ class FluxDataset(IterableDataset, Stateful):
                 self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
 
-                yield sample_dict
+                labels = sample_dict.pop("image")
+                yield sample_dict, labels
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")

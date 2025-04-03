@@ -20,10 +20,12 @@ class Tokenizer(ABC):
         self._n_words = 8
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> list[int]: ...
+    def encode(self, *args, **kwargs) -> list[int]:
+        ...
 
     @abstractmethod
-    def decode(self, *args, **kwargs) -> str: ...
+    def decode(self, *args, **kwargs) -> str:
+        ...
 
     @property
     def n_words(self) -> int:

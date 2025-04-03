@@ -1,7 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
 from dataclasses import dataclass
 
 import torch
 from einops import rearrange
+from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
@@ -348,8 +356,11 @@ class AutoEncoder(nn.Module):
 def load_ae(
     ckpt_path: str,
     autoencoder_params: AutoEncoderParams,
+    repo_id: str = "black-forest-labs/FLUX.1-dev",
+    repo_ae: str = "ae.safetensors",
     device: str | torch.device = "cuda",
     dtype=torch.bfloat16,
+    hf_download: bool = True,
 ) -> AutoEncoder:
     """
     Load the autoencoder from the given model name.
@@ -359,7 +370,13 @@ def load_ae(
     Returns:
         AutoEncoder: The loaded autoencoder.
     """
-
+    if (
+        not os.path.exists(ckpt_path)
+        and repo_id is not None
+        and repo_ae is not None
+        and hf_download
+    ):
+        hf_hub_download(repo_id, repo_ae, local_dir=ckpt_path)
     # Loading the autoencoder
     print("Init AE")
     with torch.device(device):

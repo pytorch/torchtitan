@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import os
 import time
 from typing import Iterable, Optional
@@ -39,39 +45,20 @@ class FluxTrainer(Trainer):
             dtype=self._dtype
         )
 
-    def next_batch(
-        self, data_iterator: Iterable
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        print("in next_batch")
-        data_load_start = time.perf_counter()
-        batch = next(data_iterator)
-
+    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         # generate t5 and clip
+        input_dict["image"] = labels
         input_dict = self.preprocess_fn(
             device=self.device,
             dtype=self._dtype,
             autoencoder=self.autoencoder,
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
-            batch=batch,
+            batch=input_dict,
             offload=True,
         )
+        labels = input_dict["img_encodings"]
 
-        labels = input_dict.pop("img_encodings")
-        self.metrics_processor.ntokens_since_last_log += labels.numel()
-        self.metrics_processor.data_loading_times.append(
-            time.perf_counter() - data_load_start
-        )
-
-        device_type = utils.device_type
-        for k, v in input_dict.items():
-            input_dict[k] = input_dict[k].to(device_type)
-        labels = labels.to(device_type)
-
-        return input_dict, labels
-
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        print("in train_step")
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -140,7 +127,7 @@ class FluxTrainer(Trainer):
         else:
             global_avg_loss = global_max_loss = loss.item()
 
-        # self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
+        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
 
 if __name__ == "__main__":
