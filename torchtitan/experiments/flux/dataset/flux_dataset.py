@@ -195,12 +195,16 @@ class FluxDataset(IterableDataset, Stateful):
                 sample_dict = self._data_processor(
                     sample, self._t5_tokenizer, self._clip_tokenizer, output_size=256
                 )
+
+                # skip image with color channel = 1
+                if sample_dict["image"].shape[0] == 1:
+                    logger.warning(
+                        f"Skipped sample {sample["__key__"]} because image has 1 color channel"
+                    )
+                    continue
+
                 self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
-
-                # Move the encoder to CPU, save some GPU memory
-                # self._t5_encoder.to("cpu")
-                # self._clip_encoder.to("cpu")
 
                 yield sample_dict
 

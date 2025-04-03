@@ -29,10 +29,6 @@ class TestFluxDataLoader:
         config.maybe_add_custom_args()
         config.parse_args(
             [
-                "--training.dataset",
-                dataset_name,
-                "--training.batch_size",
-                str(batch_size),
                 ## Profiling options
                 # "--profiling.enable_profiling",
                 # "--profiling.profile_freq",
@@ -40,6 +36,10 @@ class TestFluxDataLoader:
                 # "--profiling.enable_memory_snapshot",
                 # "--profiling.save_memory_snapshot_folder",
                 # "memory_snapshot_flux",
+                "--training.dataset",
+                dataset_name,
+                "--training.batch_size",
+                str(batch_size),
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-small",
                 "--encoder.clip_encoder",
@@ -70,8 +70,6 @@ class TestFluxDataLoader:
                     memory_profiler.step()
 
                 print(len(input_data["clip_tokens"]))
-                # print(len(input_data["clip_tokens"][0]))
-                # break
                 for k, v in input_data.items():
                     print(f"Step {i} {k} value: {type(v), v.shape}")
 
@@ -85,6 +83,9 @@ class TestFluxDataLoader:
             if memory_profiler:
                 memory_profiler.step(exit_ctx=True)
 
+    def test_preprocess(self):
+        pass
+
     def _build_dataloader(
         self,
         job_config,
@@ -96,5 +97,6 @@ class TestFluxDataLoader:
             dp_world_size=world_size,
             dp_rank=rank,
             job_config=job_config,
+            tokenizer=None,
             infinite=False,
         )

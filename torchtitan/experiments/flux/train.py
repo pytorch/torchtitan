@@ -22,33 +22,34 @@ class FluxTrainer(Trainer):
         # self.dtype = job_config.encoder.dtype
         self._dtype = torch.bfloat16
         self._seed = job_config.training.seed
-        self._guidence = job_config.training.guidence
+        self._guidance = job_config.training.guidance
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
         self.autoencoder = load_ae(
             job_config.encoder.auto_encoder_path,
             model_config.autoencoder_params,
-            self.torch_device,
+            "cpu",
             self._dtype,
         )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
-            self.torch_device, dtype=self._dtype
+            dtype=self._dtype
         )
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
-            self.torch_device, dtype=self._dtype
+            dtype=self._dtype
         )
 
     def next_batch(
         self, data_iterator: Iterable
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        print("in next_batch")
         data_load_start = time.perf_counter()
         batch = next(data_iterator)
 
         # generate t5 and clip
-        batch = self.preprocess_fn(
-            device=self.torch_device,
-            dtype=self.dtype,
+        input_dict = self.preprocess_fn(
+            device=self.device,
+            dtype=self._dtype,
             autoencoder=self.autoencoder,
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
@@ -56,8 +57,7 @@ class FluxTrainer(Trainer):
             offload=True,
         )
 
-        labels = batch["image_encodings"]
-        input_dict = batch
+        labels = input_dict.pop("img_encodings")
         self.metrics_processor.ntokens_since_last_log += labels.numel()
         self.metrics_processor.data_loading_times.append(
             time.perf_counter() - data_load_start
@@ -71,6 +71,7 @@ class FluxTrainer(Trainer):
         return input_dict, labels
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+        print("in train_step")
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -95,6 +96,9 @@ class FluxTrainer(Trainer):
         target = noise - labels
 
         assert len(model_parts) == 1
+        # TODO(jianiw): model_parts will be wrapped by FSDP, which will cacluate
+        model_parts[0] = model_parts[0].to(dtype=self._dtype)
+
         pred = predict_noise(
             model_parts[0],
             noisy_latents,
@@ -103,10 +107,10 @@ class FluxTrainer(Trainer):
             timesteps,
             guidance,
         )
-        loss = self.train_spec.loss_fn(pred, target)
+        loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
         # need to free to before bwd to avoid peaking memory
-        del pred
+        del (pred, noise, target)
         loss.backward()
 
         dist_utils.clip_grad_norm_(
@@ -136,7 +140,7 @@ class FluxTrainer(Trainer):
         else:
             global_avg_loss = global_max_loss = loss.item()
 
-        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
+        # self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
 
 if __name__ == "__main__":

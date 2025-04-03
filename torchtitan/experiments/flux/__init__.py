@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import build_mse_loss, mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
@@ -43,7 +43,7 @@ flux_configs = {
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
-            ch=3,
+            ch=128,
             out_ch=3,
             ch_mult=(1, 2, 4, 4),
             num_res_blocks=2,
@@ -66,6 +66,6 @@ register_train_spec(
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=build_flux_t5_tokenizer,
-        loss_fn=cross_entropy_loss,
+        build_loss_fn=build_mse_loss,
     )
 )

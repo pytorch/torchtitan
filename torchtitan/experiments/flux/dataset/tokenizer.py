@@ -56,7 +56,6 @@ class FluxTokenizer(Tokenizer):
             padding="max_length",
             return_tensors="pt",  # return pytorch tensors, default return List[int]
         )["input_ids"]
-        # print("Data is :", type(tokens), len(tokens))
         return tokens
 
     def decode(self, t: List[int]) -> str:

@@ -109,7 +109,7 @@ class FluxModel(nn.Module, ModelProtocol):
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
-    def _init_weight(self):
+    def init_weights(self, buffer_device=None):
         # TODO(jianiw): replace placeholder with real weight init
         for param in self.parameters():
             param.data.uniform_(0, 0.1)

@@ -27,3 +27,16 @@ def build_cross_entropy_loss(job_config: JobConfig):
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn)
     return loss_fn
+
+
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Common MSE loss function for Transformer models training."""
+    return torch.nn.functional.mse_loss(pred.float(), labels.float().detach())
+
+
+def build_mse_loss(job_config: JobConfig):
+    loss_fn = mse_loss
+    if job_config.training.compile:
+        logger.info("Compiling the loss function with torch.compile")
+        loss_fn = torch.compile(loss_fn)
+    return loss_fn
