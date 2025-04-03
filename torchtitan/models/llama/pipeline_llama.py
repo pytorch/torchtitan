@@ -96,7 +96,8 @@ def pipeline_llama_manual_split(
     parallelism_config = job_config.parallelism
 
     splits = parallelism_config.pipeline_parallel_split_points or generate_split_points(
-        job_config,
+        parallelism_config.pipeline_parallel_schedule,
+        parallelism_config.pipeline_parallel_layers_per_stage,
         parallel_dims.pp,
         model_config.n_layers,
     )

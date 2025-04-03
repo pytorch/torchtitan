@@ -476,7 +476,7 @@ class JobConfig:
         self.parser.add_argument(
             "--parallelism.pipeline_parallel_layers_per_stage",
             type=int,
-            default=0,
+            default=None,
             help="""
                 The number of layers per stage. If specified, the split points will be calculated from
                 the number of layers and pipeline_parallel_degree. If not specified, the layers per stage will

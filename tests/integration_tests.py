@@ -255,7 +255,7 @@ def build_test_list():
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.pipeline_parallel_layers_per_stage 2",
+                    "--parallelism.pipeline_parallel_layers_per_stage 1",
                 ],
             ],
             "PP looped 1F1B test",
