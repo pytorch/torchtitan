@@ -741,8 +741,6 @@ def grouped_gemm_forward(
     assert x.is_contiguous()
     assert w.is_contiguous()
     assert m_sizes.is_contiguous()
-    for m in m_sizes.tolist():
-        assert m % ALIGN_SIZE_M == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
 
     # Total input size is now [M_total, K] where M_total is the sum of all group sizes
     M_total, K = x.shape
@@ -750,11 +748,9 @@ def grouped_gemm_forward(
 
     assert K == w.shape[1], f"Input K ({K}) must match weight K ({w.shape[1]})"
 
-    # Verify that the sum of m_sizes matches M_total
-    sum_m_sizes = m_sizes.sum().item()
-    assert (
-        M_total == sum_m_sizes
-    ), f"Sum of m_sizes ({sum_m_sizes}) must match M_total ({M_total})"
+    # Verify that all group sizes are multiples of ALIGN_SIZE_M
+    # TODO: remove this check because this is a GPU-CPU sync
+    assert torch.remainder(m_sizes, ALIGN_SIZE_M).max() == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
 
     # Create output tensor with correct shape [M_total, N]
     y = torch.empty((M_total, N // G), device=x.device, dtype=x.dtype)
