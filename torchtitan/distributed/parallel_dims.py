@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Callable
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -71,7 +71,6 @@ class ParallelDims:
         init_device_mesh_fn: Callable,
     ) -> DeviceMesh:
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        names = tuple(names)
         mesh = init_device_mesh_fn(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are

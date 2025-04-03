@@ -8,19 +8,9 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 import os
+from collections.abc import Collection, Iterator, Sequence, Set as AbstractSet
 from pathlib import Path
-from typing import (
-    AbstractSet,
-    cast,
-    Collection,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Optional,
-    Sequence,
-    Union,
-)
+from typing import cast, Literal
 
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
@@ -38,7 +28,7 @@ class TikTokenizer(Tokenizer):
         model_path (str): The path to the Tiktoken model file.
     """
 
-    special_tokens: Dict[str, int]
+    special_tokens: dict[str, int]
 
     num_reserved_special_tokens = 256
 
@@ -94,9 +84,9 @@ class TikTokenizer(Tokenizer):
         *,
         bos: bool,
         eos: bool,
-        allowed_special: Optional[Union[Literal["all"], AbstractSet[str]]] = None,
-        disallowed_special: Optional[Union[Literal["all"], Collection[str]]] = None,
-    ) -> List[int]:
+        allowed_special: Literal["all"] | AbstractSet[str] | None = None,
+        disallowed_special: Literal["all"] | Collection[str] | None = None,
+    ) -> list[int]:
         """
         Encodes a string into a list of token IDs.
 
@@ -138,7 +128,7 @@ class TikTokenizer(Tokenizer):
                 s[i : i + TIKTOKEN_MAX_ENCODE_CHARS], MAX_NO_WHITESPACES_CHARS
             )
         )
-        t: List[int] = []
+        t: list[int] = []
         for substr in substrs:
             t.extend(
                 self.model.encode(
@@ -164,7 +154,7 @@ class TikTokenizer(Tokenizer):
             str: The decoded string.
         """
         # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
-        return self.model.decode(cast(List[int], t))
+        return self.model.decode(cast(list[int], t))
 
     @staticmethod
     def _split_whitespaces_or_nonwhitespaces(

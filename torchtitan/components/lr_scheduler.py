@@ -7,7 +7,7 @@
 import copy
 import functools
 import math
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Iterator
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
@@ -46,7 +46,7 @@ class LRSchedulersContainer(Stateful):
         optimizers (OptimizersContainer): The corresponding optimizers for the lr_schedulers.
     """
 
-    schedulers: List[LRScheduler]
+    schedulers: list[LRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
         assert (
@@ -55,7 +55,7 @@ class LRSchedulersContainer(Stateful):
 
         self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
 
-    def __iter__(self) -> LRScheduler:
+    def __iter__(self) -> Iterator[LRScheduler]:
         return iter(self.schedulers)
 
     def __len__(self) -> int:
@@ -65,13 +65,13 @@ class LRSchedulersContainer(Stateful):
         for scheduler in self.schedulers:
             scheduler.step()
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         # While there may be multiple schedulers, we only save the first one because
         # the state_dict is the same for all. See the limitations section in the
         # docstring.
         return self.schedulers[0].state_dict()
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # Load the same state_dict for all schedulers. The key value we're concerned
         # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
         # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``

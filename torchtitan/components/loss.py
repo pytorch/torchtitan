@@ -11,7 +11,7 @@ import torch
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
-LossFunction: TypeAlias = Callable[[...], torch.Tensor]
+LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

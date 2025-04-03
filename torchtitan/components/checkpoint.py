@@ -12,7 +12,7 @@ import re
 import shutil
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -50,16 +50,16 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
-    def __init__(self, model: Union[nn.Module, List[nn.Module]]) -> None:
+    def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cache_state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=state_dict,
@@ -207,10 +207,10 @@ class CheckpointManager:
     def __init__(
         self,
         dataloader: DataLoader,
-        model_parts: List[nn.Module],
+        model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
-        states: Dict[str, Any],
+        states: dict[str, Any],
         job_config: JobConfig,
         ft_manager: FTManager,
     ) -> None:
@@ -517,7 +517,7 @@ class CheckpointManager:
             f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
 
-    def _states_to_load(self, step: int) -> Dict[str, Any]:
+    def _states_to_load(self, step: int) -> dict[str, Any]:
         """Determines which states to load for the given step.
 
         When checkpointer determines which step of the checkpoint to load, this API is
@@ -606,7 +606,7 @@ class CheckpointManager:
         self._cpu_staging(checkpoint_id)
         self.sending_to_checkpoint_mp = True
 
-    def _cpu_staging(self, checkpoint_id: Optional[str]) -> None:
+    def _cpu_staging(self, checkpoint_id: str | None) -> None:
         """Offload state_dict to CPU memory"""
         state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
         if self.cpu_offload_state_dict is None:

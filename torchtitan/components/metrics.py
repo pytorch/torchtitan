@@ -8,7 +8,7 @@ import os
 import time
 from collections import namedtuple
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -102,7 +102,7 @@ def build_device_memory_monitor():
 class BaseLogger:
     """Logger that does nothing, used when logging is disabled."""
 
-    def log(self, metrics: Dict[str, Any], step: int) -> None:
+    def log(self, metrics: dict[str, Any], step: int) -> None:
         pass
 
     def close(self) -> None:
@@ -112,12 +112,12 @@ class BaseLogger:
 class TensorBoardLogger(BaseLogger):
     """Logger implementation for TensorBoard."""
 
-    def __init__(self, log_dir: str, tag: Optional[str] = None):
+    def __init__(self, log_dir: str, tag: str | None = None):
         self.tag = tag
         self.writer = SummaryWriter(log_dir, max_queue=1000)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
-    def log(self, metrics: Dict[str, Any], step: int) -> None:
+    def log(self, metrics: dict[str, Any], step: int) -> None:
         for k, v in metrics.items():
             tag = k if self.tag is None else f"{self.tag}/{k}"
             self.writer.add_scalar(tag, v, step)
@@ -129,7 +129,7 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, tag: Optional[str] = None):
+    def __init__(self, log_dir: str, tag: str | None = None):
         # Import wandb here to avoid startup import
         import wandb
 
@@ -145,7 +145,7 @@ class WandBLogger(BaseLogger):
         )
         logger.info("WandB logging enabled")
 
-    def log(self, metrics: Dict[str, Any], step: int) -> None:
+    def log(self, metrics: dict[str, Any], step: int) -> None:
         wandb_metrics = {
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
@@ -218,7 +218,7 @@ def _get_metrics_rank(
 
 
 def _build_metric_logger(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
+    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
 ) -> BaseLogger:
     """
     Build an appropriate metric logger based on configuration.
@@ -298,7 +298,7 @@ class MetricsProcessor:
     parallel_dims: ParallelDims
     job_config: JobConfig
     device_memory_monitor: DeviceMemoryMonitor
-    color: utils.Color
+    color: utils.NoColor | utils.Color
 
     gpu_peak_flops: int
     ntokens_since_last_log: int
@@ -306,14 +306,14 @@ class MetricsProcessor:
     time_last_log: float
 
     num_flops_per_token: int
-    optimizers: Optional[OptimizersContainer]
-    lr_schedulers: Optional[LRSchedulersContainer]
+    optimizers: OptimizersContainer | None
+    lr_schedulers: LRSchedulersContainer | None
 
     def __init__(
         self,
         job_config: JobConfig,
         parallel_dims: ParallelDims,
-        tag: Optional[str] = None,
+        tag: str | None = None,
     ):
         self.logger = _build_metric_logger(job_config, parallel_dims, tag)
         self.parallel_dims = parallel_dims
@@ -321,7 +321,9 @@ class MetricsProcessor:
         self.device_memory_monitor = build_device_memory_monitor()
         # used for colorful printing
         self.color = (
-            utils.NoColor if job_config.metrics.disable_color_printing else utils.Color
+            utils.NoColor()
+            if job_config.metrics.disable_color_printing
+            else utils.Color()
         )
 
         self.gpu_peak_flops = utils.get_peak_flops(
@@ -400,7 +402,7 @@ class MetricsProcessor:
 
 
 def build_metrics_processor(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: Optional[str] = None
+    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
 ) -> MetricsProcessor:
     """Create a metrics processor.
 
