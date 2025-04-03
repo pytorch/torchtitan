@@ -17,6 +17,7 @@ from torchtitan.experiments.flux.model.modules.layers import (
 )
 
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
+from torchtitan.tools.logging import logger
 
 
 @dataclass
@@ -40,9 +41,10 @@ class FluxModelArgs(BaseModelArgs):
         # context_in_dim is the same as the T5 embedding dimension
         self.context_in_dim = job_config.encoder.max_t5_encoding_len
 
-    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
-        return 0
+        logger.warning("FLUX model haven't implement get_nparams_and_flops() function")
+        return 0, 0
 
 
 class FluxModel(nn.Module, ModelProtocol):

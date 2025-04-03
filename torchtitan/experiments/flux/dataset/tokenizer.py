@@ -45,7 +45,7 @@ class FluxTokenizer(Tokenizer):
         s: str,
     ) -> List[int]:
         """
-        Encode the
+        Encode the prompt text into tokens.
         """
         tokens = self._tokenizer(
             s,
@@ -60,7 +60,7 @@ class FluxTokenizer(Tokenizer):
 
     def decode(self, t: List[int]) -> str:
         """
-        Decode function. This function will not be called
+        Decode function. This function will not be called.
         """
         return self._tokenizer.decode(t)
 
