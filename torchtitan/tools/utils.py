@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-import torch.nn as nn
 from torch._utils import _get_available_device_type, _get_device_module
 
 from torchtitan.tools.logging import logger
@@ -45,17 +44,6 @@ class GarbageCollection:
         begin = time.monotonic()
         gc.collect(1)
         logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
-
-
-def get_num_params(model: nn.Module, exclude_embedding: bool = False) -> int:
-    num_params = sum(p.numel() for p in model.parameters())
-    if exclude_embedding:
-        num_params -= sum(
-            sum(p.numel() for p in m.parameters())
-            for m in model.children()
-            if isinstance(m, nn.Embedding)
-        )
-    return num_params
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC

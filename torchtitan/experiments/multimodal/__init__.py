@@ -6,7 +6,7 @@
 
 from mm_dataset import build_mm_dataloader
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
@@ -27,6 +27,6 @@ register_train_spec(
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_mm_dataloader,
         build_tokenizer_fn=build_tiktoken_tokenizer,
-        loss_fn=cross_entropy_loss,
+        build_loss_fn=build_cross_entropy_loss,
     )
 )
