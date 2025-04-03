@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import time
-from typing import Iterable, Optional
+from typing import Optional
 
 import torch
 
@@ -15,7 +14,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.model.modules.autoencoder import load_ae
 from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import predict_noise, preprocess_flux_data
-from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 

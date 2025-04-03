@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.components.loss import build_mse_loss, mse_loss
+from torchtitan.components.loss import build_mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader

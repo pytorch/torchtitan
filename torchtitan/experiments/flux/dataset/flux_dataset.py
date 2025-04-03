@@ -7,8 +7,6 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from PIL import Image
@@ -20,13 +18,8 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
-from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.tools.logging import logger
 
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchvision import transforms
 
 
