@@ -496,7 +496,6 @@ class MoE(nn.Module):
 
         concat_weight = torch.cat(all_weights)
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(concat_weight))
-        print(f"Combined weights of {submod_name}, shape = {concat_weight.shape}")
 
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
@@ -508,6 +507,7 @@ class MoE(nn.Module):
         self.shuffle_method = "symm_mem"
 
         # Combine expert weights
+        print("Combining expert weights for Group GEMM")
         self.combine_experts("gate_proj")
         self.combine_experts("up_proj")
         self.combine_experts("down_proj")
@@ -739,78 +739,66 @@ class MoE(nn.Module):
             input_splits,
             self.ep_group,
         )
+
+        # We need to permute the received tokens so that tokens for the same expert are contiguous.
+        # This part prepares a 1D tensor `permuted_indices` for such permutation.
+        # TODO: write a kernel for this part
         with torch.no_grad():
-            # Received tokens from all other ranks. TODO: use mask instead
-            received = output_splits.sum()
-            print(f"{input_splits=}, {output_splits=}")
-        # TODO: don't use `received`
-        gathered_tokens = token_gather_buf[:received]
-        print(f"After first shuffle: {gathered_tokens.shape=}")
+            offsets = torch.cumsum(tokens_per_expert_group, 0)
+            offsets = offsets.tolist()
+            indices = [
+                torch.arange(0 if i == 0 else offsets[i-1], offsets[i]) for i in range(len(offsets))
+            ]
+            permuted_indices = []
+            m_sizes = []
+            ALIGNMENT = 128
+            pad_pos = -1
+            for e in range(self.experts_per_rank):
+                len_for_e = 0
+                indices_for_e = []
+                for r in range(self.ep_size):
+                    i = r * self.experts_per_rank + e
+                    indices_for_e.append(indices[i])
+                    assert indices[i].shape[0] == tokens_per_expert_group[i]
+                    len_for_e += tokens_per_expert_group[i]
 
-        offsets = torch.cumsum(tokens_per_expert_group, 0)
-        offsets = offsets.tolist()
-        indices = [
-            torch.arange(0 if i == 0 else offsets[i-1], offsets[i]) for i in range(len(offsets))
-        ]
-        permuted_indices = []
-        m_sizes = []
-        ALIGNMENT = 128
-        pad_pos = -1
-        for e in range(self.experts_per_rank):
-            agg_len = 0
-            indices_for_e = []
-            for r in range(self.ep_size):
-                i = r * self.experts_per_rank + e
-                indices_for_e.append(indices[i])
-                assert indices[i].shape[0] == tokens_per_expert_group[i]
-                agg_len += tokens_per_expert_group[i]
+                fill_len = (ALIGNMENT - len_for_e % ALIGNMENT) % ALIGNMENT
+                fill = torch.full((fill_len,), pad_pos, dtype=torch.int32)
+                m_sizes.append(len_for_e + fill_len)
+                indices_for_e.append(fill)
+                permuted_indices.append(torch.cat(indices_for_e))
 
-            fill_len = (ALIGNMENT - agg_len % ALIGNMENT) % ALIGNMENT
-            # fill = torch.arange(pad_pos, pad_pos + fill_len)
-            # pad_pos += fill_len
-            fill = torch.full((fill_len,), pad_pos, dtype=torch.int32)
-            m_sizes.append(agg_len + fill_len)
-            print(f"{e=}, {agg_len=}, {fill_len=}, {m_sizes[-1]=}")
-            print(f"{indices_for_e=}")
-            indices_for_e.append(fill)
-            permuted_indices.append(torch.cat(indices_for_e))
+            permuted_indices = torch.cat(permuted_indices)
+            m_sizes = torch.tensor(m_sizes, dtype=torch.int32, device=topk_ids.device)
 
-        permuted_indices = torch.cat(permuted_indices)
-        # print(f"{self.experts_per_rank=}, {self.ep_size=}")
-        # print(f"{tokens_per_expert_group=}")
-        # print(f"{permuted_indices=}")
-
+        # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
 
-        # Run the grouped GEMM
-        m_sizes = torch.tensor(m_sizes, dtype=torch.int32, device=token_gather_buf.device)
-        print(f"{m_sizes=}")
-        w1 = self.get_parameter("up_proj_weight")
-        hidden_outputs_1 = grouped_gemm_forward(
+        # Run the first grouped GEMM
+        w1 = self.get_parameter("gate_proj_weight")
+        gate_proj = grouped_gemm_forward(
             contig_tokens, w1, m_sizes
         )
-        print(f"After w1: {hidden_outputs_1.shape=}")
-
-        w3 = self.get_parameter("gate_proj_weight")
-        hidden_outputs_3 = grouped_gemm_forward(
-            contig_tokens, w3, m_sizes
-        )
-        print(f"After w3: {hidden_outputs_3.shape=}")
-
-        # Apply activation
-        hidden_outputs = MLP.act_fn(hidden_outputs_1 * hidden_outputs_3)
 
         # Run the second grouped GEMM
+        w3 = self.get_parameter("up_proj_weight")
+        up_proj = grouped_gemm_forward(
+            contig_tokens, w3, m_sizes
+        )
+
+        # Apply activation
+        hidden_outputs = MLP.act_fn(gate_proj) * up_proj
+
+        # Run the third grouped GEMM
         w2 = self.get_parameter("down_proj_weight")
         hidden_outputs = grouped_gemm_forward(
             hidden_outputs, w2, m_sizes
         )
-        print(f"After w2: {hidden_outputs.shape=}")
 
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are
         # going to send them out after expert processing
-        processed_tokens = self.get_gather_buf()  #[: hidden_outputs.shape[0]]
+        processed_tokens = self.get_gather_buf()
 
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs

@@ -23,7 +23,7 @@ from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
-model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 8)
+model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (2, 2)
 # model_id, mesh_shape = "deepseek-ai/deepseek-v3", (8, 4)
 
 
@@ -144,7 +144,7 @@ def create_model(dist_config: DistConfig):
 
 
 @torch.inference_mode()
-def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 2):
+def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 10):
     rank = dist.get_rank()
 
     device_count = torch.cuda.device_count()
