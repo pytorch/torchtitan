@@ -37,6 +37,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
+from indices import generate_permute_indices
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
@@ -442,6 +443,9 @@ class MoEGate(nn.Module):
         return topk_idx, topk_weight
 
 
+ALIGNMENT = 128
+
+
 class MoE(nn.Module):
     """
     A mixed expert module containing shared experts.
@@ -743,44 +747,18 @@ class MoE(nn.Module):
 
         # We need to permute the received tokens so that tokens for the same expert are contiguous.
         # This part prepares a 1D tensor `permuted_indices` for such permutation.
-        # TODO: write a kernel for this part
+        # This part doesn't need gradient.
         with torch.no_grad():
-            # Prefix sum to get the start indices
-            offsets = torch.cumsum(tokens_per_expert_group, 0)
-            offsets = offsets.tolist()
-            # Create indices chunk by chunk
-            indices = [
-                torch.arange(0 if i == 0 else offsets[i - 1], offsets[i])
-                for i in range(len(offsets))
-            ]
-            permuted_indices = []
-            m_sizes = []
-            # Alignment for token group sizes to be compatible with group GEMM
-            # TODO: to be decreased to 16 or 8
-            ALIGNMENT = 128
-            # Pad -1 (last element) to each chunk so that they meet the alignment requirement
-            pad_pos = -1
-            # For each local expert
-            for e in range(self.experts_per_rank):
-                len_for_e = 0
-                indices_for_e = []
-                # For each remote rank
-                for r in range(self.ep_size):
-                    i = r * self.experts_per_rank + e
-                    # Append the real index chunks
-                    indices_for_e.append(indices[i])
-                    assert indices[i].shape[0] == tokens_per_expert_group[i]
-                    len_for_e += tokens_per_expert_group[i]
-                # Prepare padding
-                fill_len = (ALIGNMENT - len_for_e % ALIGNMENT) % ALIGNMENT
-                fill = torch.full((fill_len,), pad_pos, dtype=torch.int32)
-                indices_for_e.append(fill)
-                # The group's token length is the sum of the real tokens and the padding
-                m_sizes.append(len_for_e + fill_len)
-                permuted_indices.append(torch.cat(indices_for_e))
-
-            permuted_indices = torch.cat(permuted_indices)
-            m_sizes = torch.tensor(m_sizes, dtype=torch.int32, device=topk_ids.device)
+            permuted_indices, m_sizes = generate_permute_indices(
+                tokens_per_expert_group,
+                self.experts_per_rank,
+                self.ep_size,
+                token_gather_buf.shape[0],
+                ALIGNMENT,
+            )
+            # TODO: this is unnecessary, we can just use `permuted_indices`
+            # directly, after group gemm supports longer buffer length.
+            permuted_indices = permuted_indices[: m_sizes.sum()]
 
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
