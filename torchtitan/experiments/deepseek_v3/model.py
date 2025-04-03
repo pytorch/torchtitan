@@ -42,7 +42,9 @@ from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
-from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr.mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr.mg_grouped_gemm import (
+    grouped_gemm_forward,
+)
 
 # Get model parallel subgroup by name:
 # e.g. "pp", "ep", None
@@ -695,7 +697,6 @@ class MoE(nn.Module):
         )
         return final_out
 
-
     def moe_on_device(self, x, topk_ids, topk_weight):
         # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
@@ -749,7 +750,8 @@ class MoE(nn.Module):
             offsets = offsets.tolist()
             # Create indices chunk by chunk
             indices = [
-                torch.arange(0 if i == 0 else offsets[i-1], offsets[i]) for i in range(len(offsets))
+                torch.arange(0 if i == 0 else offsets[i - 1], offsets[i])
+                for i in range(len(offsets))
             ]
             permuted_indices = []
             m_sizes = []
@@ -785,24 +787,18 @@ class MoE(nn.Module):
 
         # Run the first grouped GEMM
         w1 = self.get_parameter("gate_proj_weight")
-        gate_proj = grouped_gemm_forward(
-            contig_tokens, w1, m_sizes
-        )
+        gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
 
         # Run the second grouped GEMM
         w3 = self.get_parameter("up_proj_weight")
-        up_proj = grouped_gemm_forward(
-            contig_tokens, w3, m_sizes
-        )
+        up_proj = grouped_gemm_forward(contig_tokens, w3, m_sizes)
 
         # Apply activation
         hidden_outputs = MLP.act_fn(gate_proj) * up_proj
 
         # Run the third grouped GEMM
         w2 = self.get_parameter("down_proj_weight")
-        hidden_outputs = grouped_gemm_forward(
-            hidden_outputs, w2, m_sizes
-        )
+        hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
 
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are
