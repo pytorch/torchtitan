@@ -25,7 +25,7 @@ class FlexAttention(torch.nn.Module):
     )
     compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     used_attn_mask_types: ClassVar[set[str]] = set()
-    # Attention mask type to the created (id(batch), BlockMask).
+    # Attention mask type to the created BlockMask.
     # This allows us to keep track the created block masks for each
     # new batch. We will use this to update the block mask when a
     # new batch is created. This also allows user to create different
@@ -48,15 +48,15 @@ class FlexAttention(torch.nn.Module):
         block_mask = FlexAttention.block_masks[self.attn_mask_type]
         return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
 
-    @classmethod
-    def _get_causal_mask_fn(cls) -> Callable:
+    @staticmethod
+    def _get_causal_mask_fn() -> Callable:
         def causal_mask(b, h, q_idx, kv_idx):
             return q_idx >= kv_idx
 
         return causal_mask
 
-    @classmethod
-    def _get_block_causal_mask_fn(cls, batch: torch.Tensor, eos_id: int) -> Callable:
+    @staticmethod
+    def _get_block_causal_mask_fn(batch: torch.Tensor, eos_id: int) -> Callable:
         mask = batch == eos_id
         mask[:, -1] = True
         acc_mask = torch.cumsum(torch.where(mask, 1, 0).flatten(), dim=0)
