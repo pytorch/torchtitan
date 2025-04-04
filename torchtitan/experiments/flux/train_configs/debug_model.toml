@@ -21,7 +21,7 @@ enable_wandb = false
 
 [model]
 name = "flux"
-flavor = "flux-dev"
+flavor = "flux-debug"
 norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 # test tokenizer.model, for debug purpose only
 # tokenizer_path = "./tests/assets/test_tiktoken.model"
@@ -40,7 +40,7 @@ decay_type = "linear"
 lr_min = 0.0
 
 [training]
-batch_size = 2
+batch_size = 32
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
 steps = 10
