@@ -63,7 +63,7 @@ class TestFluxDataLoader:
 
             for i in range(0, num_steps):
                 input_data, labels = next(dl)
-                print(f"Step {i} image size: {input_data['image'].shape}")
+                print(f"Step {i} image size: {labels.shape}")
                 if torch_profiler:
                     torch_profiler.step()
                 if memory_profiler:

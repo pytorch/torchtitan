@@ -86,7 +86,7 @@ class TrainSpec:
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
     build_dataloader_fn: DataLoaderBuilder
-    build_tokenizer_fn: TokenizerBuilder
+    build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
 

@@ -11,8 +11,8 @@ import torch
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.experiments.flux.model.modules.autoencoder import load_ae
-from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
+from torchtitan.experiments.flux.model.autoencoder import load_ae
+from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.utils import predict_noise, preprocess_flux_data
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer

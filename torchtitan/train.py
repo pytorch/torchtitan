@@ -11,11 +11,11 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 
-from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -125,7 +125,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # build dataloader
-        tokenizer = self.train_spec.build_tokenizer_fn(job_config)
+        tokenizer = (
+            self.train_spec.build_tokenizer_fn(job_config)
+            if self.train_spec.build_tokenizer_fn is not None
+            else None
+        )
 
         # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
         # dataloader must be changed.

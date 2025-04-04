@@ -13,9 +13,10 @@ from PIL import ExifTags, Image
 
 from torch import Tensor
 
+from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
+from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
+
 from torchtitan.experiments.flux.model.model import FluxModel
-from torchtitan.experiments.flux.model.modules.autoencoder import AutoEncoder
-from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.sampling import get_schedule
 
 

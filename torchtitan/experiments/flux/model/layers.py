@@ -12,7 +12,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
-from torchtitan.experiments.flux.math import attention, rope
+from torchtitan.experiments.flux.model.math import attention, rope
 
 
 class EmbedND(nn.Module):

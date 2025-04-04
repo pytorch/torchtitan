@@ -12,8 +12,8 @@ from torch import nn, Tensor
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 
-from torchtitan.experiments.flux.model.modules.autoencoder import AutoEncoderParams
-from torchtitan.experiments.flux.model.modules.layers import (
+from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
+from torchtitan.experiments.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,

@@ -20,19 +20,19 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         "--encoder.t5_encoder",
         type=str,
         default="google/t5-v1_1-small",
-        help="T5 encoder to use, hugging face model name.",
+        help="T5 encoder to use, HuggingFace model name.",
     )
     parser.add_argument(
         "--encoder.clip_encoder",
         type=str,
         default="openai/clip-vit-large-patch14",
-        help="Clip encoder to use, hugging face model name.",
+        help="Clip encoder to use, HuggingFace model name.",
     )
     parser.add_argument(
         "--encoder.encoder_dtype",
         type=torch.dtype,
         default=torch.bfloat16,
-        help="Where to load the encoder, cpu or cuda.",
+        help="Which dtype to load for autoencoder. ",
     )
     parser.add_argument(
         "--encoder.max_t5_encoding_len",

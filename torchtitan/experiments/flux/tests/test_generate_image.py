@@ -12,13 +12,10 @@ import torch
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
-from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs
+from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams, load_ae
+from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 
-from torchtitan.experiments.flux.model.modules.autoencoder import (
-    AutoEncoderParams,
-    load_ae,
-)
-from torchtitan.experiments.flux.model.modules.hf_embedder import FluxEmbedder
+from torchtitan.experiments.flux.model.model import FluxModel, FluxModelArgs
 from torchtitan.experiments.flux.utils import (
     generate_images,
     preprocess_flux_data,

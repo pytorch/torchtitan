@@ -4,8 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+
+import numpy as np
+
+import torch
 
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
@@ -25,41 +31,51 @@ from torchvision import transforms
 
 def _process_cc12m_image(
     img: Image.Image,
-    img_height: int = 256,
-    img_width: int = 256,
-) -> Image.Image:
+    output_size: int = 256,
+) -> Optional[torch.Tensor]:
     """Process CC12M image to the desired size."""
 
-    # width, height = img.size
-    # if width >= height:
-    #     # resize height to be equal to output_size, then crop
-    #     new_width, new_height = math.ceil(output_size / height * width), output_size
-    #     img = img.resize((new_width, new_height))
-    #     left = random.randint(0, new_width - output_size)
-    #     resized_img = img.crop((left, 0, left + output_size, output_size))
-    # else:
-    #     # resize width to be equal to output_size, the crop
-    #     new_width, new_height = (
-    #         output_size,
-    #         math.ceil(output_size / width * height),
-    #     )
-    #     img = img.resize((new_width, new_height))
-    #     lower = random.randint(0, new_width - output_size)
-    #     resized_img = img.crop((0, lower, output_size, lower + output_size))
+    width, height = img.size
+    # Skip low resolution images
+    if width < output_size or height < output_size:
+        return None
 
-    # assert resized_img.size[0] == resized_img.size[1] == output_size
+    if width >= height:
+        # resize height to be equal to output_size, then crop
+        new_width, new_height = math.ceil(output_size / height * width), output_size
+        img = img.resize((new_width, new_height))
+        left = random.randint(0, new_width - output_size)
+        resized_img = img.crop((left, 0, left + output_size, output_size))
+    else:
+        # resize width to be equal to output_size, the crop
+        new_width, new_height = (
+            output_size,
+            math.ceil(output_size / width * height),
+        )
+        img = img.resize((new_width, new_height))
+        lower = random.randint(0, new_width - output_size)
+        resized_img = img.crop((0, lower, output_size, lower + output_size))
 
-    img_transform = transforms.Compose(
-        [
-            transforms.Resize(max(img_width, img_height)),
-            transforms.CenterCrop((img_width, img_height)),
-            transforms.ToTensor(),
-        ]
-    )
+    assert resized_img.size[0] == resized_img.size[1] == output_size
 
-    resized_img = img_transform(img)
+    # Skip grayscale images
+    if resized_img.mode == "L":
+        return None
 
-    return resized_img
+    np_img = np.array(resized_img).transpose((2, 0, 1))
+    tensor_img = torch.tensor(np_img).float() / 255.0
+
+    # NOTE: The following commented code is an alternative way
+    # img_transform = transforms.Compose(
+    #     [
+    #         transforms.Resize(max(output_size, output_size)),
+    #         transforms.CenterCrop((output_size, output_size)),
+    #         transforms.ToTensor(),
+    #     ]
+    # )
+    # tensor_img = img_transform(img)
+
+    return tensor_img
 
 
 def _flux_data_processor(
@@ -78,9 +94,7 @@ def _flux_data_processor(
         output_size: The output image size
 
     """
-    img = _process_cc12m_image(
-        sample["jpg"], img_height=output_size, img_width=output_size
-    )
+    img = _process_cc12m_image(sample["jpg"], output_size=output_size)
     t5_tokens = t5_tokenizer.encode(sample["txt"])
     clip_tokens = clip_tokenizer.encode(sample["txt"])
 
@@ -158,7 +172,6 @@ class FluxDataset(IterableDataset, Stateful):
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
-        # TODO(jianiw): put the two encoders and data in the same device
         self._t5_tokenizer = t5_tokenizer
         self._clip_tokenizer = clip_tokenizer
         self._data_processor = data_processor
@@ -187,10 +200,10 @@ class FluxDataset(IterableDataset, Stateful):
                     sample, self._t5_tokenizer, self._clip_tokenizer, output_size=256
                 )
 
-                # skip image with color channel = 1
-                if sample_dict["image"].shape[0] == 1:
+                # skip low quality image or image with color channel = 1
+                if sample_dict["image"] is None:
                     logger.warning(
-                        f"Skipped sample {sample["__key__"]} because image has 1 color channel"
+                        f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
                     )
                     continue
 
@@ -223,7 +236,7 @@ def build_flux_dataloader(
     dp_world_size: int,
     dp_rank: int,
     job_config: JobConfig,
-    tokenizer: FluxTokenizer,  # This parameter is not used, keep it for backward compatibility
+    tokenizer: FluxTokenizer,  # This parameter is not used, keep it for compatibility
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
