@@ -30,7 +30,8 @@ def generate_split_points(
     layers_per_stage: Optional[int],
     pp_dim: int,
     num_layers: int,
-    input_output_weight: int = 1,
+    input_weight: int = 1,
+    output_weight: int = 1,
 ) -> list[str]:
     """
     Generate a list of split points based on the number of layers and
@@ -73,25 +74,35 @@ def generate_split_points(
         if total_stages > num_layers:
             raise ValueError("Total stages cannot be greater than the number of layers")
 
-    effective_num_layers = num_layers + (2 * input_output_weight)
+    # Calculate effective number of layers including input and output weights
+    effective_num_layers = num_layers + input_weight + output_weight
     base_layers_per_stage = effective_num_layers // total_stages
-    extra_layers = effective_num_layers % total_stages
 
-    splits = []
-    current_layer = 0
+    splits = [""] * (total_stages - 1)
+    current_layer_index = 0
 
-    for i in range(total_stages - 1):
-        if i == 0:
-            # First stage gets less layers than its peer
-            current_layer += base_layers_per_stage - input_output_weight
-        elif i == total_stages - 2:
-            # Last stage gets less layers than its peer
-            current_layer += base_layers_per_stage + input_output_weight
-        else:
-            # Middle stages get an extra layer if there are any remaining
-            current_layer += base_layers_per_stage + (1 if extra_layers > 0 else 0)
-            extra_layers = max(0, extra_layers - 1)
-        splits.append("layers." + str(current_layer))
+    # First stage
+    layers_on_first_stage = max(0, base_layers_per_stage - input_weight)
+    current_layer_index += layers_on_first_stage
+    splits[0] = "layers." + str(current_layer_index)
+
+    # Last stage
+    layers_on_last_stage = max(0, base_layers_per_stage - output_weight)
+    splits[-1] = "layers." + str(num_layers - layers_on_last_stage)
+
+    # Middle stages
+    remaining_layers = num_layers - layers_on_first_stage - layers_on_last_stage - 1
+    middle_stages = len(splits) - 2
+    layers_per_middle_stage = remaining_layers // middle_stages
+    # split remainder evenly across middle stages
+    remainder = remaining_layers % middle_stages
+
+    for i in range(1, middle_stages + 1):
+        current_layer_index += layers_per_middle_stage
+        if remainder > 0:
+            current_layer_index += 1
+            remainder -= 1
+        splits[i] = "layers." + str(current_layer_index)
 
     logger.info(
         f"No 'pipeline_parallel_split_points' provided so the generated splits are: {splits} "
