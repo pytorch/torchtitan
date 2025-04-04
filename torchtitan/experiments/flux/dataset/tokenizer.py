@@ -24,7 +24,7 @@ class FluxTokenizer(Tokenizer):
     """
 
     def __init__(self, model_path: str = "t5-small", max_length: int = 77):
-        super().__init__(model_path, from_pretrained=True)
+        super().__init__()
         self._n_words = 8  # TODO(jianiw): check
         self._max_length = max_length
 

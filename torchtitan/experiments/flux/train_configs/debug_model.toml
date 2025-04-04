@@ -1,7 +1,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "Flux1.1-dev model"
+description = "Flux debug model"
 print_args = false
 use_for_integration_test = true
 
