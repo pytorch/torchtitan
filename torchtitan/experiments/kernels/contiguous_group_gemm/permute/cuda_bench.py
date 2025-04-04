@@ -3,14 +3,28 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import os
+import sys
+
+import torch
+
+# Add PyTorch's library path to system path
+torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "../../../")
+os.environ["LD_LIBRARY_PATH"] = (
+    f"{torch_lib_path}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+)
 
 import time
 
 # Import our CUDA extension
+# note - requires torch to go first...this may be another way:
+# export LD_LIBRARY_PATH=$(python -c "import torch; print(torch.__path__[0])")/../../../:$LD_LIBRARY_PATH
+
 import moe_permutation
 
 import numpy as np
-import torch
+
+# import torch
 
 
 def compute_permutation_indices_pytorch(

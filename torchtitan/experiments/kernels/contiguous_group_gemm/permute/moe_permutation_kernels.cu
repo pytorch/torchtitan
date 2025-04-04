@@ -31,6 +31,39 @@ __global__ void compute_offsets_kernel(
   }
 }
 
+// CUDA kernel to calculate expert sizes
+__global__ void calculate_expert_sizes_kernel(
+    int *m_sizes,                 // output: expert sizes [experts_per_rank]
+    int *total_size,              // output: total size (single value)
+    const int *tokens_per_expert, // input: tokens per expert [n_routed_experts]
+    int n_routed_experts,         // total number of experts
+    int experts_per_rank,         // number of experts per rank
+    int ep_size,                  // number of expert parallel ranks
+    int alignment                 // alignment requirement
+) {
+  int local_expert_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (local_expert_idx < experts_per_rank) {
+    int e_tokens_total = 0;
+
+    // Calculate total tokens for this expert (across all ranks)
+    for (int r = 0; r < ep_size; r++) {
+      int e_idx = r * experts_per_rank + local_expert_idx;
+      if (e_idx < n_routed_experts) {
+        e_tokens_total += tokens_per_expert[e_idx];
+      }
+    }
+
+    // Add padding for alignment
+    int padded_size =
+        e_tokens_total + (alignment - e_tokens_total % alignment) % alignment;
+    m_sizes[local_expert_idx] = padded_size;
+
+    // Atomically add to total size
+    atomicAdd(total_size, padded_size);
+  }
+}
+
 // CUDA kernel to compute permutation indices
 __global__ void compute_permutation_indices_kernel(
     int *permuted_indices, // output: permuted indices [total_tokens]
@@ -153,6 +186,7 @@ std::tuple<torch::Tensor, torch::Tensor>
 compute_permutation_indices_cuda(torch::Tensor tokens_per_expert_group,
                                  int experts_per_rank, int ep_size,
                                  int alignment = 128, int pad_value = -1) {
+
   // Ensure input is on CUDA
   TORCH_CHECK(tokens_per_expert_group.device().is_cuda(),
               "tokens_per_expert_group must be a CUDA tensor");
@@ -162,7 +196,7 @@ compute_permutation_indices_cuda(torch::Tensor tokens_per_expert_group,
   auto device = tokens_per_expert_group.device();
   auto n_routed_experts = tokens_per_expert_group.size(0);
 
-  // Compute offsets (using a separate CUDA kernel)
+  // 1. Compute offsets (using a separate CUDA kernel)
   auto offsets = torch::zeros({n_routed_experts + 1},
                               torch::dtype(torch::kInt32).device(device));
 
@@ -171,25 +205,36 @@ compute_permutation_indices_cuda(torch::Tensor tokens_per_expert_group,
                                    tokens_per_expert_group.data_ptr<int>(),
                                    n_routed_experts);
 
-  // Estimate total tokens (including padding)
-  auto total_tokens_tensor = tokens_per_expert_group.sum();
-  int total_tokens = total_tokens_tensor.item<int>();
-
-  // Add potential padding (worst case: each expert needs alignment-1 padding)
-  int total_tokens_padded = total_tokens + experts_per_rank * alignment;
-
-  // Allocate output tensors
-  auto permuted_indices =
-      torch::full({total_tokens_padded}, pad_value,
-                  torch::dtype(torch::kInt32).device(device));
-  auto m_sizes = torch::empty({experts_per_rank},
+  // 2. Calculate expert sizes on GPU
+  auto m_sizes = torch::zeros({experts_per_rank},
                               torch::dtype(torch::kInt32).device(device));
 
-  // Launch kernel
+  // Launch a kernel to calculate expert sizes
   const int threads_per_block = 128;
   const int blocks =
       (experts_per_rank + threads_per_block - 1) / threads_per_block;
 
+  // Calculate total size needed
+  int total_size = 0;
+
+  // Create a temporary buffer on GPU to hold the total size
+  auto d_total_size =
+      torch::zeros({1}, torch::dtype(torch::kInt32).device(device));
+
+  // Launch kernel to calculate sizes and total size
+  calculate_expert_sizes_kernel<<<blocks, threads_per_block>>>(
+      m_sizes.data_ptr<int>(), d_total_size.data_ptr<int>(),
+      tokens_per_expert_group.data_ptr<int>(), n_routed_experts,
+      experts_per_rank, ep_size, alignment);
+
+  // Copy total size back to host (single value)
+  total_size = d_total_size.item<int>();
+
+  // Allocate output tensors with exact size
+  auto permuted_indices = torch::full(
+      {total_size}, pad_value, torch::dtype(torch::kInt32).device(device));
+
+  // 3. put it all together
   compute_permutation_indices_kernel<<<blocks, threads_per_block>>>(
       permuted_indices.data_ptr<int>(), m_sizes.data_ptr<int>(),
       tokens_per_expert_group.data_ptr<int>(), offsets.data_ptr<int>(),
