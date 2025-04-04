@@ -35,7 +35,10 @@ class TikTokenizer(Tokenizer):
     pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # noqa: E501, B950
 
     def __init__(self, model_path: str):
-        super().__init__(model_path)
+        super().__init__()
+        assert os.path.exists(
+            model_path
+        ), f"The tokenizer path does not exist: {model_path}"
         assert os.path.isfile(model_path), model_path
 
         mergeable_ranks = load_tiktoken_bpe(model_path)
