@@ -506,15 +506,16 @@ class JobConfig:
             """,
         )
         self.parser.add_argument(
-            "--parallelism.pipeline_parallel_microbatches",
+            "--parallelism.pipeline_parallel_microbatch_size",
             type=int,
-            default=None,
+            default=1,
             help="""
-                How many microbatches to split the global training batch into when using pipeline parallelism.
+                The size of each pipeline parallel microbatch (default 1).
 
-                The global training batch size must be evenly divisible by the number of microbatches.
+                This value is used to compute the total number of microbatches by dividing batch_size with
+                pipeline_parallel_microbatch_size.
 
-                The default value will be the number of pipeline stages, if unspecified.
+                The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
             """,
         )
         self.parser.add_argument(

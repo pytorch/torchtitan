@@ -144,7 +144,6 @@ def build_test_list():
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    "--parallelism.pipeline_parallel_microbatches 8",
                 ],
             ],
             "PP zero bubble test (v shaped)",
@@ -268,7 +267,6 @@ def build_test_list():
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    "--parallelism.pipeline_parallel_microbatches 8",
                 ],
             ],
             "PP with custom pipeline schedule loaded from CSV file",
