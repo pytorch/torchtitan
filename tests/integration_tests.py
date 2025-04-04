@@ -182,6 +182,12 @@ def build_test_list():
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                 ],
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--parallelism.pipeline_parallel_layers_per_stage 4",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
             ],
             "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
@@ -245,6 +251,11 @@ def build_test_list():
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                ],
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.pipeline_parallel_layers_per_stage 1",
                 ],
             ],
             "PP looped 1F1B test",
