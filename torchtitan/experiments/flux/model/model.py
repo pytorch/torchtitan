@@ -49,8 +49,9 @@ class FluxModelArgs(BaseModelArgs):
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
+        nparams = sum(p.numel() for p in model.parameters())
         logger.warning("FLUX model haven't implement get_nparams_and_flops() function")
-        return 0, 1
+        return nparams, 1
 
 
 class FluxModel(nn.Module, ModelProtocol):

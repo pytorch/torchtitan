@@ -36,6 +36,9 @@ class TikTokenizer(Tokenizer):
 
     def __init__(self, model_path: str):
         super().__init__()
+        assert os.path.exists(
+            model_path
+        ), f"The tokenizer path does not exist: {model_path}"
         assert os.path.isfile(model_path), model_path
 
         mergeable_ranks = load_tiktoken_bpe(model_path)

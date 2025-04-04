@@ -11,4 +11,7 @@ Run the following command to train the model:
 ```
 
 ## TODO
-- [ ] Support for multiple GPUs is comming soon (FSDP, etc)
+- [ ] Supporting for multiple GPUs is comming soon (FSDP, etc)
+- [ ] Implement test cases in CI for FLUX model
+- [ ] More parallesim support (Tensor Parallelism, Context Parallelism, etc)
+- [ ] Support for distributed checkpointing and loading
