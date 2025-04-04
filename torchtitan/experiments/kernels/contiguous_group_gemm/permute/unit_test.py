@@ -7,6 +7,53 @@ from typing import List, Tuple
 import numpy as np
 import torch
 
+
+"""
+perf and current failures:
+
+Performance Test:
+Test data: 8x512 sequence, 1024 dims, 16 experts
+Total tokens: 8192
+PyTorch: 136.76 ± 1.29 ms
+CUDA:    0.14 ± 0.05 ms
+Speedup: 951.89x
+
+======================================================================
+ERROR: test_various_alignments (unit_test.TestMoEPermutationCUDA.test_various_alignments)
+Test with various alignment values
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/data/users/less/torchtitan/torchtitan/experiments/kernels/contiguous_group_gemm/permute/unit_test.py", line 436, in test_various_alignments
+    torch.all(ref_indices[valid_mask] == cuda_indices[valid_mask]),
+                                         ~~~~~~~~~~~~^^^^^^^^^^^^
+IndexError: The shape of the mask [16] at index 0 does not match the shape of the indexed tensor [24] at index 0
+
+======================================================================
+FAIL: test_compute_permutation_indices_medium (unit_test.TestMoEPermutationCUDA.test_compute_permutation_indices_medium)
+Test compute_permutation_indices with medium-sized inputs
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/data/users/less/torchtitan/torchtitan/experiments/kernels/contiguous_group_gemm/permute/unit_test.py", line 247, in test_compute_permutation_indices_medium
+    self.assertEqual(
+AssertionError: torch.Size([768]) != torch.Size([1152]) : Indices shape mismatch
+
+======================================================================
+FAIL: test_compute_permutation_indices_small (unit_test.TestMoEPermutationCUDA.test_compute_permutation_indices_small)
+Test compute_permutation_indices with small inputs
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/data/users/less/torchtitan/torchtitan/experiments/kernels/contiguous_group_gemm/permute/unit_test.py", line 203, in test_compute_permutation_indices_small
+    self.assertEqual(
+AssertionError: torch.Size([16]) != torch.Size([24]) : Indices shape mismatch
+
+----------------------------------------------------------------------
+Ran 9 tests in 3.034s
+
+FAILED (failures=2, errors=1)
+
+"""
+
+
 # Add PyTorch's library path to system path
 torch_lib_path = os.path.join(os.path.dirname(torch.__file__), "../../../")
 os.environ["LD_LIBRARY_PATH"] = (
