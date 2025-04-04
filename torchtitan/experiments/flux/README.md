@@ -1,4 +1,4 @@
-# Flux model in torchtitan
+# FLUX model in torchtitan
 
 ## Overview
 
@@ -10,4 +10,5 @@ Run the following command to train the model:
 
 ```
 
-## Code Structure
+## TODO
+- [ ] Support for multiple GPUs is comming soon (FSDP, etc)
