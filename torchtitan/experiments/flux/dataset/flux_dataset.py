@@ -26,8 +26,6 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.tools.logging import logger
 
-from torchvision import transforms
-
 
 def _process_cc12m_image(
     img: Image.Image,
@@ -236,7 +234,8 @@ def build_flux_dataloader(
     dp_world_size: int,
     dp_rank: int,
     job_config: JobConfig,
-    tokenizer: FluxTokenizer,  # This parameter is not used, keep it for compatibility
+    # This parameter is not used, keep it for compatibility
+    tokenizer: FluxTokenizer | None,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""

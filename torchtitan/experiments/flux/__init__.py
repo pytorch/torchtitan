@@ -10,7 +10,6 @@ from torchtitan.components.loss import build_mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.dataset.tokenizer import build_flux_t5_tokenizer
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.parallelize_flux import parallelize_flux
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec

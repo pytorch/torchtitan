@@ -13,7 +13,13 @@ from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.experiments.flux.utils import predict_noise, preprocess_flux_data
+from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_flux_data,
+    unpack_latents,
+)
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
@@ -42,6 +48,67 @@ class FluxTrainer(Trainer):
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
             dtype=self._dtype
         )
+
+    def _predict_noise(
+        self,
+        model: FluxModel,
+        latents: torch.Tensor,
+        clip_encodings: torch.Tensor,
+        t5_encodings: torch.Tensor,
+        timesteps: torch.Tensor,
+        guidance: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Use Flux's flow-matching model to predict the noise in image latents.
+        Args:
+            model (FluxFlowModel): The Flux flow model.
+            latents (Tensor): Image encodings from the Flux autoencoder.
+                Shape: [bsz, 16, latent height, latent width]
+            clip_encodings (Tensor): CLIP text encodings.
+                Shape: [bsz, 768]
+            t5_encodings (Tensor): T5 text encodings.
+                Shape: [bsz, sequence length, 256 or 512]
+            timesteps (Tensor): The amount of noise (0 to 1).
+                Shape: [bsz]
+            guidance (Optional[Tensor]): The guidance value (1.5 to 4) if guidance-enabled model.
+                Shape: [bsz]
+                Default: None
+            model_ctx (ContextManager): Optional context to wrap the model call (e.g. for activation offloading)
+                Default: nullcontext
+        Returns:
+            Tensor: The noise prediction.
+                Shape: [bsz, 16, latent height, latent width]
+        """
+        bsz, _, latent_height, latent_width = latents.shape
+
+        POSITION_DIM = 3  # constant for Flux flow model
+        with torch.no_grad():
+            # Create positional encodings
+            latent_pos_enc = create_position_encoding_for_latents(
+                bsz, latent_height, latent_width, POSITION_DIM
+            )
+            text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
+
+            # Convert latent into a sequence of patches
+            latents = pack_latents(latents)
+
+        # Predict noise
+        latent_noise_pred = model(
+            img=latents,
+            img_ids=latent_pos_enc.to(latents),
+            txt=t5_encodings.to(latents),
+            txt_ids=text_pos_enc.to(latents),
+            y=clip_encodings.to(latents),
+            timesteps=timesteps.to(latents),
+            guidance=guidance.to(latents) if guidance is not None else None,
+        )
+
+        # Convert sequence of patches to latent shape
+        latent_noise_pred = unpack_latents(
+            latent_noise_pred, latent_height, latent_width
+        )
+
+        return latent_noise_pred
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         # generate t5 and clip
@@ -84,7 +151,7 @@ class FluxTrainer(Trainer):
         # TODO(jianiw): model_parts will be wrapped by FSDP, which will cacluate
         model_parts[0] = model_parts[0].to(dtype=self._dtype)
 
-        pred = predict_noise(
+        pred = self._predict_noise(
             model_parts[0],
             noisy_latents,
             clip_encodings,

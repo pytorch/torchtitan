@@ -385,5 +385,10 @@ def load_ae(
     if ckpt_path is not None:
         sd = load_sft(ckpt_path, device=str(device))
         missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
-        # print_load_warning(missing, unexpected)
+        if len(missing) > 0:
+            print(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
+        if len(unexpected) > 0:
+            print(
+                f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected)
+            )
     return ae.to(dtype=dtype)
