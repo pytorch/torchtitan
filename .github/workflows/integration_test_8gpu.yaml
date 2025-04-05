@@ -21,7 +21,7 @@ jobs:
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
-      gpu-arch-version: "12.4"
+      gpu-arch-version: "12.6"
       # This image is faster to clone than the default, but it lacks CC needed by triton
       # (1m25s vs 2m37s).
       docker-image: torchtitan-ubuntu-20.04-clang12
@@ -36,7 +36,7 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
+        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
         python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
