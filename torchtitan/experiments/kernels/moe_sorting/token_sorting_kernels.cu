@@ -24,6 +24,7 @@ using namespace moe_kernel_utils;
 //
 
 // Sequential exclusive prefix sum
+// for small num experts .. < 64?
 __device__ void
 sequential_prefix_sum(int *offsets,      // output: exclusive prefix sum
                       const int *counts, // input: values to sum
@@ -32,6 +33,40 @@ sequential_prefix_sum(int *offsets,      // output: exclusive prefix sum
   for (int i = 0; i < num_elements; i++) {
     offsets[i] = running_sum;
     running_sum += counts[i];
+  }
+}
+
+// Parallel exclusive prefix sum  - uses up and down sweep (binary tree style)
+// should be faster for larger num experts ala maybe > 64
+// TODO - time this and determine threshold to switch between
+__device__ void
+parallel_prefix_sum(int *offsets, // output and input from shared memory
+                    int num_elements, int thread_id) {
+  // up sweep (reduction)
+  for (int stride = 1; stride < num_elements; stride *= 2) {
+    int index = (thread_id + 1) * 2 * stride - 1; // 2i-1
+    if (index < num_elements) {
+      offsets[index] += offsets[index - stride];
+    }
+  }
+  __syncthreads();
+
+  // set last elem to zero
+  if (thread_id == 0) {
+    offsets[num_elements - 1] = 0;
+  }
+  __syncthreads();
+
+  // Down sweep (distribute values)
+  // int temp = 0;
+  for (int stride = num_elements / 2; stride > 0; stride /= 2) {
+    int index = (thread_id + 1) * 2 * stride - 1;
+    if (index < num_elements) {
+      int temp = offsets[index];
+      offsets[index] += offsets[index - stride];
+      offsets[index - stride] = temp;
+    }
+    __syncthreads();
   }
 }
 
