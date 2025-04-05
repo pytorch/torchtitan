@@ -23,6 +23,18 @@ using namespace moe_kernel_utils;
 // kernels for sorting tokens by expert assignment
 //
 
+// Sequential exclusive prefix sum
+__device__ void
+sequential_prefix_sum(int *offsets,      // output: exclusive prefix sum
+                      const int *counts, // input: values to sum
+                      int num_elements) {
+  int running_sum = 0;
+  for (int i = 0; i < num_elements; i++) {
+    offsets[i] = running_sum;
+    running_sum += counts[i];
+  }
+}
+
 __global__ void sort_tokens_by_expert_kernel(
 
     )
