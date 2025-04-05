@@ -10,7 +10,8 @@ import inspect
 import os
 import sys
 from collections import defaultdict
-from typing import Tuple, Union
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -33,7 +34,7 @@ def string_list(raw_arg):
     return [s.strip() for s in raw_arg.split(",") if s.strip()]
 
 
-def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
+def check_string_list_argument(args_dict: dict[str, Any], fullargname: str):
     section, name = fullargname.split(".")
     # Split string list which are still raw strings.
     if (
@@ -43,6 +44,153 @@ def check_string_list_argument(args_dict: dict[str, any], fullargname: str):
     ):
         sec = args_dict[section]
         sec[name] = string_list(sec[name])
+
+
+@dataclass
+class Job:
+    config_file: str | None = None
+    dump_folder: str = "./torchtitan/outputs"
+    description: str = "default job"
+    use_for_integration_test: bool = False
+    print_args: bool = False
+
+
+@dataclass
+class Profiling:
+    enable_profiling: bool = False
+    save_traces_folder: str = "profile_traces"
+    profile_freq: int = 10
+    enable_memory_snapshot: bool = False
+    save_memory_snapshot_folder: str = "memory_snapshot"
+
+
+@dataclass
+class Metrics:
+    log_freq: int = 10
+    enable_tensorboard: bool = False
+    disable_color_printing: bool = False
+    save_tb_folder: str = "tb"
+    save_for_all_ranks: bool = False
+    enable_wandb: bool = False
+
+
+@dataclass
+class Model:
+    name: str = "llama"
+    flavor: str = "debugmodel"
+    norm_type: str = "rmsnorm"
+    use_flex_attn: bool = False
+    attn_mask_type: str = "causal"
+    tokenizer_path: str = "./assets/tokenizer/original/tokenizer.model"
+    converters: list = field(default_factory=list)
+    print_after_conversion: bool = False
+
+
+@dataclass
+class Optimizer:
+    name: str = "AdamW"
+    lr: float = 8e-4
+    eps: float = 1e-8
+    implementation: str = "fused"
+    early_step_in_backward: bool = False
+
+
+@dataclass
+class LRScheduler:
+    warmup_steps: int = 200
+    decay_ratio: float | None = None
+    decay_type: str = "linear"
+    lr_min: float = 0.0
+
+
+@dataclass
+class Training:
+    dataset: str = "c4_test"
+    dataset_path: str | None = None
+    batch_size: int = 8
+    seq_len: int = 2048
+    max_norm: float = 1.0
+    steps: int = 10000
+    enable_cpu_offload: bool = False
+    mixed_precision_param: str = "bfloat16"
+    mixed_precision_reduce: str = "float32"
+    compile: bool = False
+    gc_freq: int = 50
+    seed: int | None = None
+    deterministic: bool = False
+
+
+@dataclass
+class Parallelism:
+    data_parallel_replicate_degree: int = 1
+    enable_compiled_autograd: bool = False
+    data_parallel_shard_degree: int = -1
+    fsdp_reshard_after_forward: str = "default"
+    tensor_parallel_degree: int = 1
+    disable_loss_parallel: bool = False
+    enable_async_tensor_parallel: bool = False
+    pipeline_parallel_degree: int = 1
+    pipeline_parallel_split_points: list[str] = field(default_factory=list)
+    pipeline_parallel_schedule: str = "1F1B"
+    pipeline_parallel_schedule_csv: str = ""
+    pipeline_parallel_microbatches: int | None = None
+    context_parallel_degree: int = 1
+    context_parallel_rotate_method: str = "allgather"
+
+
+@dataclass
+class Checkpoint:
+    enable_checkpoint: bool = False
+    folder: str = "checkpoint"
+    interval: int = 500
+    model_weights_only: bool = False
+    export_dtype: str = "float32"
+    create_seed_checkpoint: bool = False
+    async_mode: str = "disabled"
+    keep_latest_k: int = 10
+    load_step: int = -1
+    exclude_from_loading: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ActivationCheckpoint:
+    mode: str = "selective"
+    selective_ac_option: str = "2"
+
+
+@dataclass
+class Float8:
+    enable_fsdp_float8_all_gather: bool = False
+    precompute_float8_dynamic_scale_for_fsdp: bool = False
+    force_recompute_fp8_weight_in_bwd: bool = False
+    recipe_name: str | None = None
+
+
+@dataclass
+class Comm:
+    init_timeout_seconds: int = 300
+    train_timeout_seconds: int = 100
+    trace_buf_size: int = 20000
+
+
+@dataclass
+class MemoryEstimation:
+    enabled: bool = False
+    disable_fake_mode: bool = False
+
+
+@dataclass
+class FaultTolerance:
+    enable: bool = False
+    replica_id: int = 0
+    group_size: int = 0
+    min_replica_size: int = 1
+
+
+@dataclass
+class Experimental:
+    custom_import: str = ""
+    custom_args_module: str = ""
 
 
 class JobConfig:
@@ -59,13 +207,29 @@ class JobConfig:
 
     Arg parsing semantics:
 
-    Each argument starts with <prefix>_ which is the section name in the toml file
+    Each argument starts with <prefix>. which is the section name in the toml file
     followed by name of the option in the toml file. For ex,
     model.name translates to:
         [model]
         name
     in the toml file
     """
+
+    job: Job
+    profiling: Profiling
+    metrics: Metrics
+    model: Model
+    optimizer: Optimizer
+    lr_scheduler: LRScheduler
+    training: Training
+    parallelism: Parallelism
+    checkpoint: Checkpoint
+    activation_checkpoint: ActivationCheckpoint
+    float8: Float8
+    comm: Comm
+    memory_estimation: MemoryEstimation
+    fault_tolerance: FaultTolerance
+    experimental: Experimental
 
     def __init__(self):
         self.args_dict = None
@@ -336,7 +500,7 @@ class JobConfig:
         )
         self.parser.add_argument(
             "--training.max_norm",
-            type=Union[float, int],
+            type=float,
             default=1.0,
             help="Max norm for gradient clipping",
         )
@@ -859,8 +1023,13 @@ class JobConfig:
         self.args_dict = args_dict
 
         for k, v in args_dict.items():
-            class_type = type(k.title(), (), v)
-            setattr(self, k, class_type())
+            if k in self.__class__.__annotations__:  # Override dataclasses defaults
+                class_type = self.__class__.__annotations__[k]
+                setattr(self, k, class_type(**v))
+            else:
+                # Fallback to dynamic class creation for any new sections
+                class_type = type(k.title(), (), v)
+                setattr(self, k, class_type())
         self._validate_config()
 
     def _args_to_two_level_dict(self, args: argparse.Namespace) -> defaultdict:
@@ -896,7 +1065,7 @@ class JobConfig:
 
     def parse_args_from_command_line(
         self, args_list
-    ) -> Tuple[argparse.Namespace, argparse.Namespace]:
+    ) -> tuple[argparse.Namespace, argparse.Namespace]:
         """
         Parse command line arguments and return the parsed args and the command line only args
         """
