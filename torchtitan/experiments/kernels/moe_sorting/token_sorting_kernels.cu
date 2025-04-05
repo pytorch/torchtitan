@@ -70,12 +70,43 @@ parallel_prefix_sum(int *offsets, // output and input from shared memory
   }
 }
 
-__global__ void sort_tokens_by_expert_kernel(
+//
+// reorder (gather) tokens using sorted indices
+//
+template <template scalar_t>
+__global__ void gather_sorted_tokens_kernel(
+    scalar_t *sorted_tokens,      // output: sorted tokens
+    const scalar_t *input_tokens, // input: original token features
+    cnost int *sorted_indices,    // input:
+    int seq_len,                  // M
+    int hidden_dim                // N
 
-    )
+) {
+  // get global position
+  int token_index = blockIdx.x * blockDim.x + threadIdx.x;
+  int feat_index = blockIdx.y * blockDim.y + threadIdx.y;
 
-    // gather kernel - move tokens to sorted indices
-    template <template scalar_t>
-    __global__ void gather_sorted_tokens_kernel(
-        scalar_t *sorted_tokens, // output: sorted token features
-    )
+  // update to new location
+  if (token_index < seq_len && feat_index < hidden_dim) {
+    int src_index = sorted_indices[token_index];
+    // column_offset = hidden
+    sorted_tokens[token_index * hidden_dim + feat_index] =
+        input_tokens[src_index * hidden_dim + feat_index];
+  }
+}
+
+//
+// Wrapper functions
+//
+
+// main function
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+sort_tokens_by_expert_cuda(torch::Tensor topk_ids, torch::Tensor x,
+                           int n_experts, bool use_parallel_scan = false) {
+  auto device = topk_ids.device();
+  int seq_len = topk_ids.size(0);
+  int k = topk_ids.size(1);
+  int hidden_dim = x.size(1);
+
+  // TODO...
+}
