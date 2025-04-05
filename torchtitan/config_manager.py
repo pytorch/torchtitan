@@ -11,7 +11,7 @@ import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -78,9 +78,9 @@ class Metrics:
 class Model:
     name: str = "llama"
     flavor: str = "debugmodel"
-    norm_type: str = "rmsnorm"
+    norm_type: Literal["layernorm", "np_layernorm", "rmsnorm"] = "rmsnorm"
     use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
+    attn_mask_type: Literal["causal", "block_causal"] = "causal"
     tokenizer_path: str = "./assets/tokenizer/original/tokenizer.model"
     converters: list = field(default_factory=list)
     print_after_conversion: bool = False
@@ -91,7 +91,7 @@ class Optimizer:
     name: str = "AdamW"
     lr: float = 8e-4
     eps: float = 1e-8
-    implementation: str = "fused"
+    implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     early_step_in_backward: bool = False
 
 
@@ -99,7 +99,7 @@ class Optimizer:
 class LRScheduler:
     warmup_steps: int = 200
     decay_ratio: float | None = None
-    decay_type: str = "linear"
+    decay_type: Literal["linear", "sqrt", "cosine"] = "linear"
     lr_min: float = 0.0
 
 
@@ -112,8 +112,8 @@ class Training:
     max_norm: float = 1.0
     steps: int = 10000
     enable_cpu_offload: bool = False
-    mixed_precision_param: str = "bfloat16"
-    mixed_precision_reduce: str = "float32"
+    mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
+    mixed_precision_reduce: Literal["float32"] = "float32"
     compile: bool = False
     gc_freq: int = 50
     seed: int | None = None
@@ -125,7 +125,7 @@ class Parallelism:
     data_parallel_replicate_degree: int = 1
     enable_compiled_autograd: bool = False
     data_parallel_shard_degree: int = -1
-    fsdp_reshard_after_forward: str = "default"
+    fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
     tensor_parallel_degree: int = 1
     disable_loss_parallel: bool = False
     enable_async_tensor_parallel: bool = False
@@ -144,7 +144,7 @@ class Checkpoint:
     folder: str = "checkpoint"
     interval: int = 500
     model_weights_only: bool = False
-    export_dtype: str = "float32"
+    export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     create_seed_checkpoint: bool = False
     async_mode: str = "disabled"
     keep_latest_k: int = 10
@@ -163,7 +163,7 @@ class Float8:
     enable_fsdp_float8_all_gather: bool = False
     precompute_float8_dynamic_scale_for_fsdp: bool = False
     force_recompute_fp8_weight_in_bwd: bool = False
-    recipe_name: str | None = None
+    recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
 
 
 @dataclass
