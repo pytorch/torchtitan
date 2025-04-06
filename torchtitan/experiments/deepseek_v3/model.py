@@ -44,8 +44,8 @@ from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-    grouped_gemm_forward,
     ALIGN_SIZE_M,
+    grouped_gemm_forward,
 )
 
 # Get model parallel subgroup by name:

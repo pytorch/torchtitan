@@ -56,7 +56,7 @@ def fill_indices(
         (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
     )
     # Analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
-    # In this case, we use a 1D grid where the size is the number of blocks:
+    # In this case, we use a 1D grid where the size is the number of blocks (TODO: bump this value).
     grid = lambda meta: (1,)
     #  Each torch.tensor object is implicitly converted into a pointer to its first element.
     fill_indices_kernel[grid](
@@ -166,9 +166,11 @@ def test():
     )
     max_len = 128
     alignment = 32
-    permuted_indices, m_sizes = generate_permute_indices(
+    # Use the GPU kernel
+    permuted_indices_gpu, m_sizes = generate_permute_indices(
         tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
     )
+    # Use the CPU method
     permuted_indices_cpu, _ = generate_permute_indices(
         tokens_per_expert_group,
         experts_per_rank,
@@ -177,9 +179,16 @@ def test():
         alignment,
         use_cpu=True,
     )
-    assert torch.equal(permuted_indices.cpu(), permuted_indices_cpu)
-    print(permuted_indices)
+    # Check that the results are the same
+    assert torch.equal(permuted_indices_gpu.cpu(), permuted_indices_cpu)
+    assert torch.equal(
+        torch.remainder(m_sizes, alignment),
+        torch.zeros(experts_per_rank, device=device),
+    )
+    # Print the results
+    print(permuted_indices_gpu)
     print(m_sizes)
+    print("Success")
 
 
 if __name__ == "__main__":
