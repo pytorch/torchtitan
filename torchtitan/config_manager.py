@@ -693,6 +693,17 @@ class JobConfig:
             `tensorwise`, `rowwise` and `rowwise_with_gw_hp`.
             """,
         )
+        self.parser.add_argument(
+            "--float8.filter_fqns",
+            type=string_list,
+            default=[],
+            nargs="+",
+            help="""
+            Comma-separated list of fully qualified names of modules to skip applying float8 training to. 
+            nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
+            Example: --float8.module_filter_fqns "attention.wq,attention.wk,attention.wv,output"
+            """,
+        )
 
         # communications library settings
         self.parser.add_argument(
