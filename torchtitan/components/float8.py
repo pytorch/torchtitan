@@ -121,7 +121,9 @@ class Float8Converter(ModelConverter):
         assert isinstance(mod, nn.Linear)
 
         # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
-        dims_multiples_of_16 = mod.weight.shape[0] % 16 == 0 and mod.weight.shape[1] % 16 == 0
+        dims_multiples_of_16 = (
+            mod.weight.shape[0] % 16 == 0 and mod.weight.shape[1] % 16 == 0
+        )
 
         # If the fqn matches any filtered fqn, then we should not convert this module.
         is_filtered_fqn = any(filtered_fqn in fqn for filtered_fqn in self.filter_fqns)

@@ -699,7 +699,7 @@ class JobConfig:
             default=[],
             nargs="+",
             help="""
-            Comma-separated list of fully qualified names of modules to skip applying float8 training to. 
+            Comma-separated list of fully qualified names of modules to skip applying float8 training to.
             nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
             Example: --float8.module_filter_fqns "attention.wq,attention.wk,attention.wv,output"
             """,
