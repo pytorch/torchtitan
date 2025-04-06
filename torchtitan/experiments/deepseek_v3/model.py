@@ -43,8 +43,9 @@ from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
-from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr.mg_grouped_gemm import (
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     grouped_gemm_forward,
+    ALIGN_SIZE_M,
 )
 
 # Get model parallel subgroup by name:
@@ -443,9 +444,6 @@ class MoEGate(nn.Module):
         return topk_idx, topk_weight
 
 
-ALIGNMENT = 128
-
-
 class MoE(nn.Module):
     """
     A mixed expert module containing shared experts.
@@ -754,11 +752,8 @@ class MoE(nn.Module):
                 self.experts_per_rank,
                 self.ep_size,
                 token_gather_buf.shape[0],
-                ALIGNMENT,
+                ALIGN_SIZE_M,
             )
-            # TODO: this is unnecessary, we can just use `permuted_indices`
-            # directly, after group gemm supports longer buffer length.
-            permuted_indices = permuted_indices[: m_sizes.sum()]
 
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]

@@ -144,7 +144,7 @@ class TmaDescriptorHelper:
 
 
 # ======  Autotuning utilities ======
-ALIGN_SIZE_M = 64
+ALIGN_SIZE_M = 128
 
 _NV_CONFIGS = [
     triton.Config(
