@@ -117,8 +117,9 @@ class Float8Converter(ModelConverter):
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
 
-    def _module_filter_fn(self, mod, fqn):
-        assert isinstance(mod, nn.Linear)
+    def _module_filter_fn(self, mod: nn.Module, fqn: str) -> bool:
+        if not isinstance(mod, nn.Linear):
+            return False
 
         # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
         dims_multiples_of_16 = (
