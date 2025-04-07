@@ -49,7 +49,7 @@ def verify_implementations(
     )
 
     # Create random input data
-    torch.manual_seed(42)
+    torch.manual_seed(2020)
     device = torch.device("cuda")
 
     # Generate expert IDs, ensuring they're valid indices
@@ -348,7 +348,7 @@ def create_plots(results_df: pd.DataFrame):
     # For simplicity, fix k=2 and seq_len=2048 for the heatmap
     if 2 in results_df["k"].values and 2048 in results_df["seq_len"].values:
         df_heatmap = results_df[
-            (results_df["k"] == 2) & (results_df["seq_len"] == 2048)
+            (results_df["k"] == 1) & (results_df["seq_len"] == 4096)
         ]
 
         # Create pivot table for heatmap
@@ -363,7 +363,7 @@ def create_plots(results_df: pd.DataFrame):
         # Set labels
         plt.xlabel("Hidden Dimension")
         plt.ylabel("Number of Experts")
-        plt.title("Speedup Heatmap (k=2, seq_len=2048)")
+        plt.title("Speedup Heatmap (k=1, seq_len=4096)")
 
         # Set ticks
         plt.xticks(range(len(heatmap_data.columns)), heatmap_data.columns)
@@ -399,7 +399,7 @@ def main():
     parser.add_argument(
         "--k-values",
         type=str,
-        default="1,2,4",
+        default="1,2,6",
         help="Comma-separated list of k values (experts per token) to test",
     )
     parser.add_argument(
