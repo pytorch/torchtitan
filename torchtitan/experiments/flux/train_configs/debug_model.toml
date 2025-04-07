@@ -6,7 +6,7 @@ print_args = false
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -43,7 +43,7 @@ lr_min = 0.0
 batch_size = 32
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 100
 compile = false
 dataset = "cc12m"
 guidance = 3.5
@@ -56,9 +56,9 @@ max_t5_encoding_len=512
 auto_encoder_path="torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [parallelism]
-data_parallel_replicate_degree = 1
-data_parallel_shard_degree = 1
-fsdp_reshard_after_forward = "default" # default / never / always
+data_parallel_replicate_degree = 1  # DDP
+data_parallel_shard_degree = 4  # FSDP
+fsdp_reshard_after_forward = "never" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1

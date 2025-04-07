@@ -148,8 +148,8 @@ class FluxTrainer(Trainer):
         target = noise - labels
 
         assert len(model_parts) == 1
-        # TODO(jianiw): model_parts will be wrapped by FSDP, which will cacluate
-        model_parts[0] = model_parts[0].to(dtype=self._dtype)
+        # TODO(jianiw): model_parts will be wrapped by FSDP, which will be calculated in bfloat16
+        # model_parts[0] = model_parts[0].to(dtype=self._dtype)
 
         pred = self._predict_noise(
             model_parts[0],
