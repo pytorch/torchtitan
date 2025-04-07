@@ -3,10 +3,16 @@
 ## Overview
 
 ## Usage
+First, download the autoencoder model from HuggingFace with your own access token:
+```bash
+python torchtitan/experiments/flux/scripts/download_autoencoder.py --repo_id black-forest-labs/FLUX.1-dev --ae_path ae.safetensors --hf_token <your_access_token>
 
-Run the following command to train the model:
 ```
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nproc_per_node=1 torchtitan/experiments/flux/train.py --job.config_file torchtitan/experiments/flux/train_configs/debug_model.toml
+This step will download the autoencoder model from HuggingFace and save it to the `assets/autoencoder/ae.safetensors` file.
+
+Run the following command to train the model on a single GPU:
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nproc_per_node=1 torchtitan/experiments/flux/train.py --job.config_file torchtitan/experiments/flux/train_configs/debug_model.toml
 
 ```
 

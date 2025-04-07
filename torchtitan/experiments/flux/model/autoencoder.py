@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 import torch
 from einops import rearrange
-from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
@@ -356,11 +355,8 @@ class AutoEncoder(nn.Module):
 def load_ae(
     ckpt_path: str,
     autoencoder_params: AutoEncoderParams,
-    repo_id: str = "black-forest-labs/FLUX.1-dev",
-    repo_ae: str = "ae.safetensors",
     device: str | torch.device = "cuda",
     dtype=torch.bfloat16,
-    hf_download: bool = True,
 ) -> AutoEncoder:
     """
     Load the autoencoder from the given model name.
@@ -370,17 +366,15 @@ def load_ae(
     Returns:
         AutoEncoder: The loaded autoencoder.
     """
-    if (
-        not os.path.exists(ckpt_path)
-        and repo_id is not None
-        and repo_ae is not None
-        and hf_download
-    ):
-        hf_hub_download(repo_id, repo_ae, local_dir=ckpt_path)
     # Loading the autoencoder
     print("Init AE")
     with torch.device(device):
         ae = AutoEncoder(autoencoder_params)
+
+    if not os.path.exists(ckpt_path):
+        raise ValueError(
+            f"Autoencoder path {ckpt_path} does not exist. Please download it first."
+        )
 
     if ckpt_path is not None:
         sd = load_sft(ckpt_path, device=str(device))

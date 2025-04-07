@@ -53,7 +53,7 @@ seed = 0
 t5_encoder="google/t5-v1_1-small"
 clip_encoder="openai/clip-vit-large-patch14"
 max_t5_encoding_len=512
-auto_encoder_path="assets/autoencoder/ae.safetensors"
+auto_encoder_path="assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [parallelism]
 data_parallel_replicate_degree = 1

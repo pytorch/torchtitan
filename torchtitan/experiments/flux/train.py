@@ -39,8 +39,8 @@ class FluxTrainer(Trainer):
         self.autoencoder = load_ae(
             job_config.encoder.auto_encoder_path,
             model_config.autoencoder_params,
-            "cpu",
-            self._dtype,
+            device="cpu",
+            dtype=self._dtype,
         )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
             dtype=self._dtype
