@@ -17,7 +17,12 @@ setup(
             # include_dirs=["."],  # Include current directory for header files
             extra_compile_args={
                 "cxx": ["-O3"],
-                "nvcc": ["-O3"],
+                "nvcc": [
+                    "-O3",
+                    "-gencode=arch=compute_90a,code=sm_90a",
+                    "--use_fast_math",
+                    "--ptxas-options=-v",
+                ],
             },
         ),
     ],
