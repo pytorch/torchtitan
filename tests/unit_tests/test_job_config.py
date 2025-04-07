@@ -24,7 +24,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
             ]
         )
         assert config.training.steps == 10
@@ -45,7 +45,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
                 "--job.dump_folder",
                 "/tmp/test_tt/",
             ]
@@ -62,7 +62,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
             ]
         )
         assert config.parallelism.pipeline_parallel_split_points == []
@@ -72,7 +72,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
                 "--parallelism.pipeline_parallel_split_points",
                 f"{cmdline_split_str}",
             ]
@@ -132,7 +132,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
             ]
         )
         assert config.checkpoint.exclude_from_loading == []
@@ -142,7 +142,7 @@ class TestJobConfig(unittest.TestCase):
         config.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.toml",
                 "--checkpoint.exclude_from_loading",
                 f"{cmdline_split_str}",
             ]

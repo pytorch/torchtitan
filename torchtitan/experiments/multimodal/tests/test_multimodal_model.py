@@ -6,16 +6,14 @@
 
 import pytest
 import torch
-from torchtitan.models.llama_multimodal import (
+
+from torchtitan.experiments.llama_multimodal import (
     ModelArgs,
     MultimodalDecoder,
     VisionEncoder,
 )
 
-from tests.unit_tests.multimodal_model.test_utils import (
-    fixed_init_model,
-    fixed_init_tensor,
-)
+from .test_utils import fixed_init_model, fixed_init_tensor
 
 
 @pytest.fixture

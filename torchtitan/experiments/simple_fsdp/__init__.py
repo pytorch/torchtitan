@@ -11,7 +11,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
-from torchtitan.models.llama import llama3_configs, pipeline_llama
+from torchtitan.models.llama3 import llama3_configs, pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .model import SimpleFSDPTransformer

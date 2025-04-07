@@ -177,7 +177,7 @@ class JobConfig:
         self.parser.add_argument(
             "--model.name",
             type=str,
-            default="llama",
+            default="llama3",
             help="Which model to train",
         )
         self.parser.add_argument(
