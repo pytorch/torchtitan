@@ -5,255 +5,136 @@
 // LICENSE file in the root directory of this source tree.
 
 /*
- *  Token sorting kernels
- *  sequential and parallel scans
+ * Token sorting for MoE Models
+ *
  */
 
+#include "moe_kernel_utils.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <vector>
 
-#include "moe_kernel_utils.h"
-
-// our utility namespace
+// Our utility namespace
 using namespace moe_kernel_utils;
 
 //
-// kernels for sorting tokens by expert assignment
+//  CUDA Kernels
 //
 
-// Sequential exclusive prefix sum
-// for small num experts .. < 64?
-__device__ void
-sequential_prefix_sum(long *offsets,     // output: exclusive prefix sum
-                      const int *counts, // input: values to sum
-                      int num_elements) {
-  long running_sum = 0;
-  for (int i = 0; i < num_elements; i++) {
-    offsets[i] = running_sum;
-    running_sum += counts[i];
-  }
-}
-
-// Parallel exclusive prefix sum  - uses up and down sweep (binary tree style)
-// should be faster for larger num experts ala maybe > 64
-// TODO - time this and determine threshold to switch between
-__device__ void
-parallel_prefix_sum(long *offsets, // output and input from shared memory
-                    int num_elements, int thread_id) {
-  // up sweep (reduction)
-  for (int stride = 1; stride < num_elements; stride *= 2) {
-    int index = (thread_id + 1) * 2 * stride - 1; // 2i-1
-    if (index < num_elements) {
-      offsets[index] += offsets[index - stride];
-    }
-  }
-  __syncthreads();
-
-  // set last elem to zero
-  if (thread_id == 0) {
-    offsets[num_elements - 1] = 0;
-  }
-  __syncthreads();
-
-  // Down sweep (distribute values)
-  // int temp = 0;
-  for (int stride = num_elements / 2; stride > 0; stride /= 2) {
-    int index = (thread_id + 1) * 2 * stride - 1;
-    if (index < num_elements) {
-      int temp = offsets[index];
-      offsets[index] += offsets[index - stride];
-      offsets[index - stride] = temp;
-    }
-    __syncthreads();
-  }
-}
-
-//
-// Main sorting
-//
-
-__global__ void sort_tokens_by_expert_kernel(
-    long *sorted_indices,    // output: sorted token indices [seq_len]
-    long *tokens_per_expert, // output: number of tokens per expert [n_experts]
-    long *expert_offsets, // output: starting offset for each expert [n_experts]
-    const long *topk_ids, // input: expert assignments [seq_len, k]
-    int seq_len,          // sequence length
-    int n_experts,        // number of experts
-    int k                 // top-k experts per token
+// CUDA kernel to count tokens per expert (PyTorch-compatible)
+__global__ void count_tokens_per_expert_kernel(
+    int *tokens_per_expert, // output:  [n_experts]
+    const int *topk_ids,    // input: expert assignments [seq_len, k]
+    int seq_len, int n_experts,
+    int k // top-k experts per token
 ) {
-  // Use shared memory to track local counts
-  extern __shared__ long s_expert_counts[];
+  extern __shared__ int s_expert_presence[];
 
-  // Initialize shared memory counters
-  for (int i = threadIdx.x; i < n_experts; i += blockDim.x) {
-    s_expert_counts[i] = 0;
-  }
-  __syncthreads();
+  // Process tokens in batches to avoid excessive shared memory usage
+  const int tokens_per_batch = 128; // Process 128 tokens at a time
 
-  // First pass: count tokens per expert in this block
-  for (int token_idx = threadIdx.x + blockIdx.x * blockDim.x;
-       token_idx < seq_len; token_idx += blockDim.x * gridDim.x) {
+  for (int batch_start = 0; batch_start < seq_len;
+       batch_start += tokens_per_batch) {
+    int batch_end = min(batch_start + tokens_per_batch, seq_len);
+    int batch_size = batch_end - batch_start;
 
-    // We only process the first expert assignment for each token
-    long expert_id = topk_ids[token_idx * k];
-    if (expert_id >= 0 && expert_id < n_experts) {
-      atomicAdd(&s_expert_counts[expert_id], 1);
-    }
-  }
-  __syncthreads();
-
-  // Contribute this block's counts to global counts
-  for (int i = threadIdx.x; i < n_experts; i += blockDim.x) {
-    if (s_expert_counts[i] > 0) {
-      atomicAdd(&tokens_per_expert[i], s_expert_counts[i]);
-    }
-  }
-  __syncthreads();
-
-  // Wait for all blocks to finish counting
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    // Compute exclusive prefix sum for offsets (sequential implementation)
-    sequential_prefix_sum(expert_offsets, tokens_per_expert, n_experts);
-  }
-  __syncwarp();
-  __threadfence(); // Ensure offsets are visible to all blocks
-
-  // Second pass: place token indices in the sorted array
-  for (int token_idx = threadIdx.x + blockIdx.x * blockDim.x;
-       token_idx < seq_len; token_idx += blockDim.x * gridDim.x) {
-
-    // We only process the first expert assignment for each token
-    long expert_id = topk_ids[token_idx * k];
-    if (expert_id >= 0 && expert_id < n_experts) {
-      // Get position by atomically incrementing the expert offset
-      long position = atomicAdd(&expert_offsets[expert_id], 1);
-      sorted_indices[position] = token_idx;
-    }
-  }
-}
-
-// CUDA kernel to sort token indices by expert assignment using parallel scan
-__global__ void sort_tokens_parallel_scan_kernel(
-    long *sorted_indices,    // output: sorted token indices [seq_len]
-    long *tokens_per_expert, // output: number of tokens per expert [n_experts]
-    long *expert_offsets, // output: starting offset for each expert [n_experts]
-    const long *topk_ids, // input: expert assignments [seq_len, k]
-    int seq_len,          // sequence length
-    int n_experts,        // number of experts
-    int k,                // top-k experts per token
-    bool use_parallel_scan // whether to use parallel scan
-) {
-  // Use shared memory to track local counts and for scan operation
-  extern __shared__ long shared_mem[];
-  long *s_expert_counts = shared_mem;
-  long *s_scan_workspace = &shared_mem[n_experts];
-
-  // Initialize shared memory counters
-  for (int i = threadIdx.x; i < n_experts; i += blockDim.x) {
-    s_expert_counts[i] = 0;
-  }
-  __syncthreads();
-
-  // First pass: count tokens per expert in this block
-  for (int token_idx = threadIdx.x + blockIdx.x * blockDim.x;
-       token_idx < seq_len; token_idx += blockDim.x * gridDim.x) {
-
-    // We only process the first expert assignment for each token
-    long expert_id = topk_ids[token_idx * k];
-    if (expert_id >= 0 && expert_id < n_experts) {
-      atomicAdd(&s_expert_counts[expert_id], 1);
-    }
-  }
-  __syncthreads();
-
-  // Contribute this block's counts to global counts
-  for (int i = threadIdx.x; i < n_experts; i += blockDim.x) {
-    if (s_expert_counts[i] > 0) {
-      atomicAdd(&tokens_per_expert[i], s_expert_counts[i]);
-    }
-  }
-  __syncthreads();
-
-  // Wait for all blocks to finish counting
-  if (blockIdx.x == 0) {
-    // Copy token counts to scan workspace
-    if (threadIdx.x < n_experts) {
-      s_scan_workspace[threadIdx.x] = tokens_per_expert[threadIdx.x];
+    // For each token, we track which experts are assigned to it
+    for (int i = threadIdx.x; i < batch_size * n_experts; i += blockDim.x) {
+      s_expert_presence[i] = 0;
     }
     __syncthreads();
 
-    if (use_parallel_scan && n_experts >= 64) {
-      // Use parallel scan for larger expert counts
-      parallel_prefix_sum(s_scan_workspace, n_experts, threadIdx.x);
-    } else {
-      // Use sequential scan for smaller expert counts
-      if (threadIdx.x == 0) {
-        sequential_prefix_sum(s_scan_workspace, tokens_per_expert, n_experts);
+    // Mark which experts are assigned to each token
+    for (int token_offset = threadIdx.x; token_offset < batch_size;
+         token_offset += blockDim.x) {
+      int token_idx = batch_start + token_offset;
+
+      for (int j = 0; j < k; j++) {
+        int expert_id = topk_ids[token_idx * k + j];
+        if (expert_id >= 0 && expert_id < n_experts) {
+          // Mark this expert as assigned to this token (once)
+          s_expert_presence[token_offset * n_experts + expert_id] = 1;
+        }
       }
-      __syncthreads();
     }
+    __syncthreads();
 
-    // Copy scan results back to expert offsets
-    if (threadIdx.x < n_experts) {
-      expert_offsets[threadIdx.x] = s_scan_workspace[threadIdx.x];
+    // Sum up experts across this batch
+    for (int expert_id = threadIdx.x; expert_id < n_experts;
+         expert_id += blockDim.x) {
+      int count = 0;
+      for (int token_offset = 0; token_offset < batch_size; token_offset++) {
+        count += s_expert_presence[token_offset * n_experts + expert_id];
+      }
+      if (count > 0) {
+        // note that atomicAdd does not work for int64...
+        atomicAdd(&tokens_per_expert[expert_id], count);
+      }
     }
-  }
-  __syncthreads();
-  __threadfence(); // Ensure offsets are visible to all blocks
-
-  // Second pass: place token indices in the sorted array
-  for (int token_idx = threadIdx.x + blockIdx.x * blockDim.x;
-       token_idx < seq_len; token_idx += blockDim.x * gridDim.x) {
-
-    // We only process the first expert assignment for each token
-    long expert_id = topk_ids[token_idx * k];
-    if (expert_id >= 0 && expert_id < n_experts) {
-      // Get position by atomically incrementing the expert offset
-      long position = atomicAdd(&expert_offsets[expert_id], 1);
-      sorted_indices[position] = token_idx;
-    }
+    __syncthreads();
   }
 }
 
-//
-// reorder (gather) tokens using sorted indices
-//
+// prepare flatten-and-argsort inputs
+__global__ void prepare_flattened_experts_kernel(
+    int *flattened_experts, // output: flattened expert assignments
+    const int *topk_ids,    // input: expert assignments [seq_len, k]
+    int total_elements      // total number of elements (seq_len * k)
+) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
+       idx += blockDim.x * gridDim.x) {
+    flattened_experts[idx] = topk_ids[idx];
+  }
+}
+
+// generate token indices based on sort order
+__global__ void generate_sorted_token_indices_kernel(
+    int *sorted_token_indices,   // output: token indices for gathering features
+    const int64_t *sort_indices, // input: indices from argsort (int64)
+    int total_elements,
+    int k // k value for integer division
+) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
+       idx += blockDim.x * gridDim.x) {
+    // get token index from flattened index
+    sorted_token_indices[idx] = static_cast<int>(sort_indices[idx]) / k;
+  }
+}
+
+// gather (reorder really) token features
 template <typename scalar_t>
 __global__ void gather_sorted_tokens_kernel(
-    scalar_t *sorted_tokens,      // output: sorted tokens
-    const scalar_t *input_tokens, // input: original token features
-    const int *sorted_indices,    // input:
-    int seq_len,                  // M
-    int hidden_dim                // N
-
+    scalar_t *sorted_tokens,         // output: sorted token features
+    const scalar_t *input_tokens,    // input: original token features
+    const int *sorted_token_indices, // input: token indices for gathering
+    int total_elements,
+    int hidden_dim // hidden dimension size
 ) {
-  // get global position
-  int token_index = blockIdx.x * blockDim.x + threadIdx.x;
-  int feat_index = blockIdx.y * blockDim.y + threadIdx.y;
+  // Calculate global thread indices
+  int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int feat_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
-  // update to new location
-  if (token_index < seq_len && feat_index < hidden_dim) {
-    int src_index = sorted_indices[token_index];
-    // column_offset = hidden
-    sorted_tokens[token_index * hidden_dim + feat_index] =
-        input_tokens[src_index * hidden_dim + feat_index];
+  if (token_idx < total_elements && feat_idx < hidden_dim) {
+    int src_idx = sorted_token_indices[token_idx];
+    sorted_tokens[token_idx * hidden_dim + feat_idx] =
+        input_tokens[src_idx * hidden_dim + feat_idx];
   }
 }
 
 //
-// Wrapper functions
+// wrapper functions
 //
 
-// main function
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 sort_tokens_by_expert_cuda(torch::Tensor topk_ids, torch::Tensor x,
                            int n_experts, bool use_parallel_scan = false) {
+
   auto device = topk_ids.device();
   int seq_len = topk_ids.size(0);
   int k = topk_ids.size(1);
   int hidden_dim = x.size(1);
+  int total_elements = seq_len * k;
 
   // Validate inputs
   TORCH_CHECK(topk_ids.device().is_cuda(), "topk_ids must be a CUDA tensor");
@@ -261,82 +142,145 @@ sort_tokens_by_expert_cuda(torch::Tensor topk_ids, torch::Tensor x,
   TORCH_CHECK(topk_ids.dim() == 2, "topk_ids must be a 2D tensor");
   TORCH_CHECK(x.dim() == 2, "input tensor must be a 2D tensor");
 
-  // Output tensors
-  auto sorted_indices =
-      torch::empty({seq_len}, torch::dtype(torch::kInt64).device(device));
-  auto tokens_per_expert =
-      torch::zeros({n_experts}, torch::dtype(torch::kInt64).device(device));
-  auto expert_offsets =
-      torch::zeros({n_experts}, torch::dtype(torch::kInt64).device(device));
-
-  // Launch appropriate kernel based on whether to use parallel scan
-  const int threads = 256;
-  const int blocks = grid_1d(seq_len, threads);
-
-  if (use_parallel_scan) {
-    // For parallel scan, we need additional shared memory for the scan
-    // workspace
-    int shared_mem_size = calc_shared_memory_size<long>(n_experts * 2);
-
-    // Make sure we have enough threads to perform the scan
-    int scan_threads = std::max(threads, n_experts);
-
-    sort_tokens_parallel_scan_kernel<<<blocks, scan_threads, shared_mem_size>>>(
-        sorted_indices.data_ptr<long>(), tokens_per_expert.data_ptr<long>(),
-        expert_offsets.data_ptr<long>(), topk_ids.data_ptr<long>(), seq_len,
-        n_experts, k,
-        true // use parallel scan
-    );
+  // Convert input to int32 if needed - this is an atomicAdd limitation...
+  torch::Tensor topk_ids_int;
+  if (topk_ids.scalar_type() == torch::kInt64) {
+    topk_ids_int = topk_ids.to(torch::kInt32);
   } else {
-    // Use the original kernel with sequential scan
-    int shared_mem_size = calc_shared_memory_size<long>(n_experts);
-
-    sort_tokens_by_expert_kernel<<<blocks, threads, shared_mem_size>>>(
-        sorted_indices.data_ptr<long>(), tokens_per_expert.data_ptr<long>(),
-        expert_offsets.data_ptr<long>(), topk_ids.data_ptr<long>(), seq_len,
-        n_experts, k);
+    topk_ids_int = topk_ids;
   }
+
+  // Ensure tensor is contiguous
+  if (!topk_ids_int.is_contiguous()) {
+    topk_ids_int = topk_ids_int.contiguous();
+  }
+
+  // 1: Count tokens per expert using CUDA kernel
+  auto tokens_per_expert =
+      torch::zeros({n_experts}, torch::dtype(torch::kInt32).device(device));
+
+  const int threads = 256;
+  const int blocks = 1; // Single block is sufficient for counting
+  int shared_mem_size =
+      128 * n_experts * sizeof(int); // For 128 tokens at a time
+
+  // Check if we have enough shared memory
+  int max_shared_mem;
+  cudaDeviceGetAttribute(&max_shared_mem, cudaDevAttrMaxSharedMemoryPerBlock,
+                         device.index());
+
+  /*if (shared_mem_size > max_shared_mem) {
+    // Fall back to CPU implementation for counting if shared memory is
+    // insufficient This is a rare case for very large expert counts
+    auto cnts = torch::zeros({seq_len, n_experts},
+                             torch::dtype(torch::kInt32).device(device));
+
+    for (int i = 0; i < seq_len; i++) {
+      for (int j = 0; j < k; j++) {
+        int expert_id = topk_ids_int[i][j].item<int>();
+        if (expert_id >= 0 && expert_id < n_experts) {
+          cnts[i][expert_id] = 1;
+        }
+      }
+    }
+    tokens_per_expert = cnts.sum(0);
+  } else {
+  */
+  // Use CUDA kernel for counting
+  count_tokens_per_expert_kernel<<<blocks, threads, shared_mem_size>>>(
+      tokens_per_expert.data_ptr<int>(), topk_ids_int.data_ptr<int>(), seq_len,
+      n_experts, k);
 
   // Check for errors
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in count_tokens_per_expert_kernel: %s\n",
+           cudaGetErrorString(error));
     throw std::runtime_error("CUDA kernel execution failed");
   }
 
-  // Create output tensor for sorted tokens
-  auto sorted_tokens = torch::empty_like(x);
+  // Step 2: Create flattened experts tensor
+  auto flattened_experts = torch::empty(
+      {total_elements}, torch::dtype(torch::kInt32).device(device));
 
-  // Launch kernel to gather sorted tokens
+  const int flatten_blocks = (total_elements + threads - 1) / threads;
+  prepare_flattened_experts_kernel<<<flatten_blocks, threads>>>(
+      flattened_experts.data_ptr<int>(), topk_ids_int.data_ptr<int>(),
+      total_elements);
+
+  // Check for errors
+  // cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error in prepare_flattened_experts_kernel: %s\n",
+           cudaGetErrorString(error));
+    throw std::runtime_error("CUDA kernel execution failed");
+  }
+
+  // Step 3: Use PyTorch's built-in sort to get argsort indices
+  // This is the most reliable way to match PyTorch's behavior but need to
+  // verify no cpu sync..
+  auto sort_indices = flattened_experts.argsort();
+
+  // Step 4: Generate token indices for feature gathering
+  auto sorted_token_indices = torch::empty(
+      {total_elements}, torch::dtype(torch::kInt32).device(device));
+
+  generate_sorted_token_indices_kernel<<<flatten_blocks, threads>>>(
+      sorted_token_indices.data_ptr<int>(),
+      sort_indices.data_ptr<int64_t>(), // Note: argsort returns int64 indices
+      total_elements, k);
+
+  // Check for errors
+  error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    printf("CUDA error in generate_sorted_token_indices_kernel: %s\n",
+           cudaGetErrorString(error));
+    throw std::runtime_error("CUDA kernel execution failed");
+  }
+
+  // Step 5: Gather token features
+  auto sorted_tokens = torch::empty({total_elements, hidden_dim},
+                                    torch::dtype(x.dtype()).device(device));
+
   dim3 gather_threads(16, 16); // 16x16 = 256 threads per block
-  dim3 gather_blocks =
-      grid_2d(seq_len, hidden_dim, gather_threads.x, gather_threads.y);
+  dim3 gather_blocks((total_elements + gather_threads.x - 1) / gather_threads.x,
+                     (hidden_dim + gather_threads.y - 1) / gather_threads.y);
 
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       x.scalar_type(), "gather_sorted_tokens_cuda", ([&] {
         gather_sorted_tokens_kernel<scalar_t>
             <<<gather_blocks, gather_threads>>>(
                 sorted_tokens.data_ptr<scalar_t>(), x.data_ptr<scalar_t>(),
-                sorted_indices.data_ptr<int>(), seq_len, hidden_dim);
+                sorted_token_indices.data_ptr<int>(), total_elements,
+                hidden_dim);
       }));
 
   // Check for errors
   error = cudaGetLastError();
   if (error != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    printf("CUDA error in gather_sorted_tokens_kernel: %s\n",
+           cudaGetErrorString(error));
     throw std::runtime_error("CUDA kernel execution failed");
   }
 
-  return std::make_tuple(sorted_tokens, sorted_indices, tokens_per_expert);
+  // Convert token counts to match input type
+  torch::Tensor tokens_per_expert_out;
+  if (topk_ids.scalar_type() == torch::kInt64) {
+    tokens_per_expert_out = tokens_per_expert.to(torch::kInt64);
+  } else {
+    tokens_per_expert_out = tokens_per_expert;
+  }
+
+  return std::make_tuple(sorted_tokens, sort_indices, tokens_per_expert_out);
 }
 
-//
-// Python Bindings
-//
+//////////////////////////////////////////////////////////////////////////////
+// Python bindings
+//////////////////////////////////////////////////////////////////////////////
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sort_tokens_by_expert", &sort_tokens_by_expert_cuda,
-        "Sort tokens by expert assignment with CUDA", py::arg("topk_ids"),
+        "Sort tokens by expert assignment (CUDA)", py::arg("topk_ids"),
         py::arg("x"), py::arg("n_experts"),
         py::arg("use_parallel_scan") = false);
 }
