@@ -23,7 +23,7 @@ from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
-model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (2, 2)
+model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
 # model_id, mesh_shape = "deepseek-ai/deepseek-v3", (8, 4)
 
 
@@ -163,6 +163,24 @@ def create_dist_config(mesh: DeviceMesh):
     return dist_config
 
 
+def decode(tokenizer, x):
+    output = tokenizer.decode(x[0])
+    # Clean up the output by removing special tokens
+    bos = tokenizer.bos_token
+    output = output.replace(bos, "")
+    # Truncate at end of sentence token
+    eos_token = tokenizer.eos_token
+    if eos_token and eos_token in output:
+        output = output.split(eos_token)[0]
+    colored_output = colorize_chat(
+        output,
+        user_color=color.green,
+        assistant_color=color.cyan,
+        output_color=color.blue,
+    )
+    return colored_output
+
+
 @torch.inference_mode()
 def generate(
     model,
@@ -217,21 +235,46 @@ def generate(
             next_idx += 1
 
     if rank == 0:
-        output = tokenizer.decode(x[0])
-        # Clean up the output by removing special tokens
-        bos = tokenizer.bos_token
-        output = output.replace(bos, "")
-        # Truncate at end of sentence token
-        eos_token = tokenizer.eos_token
-        if eos_token and eos_token in output:
-            output = output.split(eos_token)[0]
-        colored_output = colorize_chat(
-            output,
-            user_color=color.green,
-            assistant_color=color.cyan,
-            output_color=color.blue,
-        )
-        print(f"\n{colored_output}")
+        colored_output = decode(tokenizer, x)
+        print(f"Without CUDA Graph:\n{colored_output}")
+
+
+@torch.inference_mode()
+def generate_with_cuda_graph(
+    model,
+    tokenizer,
+    dist_config,
+    messages: list[dict],
+    n_tokens: int = 10,
+):
+    rank = dist.get_rank()
+    device = dist_config.device
+    x = tokenizer.apply_chat_template(
+        [messages] * dist_config.pp_size,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    )
+    next_idx = x.shape[-1]
+    x = torch.cat([x, torch.zeros(x.shape[0], n_tokens, dtype=torch.int64)], dim=-1)
+    x = x.to(device)
+
+    torch.cuda.synchronize()
+
+    # Create CUDA graph
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        preds = model(x)
+
+    # Run CUDA graph
+    for _ in range(n_tokens):
+        g.replay()
+        next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
+        x[:, next_idx] = next_token
+        next_idx += 1
+
+    if rank == 0:
+        colored_output = decode(tokenizer, x)
+        print(f"With CUDA Graph:\n{colored_output}")
 
 
 if __name__ == "__main__":
@@ -257,6 +300,7 @@ if __name__ == "__main__":
     ]
 
     generate(model, pp_schedule, tokenizer, dist_config, messages)
+    generate_with_cuda_graph(model, tokenizer, dist_config, messages)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
