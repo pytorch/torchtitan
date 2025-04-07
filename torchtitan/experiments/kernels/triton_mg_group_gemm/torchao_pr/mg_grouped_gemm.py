@@ -749,8 +749,8 @@ def grouped_gemm_forward(
     assert K == w.shape[1], f"Input K ({K}) must match weight K ({w.shape[1]})"
 
     # Verify that all group sizes are multiples of ALIGN_SIZE_M
-    # TODO: remove this check because this is a GPU-CPU sync
-    assert torch.remainder(m_sizes, ALIGN_SIZE_M).max() == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
+    # This check is commented out because it will involve a GPU-CPU sync
+    # assert torch.remainder(m_sizes, ALIGN_SIZE_M).max() == 0, "Group sizes must be a multiple of ALIGN_SIZE_M"
 
     # Create output tensor with correct shape [M_total, N]
     y = torch.empty((M_total, N // G), device=x.device, dtype=x.dtype)
