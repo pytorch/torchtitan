@@ -87,7 +87,6 @@ class RotaryEmbedding(nn.Module):
             device=self.inv_freq.device,
             dtype=torch.get_default_dtype(),
         )
-        self.max_seq_len_cached = None
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
