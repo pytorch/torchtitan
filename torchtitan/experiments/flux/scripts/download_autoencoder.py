@@ -53,7 +53,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local_dir",
         type=str,
-        default="assets/autoencoder/",
+        default="torchtitan/experiments/flux/assets/autoencoder/",
         help="local directory to save the autoencoder",
     )
 
