@@ -95,7 +95,7 @@ class FTParallelDims(ParallelDims):
             return ft_init_device_mesh(
                 device_type=device_type,
                 mesh_shape=mesh_shape,
-                mesh_dim_names=mesh_dim_names,
+                mesh_dim_names=tuple(mesh_dim_names),
                 replicate_dim=mesh_dim_names.index("dp_replicate"),
                 manager=self.ft_manager.manager,
             )
