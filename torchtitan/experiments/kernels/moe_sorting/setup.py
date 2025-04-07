@@ -1,29 +1,33 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#  All rights reserved.
-#
-# This source code is licensed under the BSD 3-Clause license found in the
-#  LICENSE file in the root directory of this source tree.
-
+import os
 
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
+
+extra_compile_args = {
+    "cxx": ["-O3"],
+    "nvcc": [
+        "-O3",
+        "--gpu-architecture=sm_90",  #  H100
+        "--use_fast_math",
+        "--extended-lambda",
+    ],
+}
+
+# Source files
+sources = [
+    "token_sorting_kernels.cu",
+]  # "moe_kernel_utils.h"]
+
 setup(
-    name="token_sorting",
+    name="token_sorting_cuda",
+    version="0.1",
+    description="CUDA-accelerated token sorting for Mixture of Experts models",
     ext_modules=[
         CUDAExtension(
             name="token_sorting_cuda",
-            sources=["token_sorting_kernels.cu"],
-            # include_dirs=["."],  # Include current directory for header files
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": [
-                    "-O3",
-                    "-gencode=arch=compute_90a,code=sm_90a",
-                    "--use_fast_math",
-                    "--ptxas-options=-v",
-                ],
-            },
+            sources=sources,
+            extra_compile_args=extra_compile_args,
         ),
     ],
     cmdclass={"build_ext": BuildExtension},
