@@ -134,19 +134,19 @@ def create_model(dist_config: DistConfig):
     model.eval()
     model.setup_symm_mem(torch.bfloat16, dist_config.device)
 
-    return model, PipelineStage(
+    stage = PipelineStage(
         model,
         dist_config.pp_rank,
         dist_config.pp_size,
         dist_config.device,
         group=dist_config.pp_mesh.get_group(),
     )
+    pp_schedule = ScheduleGPipe(stage, dist_config.pp_size)
+    return model, pp_schedule
 
 
-@torch.inference_mode()
-def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
+def create_dist_config(mesh: DeviceMesh):
     rank = dist.get_rank()
-
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
 
@@ -160,16 +160,20 @@ def generate(mesh: DeviceMesh, messages: list[dict], n_tokens: int = 50):
         ep_rank=mesh["ep"].get_local_rank(),
         device=device,
     )
+    return dist_config
 
-    model, stage = create_model(dist_config)
-    pp_schedule = ScheduleGPipe(stage, dist_config.pp_size)
 
-    if rank == 0:
-        print(
-            f"{color.yellow}Running inference with {model_id} on {mesh_shape} mesh{color.reset}"
-        )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+@torch.inference_mode()
+def generate(
+    model,
+    pp_schedule,
+    tokenizer,
+    dist_config,
+    messages: list[dict],
+    n_tokens: int = 50,
+):
+    rank = dist.get_rank()
+    device = dist_config.device
     x = tokenizer.apply_chat_template(
         [messages] * dist_config.pp_size,
         add_generation_prompt=True,
@@ -237,13 +241,24 @@ if __name__ == "__main__":
         user_prompt = sys.argv[1]
 
     mesh = dist.init_device_mesh("cuda", mesh_shape, mesh_dim_names=("pp", "ep"))
+    rank = dist.get_rank()
+    if rank == 0:
+        print(
+            f"{color.yellow}Running inference with {model_id} on {mesh_shape} mesh{color.reset}"
+        )
+
+    dist_config = create_dist_config(mesh)
+    model, pp_schedule = create_model(dist_config)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": user_prompt},
     ]
-    generate(mesh, messages)
 
-    if dist.get_rank() == 0:
+    generate(model, pp_schedule, tokenizer, dist_config, messages)
+
+    if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
+
     dist.destroy_process_group()
