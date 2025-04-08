@@ -87,9 +87,20 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    reshard_after_forward = True  # default is true
+
+    linear_layers = [
+        model.img_in,
+        model.time_in,
+        model.guidance_in,
+        model.vector_in,
+        model.txt_in,
+    ]
+    for layer in linear_layers:
+        fully_shard(layer, **fsdp_config, reshard_after_forward=reshard_after_forward)
 
     for block in model.double_blocks:
-        reshard_after_forward = False
+
         fully_shard(
             block,
             **fsdp_config,
