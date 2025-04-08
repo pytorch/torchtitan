@@ -36,17 +36,27 @@ class FluxTrainer(Trainer):
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
+
         self.autoencoder = load_ae(
             job_config.encoder.auto_encoder_path,
             model_config.autoencoder_params,
-            device="cpu",
+            device=self.device,
             dtype=self._dtype,
+        )
+        logger.info(
+            f"Autoencoder model size: {sum(p.numel() for p in self.autoencoder.parameters()):,} total parameters"
         )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
             dtype=self._dtype
         )
+        logger.info(
+            f"Clip encoder model size: {sum(p.numel() for p in self.clip_encoder.parameters()):,} total parameters"
+        )
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
             dtype=self._dtype
+        )
+        logger.info(
+            f"T5 encoder model size: {sum(p.numel() for p in self.t5_encoder.parameters()):,} total parameters"
         )
 
     def _predict_noise(
