@@ -15,7 +15,7 @@ try:
     from moe_kernels import fill_indices_wrapper, generate_permute_indices
 
 except ImportError:
-    print("unable to import required function from moe_kernels.py...")
+    print("unable to import required function(s) from moe_kernels.py...")
     raise
 
 
@@ -56,14 +56,14 @@ def fill_indices_cpu(
 
 
 class TestOptimizedKernel(unittest.TestCase):
-    """Test cases for the optimized Triton kernel."""
+    """Test cases for the permute Triton kernel."""
 
     def setUp(self):
         """Set up common test parameters."""
         # Check if GPU is available
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.device.type == "cpu":
-            self.skipTest("No GPU available, skipping Triton kernel tests")
+            self.skipTest("WARNING:  No GPU available, skipping Triton kernel tests")
 
         # Set random seed for reproducible tests
         torch.manual_seed(2020)
@@ -79,7 +79,7 @@ class TestOptimizedKernel(unittest.TestCase):
         token_range: Tuple[int, int] = (1, 16),
         alignment: int = 32,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Create test data with given parameters."""
+        """Create test data"""
         # Create token counts
         tokens_per_expert_group = torch.randint(
             token_range[0],
@@ -89,28 +89,28 @@ class TestOptimizedKernel(unittest.TestCase):
             device=self.device,
         )
 
-        # Calculate start indices
+        # Calc start indices
         start_index_values = (
             torch.cumsum(tokens_per_expert_group, 0) - tokens_per_expert_group
         )
 
-        # Calculate chunk sizes
+        # Calcu chunk sizes
         chunk_size_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
         m_sizes = ((chunk_size_per_expert + alignment - 1) // alignment * alignment).to(
             torch.int32
         )
 
-        # Calculate write offsets
+        # Calc write offsets
         write_offsets = torch.cumsum(m_sizes, 0) - m_sizes
 
-        # Calculate max_len
+        # Calcu max_len
         total_tokens = tokens_per_expert_group.sum().item()
         max_len = total_tokens * 2  # Give some extra space
 
         return tokens_per_expert_group, start_index_values, write_offsets, max_len
 
     def test_fixed_total_experts_varying_ranks(self):
-        """Test with 256 total experts distributed across different numbers of ranks."""
+        """Test with 256 total experts (deepseek v3) distributed across different numbers of ranks."""
         # Test with different rank configurations
         rank_configs = [1, 2, 4, 8, 16, 32, 64, 128]
 
@@ -160,7 +160,7 @@ class TestOptimizedKernel(unittest.TestCase):
                 # Verify results match
                 self.assertTrue(
                     torch.equal(cpu_result, optimized_result),
-                    f"Optimized kernel output does not match CPU implementation for "
+                    f"Triton kernel output does not match CPU implementation for "
                     f"{experts_per_rank} experts per rank, {num_ranks} ranks",
                 )
 
@@ -253,7 +253,7 @@ class TestOptimizedKernel(unittest.TestCase):
                 # Verify results match
                 self.assertTrue(
                     torch.equal(cpu_result, optimized_result),
-                    f"Optimized kernel failed for token range {token_range}",
+                    f"Triton kernel failed for token range {token_range}",
                 )
 
 
