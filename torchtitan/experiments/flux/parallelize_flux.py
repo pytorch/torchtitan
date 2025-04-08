@@ -95,6 +95,7 @@ def apply_fsdp(
         model.guidance_in,
         model.vector_in,
         model.txt_in,
+        model.final_layer,
     ]
     for layer in linear_layers:
         fully_shard(layer, **fsdp_config, reshard_after_forward=reshard_after_forward)
@@ -116,4 +117,4 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
 
-    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
+    fully_shard(model, **fsdp_config)
