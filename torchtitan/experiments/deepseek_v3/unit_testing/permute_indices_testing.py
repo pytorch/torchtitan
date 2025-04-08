@@ -132,9 +132,12 @@ class TestOptimizedKernel(unittest.TestCase):
                     f"Testing {experts_per_rank} experts per rank across {num_ranks} ranks (total: {actual_total_experts})"
                 )
 
-                tokens_per_expert_group, start_index_values, write_offsets, max_len = (
-                    self.create_test_data(experts_per_rank, num_ranks)
-                )
+                (
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    max_len,
+                ) = self.create_test_data(experts_per_rank, num_ranks)
 
                 # Run CPU implementation
                 cpu_result = fill_indices_cpu(
@@ -180,9 +183,12 @@ class TestOptimizedKernel(unittest.TestCase):
         num_ranks = 8
         experts_per_rank = self.total_experts // num_ranks  # 32 experts per rank
 
-        tokens_per_expert_group, start_index_values, write_offsets, max_len = (
-            self.create_test_data(experts_per_rank, num_ranks)
-        )
+        (
+            tokens_per_expert_group,
+            start_index_values,
+            write_offsets,
+            max_len,
+        ) = self.create_test_data(experts_per_rank, num_ranks)
 
         # Run CPU implementation for reference
         cpu_result = fill_indices_cpu(
@@ -225,9 +231,12 @@ class TestOptimizedKernel(unittest.TestCase):
 
         for token_range in token_ranges:
             with self.subTest(f"token_range={token_range}"):
-                tokens_per_expert_group, start_index_values, write_offsets, max_len = (
-                    self.create_test_data(experts_per_rank, num_ranks, token_range)
-                )
+                (
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    max_len,
+                ) = self.create_test_data(experts_per_rank, num_ranks, token_range)
 
                 # Run CPU implementation
                 cpu_result = fill_indices_cpu(
