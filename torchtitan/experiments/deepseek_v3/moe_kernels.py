@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Tuple
+from typing import Tuple
 
 import torch
 import triton
@@ -302,6 +302,6 @@ def verify_correctness(
 if __name__ == "__main__":
     res = verify_correctness()
     if res:
-        print(f"Success - results match reference!")
+        print("Success - results match reference!")
     else:
-        print(f"Warning:  see details above - results do not match reference!")
+        print("Warning:  see details above - results do not match reference!")
