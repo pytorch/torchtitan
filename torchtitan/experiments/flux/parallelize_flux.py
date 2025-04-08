@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# This file applies the PT-D parallelisms (except pipeline parallelism) and various
-# training techniques (e.g. activation checkpointing and compile) to the Llama model.
-
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
@@ -25,6 +25,9 @@ def parallelize_flux(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
+    if job_config.activation_checkpoint.mode != "none":
+        apply_ac(model, job_config.activation_checkpoint)
+
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
@@ -118,3 +121,21 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+
+def apply_ac(model: nn.Module, ac_config):
+    """Apply activation checkpointing to the model."""
+    if ac_config.mode != "full":
+        raise ValueError(
+            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
+        )
+
+    for layer_id, block in model.double_blocks.named_children():
+        block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+        model.double_blocks.register_module(layer_id, block)
+
+    for layer_id, block in model.single_blocks.named_children():
+        block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+        model.single_blocks.register_module(layer_id, block)
+
+    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
