@@ -324,22 +324,22 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
-        self.attention = Attention(model_args)
-        self.feed_forward = FeedForward(
+        self.attention = torch.compile(Attention(model_args))
+        self.feed_forward = torch.compile(FeedForward(
             dim=model_args.dim,
             hidden_dim=4 * model_args.dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-        )
+        ))
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
-        self.attention_norm = build_norm(
+        self.attention_norm = torch.compile(build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-        self.ffn_norm = build_norm(
+        ))
+        self.ffn_norm = torch.compile(build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
+        ))
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
@@ -414,11 +414,11 @@ class Transformer(nn.Module, ModelProtocol):
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
-        self.norm = build_norm(
+        self.norm = torch.compile(build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
+        ))
 
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.output = torch.compile(nn.Linear(model_args.dim, model_args.vocab_size, bias=False))
         self.init_weights()
 
     def init_weights(
