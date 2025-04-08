@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 try:
-    from moe_kernels import fill_indices_wrapper, generate_permute_indices
+    from moe_kernels import fill_indices_wrapper
 
 except ImportError:
     print("unable to import required function(s) from moe_kernels.py...")
