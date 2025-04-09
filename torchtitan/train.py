@@ -358,26 +358,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
-#                with NanInfDetect(do_breakpoint=True):
-                assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
+                with NanInfDetect(do_breakpoint=True):
+                    assert len(model_parts) == 1
+                    pred = model_parts[0](inputs)
 
-                # check for Nans in model output
-                assert not pred.isnan().any(), "model output contains NaN"
-                
-                loss = self.loss_fn(pred, labels)
+                    # check for Nans in model output
+                    assert not pred.isnan().any(), "model output contains NaN"
+                    
+                    loss = self.loss_fn(pred, labels)
 
-                # Check loss is not nan
-                assert not loss.isnan().any(), "loss contains NaN"
+                    # Check loss is not nan
+                    assert not loss.isnan().any(), "loss contains NaN"
 
-                # pred.shape=(bs, seq_len, vocab_size)
-                # need to free to before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
+                    loss.backward()
 
-                # check for NaNs in the gradients
-                for param in model_parts[0].parameters():
-                    assert not param.grad.isnan().any(), "gradients contain NaN after bwd"
+                    # check for NaNs in the gradients
+                    for param in model_parts[0].parameters():
+                        assert not param.grad.isnan().any(), "gradients contain NaN after bwd"
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
