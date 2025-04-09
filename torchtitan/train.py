@@ -32,6 +32,9 @@ from torchtitan.tools.profiling import (
 )
 
 
+from transformer_nuggets.utils.tracing import NanInfDetect
+
+
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
     gc_handler: utils.GarbageCollection
@@ -149,7 +152,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_args)
+            model = model_cls.from_model_args(model_args).to(torch.bfloat16)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -355,13 +358,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
-                assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
-                loss = self.loss_fn(pred, labels)
-                # pred.shape=(bs, seq_len, vocab_size)
-                # need to free to before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+                with NanInfDetect(do_breakpoint=True):
+                    assert len(model_parts) == 1
+                    pred = model_parts[0](inputs)
+
+                    # check for Nans in model output
+                    assert not pred.isnan().any(), "model output contains NaN"
+                    
+                    loss = self.loss_fn(pred, labels)
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
+                    del pred
+                    loss.backward()
+
+                    # check for NaNs in the gradients
+                    for param in model_parts[0].parameters():
+                        assert not param.grad.isnan().any(), "gradients contain NaN after bwd"
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
