@@ -9,7 +9,7 @@
 #include <torch/extension.h>
 #include <vector>
 
-// Smallest problems - use shared memory
+// Smallest problems - use shared memory as bridge
 template <typename scalar_t, int BLOCK_SIZE, int FEATURES_PER_THREAD>
 __global__ void
 fast_permute_small_kernel(const scalar_t *__restrict__ input,
@@ -119,5 +119,54 @@ fast_permute_large_kernel(const scalar_t *__restrict__ input,
             input[src_idx * feature_size + feature_idx];
       }
     }
+  }
+}
+
+// XL kernel - adds vectorized loads - not sure where the tradeoff is for this
+template <typename scalar_t>
+__global__ void
+fast_permute_vectorized_kernel(const scalar_t *__restrict__ input,
+                               const int64_t *__restrict__ permute_indices,
+                               scalar_t *__restrict__ output,
+                               int64_t num_indices, int64_t feature_size
+
+) {
+  // templatized vec4
+
+  using vec4_t = typename std::aligned_storage<4 * sizeof(scalar_t),
+                                               4 * sizeof(scalar_t)>::type;
+
+  // for loop vs tail
+  const int vec_width = 4;
+
+  const int token_idx = blockIdx.x;
+  const int thread_idx = threadIdx.x;
+
+  if (token_idx < num_indices) {
+    // load soarce
+    const int64_t src_idx = permute_indices[token_idx];
+
+    // base pointers
+    const scalar_t *src_ptr = input + src_idx * feature_size;
+    scalar_t *dst_ptr = output + token_idx * feature_size;
+
+    // calc number of aligned vec4 elements
+
+    const int num_vectors = feature_size / vec_width;
+
+    // process aligned elements
+    for (int i = thread_idx; i < num_vectors; i += blockDim.x) {
+      reinterpret_cast<vec4_t *>(dst_ptr)[i] =
+          reinterpret_cast<vec4_t *>(src_ptr)[i];
+
+      // remainder (tail)
+      const int remaining_start = num_vectors * vec_width;
+      for (int i = remaining_start + thread_idx; i < feature_size;
+           i += blockDim.x) {
+        dst_ptr[i] = src_ptr[i];
+      }
+    }
+
+    //
   }
 }
