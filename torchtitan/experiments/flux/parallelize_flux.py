@@ -73,7 +73,8 @@ def apply_fsdp(
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str): The policy to use for resharding after forward pass. Default behavior is to reshard after forward pass.
+        reshard_after_forward_policy (str): The policy to use for resharding after forward pass.
+            Default behavior is to reshard after forward pass.
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
@@ -187,7 +188,8 @@ def apply_fsdp_to_t5(
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str): The policy to use for resharding after forward pass. Default behavior is to reshard after forward pass.
+        reshard_after_forward_policy (str): The policy to use for resharding after forward pass.
+            Default behavior is to reshard after forward pass.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
