@@ -14,8 +14,8 @@ from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataload
 from torchtitan.experiments.flux.loss import build_mse_loss
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.parallelize_flux import (
+    parallelize_encoders,
     parallelize_flux,
-    parallelize_t5,
 )
 from torchtitan.protocols.train_spec import (
     ParallelizeFunction,
@@ -139,6 +139,6 @@ register_train_spec(
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
-        parallelize_encoder_fn=parallelize_t5,
+        parallelize_encoder_fn=parallelize_encoders,
     )
 )

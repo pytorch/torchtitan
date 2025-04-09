@@ -61,7 +61,7 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "never",  # Use never for Flux FSDP
+    reshard_after_forward_policy: str = "default",  # Use never for Flux FSDP
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -72,12 +72,8 @@ def apply_fsdp(
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
+        cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        reshard_after_forward_policy (str): The policy to use for resharding after forward pass. Default behavior is to reshard after forward pass.
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
@@ -92,7 +88,6 @@ def apply_fsdp(
         model.guidance_in,
         model.vector_in,
         model.txt_in,
-        model.final_layer,
     ]
     for layer in linear_layers:
         fully_shard(layer, **fsdp_config, reshard_after_forward=reshard_after_forward)
@@ -110,7 +105,11 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-
+    # apply FSDP to last layer
+    fully_shard(
+        model.final_layer, **fsdp_config, reshard_after_forward=reshard_after_forward
+    )
+    # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
 
@@ -132,7 +131,7 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def parallelize_t5(
+def parallelize_encoders(
     model: nn.Module,
     world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
@@ -176,7 +175,7 @@ def apply_fsdp_to_t5(
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "never",  # Use never for Flux FSDP
+    reshard_after_forward_policy: str = "default",  # Use never for Flux FSDP
 ):
     """
     Apply data parallelism (via FSDP2) to T5 model.
@@ -185,6 +184,10 @@ def apply_fsdp_to_t5(
         model (nn.Module): The model to apply data parallelism to.
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
         param_dtype (torch.dtype): The data type to use for model parameters.
+        reduce_dtype (torch.dtype): The data type to use for reduction operations.
+        pp_enabled (bool): Whether pipeline parallelism is enabled.
+        cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
+        reshard_after_forward_policy (str): The policy to use for resharding after forward pass. Default behavior is to reshard after forward pass.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
