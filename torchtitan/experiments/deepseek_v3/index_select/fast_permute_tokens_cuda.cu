@@ -170,3 +170,95 @@ fast_permute_vectorized_kernel(const scalar_t *__restrict__ input,
     //
   }
 }
+
+// Launch the best kernel based on problem size (effectively adaptive tuning)
+torch::Tensor adaptive_fast_permute(torch::Tensor input,
+                                    torch::Tensor permute_indices) {
+
+  // INput checks
+  TORCH_CHECK(input.dim() == 2,
+              "Input tensor must be 2D [num_tokens, hidden_dim]");
+  TORCH_CHECK(permute_indices.dim() == 1, "Permute indices tensor must be 1D");
+  TORCH_CHECK(input.device().is_cuda(), "Input must be a CUDA tensor");
+  TORCH_CHECK(permute_indices.device().is_cuda(),
+              "Permute indices must be a CUDA tensor");
+
+  const int64_t batch_size = input.size(0);
+  const int64_t feature_size = input.size(1);
+  const int64_t num_indices = permute_indices.size(0);
+
+  auto output = torch::empty({num_indices, feature_size}, input.options());
+
+  // auto select kernel - criterion is not finalized
+  if (num_indices <= 128 && feature_size <= 4096) {
+    // small, use shared mem kernel
+    const int threads = 256;
+    const int features_per_thread = 4;
+    const int blocks = num_indices;
+    const int shared_mem_size = feature_size * sizeof(float); // half?
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        input.scalar_type(), "fast_permute_msall", ([&] {
+          fast_permute_small_kernel<scalar_t, 256, features_per_thread>
+              <<<blocks, threads, shared_mem_size>>>(
+                  input.data_ptr<scalar_t>(),
+                  permute_indices.data_ptr<int64_t>(),
+                  output.data_ptr<scalar_t>(), num_indices, feature_size);
+        }));
+  } else if (num_indices <= 2048 && feature_size <= 4096) {
+    // call this medium, process multiple tokens per block
+    const int tokens_per_block = 4;
+    const int threads_per_block = 256;
+    const int blocks = (num_indices + tokens_per_block - 1) / tokens_per_block;
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        input.scalar_type(), "fast_permute_medium", ([&] {
+          fast_permute_medium_kernel<scalar_t, tokens_per_block,
+                                     threads_per_block>
+              <<<blocks, threads_per_block>>>(
+                  input.data_ptr<scalar_t>(),
+                  permute_indices.data_ptr<int64_t>(),
+                  output.data_ptr<scalar_t>(), num_indices, feature_size);
+        }));
+  } else if (feature_size >= 8192 || num_indices >= 8192) {
+    // XL problem - use vectorized loads
+    const int threads = 256;
+    const int blocks = num_indices;
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        input.scalar_type(), "fast_permute_vectorized", ([&] {
+          fast_permute_vectorized_kernel<scalar_t><<<blocks, threads>>>(
+              input.data_ptr<scalar_t>(), permute_indices.data_ptr<int64_t>(),
+              output.data_ptr<scalar_t>(), num_indices, feature_size);
+        }));
+
+  } else {
+    // Large - use 2D grid
+    const int features_per_block = 1024;
+    const int indices_per_block = 16;
+    const int threads = 256;
+
+    const int grid_x =
+        (feature_size + features_per_block - 1) / features_per_block;
+    const int grid_y =
+        (num_indices + indices_per_block - 1) / indices_per_block;
+
+    dim3 blocks(grid_x, grid_y);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        input.scalar_type(), "fast_permute_large", ([&] {
+          fast_permute_large_kernel<scalar_t><<<blocks, threads>>>(
+              input.data_ptr<scalar_t>(), permute_indices.data_ptr<int64_t>(),
+              output.data_ptr<scalar_t>(), num_indices, feature_size,
+              batch_size);
+        }));
+  }
+  // finished
+  return output
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("fast_permute", &adaptive_fast_permute,
+        "Adaptive Fast Permute Implementation for MoE using CUDA",
+        py::arg("input") py::arg("permute_indices"));
+}
