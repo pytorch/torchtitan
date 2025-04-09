@@ -81,4 +81,43 @@ __global__ void
 fast_permute_large_kernel(const scalar_t *__restrict__ input,
                           const int64_t *__restrict__ permute_indices,
                           scalar_t *__restrict__ output, int64_t num_indices,
-                          int64_t feature_size, int batch_size) {}
+                          int64_t feature_size, int batch_size) {
+
+  // setup 2D grid of blocks
+  // each handles a portion of indiees and features
+  const int block_row = blockIdx.y;
+  const int block_col = blockIdx.x;
+  const int thread_idx = threadIdx.x;
+
+  const int BLOCK_SIZE = 256; // 512?
+  const int FEATURES_PER_BLOCK = 1024;
+  const int INDICES_PER_BLOCK = 16;
+
+  // stread index for this block
+  const int start_idx = block_row * INDICES_PER_BLOCK;
+
+  const int start_feature = block_col * FEATURES_PER_BLOCK;
+
+  // calc num features to process for this block
+  const int num_features =
+      min(FEATURES_PER_BLOCK, static_cast<int>(feature_size - start_feature));
+
+  // each thread handles multiple features (cdiv...)
+  const int features_per_thread = (num_features + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+  // process things
+  for (int i = 0; i < INDICES_PER_BLOCK; ++i) {
+    const int token_idx = start_idx + i;
+    // load source
+    const int64_t src_idx = permute_indices[token_idx];
+
+    // each thread processes features
+    for (int j = 0; j < features_per_thread; ++j) {
+      const int feature_idx = start_feature + thread_idx + j * BLOCK_SIZE;
+      if (feature_idx < feature_size) {
+        output[token_idx * feature_size + feature_idx] =
+            input[src_idx * feature_size + feature_idx];
+      }
+    }
+  }
+}
