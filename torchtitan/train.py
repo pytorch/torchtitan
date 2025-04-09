@@ -358,7 +358,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 pred = model_parts[0](inputs)
                 loss = self.loss_fn(pred, labels)
-                # pred.shape=(bs, seq_len, vocab_size)
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
