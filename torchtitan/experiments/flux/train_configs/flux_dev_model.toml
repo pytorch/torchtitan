@@ -6,7 +6,7 @@ print_args = false
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -40,7 +40,7 @@ decay_type = "linear"
 lr_min = 0.0
 
 [training]
-batch_size = 32
+batch_size = 4
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
 steps = 10
@@ -50,10 +50,11 @@ guidance = 3.5
 seed = 0
 
 [encoder]
-t5_encoder="google/t5-v1_1-base"
+t5_encoder="google/t5-v1_1-xxl"
 clip_encoder="openai/clip-vit-large-patch14"
-max_t5_encoding_len=768  # 512 for t5-small, 768 for t5-base, 1024 for t5-large, 2048 for t5-xl, 4096 for t5-xxl
+max_t5_encoding_len=4096  # 512 for t5-small, 768 for t5-base, 1024 for t5-large, 2048 for t5-xl, 4096 for t5-xxl
 auto_encoder_path="torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
+encoder_data_parallel_shard=true
 
 [parallelism]
 data_parallel_replicate_degree = 1  # DDP
@@ -68,4 +69,4 @@ context_parallel_degree = 1
 custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 
 [activation_checkpoint]
-mode="none"
+mode="full"

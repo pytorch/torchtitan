@@ -50,10 +50,14 @@ class FluxTrainer(Trainer):
             dtype=self._dtype
         )
 
-        # Apply FSDP to the T5 model
-        self.clip_encoder = self.train_spec.parallelize_encoder_fn(
-            self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
-        )
+        if job_config.encoder.encoder_data_parallel_shard:
+            # Apply FSDP to the T5 model
+            self.t5_encoder = self.train_spec.parallelize_encoder_fn(
+                self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
+            )
+            self.clip_encoder = self.train_spec.parallelize_encoder_fn(
+                self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
+            )
 
     def _predict_noise(
         self,
@@ -154,8 +158,6 @@ class FluxTrainer(Trainer):
         target = noise - labels
 
         assert len(model_parts) == 1
-        # TODO(jianiw): model_parts will be wrapped by FSDP, which will be calculated in bfloat16
-        # model_parts[0] = model_parts[0].to(dtype=self._dtype)
 
         pred = self._predict_noise(
             model_parts[0],
