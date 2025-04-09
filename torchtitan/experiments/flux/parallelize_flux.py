@@ -146,7 +146,12 @@ def parallelize_t5(
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
 
-        apply_fsdp_to_t5(
+        if model.is_clip:
+            apply_fsdp_fn = apply_fsdp_to_clip
+        else:
+            apply_fsdp_fn = apply_fsdp_to_t5
+
+        apply_fsdp_fn(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -189,3 +194,30 @@ def apply_fsdp_to_t5(
     for block in model.hf_module.encoder.block:
         fully_shard(block, **fsdp_config, reshard_after_forward=True)
     fully_shard(model.hf_module, **fsdp_config, reshard_after_forward=True)
+
+
+def apply_fsdp_to_clip(
+    model: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    pp_enabled: bool,
+    cpu_offload: bool = False,
+    reshard_after_forward_policy: str = "never",  # Use never for Flux FSDP
+):
+    """
+    Apply data parallelism (via FSDP2) to T5 model.
+
+    Args:
+        model (nn.Module): The model to apply data parallelism to.
+        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        param_dtype (torch.dtype): The data type to use for model parameters.
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    # FSDP for encoder blocks
+    for block in model.hf_module.text_model.encoder.layers:
+        fully_shard(block, **fsdp_config, reshard_after_forward=True)
+    fully_shard(model, **fsdp_config, reshard_after_forward=True)

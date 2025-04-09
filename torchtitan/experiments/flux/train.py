@@ -43,25 +43,16 @@ class FluxTrainer(Trainer):
             device=self.device,
             dtype=self._dtype,
         )
-        logger.info(
-            f"Autoencoder model size: {sum(p.numel() for p in self.autoencoder.parameters()):,} total parameters"
-        )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
             dtype=self._dtype
-        )
-        logger.info(
-            f"Clip encoder model size: {sum(p.numel() for p in self.clip_encoder.parameters()):,} total parameters"
         )
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
             dtype=self._dtype
         )
-        logger.info(
-            f"T5 encoder model size: {sum(p.numel() for p in self.t5_encoder.parameters()):,} total parameters"
-        )
 
         # Apply FSDP to the T5 model
-        self.t5_encoder = self.train_spec.parallelize_encoder_fn(
-            self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
+        self.clip_encoder = self.train_spec.parallelize_encoder_fn(
+            self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
         )
 
     def _predict_noise(
