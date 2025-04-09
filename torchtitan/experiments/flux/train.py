@@ -59,6 +59,11 @@ class FluxTrainer(Trainer):
             f"T5 encoder model size: {sum(p.numel() for p in self.t5_encoder.parameters()):,} total parameters"
         )
 
+        # Apply FSDP to the T5 model
+        self.t5_encoder = self.train_spec.parallelize_encoder_fn(
+            self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
+        )
+
     def _predict_noise(
         self,
         model: FluxModel,
