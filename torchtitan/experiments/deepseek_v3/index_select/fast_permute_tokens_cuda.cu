@@ -157,7 +157,7 @@ fast_permute_vectorized_kernel(const scalar_t *__restrict__ input,
     // process aligned elements
     for (int i = thread_idx; i < num_vectors; i += blockDim.x) {
       reinterpret_cast<vec4_t *>(dst_ptr)[i] =
-          reinterpret_cast<vec4_t *>(src_ptr)[i];
+          reinterpret_cast<const vec4_t *>(src_ptr)[i];
 
       // remainder (tail)
       const int remaining_start = num_vectors * vec_width;
@@ -254,11 +254,11 @@ torch::Tensor adaptive_fast_permute(torch::Tensor input,
         }));
   }
   // finished
-  return output
+  return output;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("fast_permute", &adaptive_fast_permute,
+  m.def("fast_permute_tokens", &adaptive_fast_permute,
         "Adaptive Fast Permute Implementation for MoE using CUDA",
-        py::arg("input") py::arg("permute_indices"));
+        py::arg("input"), py::arg("permute_indices"));
 }
