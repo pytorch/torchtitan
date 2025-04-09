@@ -11,7 +11,7 @@ setup(
                 "cxx": ["-O3"],
                 "nvcc": [
                     "-O3",
-                    "-gencode=arch=compute_90,code=sm_90",
+                    "-gencode=arch=compute_90a,code=sm_90a",
                 ],
             },
         ),
