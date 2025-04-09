@@ -189,17 +189,19 @@ torch::Tensor adaptive_fast_permute(torch::Tensor input,
 
   auto output = torch::empty({num_indices, feature_size}, input.options());
 
+  const int threads_count = 512;
+
   // auto select kernel - criterion is not finalized
   if (num_indices <= 128 && feature_size <= 4096) {
     // small, use shared mem kernel
-    const int threads = 256;
+    const int threads = threads_count;
     const int features_per_thread = 4;
     const int blocks = num_indices;
     const int shared_mem_size = feature_size * sizeof(float); // half?
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
         input.scalar_type(), "fast_permute_msall", ([&] {
-          fast_permute_small_kernel<scalar_t, 256, features_per_thread>
+          fast_permute_small_kernel<scalar_t, threads, features_per_thread>
               <<<blocks, threads, shared_mem_size>>>(
                   input.data_ptr<scalar_t>(),
                   permute_indices.data_ptr<int64_t>(),
@@ -208,7 +210,7 @@ torch::Tensor adaptive_fast_permute(torch::Tensor input,
   } else if (num_indices <= 2048 && feature_size <= 4096) {
     // call this medium, process multiple tokens per block
     const int tokens_per_block = 4;
-    const int threads_per_block = 256;
+    const int threads_per_block = threads_count;
     const int blocks = (num_indices + tokens_per_block - 1) / tokens_per_block;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
@@ -222,7 +224,7 @@ torch::Tensor adaptive_fast_permute(torch::Tensor input,
         }));
   } else if (feature_size >= 8192 || num_indices >= 8192) {
     // XL problem - use vectorized loads
-    const int threads = 256;
+    const int threads = threads_count;
     const int blocks = num_indices;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
@@ -236,7 +238,7 @@ torch::Tensor adaptive_fast_permute(torch::Tensor input,
     // Large - use 2D grid
     const int features_per_block = 1024;
     const int indices_per_block = 16;
-    const int threads = 256;
+    const int threads = threads_count;
 
     const int grid_x =
         (feature_size + features_per_block - 1) / features_per_block;

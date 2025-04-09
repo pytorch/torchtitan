@@ -126,7 +126,8 @@ if __name__ == "__main__":
         # Define wrapper function
         def fast_permute(input_tensor, indices):
             return fast_permute_tokens_cuda.fast_permute_tokens(  # fast_permute_tokens_triton(
-                input_tensor, indices, True
+                input_tensor,
+                indices,
             )
 
         # Run benchmark with different configurations
@@ -137,12 +138,12 @@ if __name__ == "__main__":
 
         print("\n=== Medium Configuration ===")
         benchmark_implementation(
-            fast_permute, batch_size=4096, hidden_dim=4096, n_indices=2048
+            fast_permute, batch_size=4096, hidden_dim=4096, n_indices=4096
         )
 
         print("\n=== Large Configuration ===")
         benchmark_implementation(
-            fast_permute, batch_size=8192, hidden_dim=4096, n_indices=4096
+            fast_permute, batch_size=8192, hidden_dim=4096, n_indices=8192
         )
 
     except ImportError:
