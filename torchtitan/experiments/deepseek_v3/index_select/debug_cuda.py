@@ -4,7 +4,6 @@ Simple benchmark comparing CUDA permute implementation vs PyTorch with result ve
 
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
