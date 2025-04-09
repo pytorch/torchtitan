@@ -44,10 +44,10 @@ class FluxTrainer(Trainer):
             dtype=self._dtype,
         )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
-            dtype=self._dtype
+            device=self.device, dtype=self._dtype
         )
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
-            dtype=self._dtype
+            device=self.device, dtype=self._dtype
         )
 
         if job_config.encoder.encoder_data_parallel_shard:
@@ -130,7 +130,7 @@ class FluxTrainer(Trainer):
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
-            offload=True,
+            offload=self.job_config.encoder.offload_encoder,
         )
         labels = input_dict["img_encodings"]
 

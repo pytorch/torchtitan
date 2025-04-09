@@ -45,3 +45,8 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Whether to shard the encoder using FSDP",
     )
+    parser.add_argument(
+        "--encoder.offload_encoder",
+        action="store_true",
+        help="Whether to shard the encoder using FSDP",
+    )
