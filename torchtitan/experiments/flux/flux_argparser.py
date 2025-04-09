@@ -41,11 +41,6 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Maximum length of the T5 encoding.",
     )
     parser.add_argument(
-        "--encoder.encoder_data_parallel_shard",
-        action="store_true",
-        help="Whether to shard the encoder using FSDP",
-    )
-    parser.add_argument(
         "--encoder.offload_encoder",
         action="store_true",
         help="Whether to shard the encoder using FSDP",

@@ -50,14 +50,13 @@ class FluxTrainer(Trainer):
             device=self.device, dtype=self._dtype
         )
 
-        if job_config.encoder.encoder_data_parallel_shard:
-            # Apply FSDP to the T5 model
-            self.t5_encoder = self.train_spec.parallelize_encoder_fn(
-                self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
-            )
-            self.clip_encoder = self.train_spec.parallelize_encoder_fn(
-                self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
-            )
+        # Apply FSDP to the T5 model / CLIP model
+        self.t5_encoder = self.train_spec.parallelize_encoder_fn(
+            self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
+        )
+        self.clip_encoder = self.train_spec.parallelize_encoder_fn(
+            self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
+        )
 
     def _predict_noise(
         self,

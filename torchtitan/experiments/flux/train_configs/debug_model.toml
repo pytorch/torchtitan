@@ -6,7 +6,7 @@ print_args = false
 use_for_integration_test = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 5
 enable_memory_snapshot = false
@@ -54,7 +54,6 @@ t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
-encoder_data_parallel_shard = false
 offload_encoder = false
 
 [parallelism]
