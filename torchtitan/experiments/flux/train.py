@@ -134,7 +134,6 @@ class FluxTrainer(Trainer):
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
-            offload=self.job_config.encoder.offload_encoder,
         )
         labels = input_dict["img_encodings"]
 

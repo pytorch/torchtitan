@@ -8,7 +8,7 @@ use_for_integration_test = true
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 5
+profile_freq = 10
 enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
@@ -22,11 +22,6 @@ enable_wandb = false
 [model]
 name = "flux"
 flavor = "flux-debug"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
-# test tokenizer.model, for debug purpose only
-# tokenizer_path = "./tests/assets/test_tiktoken.model"
-# converters = "float8"
-
 
 [optimizer]
 name = "AdamW"
@@ -34,27 +29,23 @@ lr = 8e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
-decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
-decay_type = "linear"
-lr_min = 0.0
+warmup_steps = 1  # 10% warmup steps
+decay_ratio = 0.0  # no decay, stay stable during training
 
 [training]
 batch_size = 4
 seq_len = 512
-max_norm = 1.0  # grad norm clipping
-steps = 100
+max_norm = 2.0  # grad norm clipping
+steps = 10
 compile = false
 dataset = "cc12m"
 guidance = 3.5
-seed = 0
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
-offload_encoder = false
 
 [parallelism]
 data_parallel_replicate_degree = 1

@@ -67,17 +67,12 @@ def apply_fsdp(
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str): The policy to use for resharding after forward pass.
-            Default behavior is to reshard after forward pass.
-
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    reshard_after_forward = True  # default is true
 
     linear_layers = [
         model.img_in,
@@ -87,25 +82,21 @@ def apply_fsdp(
         model.txt_in,
     ]
     for layer in linear_layers:
-        fully_shard(layer, **fsdp_config, reshard_after_forward=reshard_after_forward)
+        fully_shard(layer, **fsdp_config)
 
     for block in model.double_blocks:
         fully_shard(
             block,
             **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
         )
 
     for block in model.single_blocks:
         fully_shard(
             block,
             **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
         )
     # apply FSDP to last layer
-    fully_shard(
-        model.final_layer, **fsdp_config, reshard_after_forward=reshard_after_forward
-    )
+    fully_shard(model.final_layer, **fsdp_config)
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
@@ -158,9 +149,9 @@ def parallelize_encoders(
         )
 
         if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the T5 and CLIP model")
+            logger.info("Applied FSDP to the T5 and CLIP model")
         else:
-            logger.info("Applied HSDP to the T5 and CLIP model")
+            logger.info("Applied FSDP to the T5 and CLIP model")
 
     return t5_model, clip_model
 
@@ -172,27 +163,14 @@ def apply_fsdp_to_t5(
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
 ):
-    """
-    Apply data parallelism (via FSDP2) to T5 model.
-
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str): The policy to use for resharding after forward pass.
-            Default behavior is to reshard after forward pass.
-    """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
     # FSDP for encoder blocks
     for block in model.hf_module.encoder.block:
-        fully_shard(block, **fsdp_config, reshard_after_forward=True)
-    fully_shard(model.hf_module, **fsdp_config, reshard_after_forward=True)
+        fully_shard(block, **fsdp_config)
+    fully_shard(model.hf_module, **fsdp_config)
 
 
 def apply_fsdp_to_clip(
@@ -202,19 +180,11 @@ def apply_fsdp_to_clip(
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
 ):
-    """
-    Apply data parallelism (via FSDP2) to CLIP model.
-
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-    """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
     # FSDP for encoder blocks
     for block in model.hf_module.text_model.encoder.layers:
-        fully_shard(block, **fsdp_config, reshard_after_forward=True)
-    fully_shard(model, **fsdp_config, reshard_after_forward=True)
+        fully_shard(block, **fsdp_config)
+    fully_shard(model, **fsdp_config)

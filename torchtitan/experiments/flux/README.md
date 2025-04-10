@@ -18,7 +18,7 @@ Run the following command to train the model on a single GPU:
 ```
 
 ## Supported Features
-- Parallelism: The model supports FSDP (Fully Sharded Data Parallelism) for training on multiple GPUs.
+- Parallelism: The model supports FSDP, HSDP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 
 
