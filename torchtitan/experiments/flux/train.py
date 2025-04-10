@@ -14,6 +14,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -29,24 +30,36 @@ class FluxTrainer(Trainer):
         super().__init__(job_config)
 
         self.preprocess_fn = preprocess_flux_data
-        # self.dtype = job_config.encoder.dtype
+        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
+        # We cast the encoders and it's input/output to this dtype.
+        # For Flux model, we use FSDP with mixed precision training.
         self._dtype = torch.bfloat16
         self._seed = job_config.training.seed
         self._guidance = job_config.training.guidance
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
+
         self.autoencoder = load_ae(
             job_config.encoder.auto_encoder_path,
             model_config.autoencoder_params,
-            device="cpu",
+            device=self.device,
             dtype=self._dtype,
         )
         self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
-            dtype=self._dtype
+            device=self.device, dtype=self._dtype
         )
         self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
-            dtype=self._dtype
+            device=self.device, dtype=self._dtype
+        )
+
+        # Apply FSDP to the T5 model / CLIP model
+        self.t5_encoder, self.clip_encoder = parallelize_encoders(
+            t5_model=self.t5_encoder,
+            clip_model=self.clip_encoder,
+            world_mesh=self.world_mesh,
+            parallel_dims=self.parallel_dims,
+            job_config=job_config,
         )
 
     def _predict_noise(
@@ -120,7 +133,6 @@ class FluxTrainer(Trainer):
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
-            offload=True,
         )
         labels = input_dict["img_encodings"]
 
@@ -148,8 +160,6 @@ class FluxTrainer(Trainer):
         target = noise - labels
 
         assert len(model_parts) == 1
-        # TODO(jianiw): model_parts will be wrapped by FSDP, which will cacluate
-        model_parts[0] = model_parts[0].to(dtype=self._dtype)
 
         pred = self._predict_noise(
             model_parts[0],

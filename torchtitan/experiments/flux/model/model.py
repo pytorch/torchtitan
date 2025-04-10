@@ -69,6 +69,7 @@ class FluxModel(nn.Module, ModelProtocol):
         super().__init__()
 
         self.model_args = model_args
+
         self.in_channels = model_args.in_channels
         self.out_channels = model_args.out_channels
         if model_args.hidden_size % model_args.num_heads != 0:
