@@ -41,7 +41,6 @@ class FluxModelArgs(BaseModelArgs):
     theta: int = 10_000
     qkv_bias: bool = True
     guidance_embed: bool = True
-    autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         # context_in_dim is the same as the T5 embedding dimension

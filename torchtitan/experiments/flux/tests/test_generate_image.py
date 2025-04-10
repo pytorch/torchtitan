@@ -20,7 +20,6 @@ from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
 from torchtitan.experiments.flux.model.autoencoder import (
     AutoEncoder,
-    AutoEncoderParams,
     load_ae,
 )
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
@@ -111,7 +110,6 @@ class TestGenerateImage:
 
         ae = load_ae(
             ckpt_path="assets/autoencoder/ae.safetensors",
-            autoencoder_params=AutoEncoderParams(),
             device=torch_device,
             dtype=torch.bfloat16,
         )

@@ -39,17 +39,6 @@ flux_configs = {
         theta=10_000,
         qkv_bias=True,
         guidance_embed=True,
-        autoencoder_params=AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            ch=128,
-            out_ch=3,
-            ch_mult=(1, 2, 4, 4),
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
-        ),
     ),
     "flux-schnell": FluxModelArgs(
         in_channels=64,
@@ -65,17 +54,6 @@ flux_configs = {
         theta=10_000,
         qkv_bias=True,
         guidance_embed=False,
-        autoencoder_params=AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            ch=128,
-            out_ch=3,
-            ch_mult=(1, 2, 4, 4),
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
-        ),
     ),
     "flux-debug": FluxModelArgs(
         in_channels=64,
@@ -91,17 +69,6 @@ flux_configs = {
         theta=10_000,
         qkv_bias=True,
         guidance_embed=True,
-        autoencoder_params=AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            ch=128,
-            out_ch=3,
-            ch_mult=(1, 2, 4, 4),
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
-        ),
     ),
 }
 

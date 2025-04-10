@@ -2,6 +2,12 @@
 
 ## Overview
 
+## Install dependencies
+
+```bash
+pip install -U -r requirements.txt
+```
+
 ## Usage
 First, download the autoencoder model from HuggingFace with your own access token:
 ```bash
