@@ -21,52 +21,46 @@ def _fill_indices_kernel(
     output_ptr,
     experts_per_rank: tl.constexpr,
     num_ranks: tl.constexpr,
-    total_experts: tl.constexpr,
-    max_blocks: tl.constexpr,
-    experts_per_block: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,  # Number of threads per block
 ):
     pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
 
-    # we loop if needed
-    start_expert = pid * experts_per_block
-    end_expert = tl.minimum(start_expert + experts_per_block, total_experts)
+    # map programs (blocks) to the experts and loop (grid stride) if needed
+    for expert_id in range(pid, experts_per_rank, num_programs):
 
-    for expert_id in range(start_expert, end_expert):
-        # only process if valid expert
-        if expert_id < experts_per_rank:
-            # read this experts write offset
-            write_offset = tl.load(write_offsets_ptr + expert_id)
+        # read this experts write offset
+        write_offset = tl.load(write_offsets_ptr + expert_id)
 
-            # loop over all ranks
-            for r in range(num_ranks):
-                # index into tokens_per_expert_group array
-                i = r * experts_per_rank + expert_id
+        # loop over all ranks
+        for r in range(num_ranks):
+            # index into tokens_per_expert_group array
+            i = r * experts_per_rank + expert_id
 
-                # load start index and number of tokens for this expert-rank pair
-                start_index = tl.load(start_index_values_ptr + i)
-                length = tl.load(tokens_per_expert_group_ptr + i)
+            # load start index and number of tokens for this expert-rank pair
+            start_index = tl.load(start_index_values_ptr + i)
+            length = tl.load(tokens_per_expert_group_ptr + i)
 
-                # each thread in block processes tokens in parallel
-                offsets = tl.arange(0, BLOCK_SIZE)
+            # each thread in block processes tokens in parallel
+            offsets = tl.arange(0, BLOCK_SIZE)
 
-                # tokens are processed in chunks of BLOCK_SIZE
-                for chunk_start in range(0, length, BLOCK_SIZE):
-                    chunk_offsets = chunk_start + offsets
+            # tokens are processed in chunks of BLOCK_SIZE
+            for chunk_start in range(0, length, BLOCK_SIZE):
+                chunk_offsets = chunk_start + offsets
 
-                    # mask valid indices
-                    mask = chunk_offsets < length
+                # mask valid indices
+                mask = chunk_offsets < length
 
-                    values = start_index + chunk_offsets
+                values = start_index + chunk_offsets
 
-                    # destination
-                    dest_indices = write_offset + chunk_offsets
+                # destination
+                dest_indices = write_offset + chunk_offsets
 
-                    # store
-                    tl.store(output_ptr + dest_indices, values, mask=mask)
+                # store
+                tl.store(output_ptr + dest_indices, values, mask=mask)
 
-                # update write offset for next rank
-                write_offset += length
+            # update write offset for next rank
+            write_offset += length
 
 
 # ==============
@@ -89,14 +83,10 @@ def fill_indices_wrapper(
         (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
     )
 
-    total_experts = experts_per_rank * num_ranks
-    num_blocks = min(total_experts, max_blocks)
-
+    # write offsets is per local expert...
+    num_blocks = min(experts_per_rank, max_blocks)
     # grid = one block per expert unless capped and then we loop...
     grid = (num_blocks,)
-
-    # calc number of experts per block via cdiv
-    experts_per_block = (total_experts + max_blocks - 1) // max_blocks
 
     # launch kernel
     _fill_indices_kernel[grid](
@@ -106,9 +96,6 @@ def fill_indices_wrapper(
         permuted_indices,
         experts_per_rank,
         num_ranks,
-        total_experts,
-        max_blocks,
-        experts_per_block,
         BLOCK_SIZE=block_size,
     )
     return permuted_indices
@@ -192,6 +179,7 @@ def generate_permute_indices(
     )
 
     # additional prefix sum to get write offset of each expert in permuted_indices
+    # write offsets is per local expert, not global
     write_offsets = torch.cumsum(m_sizes, 0) - m_sizes
 
     # Select the implementation to use
