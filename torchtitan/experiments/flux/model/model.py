@@ -119,9 +119,41 @@ class FluxModel(nn.Module, ModelProtocol):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
     def init_weights(self, buffer_device=None):
-        # TODO(jianiw): replace placeholder with real weight init
-        for param in self.parameters():
-            param.data.uniform_(0, 0.1)
+        # Adopted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
+
+        # Initialize transformer layers, img_in, txt_in
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+
+        # Initialize time_in, vector_in, guidance_in (MLPEmbedder)
+        nn.init.normal_(self.time_in.in_layer.weight, std=0.02)
+        nn.init.normal_(self.time_in.out_layer.weight, std=0.02)
+        nn.init.normal_(self.vector_in.in_layer.weight, std=0.02)
+        nn.init.normal_(self.vector_in.out_layer.weight, std=0.02)
+        if self.model_args.guidance_embed:
+            nn.init.normal_(self.guidance_in.in_layer.weight, std=0.02)
+            nn.init.normal_(self.guidance_in.out_layer.weight, std=0.02)
+
+        # Zero-out modulation layers in blocks:
+        for block in self.single_blocks:
+            nn.init.constant_(block.modulation.lin.weight, 0)
+            nn.init.constant_(block.modulation.lin.bias, 0)
+        for block in self.double_blocks:
+            nn.init.constant_(block.img_mod.lin.weight, 0)
+            nn.init.constant_(block.img_mod.lin.bias, 0)
+            nn.init.constant_(block.txt_mod.lin.weight, 0)
+            nn.init.constant_(block.txt_mod.lin.bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def forward(
         self,
