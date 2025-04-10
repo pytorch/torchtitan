@@ -122,7 +122,7 @@ class FluxModel(nn.Module, ModelProtocol):
     def init_weights(self, buffer_device=None):
         # Adopted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
 
-        # Initialize transformer layers, img_in, txt_in
+        # Initialize transformer blocks, img_in (linear layer), txt_in (linear layer)
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -140,7 +140,7 @@ class FluxModel(nn.Module, ModelProtocol):
             nn.init.normal_(self.guidance_in.in_layer.weight, std=0.02)
             nn.init.normal_(self.guidance_in.out_layer.weight, std=0.02)
 
-        # Zero-out modulation layers in blocks:
+        # Zero-out modulation layers in transformer blocks:
         for block in self.single_blocks:
             nn.init.constant_(block.modulation.lin.weight, 0)
             nn.init.constant_(block.modulation.lin.bias, 0)
