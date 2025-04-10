@@ -47,6 +47,7 @@ class TransformerModelArgs(BaseModelArgs):
     interleave_moe_layer_step: int = 2
     # token-choice
     top_k: int = 1
+    use_fused_moe_impl: bool = True  # fused or for-loop
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type

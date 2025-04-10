@@ -37,12 +37,12 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
-from indices import generate_permute_indices
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
+from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
     grouped_gemm_forward,
