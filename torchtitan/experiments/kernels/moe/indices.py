@@ -139,7 +139,8 @@ def generate_permute_indices(
         torch.int32
     )
     # Perform another prefix sum to get the write offset of each expert in `permuted_indices`
-    write_offsets = torch.cumsum(m_sizes, 0) - m_sizes
+    m_offsets = torch.cumsum(m_sizes, 0)
+    write_offsets = m_offsets - m_sizes
     # Select the method to fill the permuted indices
     fill_fn = fill_indices_cpu if use_cpu else fill_indices
     # Fill the permuted indices
@@ -151,7 +152,7 @@ def generate_permute_indices(
         num_ranks,
         max_len,
     )
-    return permuted_indices, m_sizes
+    return permuted_indices, m_sizes, m_offsets.to(torch.int32)
 
 
 # Below is for testing only
@@ -167,11 +168,11 @@ def test():
     max_len = 128
     alignment = 32
     # Use the GPU kernel
-    permuted_indices_gpu, m_sizes = generate_permute_indices(
+    permuted_indices_gpu, m_sizes, _ = generate_permute_indices(
         tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
     )
     # Use the CPU method
-    permuted_indices_cpu, _ = generate_permute_indices(
+    permuted_indices_cpu, _, _ = generate_permute_indices(
         tokens_per_expert_group,
         experts_per_rank,
         num_ranks,
