@@ -14,6 +14,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -29,10 +30,13 @@ class FluxTrainer(Trainer):
         super().__init__(job_config)
 
         self.preprocess_fn = preprocess_flux_data
-        # self.dtype = job_config.encoder.dtype
+        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
+        # We cast the encoders and it's input/output to this dtype.
+        # For Flux model, we use FSDP with mixed precision training.
         self._dtype = torch.bfloat16
         self._seed = job_config.training.seed
         self._guidance = job_config.training.guidance
+        self.parallelize_encoder_fn = parallelize_encoders
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
@@ -51,11 +55,12 @@ class FluxTrainer(Trainer):
         )
 
         # Apply FSDP to the T5 model / CLIP model
-        self.t5_encoder = self.train_spec.parallelize_encoder_fn(
-            self.t5_encoder, self.world_mesh, self.parallel_dims, job_config
-        )
-        self.clip_encoder = self.train_spec.parallelize_encoder_fn(
-            self.clip_encoder, self.world_mesh, self.parallel_dims, job_config
+        self.t5_encoder, self.clip_encoder = self.parallelize_encoder_fn(
+            t5_model=self.t5_encoder,
+            clip_model=self.clip_encoder,
+            world_mesh=self.world_mesh,
+            parallel_dims=self.parallel_dims,
+            job_config=job_config,
         )
 
     def _predict_noise(

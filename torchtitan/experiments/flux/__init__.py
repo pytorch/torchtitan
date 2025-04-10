@@ -6,22 +6,14 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
 from torchtitan.experiments.flux.loss import build_mse_loss
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
-from torchtitan.experiments.flux.parallelize_flux import (
-    parallelize_encoders,
-    parallelize_flux,
-)
-from torchtitan.protocols.train_spec import (
-    ParallelizeFunction,
-    register_train_spec,
-    TrainSpec,
-)
+from torchtitan.experiments.flux.parallelize_flux import parallelize_flux
+from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .model.model import FluxModel, FluxModelArgs
 
@@ -115,20 +107,8 @@ flux_configs = {
 }
 
 
-@dataclass
-class FluxTranSpec(TrainSpec):
-    """
-    Adding extra fields to the TrainSpec to support Flux specific training.
-
-    Args:
-        parallelize_encoder_fn: The function to parallelize T5 encoder. This function is only needed
-    """
-
-    parallelize_encoder_fn: ParallelizeFunction | None = None
-
-
 register_train_spec(
-    FluxTranSpec(
+    TrainSpec(
         name="flux",
         cls=FluxModel,
         config=flux_configs,
@@ -139,6 +119,5 @@ register_train_spec(
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
-        parallelize_encoder_fn=parallelize_encoders,
     )
 )

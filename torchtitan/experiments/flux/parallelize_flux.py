@@ -41,9 +41,7 @@ def parallelize_flux(
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -59,9 +57,7 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",  # Use never for Flux FSDP
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -133,40 +129,40 @@ def apply_ac(model: nn.Module, ac_config):
 
 
 def parallelize_encoders(
-    model: nn.Module,
+    t5_model: nn.Module,
+    clip_model: nn.Module,
     world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    if (
-        parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
-    ):  # apply FSDP or HSDP, potentially with Context Parallel
+    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
 
-        if model.is_clip:
-            apply_fsdp_fn = apply_fsdp_to_clip
-        else:
-            apply_fsdp_fn = apply_fsdp_to_t5
-
-        apply_fsdp_fn(
-            model,
+        apply_fsdp_to_clip(
+            clip_model,
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+        )
+
+        apply_fsdp_to_t5(
+            t5_model,
+            world_mesh[tuple(dp_mesh_dim_names)],
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            cpu_offload=job_config.training.enable_cpu_offload,
         )
 
         if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
+            logger.info("Applied HSDP to the T5 and CLIP model")
         else:
-            logger.info("Applied FSDP to the model")
+            logger.info("Applied HSDP to the T5 and CLIP model")
 
-    return model
+    return t5_model, clip_model
 
 
 def apply_fsdp_to_t5(
@@ -174,9 +170,7 @@ def apply_fsdp_to_t5(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",  # Use never for Flux FSDP
 ):
     """
     Apply data parallelism (via FSDP2) to T5 model.
@@ -206,12 +200,10 @@ def apply_fsdp_to_clip(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "never",  # Use never for Flux FSDP
 ):
     """
-    Apply data parallelism (via FSDP2) to T5 model.
+    Apply data parallelism (via FSDP2) to CLIP model.
 
     Args:
         model (nn.Module): The model to apply data parallelism to.
