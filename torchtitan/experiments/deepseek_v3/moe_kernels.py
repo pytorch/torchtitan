@@ -147,6 +147,7 @@ def generate_permute_indices(
     alignment: int,
     use_cpu: bool = False,
     block_size: int = 128,
+    max_blocks: int = 1024,
 ):
     """
     Prepare permutation indices and the number of tokens for each expert.
