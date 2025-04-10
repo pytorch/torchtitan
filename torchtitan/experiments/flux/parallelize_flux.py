@@ -101,10 +101,6 @@ def apply_fsdp(
 
 def apply_ac(model: nn.Module, ac_config):
     """Apply activation checkpointing to the model."""
-    if ac_config.mode != "full":
-        raise ValueError(
-            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
-        )
 
     for layer_id, block in model.double_blocks.named_children():
         block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
