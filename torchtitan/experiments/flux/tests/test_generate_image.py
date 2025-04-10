@@ -223,8 +223,8 @@ class TestGenerateImage:
         # convert sequences of patches into img-like latents
         latents = unpack_latents(latents, latent_height, latent_width)
 
-        img = decoder.decode(latents)
-        return img
+        decoder_output = decoder.decode(latents)
+        return decoder_output.sample
 
     def _save_image(
         self,
