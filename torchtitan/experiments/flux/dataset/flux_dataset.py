@@ -56,8 +56,8 @@ def _process_cc12m_image(
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
 
-    # Skip grayscale images
-    if resized_img.mode == "L":
+    # Skip grayscale images, and RGBA, CMYK images
+    if resized_img.mode != "RGB":
         return None
 
     np_img = np.array(resized_img).transpose((2, 0, 1))

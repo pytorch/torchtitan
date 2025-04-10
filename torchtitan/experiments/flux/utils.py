@@ -24,7 +24,6 @@ def preprocess_flux_data(
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],
-    offload: bool = False,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and encoder as input and return a batch of preprocessed data.
@@ -33,20 +32,13 @@ def preprocess_flux_data(
         device (torch.device): device to do preprocessing on
         dtype (torch.dtype): data type to do preprocessing in
         autoencoer(AutoEncoder): autoencoder to use for preprocessing
-        clip_encoder
-        t5_encoder
+        clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
+        t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
         batch (dict[str, Tensor]): batch of data to preprocess
 
     Returns:
         dict[str, Tensor]: batch of preprocessed data
     """
-
-    # The input of encoder should be torch.int type
-    if offload:
-        clip_encoder.to(device)
-        t5_encoder.to(device)
-        if autoencoder is not None:
-            autoencoder.to(device)
 
     clip_tokens = batch["clip_tokens"].squeeze().to(device=device, dtype=torch.int)
     t5_tokens = batch["t5_tokens"].squeeze().to(device=device, dtype=torch.int)
@@ -61,13 +53,6 @@ def preprocess_flux_data(
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
-
-    # offload encoders to cpu after preprocessing
-    if offload:
-        clip_encoder.to("cpu")
-        t5_encoder.to("cpu")
-        if autoencoder is not None:
-            autoencoder.to("cpu")
 
     return batch
 
