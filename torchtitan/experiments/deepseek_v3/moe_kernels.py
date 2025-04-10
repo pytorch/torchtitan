@@ -11,6 +11,9 @@ import triton
 import triton.language as tl
 
 
+__all__ = ["generate_permute_indices"]
+
+
 # parallelized kernel
 @triton.jit
 def _fill_indices_kernel(
@@ -18,49 +21,54 @@ def _fill_indices_kernel(
     start_index_values_ptr,
     write_offsets_ptr,
     output_ptr,
-    experts_per_rank,
-    num_ranks,
+    experts_per_rank: tl.constexpr,
+    num_ranks: tl.constexpr,
+    total_experts: tl.constexpr,
+    max_blocks: tl.constexpr,
+    experts_per_block: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,  # Number of threads per block
 ):
     pid = tl.program_id(axis=0)
 
-    # each program handles one expert
-    expert_id = pid
+    # we loop if needed
+    start_expert = pid * experts_per_block
+    end_expert = tl.minimum(start_expert + experts_per_block, total_experts)
 
-    # only process if valid expert
-    if expert_id < experts_per_rank:
-        # read this experts write offset
-        write_offset = tl.load(write_offsets_ptr + expert_id)
+    for expert_id in range(start_expert, end_expert):
+        # only process if valid expert
+        if expert_id < experts_per_rank:
+            # read this experts write offset
+            write_offset = tl.load(write_offsets_ptr + expert_id)
 
-        # loop over all ranks
-        for r in range(num_ranks):
-            # index into tokens_per_expert_group array
-            i = r * experts_per_rank + expert_id
+            # loop over all ranks
+            for r in range(num_ranks):
+                # index into tokens_per_expert_group array
+                i = r * experts_per_rank + expert_id
 
-            # load start index and number of tokens for this expert-rank pair
-            start_index = tl.load(start_index_values_ptr + i)
-            length = tl.load(tokens_per_expert_group_ptr + i)
+                # load start index and number of tokens for this expert-rank pair
+                start_index = tl.load(start_index_values_ptr + i)
+                length = tl.load(tokens_per_expert_group_ptr + i)
 
-            # each thread in block processes tokens in parallel
-            offsets = tl.arange(0, BLOCK_SIZE)
+                # each thread in block processes tokens in parallel
+                offsets = tl.arange(0, BLOCK_SIZE)
 
-            # tokens are processed in chunks of BLOCK_SIZE
-            for chunk_start in range(0, length, BLOCK_SIZE):
-                chunk_offsets = chunk_start + offsets
+                # tokens are processed in chunks of BLOCK_SIZE
+                for chunk_start in range(0, length, BLOCK_SIZE):
+                    chunk_offsets = chunk_start + offsets
 
-                # mask valid indices
-                mask = chunk_offsets < length
+                    # mask valid indices
+                    mask = chunk_offsets < length
 
-                values = start_index + chunk_offsets
+                    values = start_index + chunk_offsets
 
-                # destination
-                dest_indices = write_offset + chunk_offsets
+                    # destination
+                    dest_indices = write_offset + chunk_offsets
 
-                # store
-                tl.store(output_ptr + dest_indices, values, mask=mask)
+                    # store
+                    tl.store(output_ptr + dest_indices, values, mask=mask)
 
-            # update write offset for next rank
-            write_offset += length
+                # update write offset for next rank
+                write_offset += length
 
 
 # ==============
@@ -76,14 +84,21 @@ def fill_indices_wrapper(
     num_ranks: int,
     max_len: int,
     block_size: int = 128,
+    max_blocks: int = 1024,  # cap on total number of blocks to launch
 ):
     # preallocate output
     permuted_indices = torch.full(
         (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
     )
 
-    # grid = one block per expert
-    grid = (experts_per_rank,)
+    total_experts = experts_per_rank * num_ranks
+    num_blocks = min(total_experts, max_blocks)
+
+    # grid = one block per expert unless capped and then we loop...
+    grid = (num_blocks,)
+
+    # calc number of experts per block via cdiv
+    experts_per_block = (total_experts + max_blocks - 1) // max_blocks
 
     # launch kernel
     _fill_indices_kernel[grid](
@@ -93,6 +108,9 @@ def fill_indices_wrapper(
         permuted_indices,
         experts_per_rank,
         num_ranks,
+        total_experts,
+        max_blocks,
+        experts_per_block,
         BLOCK_SIZE=block_size,
     )
     return permuted_indices
@@ -107,9 +125,13 @@ def fill_indices_cpu(
     num_ranks: int,
     max_len: int,
 ):
-    # We need to preallocate the output
-    device = tokens_per_expert_group.device
-    permuted_indices = torch.full((max_len,), -1, dtype=torch.int32, device=device)
+    # We need to preallocate the output - we ignore device and force it on cpu
+    # device = tokens_per_expert_group.device
+    permuted_indices = torch.full(
+        (max_len,),
+        -1,
+        dtype=torch.int32,
+    )  # device=device)
     # Fill the permuted indices
     # For each local expert
     for e in range(experts_per_rank):
@@ -126,7 +148,7 @@ def fill_indices_cpu(
                     start_index,
                     start_index + (end_idx - write_start),
                     dtype=torch.int32,
-                    device=device,
+                    # device=device,
                 )
             write_start += length
     return permuted_indices
@@ -198,36 +220,24 @@ def generate_permute_indices(
     return permuted_indices, m_sizes
 
 
-def verify_correctness(
-    experts_per_rank: int = 8,
-    num_ranks: int = 8,
-    token_range: Tuple[int, int] = (1, 32),
-    max_len_factor: int = 4,
-    alignment: int = 32,
-    seed: int = 2020,
-):
-    torch.manual_seed(seed)
+# Below is for testing only
 
-    # original sequential kernel
-    from indices import generate_permute_indices as original_permute_indices
 
-    # generate test data
-    # Create test data
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokens_per_expert_group = torch.randint(
-        token_range[0],
-        token_range[1] + 1,
-        (num_ranks * experts_per_rank,),
-        dtype=torch.int32,
-        device=device,
+def simple_test():
+    device = torch.device("cuda", 0)
+    experts_per_rank = 4
+    num_ranks = 4
+    tokens_per_expert_group = torch.full(
+        (num_ranks * experts_per_rank,), 4, dtype=torch.int32, device=device
     )
-
-    # Calculate max_len based on token counts
-    total_tokens = tokens_per_expert_group.sum().item()
-    max_len = total_tokens * max_len_factor
-
-    # Generate permutation indices using different implementations
-    cpu_indices, cpu_sizes = generate_permute_indices(
+    max_len = 128
+    alignment = 32
+    # Use the GPU kernel
+    permuted_indices_gpu, m_sizes = generate_permute_indices(
+        tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
+    )
+    # Use the CPU method
+    permuted_indices_cpu, _ = generate_permute_indices(
         tokens_per_expert_group,
         experts_per_rank,
         num_ranks,
@@ -235,73 +245,19 @@ def verify_correctness(
         alignment,
         use_cpu=True,
     )
+    # Check that the results are the same
 
-    original_indices, original_sizes = original_permute_indices(
-        tokens_per_expert_group,
-        experts_per_rank,
-        num_ranks,
-        max_len,
-        alignment,
-        use_cpu=False,
+    assert torch.equal(permuted_indices_gpu.cpu(), permuted_indices_cpu)
+    assert torch.equal(
+        torch.remainder(m_sizes, alignment),
+        torch.zeros(experts_per_rank, device=device),
     )
-
-    optimized_indices, optimized_sizes = generate_permute_indices(
-        tokens_per_expert_group,
-        experts_per_rank,
-        num_ranks,
-        max_len,
-        alignment,
-        use_cpu=False,
-    )
-
-    # Check if results match
-    cpu_original_match = torch.equal(cpu_indices, original_indices)
-    cpu_optimized_match = torch.equal(cpu_indices, optimized_indices)
-    orig_optimized_match = torch.equal(original_indices, optimized_indices)
-
-    sizes_match = torch.equal(cpu_sizes, original_sizes) and torch.equal(
-        cpu_sizes, optimized_sizes
-    )
-
-    all_match = (
-        cpu_original_match
-        and cpu_optimized_match
-        and orig_optimized_match
-        and sizes_match
-    )
-
-    if not all_match:
-        print(
-            f"Correctness test failed for experts_per_rank={experts_per_rank}, num_ranks={num_ranks}"
-        )
-        if not cpu_original_match:
-            print("  CPU vs Original mismatch")
-        if not cpu_optimized_match:
-            print("  CPU vs Optimized mismatch")
-        if not orig_optimized_match:
-            print("  Original vs Optimized mismatch")
-        if not sizes_match:
-            print("  Sizes mismatch")
-
-        # Find first mismatch (if results don't match)
-        if not orig_optimized_match:
-            mismatch_indices = (original_indices != optimized_indices).nonzero(
-                as_tuple=True
-            )[0]
-            if len(mismatch_indices) > 0:
-                first_mismatch = mismatch_indices[0].item()
-                print(
-                    f"  First mismatch at index {first_mismatch}: "
-                    f"Original={original_indices[first_mismatch].item()}, "
-                    f"Optimized={optimized_indices[first_mismatch].item()}"
-                )
-    print(f"{optimized_indices=}")
-    return all_match
+    # Print the results
+    print(f"{permuted_indices_gpu=}, \n{permuted_indices_cpu=}")
+    print(f"{m_sizes=}")
+    print("Success")
+    return True  # assert would have failed meaning getting here is success.
 
 
 if __name__ == "__main__":
-    res = verify_correctness()
-    if res:
-        print("Success - results match reference!")
-    else:
-        print("Warning:  see details above - results do not match reference!")
+    simple_test()

@@ -265,6 +265,159 @@ class TestOptimizedKernel(unittest.TestCase):
                     f"Triton kernel failed for token range {token_range}",
                 )
 
+    def test_max_blocks_with_large_experts(self):
+        """Test cases where the number of experts exceeds the maximum number of blocks.
+
+        This test verifies that the kernel correctly processes all experts even when
+        the number of experts is significantly larger than the maximum blocks allowed,
+        forcing multiple experts to be processed by each block.
+        """
+        # Test configurations where experts greatly exceed max_blocks
+        test_configs = [
+            {
+                "experts_per_rank": 512,
+                "num_ranks": 4,
+                "max_blocks": 64,
+            },  # 8 experts per block
+            {
+                "experts_per_rank": 1024,
+                "num_ranks": 2,
+                "max_blocks": 32,
+            },  # 32 experts per block
+            {
+                "experts_per_rank": 2048,
+                "num_ranks": 1,
+                "max_blocks": 16,
+            },  # 128 experts per block
+        ]
+
+        for config in test_configs:
+            experts_per_rank = config["experts_per_rank"]
+            num_ranks = config["num_ranks"]
+            max_blocks = config["max_blocks"]
+
+            # Calculate experts per block for reporting
+            experts_per_block = (experts_per_rank + max_blocks - 1) // max_blocks
+
+            with self.subTest(
+                f"experts_per_rank={experts_per_rank}, num_ranks={num_ranks}, "
+                f"max_blocks={max_blocks}, experts_per_block={experts_per_block}"
+            ):
+                print(
+                    f"Testing with {experts_per_rank} experts per rank, {num_ranks} ranks, "
+                    f"max_blocks={max_blocks} (approx. {experts_per_block} experts per block)"
+                )
+
+                # Create test data
+                (
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    max_len,
+                ) = self.create_test_data(
+                    experts_per_rank,
+                    num_ranks,
+                    token_range=(
+                        1,
+                        8,
+                    ),  # Use smaller token range for large expert counts
+                )
+
+                # Run CPU implementation for reference
+                cpu_result = fill_indices_cpu(
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    experts_per_rank,
+                    num_ranks,
+                    max_len,
+                )
+
+                # Run optimized implementation with max_blocks cap
+                optimized_result = fill_indices_wrapper(
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    experts_per_rank,
+                    num_ranks,
+                    max_len,
+                    block_size=128,
+                    max_blocks=max_blocks,
+                )
+
+                # Verify results match
+                self.assertTrue(
+                    torch.equal(cpu_result, optimized_result),
+                    f"Triton kernel output doesn't match CPU implementation with max_blocks={max_blocks}",
+                )
+
+                # Additional verification for valid entries
+                valid_positions = cpu_result != -1
+                if valid_positions.sum() > 0:
+                    valid_cpu = cpu_result[valid_positions]
+                    valid_optimized = optimized_result[valid_positions]
+                    self.assertTrue(
+                        torch.equal(valid_cpu, valid_optimized),
+                        f"Mismatch in valid positions with max_blocks={max_blocks}",
+                    )
+
+    def test_extreme_max_blocks_limit(self):
+        """Test with extremely small max_blocks limits to stress-test the looping mechanism."""
+        # Use moderately large number of experts
+        experts_per_rank = 256
+        num_ranks = 4
+
+        # Test with extremely small max_blocks values
+        max_blocks_values = [8, 4, 2, 1]  # Test down to just a single block
+
+        for max_blocks in max_blocks_values:
+            experts_per_block = (experts_per_rank + max_blocks - 1) // max_blocks
+
+            with self.subTest(
+                f"experts_per_rank={experts_per_rank}, max_blocks={max_blocks}, "
+                f"experts_per_block={experts_per_block}"
+            ):
+                print(
+                    f"Testing extreme case with {experts_per_rank} experts per rank, "
+                    f"max_blocks={max_blocks} (approx. {experts_per_block} experts per block)"
+                )
+
+                # Create test data
+                (
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    max_len,
+                ) = self.create_test_data(experts_per_rank, num_ranks)
+
+                # Run CPU implementation for reference
+                cpu_result = fill_indices_cpu(
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    experts_per_rank,
+                    num_ranks,
+                    max_len,
+                )
+
+                # Run optimized implementation with extremely limited max_blocks
+                optimized_result = fill_indices_wrapper(
+                    tokens_per_expert_group,
+                    start_index_values,
+                    write_offsets,
+                    experts_per_rank,
+                    num_ranks,
+                    max_len,
+                    block_size=128,
+                    max_blocks=max_blocks,
+                )
+
+                # Verify results match
+                self.assertTrue(
+                    torch.equal(cpu_result, optimized_result),
+                    f"Triton kernel failed with extreme max_blocks limit of {max_blocks}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
