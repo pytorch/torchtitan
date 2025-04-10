@@ -20,7 +20,6 @@ from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
 from torchtitan.experiments.flux.model.autoencoder import (
     AutoEncoder,
-    AutoEncoderParams,
     load_ae,
 )
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
@@ -111,7 +110,6 @@ class TestGenerateImage:
 
         ae = load_ae(
             ckpt_path="assets/autoencoder/ae.safetensors",
-            autoencoder_params=AutoEncoderParams(),
             device=torch_device,
             dtype=torch.bfloat16,
         )
@@ -225,8 +223,8 @@ class TestGenerateImage:
         # convert sequences of patches into img-like latents
         latents = unpack_latents(latents, latent_height, latent_width)
 
-        img = decoder.decode(latents)
-        return img
+        decoder_output = decoder.decode(latents)
+        return decoder_output.sample
 
     def _save_image(
         self,

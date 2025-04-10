@@ -38,7 +38,6 @@ class FluxTrainer(Trainer):
         model_config = self.train_spec.config[job_config.model.flavor]
         self.autoencoder = load_ae(
             job_config.encoder.auto_encoder_path,
-            model_config.autoencoder_params,
             device="cpu",
             dtype=self._dtype,
         )
