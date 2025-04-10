@@ -149,8 +149,8 @@ def apply_moe_tp(
             # replicate computation for the router
             "moe.router.gate": NoParallel(),
             # input Replicate, output Partial
-            "moe.experts": TensorParallel(),
-            "moe.shared_expert": TensorParallel(),
+            "moe.experts": TensorParallel(output_layout=Partial()),
+            "moe.shared_expert": TensorParallel(output_layout=Partial()),
         }
         parallelize_module(
             module=transformer_block,

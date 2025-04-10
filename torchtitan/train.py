@@ -391,7 +391,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dist_utils.dist_max(loss, world_mesh["dp_cp"]),
             )
         else:
-            global_avg_loss = global_max_loss = loss.item()
+            global_avg_loss = global_max_loss = loss.detach().item()
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 

@@ -47,6 +47,7 @@ class TransformerModelArgs(BaseModelArgs):
     interleave_moe_layer_step: int = 2
     # token-choice
     top_k: int = 1
+    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type
