@@ -30,8 +30,8 @@ attn_mask_type = "causal"  # causal / block_causal
 
 [optimizer]
 # TODO: currently grouped mm in MoE doesn't work with AdamW, need to investigate
-# name = "AdamW"
-name = "Adam"
+name = "AdamW"
+# name = "Adam"
 lr = 4e-3
 eps = 1e-15
 

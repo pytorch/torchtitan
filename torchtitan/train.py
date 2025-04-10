@@ -239,6 +239,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 model.init_weights(buffer_device=buffer_device)
             model.train()
 
+            model = model.to(dtype=torch.bfloat16)
+
             self.model_parts = [model]
 
         # initialize device memory monitor and get peak flops for MFU calculation
