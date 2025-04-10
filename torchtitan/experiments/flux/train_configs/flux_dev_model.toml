@@ -12,7 +12,7 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 1
+log_freq = 100
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"

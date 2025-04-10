@@ -28,7 +28,9 @@ def parallelize_flux(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
+    if (
+        parallel_dims.dp_shard_enabled or parallel_dims.dp_replicate_enabled
+    ):  # apply FSDP or HSDP
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
@@ -120,27 +122,32 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
+    if (
+        parallel_dims.dp_shard_enabled or parallel_dims.dp_replicate_enabled
+    ):  # apply FSDP or HSDP
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
 
-        apply_fsdp_to_clip(
-            clip_model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+        mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            cpu_offload=job_config.training.enable_cpu_offload,
         )
+        fsdp_config = {
+            "mesh": world_mesh[tuple(dp_mesh_dim_names)],
+            "mp_policy": mp_policy,
+        }
+        if job_config.training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+        # FSDP for encoder blocks
+        for block in clip_model.hf_module.text_model.encoder.layers:
+            fully_shard(block, **fsdp_config)
+        fully_shard(clip_model, **fsdp_config)
 
-        apply_fsdp_to_t5(
-            t5_model,
-            world_mesh[tuple(dp_mesh_dim_names)],
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            cpu_offload=job_config.training.enable_cpu_offload,
-        )
+        for block in t5_model.hf_module.encoder.block:
+            fully_shard(block, **fsdp_config)
+        fully_shard(t5_model.hf_module, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied FSDP to the T5 and CLIP model")
@@ -148,37 +155,3 @@ def parallelize_encoders(
             logger.info("Applied FSDP to the T5 and CLIP model")
 
     return t5_model, clip_model
-
-
-def apply_fsdp_to_t5(
-    model: nn.Module,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    cpu_offload: bool = False,
-):
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    # FSDP for encoder blocks
-    for block in model.hf_module.encoder.block:
-        fully_shard(block, **fsdp_config)
-    fully_shard(model.hf_module, **fsdp_config)
-
-
-def apply_fsdp_to_clip(
-    model: nn.Module,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    cpu_offload: bool = False,
-):
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    # FSDP for encoder blocks
-    for block in model.hf_module.text_model.encoder.layers:
-        fully_shard(block, **fsdp_config)
-    fully_shard(model, **fsdp_config)

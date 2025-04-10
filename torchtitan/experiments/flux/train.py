@@ -36,7 +36,6 @@ class FluxTrainer(Trainer):
         self._dtype = torch.bfloat16
         self._seed = job_config.training.seed
         self._guidance = job_config.training.guidance
-        self.parallelize_encoder_fn = parallelize_encoders
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
@@ -55,7 +54,7 @@ class FluxTrainer(Trainer):
         )
 
         # Apply FSDP to the T5 model / CLIP model
-        self.t5_encoder, self.clip_encoder = self.parallelize_encoder_fn(
+        self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             world_mesh=self.world_mesh,

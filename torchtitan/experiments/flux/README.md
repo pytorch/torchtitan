@@ -1,7 +1,7 @@
 # FLUX model in torchtitan
 
 ## Overview
-This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. The FLUX model is a text-to-image model that can generate high-quality images from text prompts.
+This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. In torchtitan, we showcase the pre-training process of text-to-image part of the FLUX model.
 
 ## Usage
 First, download the autoencoder model from HuggingFace with your own access token:
