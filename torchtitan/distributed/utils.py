@@ -207,11 +207,6 @@ def init_distributed(job_config):
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
-    # to mitigate the memory issue that collectives using
-    # async_op=True hold memory longer than they should
-    # such as those in tensor parallelism
-    os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
-
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(job_config),
         timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
