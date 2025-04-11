@@ -15,8 +15,11 @@ from torchtitan.tools.profiling import (
 
 
 class TestFluxDataLoader:
-    def test_flux_dataloader(self):
-        dataset_name = "cc12m"
+    def test_load_dataset(self):
+        for dataset_name in ["cc12m-wds"]:
+            self._test_flux_dataloader(dataset_name)
+
+    def _test_flux_dataloader(self, dataset_name):
         batch_size = 32
         world_size = 4
         rank = 0
@@ -83,17 +86,12 @@ class TestFluxDataLoader:
             if memory_profiler:
                 memory_profiler.step(exit_ctx=True)
 
-    def test_preprocess(self):
-        # TODO
-        pass
-
     def _build_dataloader(
         self,
         job_config,
         world_size,
         rank,
     ):
-
         return build_flux_dataloader(
             dp_world_size=world_size,
             dp_rank=rank,

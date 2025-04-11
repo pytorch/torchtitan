@@ -10,12 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import numpy as np
+import PIL.Image
 
 import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
-from PIL import Image
 
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -28,7 +27,7 @@ from torchtitan.tools.logging import logger
 
 
 def _process_cc12m_image(
-    img: Image.Image,
+    img: PIL.Image.Image,
     output_size: int = 256,
 ) -> Optional[torch.Tensor]:
     """Process CC12M image to the desired size."""
@@ -103,19 +102,6 @@ def _cc12m_wds_data_processor(
     }
 
 
-def _cc12m_data_processor(
-    sample: dict[str, Any],
-    t5_tokenizer: FluxTokenizer,
-    clip_tokenizer: FluxTokenizer,
-    output_size: int = 256,
-) -> dict[str, Any]:
-    return {
-        "image": None,
-        "clip_tokens": None,
-        "t5_tokens": None,
-    }
-
-
 @dataclass
 class TextToImageDatasetConfig:
     path: str
@@ -128,11 +114,6 @@ DATASETS = {
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
-    ),
-    "cc12m": TextToImageDatasetConfig(
-        path="google-research-datasets/conceptual_12m",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        data_processor=_cc12m_data_processor,
     ),
 }
 
