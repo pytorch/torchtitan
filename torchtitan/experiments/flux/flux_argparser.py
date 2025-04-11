@@ -17,6 +17,12 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="guidance value used for guidance distillation",
     )
     parser.add_argument(
+        "--training.dropout_prob",
+        type=float,
+        default=0.1,
+        help="Classifier-free guidance with probability p to dropout the text conditioning",
+    )
+    parser.add_argument(
         "--encoder.t5_encoder",
         type=str,
         default="google/t5-v1_1-small",

@@ -170,7 +170,9 @@ class FluxDataset(IterableDataset, Stateful):
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._t5_tokenizer = t5_tokenizer
+        self._t5_empty_token = t5_tokenizer.encode("")
         self._clip_tokenizer = clip_tokenizer
+        self._clip_empty_token = clip_tokenizer.encode("")
         self._data_processor = data_processor
         self.job_config = job_config
 
@@ -203,6 +205,16 @@ class FluxDataset(IterableDataset, Stateful):
                         f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
                     )
                     continue
+
+                # Classifier-free guidance: Replace some of the strings with empty strings.
+                # Using random seed to ensure each rank has the same dropouted samples
+                seed = self.job_config.training.seed
+                dropout_prob = self.job_config.training.dropout_prob
+                if seed is not None and dropout_prob > 0.0:
+                    torch.manual_seed(seed)
+                    if random.random() < dropout_prob:
+                        sample_dict["t5_tokens"] = self._t5_empty_token
+                        sample_dict["clip_tokens"] = self._clip_empty_token
 
                 self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
@@ -253,6 +265,7 @@ def build_flux_dataloader(
         clip_tokenizer=FluxTokenizer(
             clip_encoder_name, max_length=77
         ),  # fix max_length for CLIP
+        job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,

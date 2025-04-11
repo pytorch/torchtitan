@@ -40,6 +40,8 @@ steps = 10
 compile = false
 dataset = "cc12m-wds"
 guidance = 3.5
+seed = 0
+dropout_prob = 0.1
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
