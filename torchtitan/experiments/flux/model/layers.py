@@ -66,6 +66,12 @@ class MLPEmbedder(nn.Module):
         self.silu = nn.SiLU()
         self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
 
+    def init_weights(self, init_std: float = 0.02):
+        nn.init.normal_(self.in_layer.weight, std=init_std)
+        nn.init.constant_(self.in_layer.bias, 0)
+        nn.init.normal_(self.out_layer.weight, std=init_std)
+        nn.init.constant_(self.out_layer.bias, 0)
+
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
 
@@ -173,6 +179,21 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
+    def init_weights(self):
+        # recursively initialize all the nn.Linear submodules
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+        # Zero-out modulation layers in transformer blocks:
+        nn.init.constant_(self.img_mod.lin.weight, 0)
+        nn.init.constant_(self.img_mod.lin.bias, 0)
+        nn.init.constant_(self.txt_mod.lin.weight, 0)
+        nn.init.constant_(self.txt_mod.lin.bias, 0)
+
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
     ) -> tuple[Tensor, Tensor]:
@@ -252,6 +273,15 @@ class SingleStreamBlock(nn.Module):
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
 
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.linear1.weight)
+        nn.init.xavier_uniform_(self.linear2.weight)
+        nn.init.constant_(self.linear1.bias, 0)
+        nn.init.constant_(self.linear2.bias, 0)
+        # Zero-out modulation layers in transformer blocks:
+        nn.init.constant_(self.modulation.lin.weight, 0)
+        nn.init.constant_(self.modulation.lin.bias, 0)
+
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
@@ -279,6 +309,12 @@ class LastLayer(nn.Module):
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
+
+    def init_weights(self):
+        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.linear.weight, 0)
+        nn.init.constant_(self.linear.bias, 0)
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
