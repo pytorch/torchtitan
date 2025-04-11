@@ -78,6 +78,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
+        print(f"Device set to {self.device}")
         ft_manager = ft.init_ft_manager(job_config)
 
         # init distributed
