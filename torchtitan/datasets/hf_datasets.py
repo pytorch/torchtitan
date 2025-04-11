@@ -49,6 +49,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train"),
         text_processor=_process_c4_text,
     ),
+    "c4_test_streaming": DatasetConfig(
+        path="tests/assets/c4_test",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        text_processor=_process_c4_text,
+    ),
 }
 
 
@@ -97,15 +102,21 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         # Variables for checkpointing
         self._sample_idx = 0
         self._all_tokens: list[int] = []
+        self._data_state_dict_loaded = False
 
     def _get_data_iter(self):
-        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
-            return iter([])
+        if isinstance(self._data, Dataset):
+            if self._sample_idx == len(self._data):
+                return iter([])
+            else:
+                return iter(self._data.skip(self._sample_idx))
+        elif not self._data_state_dict_loaded:  # backward compatibility
+            it = iter(self._data)
+            for _ in range(self._sample_idx):
+                next(it)
+            return it
 
-        it = iter(self._data)
-        for _ in range(self._sample_idx):
-            next(it)
-        return it
+        return iter(self._data)
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
@@ -138,8 +149,23 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._sample_idx = state_dict["sample_idx"]
         self._all_tokens = state_dict["token_buffer"]
 
+        if isinstance(self._data, IterableDataset):
+            if "data" in state_dict:  # backward compatibility
+                self._data.load_state_dict(state_dict["data"])
+                self._data_state_dict_loaded = True
+            else:
+                self._data_state_dict_loaded = False
+
     def state_dict(self):
-        return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
+        _state_dict = {
+            "token_buffer": self._all_tokens,
+            "sample_idx": self._sample_idx,
+        }
+
+        if isinstance(self._data, IterableDataset):
+            _state_dict["data"] = self._data.state_dict()
+
+        return _state_dict
 
 
 def build_hf_dataloader(
