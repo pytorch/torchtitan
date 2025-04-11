@@ -121,40 +121,26 @@ class FluxModel(nn.Module, ModelProtocol):
 
     def init_weights(self, buffer_device=None):
         # Adopted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
-
-        # Initialize transformer blocks, img_in (linear layer), txt_in (linear layer)
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-
-        self.apply(_basic_init)
+        # initialize Linear Layers: img_in, txt_in
+        nn.init.xavier_uniform_(self.img_in.weight)
+        nn.init.constant_(self.img_in.bias, 0)
+        nn.init.xavier_uniform_(self.txt_in.weight)
+        nn.init.constant_(self.txt_in.bias, 0)
 
         # Initialize time_in, vector_in, guidance_in (MLPEmbedder)
-        nn.init.normal_(self.time_in.in_layer.weight, std=0.02)
-        nn.init.normal_(self.time_in.out_layer.weight, std=0.02)
-        nn.init.normal_(self.vector_in.in_layer.weight, std=0.02)
-        nn.init.normal_(self.vector_in.out_layer.weight, std=0.02)
+        self.time_in.init_weights(init_std=0.02)
+        self.vector_in.init_weights(init_std=0.02)
         if self.model_args.guidance_embed:
-            nn.init.normal_(self.guidance_in.in_layer.weight, std=0.02)
-            nn.init.normal_(self.guidance_in.out_layer.weight, std=0.02)
+            self.guidance_in.init_weights(init_std=0.02)
 
-        # Zero-out modulation layers in transformer blocks:
+        # Initialize transformer blocks:
         for block in self.single_blocks:
-            nn.init.constant_(block.modulation.lin.weight, 0)
-            nn.init.constant_(block.modulation.lin.bias, 0)
+            block.init_weights()
         for block in self.double_blocks:
-            nn.init.constant_(block.img_mod.lin.weight, 0)
-            nn.init.constant_(block.img_mod.lin.bias, 0)
-            nn.init.constant_(block.txt_mod.lin.weight, 0)
-            nn.init.constant_(block.txt_mod.lin.bias, 0)
+            block.init_weights()
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        self.final_layer.init_weights()
 
     def forward(
         self,
