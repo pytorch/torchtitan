@@ -110,6 +110,11 @@ class SelfAttention(nn.Module):
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim)
 
+    def init_weights(self):
+        for layer in (self.qkv, self.proj):
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.constant_(layer.bias, 0)
+
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
@@ -132,6 +137,10 @@ class Modulation(nn.Module):
         self.is_double = double
         self.multiplier = 6 if double else 3
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
+
+    def init_weights(self):
+        nn.init.constant_(self.lin.weight, 0)
+        nn.init.constant_(self.lin.bias, 0)
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(
@@ -180,19 +189,19 @@ class DoubleStreamBlock(nn.Module):
         )
 
     def init_weights(self):
-        # recursively initialize all the nn.Linear submodules
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
+        # initialize all the nn.Linear submodules
+        for layer in (
+            self.img_mlp[0],
+            self.img_mlp[2],
+            self.txt_mlp[0],
+            self.txt_mlp[2],
+        ):
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.constant_(layer.bias, 0)
 
-        self.apply(_basic_init)
-        # Zero-out modulation layers in transformer blocks:
-        nn.init.constant_(self.img_mod.lin.weight, 0)
-        nn.init.constant_(self.img_mod.lin.bias, 0)
-        nn.init.constant_(self.txt_mod.lin.weight, 0)
-        nn.init.constant_(self.txt_mod.lin.bias, 0)
+        # initialize Modulation layers, SelfAttention layers
+        for layer in (self.img_attn, self.img_mod, self.txt_attn, self.txt_mod):
+            layer.init_weights()
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
@@ -274,13 +283,11 @@ class SingleStreamBlock(nn.Module):
         self.modulation = Modulation(hidden_size, double=False)
 
     def init_weights(self):
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-        nn.init.constant_(self.linear1.bias, 0)
-        nn.init.constant_(self.linear2.bias, 0)
-        # Zero-out modulation layers in transformer blocks:
-        nn.init.constant_(self.modulation.lin.weight, 0)
-        nn.init.constant_(self.modulation.lin.bias, 0)
+        for layer in (self.linear1, self.linear2):
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.constant_(layer.bias, 0)
+
+        self.modulation.init_weights()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
