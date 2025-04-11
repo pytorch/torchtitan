@@ -56,9 +56,9 @@ def _process_cc12m_image(
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
 
-    # Skip grayscale images, and RGBA, CMYK images
+    # Convert grayscale images, and RGBA, CMYK images
     if resized_img.mode != "RGB":
-        return None
+        resized_img = resized_img.convert("RGB")
 
     np_img = np.array(resized_img).transpose((2, 0, 1))
     tensor_img = torch.tensor(np_img).float() / 255.0
@@ -76,7 +76,7 @@ def _process_cc12m_image(
     return tensor_img
 
 
-def _flux_data_processor(
+def _cc12m_wds_data_processor(
     sample: dict[str, Any],
     t5_tokenizer: FluxTokenizer,
     clip_tokenizer: FluxTokenizer,
@@ -103,6 +103,19 @@ def _flux_data_processor(
     }
 
 
+def _cc12m_data_processor(
+    sample: dict[str, Any],
+    t5_tokenizer: FluxTokenizer,
+    clip_tokenizer: FluxTokenizer,
+    output_size: int = 256,
+) -> dict[str, Any]:
+    return {
+        "image": None,
+        "clip_tokens": None,
+        "t5_tokens": None,
+    }
+
+
 @dataclass
 class TextToImageDatasetConfig:
     path: str
@@ -111,10 +124,15 @@ class TextToImageDatasetConfig:
 
 
 DATASETS = {
-    "cc12m": TextToImageDatasetConfig(
+    "cc12m-wds": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
-        data_processor=_flux_data_processor,
+        data_processor=_cc12m_wds_data_processor,
+    ),
+    "cc12m": TextToImageDatasetConfig(
+        path="google-research-datasets/conceptual_12m",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        data_processor=_cc12m_data_processor,
     ),
 }
 
