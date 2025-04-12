@@ -13,7 +13,6 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
-import torch
 import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
@@ -23,11 +22,7 @@ from torchtitan.protocols.model_converter import (
     register_model_converter,
 )
 from torchtitan.tools.logging import logger
-
-
-def _is_sm89_or_later():
-    # Float8 is only supported on SM89 or later (H100+ GPUs)
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9)
+from torchtitan.tools.utils import has_cuda_capability
 
 
 class Float8Converter(ModelConverter):
@@ -35,7 +30,7 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config = job_config.float8
-        if not _is_sm89_or_later():
+        if not has_cuda_capability(8, 9):
             logger.warning(
                 "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
             )
@@ -73,7 +68,7 @@ class Float8Converter(ModelConverter):
             )
 
         else:
-            # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
+            # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
             enable_fsdp_float8_all_gather = (
                 parallel_dims.dp_shard_enabled
                 and float8_config.enable_fsdp_float8_all_gather

@@ -16,6 +16,13 @@ from torch._utils import _get_available_device_type, _get_device_module
 from torchtitan.tools.logging import logger
 
 
+def has_cuda_capability(major: int, minor: int) -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
+        major,
+        minor,
+    )
+
+
 def get_device_info():
     device_type = _get_available_device_type()
     if device_type is None:

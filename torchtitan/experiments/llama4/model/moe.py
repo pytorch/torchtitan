@@ -79,6 +79,9 @@ class GroupedExperts(nn.Module):
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
+        assert (
+            x.dtype == self.w1.dtype == self.w2.dtype == self.w3.dtype == torch.bfloat16
+        ), "torch._grouped_mm only supports bf16 dtypes"
         h = F.silu(torch._grouped_mm(x, self.w1, offs=offsets))
         h = h * torch._grouped_mm(x, self.w3, offs=offsets)
         out = torch._grouped_mm(h, self.w2, offs=offsets)
@@ -246,14 +249,17 @@ class MoE(nn.Module):
             ALIGN_SIZE_M = 16
 
             with torch.no_grad():
-                permuted_indices, m_sizes = generate_permute_indices(
+                (
+                    permuted_indices,
+                    num_local_tokens_per_expert,
+                    _,
+                ) = generate_permute_indices(
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
                     token_indices.shape[0] + self.experts.num_experts * ALIGN_SIZE_M,
                     ALIGN_SIZE_M,
                 )
-            num_local_tokens_per_expert = m_sizes
             token_indices = torch.vstack(
                 (token_indices, token_indices.new_zeros((dim)))
             )

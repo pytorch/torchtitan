@@ -14,6 +14,7 @@ from torchtitan.config_manager import JobConfig
 
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 
 @dataclass
@@ -54,6 +55,11 @@ class TransformerModelArgs(BaseModelArgs):
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
+        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+            logger.warning(
+                "Failed to use grouped mm, which is only supported on SM90 or later",
+            )
+            self.use_grouped_mm = False
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
