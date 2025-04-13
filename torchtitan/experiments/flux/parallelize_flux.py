@@ -95,8 +95,9 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
-    # apply FSDP to last layer
-    fully_shard(model.final_layer, **fsdp_config)
+    # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
+    fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
+
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
