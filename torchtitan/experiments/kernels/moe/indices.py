@@ -218,11 +218,11 @@ def simple_test():
     max_len = 128
     alignment = 32
     # Use the GPU kernel
-    permuted_indices_gpu, m_sizes = generate_permute_indices(
+    permuted_indices_gpu, m_sizes, _ = generate_permute_indices(
         tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
     )
     # Use the CPU method
-    permuted_indices_cpu, _ = generate_permute_indices(
+    permuted_indices_cpu, m_sizes, _ = generate_permute_indices(
         tokens_per_expert_group,
         experts_per_rank,
         num_ranks,

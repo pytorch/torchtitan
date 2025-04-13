@@ -246,7 +246,7 @@ class MoE(nn.Module):
             ALIGN_SIZE_M = 16
 
             with torch.no_grad():
-                permuted_indices, m_sizes, m_offsets = generate_permute_indices(
+                permuted_indices, m_sizes, _ = generate_permute_indices(
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
