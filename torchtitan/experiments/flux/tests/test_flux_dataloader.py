@@ -45,7 +45,7 @@ class TestFluxDataLoader:
                 str(batch_size),
                 "--training.seed",
                 "0",
-                "--training.dropout_prob",
+                "--training.classifer_free_guidance_prob",
                 "0.1",
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-small",
