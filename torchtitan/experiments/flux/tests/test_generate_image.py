@@ -84,7 +84,7 @@ class TestGenerateImage:
         device = "cuda"
         num_steps = None
         loop = False
-        output_dir = "output"
+        output_dir = "outputs/img/"
         add_sampling_metadata = True
 
         enable_classifer_free_guidance = True
@@ -139,13 +139,9 @@ class TestGenerateImage:
         t0 = time.perf_counter()
         output_name = os.path.join(output_dir, f"img_{seed}.jpg")
 
-        # Tokenize the prompt, on CPU
-        clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(
-            0
-        )  # torch.Size([bsz, 1, 1, 77])
-        t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(
-            0
-        )  # torch.Size([bsz, 1, 1, 4096])
+        # Tokenize the prompt,
+        clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
+        t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
         print(
             f"Tokens shape: clip_tokens {clip_tokens.shape}, t5_tokens {t5_tokens.shape}"
         )
@@ -182,8 +178,8 @@ class TestGenerateImage:
         clip_encoder = clip_encoder.to("cpu")
 
         # Init Flux model
-        model = FluxModel(flux_configs["flux-debug"]).to(
-            device=torch_device, dtype=torch.bfloat16
+        model = self._get_test_model(
+            context_in_dim=768, device=torch_device, dtype=torch.bfloat16
         )
 
         img = self._generate_images(
@@ -307,3 +303,15 @@ class TestGenerateImage:
         if add_sampling_metadata:
             exif_data[ExifTags.Base.ImageDescription] = prompt
         img.save(output_name, exif=exif_data, quality=95, subsampling=0)
+
+    def _get_test_model(
+        self, context_in_dim: int, device: torch.device, dtype: torch.dtype
+    ):
+        """
+        Load a smaller size test model for testing. Prevent OOM on single GPU because of large T5 model sizes.
+        """
+        config = flux_configs["flux-debug"]
+        config.context_in_dim = context_in_dim
+        print(config)
+        model = FluxModel(config).to(device, dtype)
+        return model

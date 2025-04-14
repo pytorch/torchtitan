@@ -78,7 +78,7 @@ class FluxTrainer(Trainer):
             clip_encodings (Tensor): CLIP text encodings.
                 Shape: [bsz, 768]
             t5_encodings (Tensor): T5 text encodings.
-                Shape: [bsz, sequence length, 256 or 512]
+                Shape: [bsz, sequence length, 4096]
             timesteps (Tensor): The amount of noise (0 to 1).
                 Shape: [bsz]
             model_ctx (ContextManager): Optional context to wrap the model call (e.g. for activation offloading)
