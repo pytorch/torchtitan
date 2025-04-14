@@ -87,7 +87,9 @@ class TestGenerateImage:
         output_dir = "outputs/img/"
         add_sampling_metadata = True
 
+        # sampling params:
         enable_classifer_free_guidance = True
+        classifier_free_guidance_scale = 5.0
 
         prompt = prompt.split("|")
         if len(prompt) == 1:
@@ -139,7 +141,7 @@ class TestGenerateImage:
         t0 = time.perf_counter()
         output_name = os.path.join(output_dir, f"img_{seed}.jpg")
 
-        # Tokenize the prompt,
+        # Tokenize the prompt. Unsqueeze to add a batch dimension.
         clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
         t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
         print(
@@ -202,6 +204,7 @@ class TestGenerateImage:
                 if enable_classifer_free_guidance
                 else None
             ),
+            classifier_free_guidance_scale=classifier_free_guidance_scale,
         )
 
         if torch.cuda.is_available():
@@ -229,6 +232,7 @@ class TestGenerateImage:
         enable_classifer_free_guidance: bool = False,
         empty_t5_encodings: torch.Tensor | None = None,
         empty_clip_encodings: torch.Tensor | None = None,
+        classifier_free_guidance_scale: float | None = None,
     ):
         """
         Generate images from a given prompt, by running inference with trained Flux model.
@@ -247,13 +251,13 @@ class TestGenerateImage:
         ).to(latents)
         text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
 
-        # convert img-like latents into sequences of patches
-        latents = pack_latents(latents)
-
         if enable_classifer_free_guidance:
             latents = torch.cat([latents, latents], dim=0)
             t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
             clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
+
+        # convert img-like latents into sequences of patches
+        latents = pack_latents(latents)
 
         # this is ignored for schnell
         for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
@@ -268,10 +272,7 @@ class TestGenerateImage:
             )
             if enable_classifer_free_guidance:
                 pred_u, pred_c = pred.chunk(2)
-                pred = pred_u + 10 * (pred_c - pred_u)
-                latents = (
-                    latents + (t_prev - t_curr) * pred
-                )  # TODO(jianiw): double check the udpate formula
+                pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
 
             latents = latents + (t_prev - t_curr) * pred
 
