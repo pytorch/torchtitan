@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# torchrun --standalone --nproc-per-node 8 run.py
+# torchrun --standalone --nproc-per-node 8 train.py
+# bash run_training.sh
+
 import torch
 import torch.distributed as dist
 from checkpoint import load_weights_from_hf
