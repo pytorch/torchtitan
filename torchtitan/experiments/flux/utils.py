@@ -34,14 +34,14 @@ def preprocess_flux_data(
         autoencoer(AutoEncoder): autoencoder to use for preprocessing
         clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
         t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
-        batch (dict[str, Tensor]): batch of data to preprocess
+        batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]
 
     Returns:
         dict[str, Tensor]: batch of preprocessed data
     """
 
-    clip_tokens = batch["clip_tokens"].squeeze().to(device=device, dtype=torch.int)
-    t5_tokens = batch["t5_tokens"].squeeze().to(device=device, dtype=torch.int)
+    clip_tokens = batch["clip_tokens"].squeeze(1).to(device=device, dtype=torch.int)
+    t5_tokens = batch["t5_tokens"].squeeze(1).to(device=device, dtype=torch.int)
 
     clip_text_encodings = clip_encoder(clip_tokens)
     t5_text_encodings = t5_encoder(t5_tokens)

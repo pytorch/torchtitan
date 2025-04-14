@@ -207,9 +207,9 @@ class FluxDataset(IterableDataset, Stateful):
                     continue
 
                 # Classifier-free guidance: Replace some of the strings with empty strings.
-                # Using random seed to ensure each rank has the same dropouted samples
+                # Using random seed to ensure each rank has the same dropouted samples when TP and CP are enabled.
                 seed = self.job_config.training.seed
-                dropout_prob = self.job_config.training.dropout_prob
+                dropout_prob = self.job_config.training.classifer_free_guidance_prob
                 if seed is not None and dropout_prob > 0.0:
                     torch.manual_seed(seed)
                     if random.random() < dropout_prob:

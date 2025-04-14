@@ -35,7 +35,6 @@ class FluxTrainer(Trainer):
         # For Flux model, we use FSDP with mixed precision training.
         self._dtype = torch.bfloat16
         self._seed = job_config.training.seed
-        self._guidance = job_config.training.guidance
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
@@ -69,7 +68,6 @@ class FluxTrainer(Trainer):
         clip_encodings: torch.Tensor,
         t5_encodings: torch.Tensor,
         timesteps: torch.Tensor,
-        guidance: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Use Flux's flow-matching model to predict the noise in image latents.
@@ -83,9 +81,6 @@ class FluxTrainer(Trainer):
                 Shape: [bsz, sequence length, 256 or 512]
             timesteps (Tensor): The amount of noise (0 to 1).
                 Shape: [bsz]
-            guidance (Optional[Tensor]): The guidance value (1.5 to 4) if guidance-enabled model.
-                Shape: [bsz]
-                Default: None
             model_ctx (ContextManager): Optional context to wrap the model call (e.g. for activation offloading)
                 Default: nullcontext
         Returns:
@@ -113,7 +108,6 @@ class FluxTrainer(Trainer):
             txt_ids=text_pos_enc.to(latents),
             y=clip_encodings.to(latents),
             timesteps=timesteps.to(latents),
-            guidance=guidance.to(latents) if guidance is not None else None,
         )
 
         # Convert sequence of patches to latent shape
@@ -155,7 +149,6 @@ class FluxTrainer(Trainer):
             timesteps = torch.rand((bsz,)).to(labels)
             sigmas = timesteps.view(-1, 1, 1, 1)
             noisy_latents = (1 - sigmas) * labels + sigmas * noise
-            guidance = torch.full((bsz,), self._guidance).to(labels)
 
         target = noise - labels
 
@@ -167,7 +160,6 @@ class FluxTrainer(Trainer):
             clip_encodings,
             t5_encodings,
             timesteps,
-            guidance,
         )
         loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
