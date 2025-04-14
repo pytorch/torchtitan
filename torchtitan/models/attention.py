@@ -107,6 +107,7 @@ class FlexAttention(torch.nn.Module):
 
         return block_causal_mask
 
+    @staticmethod
     def batchify_mask_mod(
         mask_mod: _mask_mod_signature, batchify_size: int
     ) -> _mask_mod_signature:
