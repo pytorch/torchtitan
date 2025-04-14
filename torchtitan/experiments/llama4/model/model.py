@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -126,7 +127,12 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(
+        self,
+        model_args: TransformerModelArgs,
+        use_rope: bool = True,
+        batchify_size: Optional[int] = None,
+    ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -145,7 +151,15 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+
+        # We could not get use_rope and batchify_size from model_args as these two
+        # are computed by Transformer.__init__() and each layer can have different
+        # values.
+        self.use_rope = use_rope
+
+        self.sdpa = build_attention(
+            model_args.use_flex_attn, model_args.attn_mask_type, batchify_size
+        )
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -179,7 +193,8 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        if self.use_rope:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -259,14 +274,21 @@ class TransformerBlock(nn.Module):
         layer_id (int): Identifier for the layer.
         attention_norm (RMSNorm): Layer normalization for attention output.
         ffn_norm (RMSNorm): Layer normalization for feedforward output.
-
+        attn_use_rope (bool): Whether to use RoPE for the attention module.
+        attn_batchify_size (Optional[int]): The batiify size for the attention module.
     """
 
-    def __init__(self, layer_id: int, model_args: TransformerModelArgs):
+    def __init__(
+        self,
+        layer_id: int,
+        model_args: TransformerModelArgs,
+        attn_use_rope: bool = True,
+        attn_batchify_size: Optional[int] = None,
+    ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
-        self.attention = Attention(model_args)
+        self.attention = Attention(model_args, attn_use_rope, attn_batchify_size)
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
         self.moe_enabled = (
@@ -369,8 +391,22 @@ class Transformer(nn.Module, ModelProtocol):
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
 
         self.layers = torch.nn.ModuleDict()
+
+        kwargs = {
+            "model_args": model_args,
+            "attn_use_rope": True,
+            "attn_batchify_size": None,
+        }
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            kwargs["layer_id"] = layer_id
+            if model_args.every_n_layers_nope is not None:
+                if model_args.every_n_layers_nope <= 1:
+                    raise ValueError("every_n_layers_nope must be greater than 1")
+                if layer_id % model_args.every_n_layers_nope == 0:
+                    kwargs["attn_use_rope"] = False
+                else:
+                    kwargs["attn_batchify_size"] = model_args.attn_batchify_size
+            self.layers[str(layer_id)] = TransformerBlock(**kwargs)
 
         self.norm = build_norm(
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps

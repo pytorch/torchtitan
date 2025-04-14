@@ -35,9 +35,12 @@ class TransformerModelArgs(BaseModelArgs):
     depth_init: bool = True
     norm_type: str = "rmsnorm"
 
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
+    use_flex_attn: bool = True
+    attn_mask_type: str = "block_causal"
     eos_id: int = 0
+    # irope settings
+    every_n_layers_nope: Optional[int] = 4
+    attn_batchify_size: int = 8192
 
     # MoE args
     moe_enabled: bool = True
