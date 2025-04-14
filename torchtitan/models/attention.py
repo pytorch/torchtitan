@@ -191,7 +191,7 @@ class ScaledDotProductAttention(torch.nn.Module):
 
 
 def build_attention(
-    use_flex_attn: bool, attn_mask_type: str, batchify_size: Optional[int]
+    use_flex_attn: bool, attn_mask_type: str, batchify_size: Optional[int] = None
 ):
     if use_flex_attn:
         return FlexAttention(attn_mask_type, batchify_size)
