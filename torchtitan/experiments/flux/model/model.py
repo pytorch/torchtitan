@@ -31,7 +31,7 @@ class FluxModelArgs(BaseModelArgs):
     in_channels: int = 64
     out_channels: int = 64
     vec_in_dim: int = 768
-    context_in_dim: int = 4096
+    context_in_dim: int = 512
     hidden_size: int = 3072
     mlp_ratio: float = 4.0
     num_heads: int = 24
@@ -40,7 +40,6 @@ class FluxModelArgs(BaseModelArgs):
     axes_dim: tuple = (16, 56, 56)
     theta: int = 10_000
     qkv_bias: bool = True
-    guidance_embed: bool = True
     autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
