@@ -95,7 +95,7 @@ def run_full_model(
     loss_fn = torch.nn.functional.cross_entropy
 
     # Run forward and backward
-    steps = 2
+    steps = 20
     for _ in range(steps):
         if pp_size > 1:
             # Create pipeline stage
