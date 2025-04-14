@@ -95,7 +95,7 @@ class FTParallelDims(ParallelDims):
             return ft_init_device_mesh(
                 device_type=device_type,
                 mesh_shape=mesh_shape,
-                mesh_dim_names=tuple(mesh_dim_names),
+                mesh_dim_names=mesh_dim_names,
                 replicate_dim=mesh_dim_names.index("dp_replicate"),
                 manager=self.ft_manager.manager,
             )
@@ -120,7 +120,7 @@ class FTParallelDims(ParallelDims):
 def ft_dist_reduce(
     x: torch.Tensor, reduceOp: str, mesh: DeviceMesh
 ) -> tuple[torch.Tensor, str, DeviceMesh]:
-    if has_torchft and isinstance(mesh, ft.process_group._FlattenDeviceMesh):
+    if has_torchft and isinstance(mesh, ft.device_mesh._FlattenDeviceMesh):
         x = funcol.all_reduce(
             x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg
         )
@@ -131,7 +131,7 @@ def ft_dist_reduce(
 def ft_clip_grad_norm_util(total_norm: DTensor) -> torch.Tensor:
     if has_torchft:
         mesh = total_norm._spec.mesh
-        if isinstance(mesh, ft.process_group.ManagedDeviceMesh):
+        if isinstance(mesh, ft.device_mesh.ManagedDeviceMesh):
             # The gradients along the replicated dim has already been reduced.
             # So we don't need another reducution beforing removing the
             # replicate dimension
