@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import numpy as np
-import PIL.Image
+import PIL
 
 import torch
 from datasets import Dataset, load_dataset
