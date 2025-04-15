@@ -1,4 +1,11 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import math
+import os
 from typing import Callable
 
 import torch
@@ -7,13 +14,17 @@ from PIL import ExifTags, Image
 
 from torch import Tensor
 
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
 
+from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     generate_noise_latent,
     pack_latents,
+    preprocess_flux_data,
     unpack_latents,
 )
 
@@ -59,11 +70,91 @@ def get_schedule(
 # ----------------------------------------
 
 
-def generate_images(
+def generate_image(
+    device: torch.device,
+    dtype: torch.dtype,
+    job_config: JobConfig,
+    model: FluxModel,
+    prompt: str,
+    autoencoder: AutoEncoder,
+    t5_tokenizer: Tokenizer,
+    clip_tokenizer: Tokenizer,
+    t5_encoder: FluxEmbedder,
+    clip_encoder: FluxEmbedder,
+):
+    """
+    Sampling and save a single images from noise using a given prompt.
+    """
+    rng = torch.Generator(device="cpu")
+    seed = job_config.training.seed
+    if seed is None:
+        seed = rng.seed()
+    print(f"Generating with seed {seed}:\n{prompt}")
+
+    # allow for packing and conversion to latent space
+    img_height = 16 * (job_config.sampling.sample_img_width // 16)
+    img_width = 16 * (job_config.sampling.sample_img_height // 16)
+
+    enable_classifer_free_guidance = job_config.sampling.enable_classifer_free_guidance
+
+    # Tokenize the prompt. Unsqueeze to add a batch dimension.
+    clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
+    t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
+
+    batch = preprocess_flux_data(
+        device=device,
+        dtype=torch.bfloat16,
+        autoencoder=None,
+        clip_encoder=clip_encoder,
+        t5_encoder=t5_encoder,
+        batch={
+            "clip_tokens": clip_tokens,
+            "t5_tokens": t5_tokens,
+        },
+    )
+
+    if enable_classifer_free_guidance:
+        empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
+        empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
+        empty_batch = preprocess_flux_data(
+            device=device,
+            dtype=torch.bfloat16,
+            autoencoder=None,
+            clip_encoder=clip_encoder,
+            t5_encoder=t5_encoder,
+            batch={
+                "clip_tokens": empty_clip_tokens,
+                "t5_tokens": empty_t5_tokens,
+            },
+        )
+
+    img = denoise(
+        device=device,
+        dtype=dtype,
+        model=model,
+        img_width=img_width,
+        img_height=img_height,
+        denoising_steps=job_config.sampling.denoising_steps,
+        seed=seed,
+        clip_encodings=batch["clip_encodings"],
+        t5_encodings=batch["t5_encodings"],
+        enable_classifer_free_guidance=enable_classifer_free_guidance,
+        empty_t5_encodings=(
+            empty_batch["t5_encodings"] if enable_classifer_free_guidance else None
+        ),
+        empty_clip_encodings=(
+            empty_batch["clip_encodings"] if enable_classifer_free_guidance else None
+        ),
+        classifier_free_guidance_scale=job_config.sampling.classifier_free_guidance_scale,
+    )
+
+    img = autoencoder.decode(img)
+
+
+def denoise(
     device: torch.device,
     dtype: torch.dtype,
     model: FluxModel,
-    decoder: AutoEncoder,
     # image params:
     img_width: int,
     img_height: int,
@@ -123,18 +214,20 @@ def generate_images(
     # convert sequences of patches into img-like latents
     latents = unpack_latents(latents, latent_height, latent_width)
 
-    img = decoder.decode(latents)
-    return img
+    return latents
 
 
 def save_image(
     name: str,
-    output_name: str,
+    output_dir: str,
     x: torch.Tensor,
     add_sampling_metadata: bool,
     prompt: str,
 ):
-    print(f"Saving {output_name}")
+    print(f"Saving {output_dir}/{name}")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    output_name = os.path.join(output_dir, name)
     # bring into PIL format and save
     x = x.clamp(-1, 1)
     x = rearrange(x[0], "c h w -> h w c")

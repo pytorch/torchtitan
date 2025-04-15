@@ -11,12 +11,6 @@ import torch
 
 def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--training.guidance",
-        type=float,
-        default=3.5,
-        help="guidance value used for guidance distillation",
-    )
-    parser.add_argument(
         "--training.classifer_free_guidance_prob",
         type=float,
         default=0.1,
@@ -50,4 +44,46 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         "--encoder.offload_encoder",
         action="store_true",
         help="Whether to shard the encoder using FSDP",
+    )
+    # sampling configs
+    #     enable_classifer_free_guidance = true
+    # classifer_free_guidance_scale = 5.0
+    # sample_img_width = 512
+    # sample_img_height = 512
+    # denoising_steps = 30
+    # output_dir = "outputs/img"
+    parser.add_argument(
+        "--sampling.enable_classifer_free_guidance",
+        action="store_true",
+        help="Whether to use classifier-free guidance during sampling",
+    )
+    parser.add_argument(
+        "--sampling.classifier_free_guidance_scale",
+        type=float,
+        default=5.0,
+        help="Classifier-free guidance scale when sampling",
+    )
+    parser.add_argument(
+        "--sampling.sample_img_width",
+        type=int,
+        default=512,
+        help="Image width to sample",
+    )
+    parser.add_argument(
+        "--sampling.sample_img_height",
+        type=int,
+        default=512,
+        help="Image height to sample",
+    )
+    parser.add_argument(
+        "--sampling.denoising_steps",
+        type=int,
+        default=512,
+        help="How many denoising steps to sample when generating an image",
+    )
+    parser.add_argument(
+        "--sampling.output_dir",
+        type=str,
+        default="outputs/images",
+        help="Output directory for the generated images",
     )
