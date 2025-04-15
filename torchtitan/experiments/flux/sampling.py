@@ -213,8 +213,6 @@ def denoise(
     # convert sequences of patches into img-like latents
     latents = unpack_latents(latents, latent_height, latent_width)
 
-    print("Latent: ", latents.shape)
-
     return latents
 
 
