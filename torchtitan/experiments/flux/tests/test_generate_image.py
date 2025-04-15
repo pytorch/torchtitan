@@ -313,6 +313,6 @@ class TestGenerateImage:
         """
         config = flux_configs["flux-debug"]
         config.context_in_dim = context_in_dim
-        print(config)
         model = FluxModel(config).to(device, dtype)
+        model = model.eval().requires_grad_(False)
         return model
