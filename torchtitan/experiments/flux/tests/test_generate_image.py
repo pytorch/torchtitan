@@ -118,12 +118,16 @@ class TestGenerateImage:
         clip_tokenizer = FluxTokenizer(
             model_path="openai/clip-vit-large-patch14", max_length=77
         )
-        t5_tokenizer = FluxTokenizer(model_path="google/t5-v1_1-small", max_length=512)
-        clip_encoder = FluxEmbedder(version="openai/clip-vit-large-patch14").to(
-            torch_device, dtype=torch.bfloat16
+        t5_tokenizer = FluxTokenizer(model_path="google/t5-v1_1-xxl", max_length=4096)
+        clip_encoder = (
+            FluxEmbedder(version="openai/clip-vit-large-patch14")
+            .to(torch_device, dtype=torch.bfloat16)
+            .eval()
         )
-        t5_encoder = FluxEmbedder(version="google/t5-v1_1-small").to(
-            torch_device, dtype=torch.bfloat16
+        t5_encoder = (
+            FluxEmbedder(version="google/t5-v1_1-xxl")
+            .to(torch_device, dtype=torch.bfloat16)
+            .eval()
         )
 
         rng = torch.Generator(device="cpu")

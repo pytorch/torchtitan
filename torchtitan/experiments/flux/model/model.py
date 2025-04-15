@@ -120,9 +120,27 @@ class FluxModel(nn.Module, ModelProtocol):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
     def init_weights(self, buffer_device=None):
-        # TODO(jianiw): replace placeholder with real weight init
-        for param in self.parameters():
-            param.data.uniform_(0, 0.1)
+        # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
+        # initialize Linear Layers: img_in, txt_in
+        nn.init.xavier_uniform_(self.img_in.weight)
+        nn.init.constant_(self.img_in.bias, 0)
+        nn.init.xavier_uniform_(self.txt_in.weight)
+        nn.init.constant_(self.txt_in.bias, 0)
+
+        # Initialize time_in, vector_in, guidance_in (MLPEmbedder)
+        self.time_in.init_weights(init_std=0.02)
+        self.vector_in.init_weights(init_std=0.02)
+        if self.model_args.guidance_embed:
+            self.guidance_in.init_weights(init_std=0.02)
+
+        # Initialize transformer blocks:
+        for block in self.single_blocks:
+            block.init_weights()
+        for block in self.double_blocks:
+            block.init_weights()
+
+        # Zero-out output layers:
+        self.final_layer.init_weights()
 
     def forward(
         self,
