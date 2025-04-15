@@ -38,9 +38,15 @@ class TransformerModelArgs(BaseModelArgs):
     use_flex_attn: bool = True
     attn_mask_type: str = "block_causal"
     eos_id: int = 0
-    # irope settings
-    every_n_layers_nope: Optional[int] = 4
-    attn_batchify_size: int = 8192
+    # iRoPE settings
+    # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
+    # used every n layers. Other layers uses RoPE (rotary positional embedding) and
+    # the inner attention of those layer will use the fixed block size specified by
+    # ``fixed_attn_block_size``. ``fixed_attn_block_size`` means that the query will
+    # only attend to the tokens within the same block regardless how long is the
+    # sequence.
+    every_n_layers_nope: Optional[int] = None
+    fixed_attn_block_size: int = 8192
 
     # MoE args
     moe_enabled: bool = True

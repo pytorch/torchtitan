@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from typing import Any, Callable, ClassVar, Optional
+from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -18,10 +18,10 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-# Flex Attention mask type. For each mask type, we initialize it at most once per
+# FlexAttention mask type. For each mask type, we initialize it at most once per
 # batch. To record what it is initialized, FLEX_ATTN_MASK_T is used as the key to
 # track the initialized mask.
-FLEX_ATTN_MASK_T = tuple[Any, ...]
+FLEX_ATTN_MASK_T = tuple[str, int | None]
 
 
 class FlexAttention(torch.nn.Module):
@@ -36,10 +36,10 @@ class FlexAttention(torch.nn.Module):
             attention matrix is masked. "block_causal" means the attention matrix
             is divided into blocks, where block boundary is defined by EOS token,
             and the lower triangle of each block is masked.
-        batchify_size (Optional[int]): The size to be batchified. If specified, each
-            sequence will be further divided to batches, where each batch has the
-            maximum size of ``batchify_size``. A query will only attend to the keys
-            within the same batch.
+        fixed_block_size (int | None): The block size to be used to perform attention.
+            If specified, each sequence will be further divided to blocks, where each
+            block has the maximum size of ``fixed_block_size``. A query will only attend
+            to the keys within the same block.
     """
 
     # We registered flex_attention related attributes as class variables as we
@@ -60,19 +60,19 @@ class FlexAttention(torch.nn.Module):
     attn_mask_type: str
 
     def __init__(
-        self, attn_mask_type: str, batchify_size: Optional[int] = None
+        self, attn_mask_type: str, fixed_block_size: int | None = None
     ) -> None:
         super().__init__()
         if attn_mask_type not in ["causal", "block_causal"]:
             raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
         self.attn_mask_type = attn_mask_type
-        self.batchify_size = batchify_size
+        self.fixed_block_size = fixed_block_size
 
         FlexAttention.used_attn_mask_types.add(self.mask_key)
 
     @property
     def mask_key(self) -> FLEX_ATTN_MASK_T:
-        return (self.attn_mask_type, self.batchify_size)
+        return (self.attn_mask_type, self.fixed_block_size)
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
@@ -108,10 +108,12 @@ class FlexAttention(torch.nn.Module):
         return block_causal_mask
 
     @staticmethod
-    def batchify_mask_mod(
-        mask_mod: _mask_mod_signature, batchify_size: int
+    def _fixed_block_mask_mod(
+        mask_mod: _mask_mod_signature, fixed_block_size: int
     ) -> _mask_mod_signature:
-        """Given arbirary mask_mod, batchify it to only allow attention within the same batch.
+        """
+        Given an arbirary mask_mod, divide the input sequence to blocks
+        and only allow attention within the same block.
 
         Args:
             mask_mod: The mask mod to apply to the documents
@@ -123,27 +125,29 @@ class FlexAttention(torch.nn.Module):
             b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
         ):
             # Get the batch index of the query and key
-            q_batch = q_idx // batchify_size
-            kv_batch = kv_idx // batchify_size
+            q_batch = q_idx // fixed_block_size
+            kv_batch = kv_idx // fixed_block_size
             # Only allow attention within the same batch
             same_batch = q_batch == kv_batch
             # Apply the original mask mod
-            inner_mask = mask_mod(b, h, q_idx % batchify_size, kv_idx % batchify_size)
+            inner_mask = mask_mod(
+                b, h, q_idx % fixed_block_size, kv_idx % fixed_block_size
+            )
 
             return same_batch & inner_mask
 
         batched_mask_mod.__name__ = (
-            f"batched_mask_mod_{mask_mod.__name__}_batch_size_{batchify_size}"
+            f"batched_mask_mod_{mask_mod.__name__}_fixed_block_size_{fixed_block_size}"
         )
 
         return batched_mask_mod
 
     @staticmethod
     @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
+    def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
         # batch is [b, s, h, d] shape
         for mask_key in FlexAttention.used_attn_mask_types:
-            attn_mask_type, batchify_size = mask_key
+            attn_mask_type, fixed_block_size = mask_key
             match attn_mask_type:
                 case "causal":
                     if FlexAttention.block_masks.get(mask_key, None) is not None:
@@ -152,10 +156,6 @@ class FlexAttention(torch.nn.Module):
                     # all samples have the same lower triangle mask.
                     batch_dimension = 1
                     mask_mod = FlexAttention._get_causal_mask_mod()
-                    if batchify_size is not None and batchify_size > 0:
-                        mask_mod = FlexAttention.batchify_mask_mod(
-                            mask_mod, batchify_size
-                        )
                 case "block_causal":
                     if eos_id is None:
                         raise RuntimeError(
@@ -163,12 +163,13 @@ class FlexAttention(torch.nn.Module):
                         )
                     batch_dimension = batch.shape[0]
                     mask_mod = FlexAttention._get_block_causal_mask_mod(batch, eos_id)
-                    if batchify_size is not None and batchify_size > 0:
-                        mask_mod = FlexAttention.batchify_mask_mod(
-                            mask_mod, batchify_size
-                        )
                 case _:
                     raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
+
+            if fixed_block_size is not None and fixed_block_size > 0:
+                mask_mod = FlexAttention._fixed_block_mask_mod(
+                    mask_mod, fixed_block_size
+                )
 
             seq_len = batch.shape[1]
             block_mask = FlexAttention.compiled_create_block_mask(
@@ -192,14 +193,14 @@ class ScaledDotProductAttention(torch.nn.Module):
 
 
 def build_attention(
-    use_flex_attn: bool, attn_mask_type: str, batchify_size: Optional[int] = None
+    use_flex_attn: bool, attn_mask_type: str, fixed_block_size: int | None = None
 ):
     if use_flex_attn:
-        return FlexAttention(attn_mask_type, batchify_size)
+        return FlexAttention(attn_mask_type, fixed_block_size)
     else:
-        if batchify_size is not None:
+        if fixed_block_size is not None:
             raise ValueError(
-                "TorchTitan with SDPA currently does not support batchify_size."
+                "TorchTitan with SDPA currently does not support fixed_block_size."
             )
         if attn_mask_type != "causal":
             raise ValueError(
@@ -208,5 +209,5 @@ def build_attention(
         return ScaledDotProductAttention(attn_mask_type)
 
 
-def init_attention_mask(batch: torch.Tensor, eos_id: Optional[int] = None) -> None:
+def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
     FlexAttention.init_attention_mask(batch, eos_id)
