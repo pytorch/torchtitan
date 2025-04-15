@@ -26,7 +26,7 @@ __all__ = [
 llama4_configs = {
     "debugmodel": TransformerModelArgs(
         dim=256,
-        n_layers=8,
+        n_layers=6,
         n_heads=16,
         rope_theta=500000,
     ),
