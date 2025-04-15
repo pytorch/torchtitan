@@ -463,7 +463,7 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor):
         """
         Perform a forward pass through the Transformer model.
 
@@ -474,10 +474,8 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        # TODO: We will to change forward() signature to allow tokens to
-        # be always passed in.
         if self.model_args.use_flex_attn:
-            init_attention_mask(tokens, eos_id=self.eos_id)
+            init_attention_mask(input_batch, eos_id=self.eos_id)
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
