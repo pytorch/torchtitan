@@ -120,7 +120,7 @@ class FluxModel(nn.Module, ModelProtocol):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
     def init_weights(self, buffer_device=None):
-        # Adopted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
+        # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
         # initialize Linear Layers: img_in, txt_in
         nn.init.xavier_uniform_(self.img_in.weight)
         nn.init.constant_(self.img_in.bias, 0)
