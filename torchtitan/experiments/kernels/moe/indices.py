@@ -28,7 +28,6 @@ def _fill_indices_kernel(
 
     # map programs (blocks) to the experts and loop (grid stride) if needed
     for expert_id in range(pid, experts_per_rank, num_programs):
-
         # read this experts write offset
         write_offset = tl.load(write_offsets_ptr + expert_id)
 
@@ -161,8 +160,15 @@ def generate_permute_indices(
         block_size: block size for optimized implementation.
 
     Returns:
-        permuted_indices: permutation indices.
-        m_sizes: number of tokens for each expert.
+        permuted_indices: Tensor of indices that map original token order to the expert-grouped order.
+        m_sizes: aligned number of tokens for each expert (padded to alignment boundary).
+        m_offsets: Cumulative sum of m_sizes. The exclusive ending position for each expert's tokens.
+
+    Explanatory details:
+        `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
+        From: |       rank 0      |       rank 1      |
+        To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
+              |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
     """
     # prefix sum to get start index of each expert (parallel scan kernel in future?)
     start_index_values = (
