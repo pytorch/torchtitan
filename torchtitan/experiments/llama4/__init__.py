@@ -29,6 +29,8 @@ llama4_configs = {
         n_layers=8,
         n_heads=16,
         rope_theta=500000,
+        every_n_layers_nope=4,
+        fixed_attn_block_size=256,
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
@@ -50,13 +52,6 @@ llama4_configs = {
         multiple_of=2048,
         rope_theta=500000,
         num_experts=128,
-    ),
-    "debugmodel_irope": TransformerModelArgs(
-        dim=256,
-        n_layers=8,
-        n_heads=16,
-        rope_theta=500000,
-        every_n_layers_nope=4,
     ),
     "17bx16e_irope": TransformerModelArgs(
         dim=5120,

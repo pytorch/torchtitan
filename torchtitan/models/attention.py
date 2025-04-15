@@ -117,30 +117,30 @@ class FlexAttention(torch.nn.Module):
 
         Args:
             mask_mod: The mask mod to apply to the documents
-            batch_size: The number of tokens in each batch.
+            fixed_block_size: The number of tokens in each block.
         """
 
         # Credit to @drisspg.
-        def batched_mask_mod(
+        def blocked_mask_mod(
             b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
         ):
-            # Get the batch index of the query and key
-            q_batch = q_idx // fixed_block_size
-            kv_batch = kv_idx // fixed_block_size
-            # Only allow attention within the same batch
-            same_batch = q_batch == kv_batch
+            # Get the block index of the query and key
+            q_block = q_idx // fixed_block_size
+            kv_block = kv_idx // fixed_block_size
+            # Only allow attention within the same block
+            same_block = q_block == kv_block
             # Apply the original mask mod
             inner_mask = mask_mod(
                 b, h, q_idx % fixed_block_size, kv_idx % fixed_block_size
             )
 
-            return same_batch & inner_mask
+            return same_block & inner_mask
 
-        batched_mask_mod.__name__ = (
-            f"batched_mask_mod_{mask_mod.__name__}_fixed_block_size_{fixed_block_size}"
+        blocked_mask_mod.__name__ = (
+            f"blocked_mask_mod_{mask_mod.__name__}_fixed_block_size_{fixed_block_size}"
         )
 
-        return batched_mask_mod
+        return blocked_mask_mod
 
     @staticmethod
     @torch.no_grad()
