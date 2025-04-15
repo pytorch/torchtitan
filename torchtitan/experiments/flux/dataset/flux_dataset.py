@@ -211,7 +211,7 @@ class FluxDataset(IterableDataset, Stateful):
                 seed = self.job_config.training.seed
                 dropout_prob = self.job_config.training.classifer_free_guidance_prob
                 if seed is not None and dropout_prob > 0.0:
-                    torch.manual_seed(seed)
+                    random.seed(seed)
                     if random.random() < dropout_prob:
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token
