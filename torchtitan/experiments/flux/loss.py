@@ -25,12 +25,3 @@ def build_mse_loss(job_config: JobConfig):
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn)
     return loss_fn
-
-
-def mse_loss_with_timestep(
-    pred: torch.Tensor, labels: torch.Tensor, noise_level: int = 0.5
-) -> torch.Tensor:
-    """Common MSE loss function for Transformer models training."""
-    return torch.nn.functional.mse_loss(pred.float(), labels.float().detach()) * (
-        1 - timesteps
-    ).pow(2)

@@ -35,10 +35,9 @@ class TestGenerateImage:
         )
         device = "cuda"
         num_steps = 30
-        output_dir = "outputs/img/"
+        output_dir = "outputs/img"
 
         # sampling params:
-        enable_classifer_free_guidance = True
         classifier_free_guidance_scale = 5.0
 
         # Contracting JobConfig
@@ -123,7 +122,7 @@ class TestGenerateImage:
         print(f"Generate Image Done in {t1 - t0:.1f}s.")
 
         save_image(
-            name=f"img_unit_test_{seed}.jpg",
+            name=f"img_unit_test_{config.training.seed}.jpg",
             output_dir=config.sampling.output_dir,
             x=image,
             add_sampling_metadata=True,

@@ -47,6 +47,15 @@ clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
+[sampling]
+enable_classifer_free_guidance = true
+classifer_free_guidance_scale = 5.0
+sample_img_width = 512
+sample_img_height = 512
+denoising_steps = 30
+output_dir = "outputs/img"
+eval_freq = 1000
+
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1

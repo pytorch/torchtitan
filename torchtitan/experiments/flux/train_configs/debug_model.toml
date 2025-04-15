@@ -18,7 +18,6 @@ disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
-eval_freq = 10
 
 [model]
 name = "flux"
@@ -56,6 +55,7 @@ sample_img_width = 512
 sample_img_height = 512
 denoising_steps = 30
 output_dir = "outputs/img"
+eval_freq = 10
 
 
 [parallelism]
