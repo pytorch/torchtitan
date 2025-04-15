@@ -492,9 +492,10 @@ class JobConfig:
             type=int,
             default=None,
             help="""
-                The number of layers per stage. If specified, the split points will be calculated from
-                the number of layers and pipeline_parallel_degree. If not specified, the layers per stage will
-                be inferred from the model, schedule, and pipeline_parallel_degree.""",
+                The number of layers per (virtual) pipeline stage. If specified, the split points will be
+                calculated from the number of layers and pipeline_parallel_degree. If not specified, the
+                layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
+                """,
         )
         self.parser.add_argument(
             "--parallelism.pipeline_parallel_schedule",
