@@ -57,7 +57,6 @@ denoising_steps = 30
 output_dir = "outputs/img"
 eval_freq = 10
 
-
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
