@@ -87,3 +87,9 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         default="outputs/images",
         help="Output directory for the generated images",
     )
+    parser.add_argument(
+        "--sampling.eval_freq",
+        type=int,
+        default=100,
+        help="Frequency of evaluation/sampling during training",
+    )

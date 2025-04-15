@@ -11,6 +11,7 @@ import torch
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
@@ -155,7 +156,7 @@ class FluxTrainer(Trainer):
 
         assert len(model_parts) == 1
 
-        model_parts[0].requires_grad_(True)
+        model_parts[0].train().requires_grad_(True)
         pred = self._predict_noise(
             model_parts[0],
             noisy_latents,
@@ -198,17 +199,15 @@ class FluxTrainer(Trainer):
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
-        # Eval:
+        # Evaluate the model during training
         if (
-            self.step % self.job_config.training.eval_interval == 0
+            self.step % self.job_config.sampling.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
-            self.model_parts[0].eval()
-            self._eval_flux_model(self)
+            self._eval_flux_model()
+            self.model_parts[0].train().requires_grad_(True)
 
-    def _eval_flux_model(
-        self,
-    ):
+    def _eval_flux_model(self):
         """
         Evaluate the Flux model.
         1) generate and save images every few steps; 2) Calculate loss with fixed t value on validation set.
@@ -223,10 +222,15 @@ class FluxTrainer(Trainer):
             model=self.model_parts[0],
             prompt=prompt,  # TODO(jianiw): change this to a prompt from dataloader
             autoencoder=self.autoencoder,
+            t5_tokenizer=FluxTokenizer(
+                self.job_config.encoder.t5_encoder,
+                max_length=self.job_config.encoder.max_t5_encoding_len,
+            ),
+            clip_tokenizer=FluxTokenizer(
+                self.job_config.encoder.clip_encoder, max_length=77
+            ),
             t5_encoder=self.t5_encoder,
-            t5_tokenizer=self.t5_tokenizer,
             clip_encoder=self.clip_encoder,
-            clip_tokenizer=self.clip_tokenizer,
         )
 
         save_image(

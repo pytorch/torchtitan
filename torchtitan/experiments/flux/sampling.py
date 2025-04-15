@@ -81,7 +81,7 @@ def generate_image(
     clip_tokenizer: Tokenizer,
     t5_encoder: FluxEmbedder,
     clip_encoder: FluxEmbedder,
-):
+) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
     """
@@ -149,6 +149,7 @@ def generate_image(
     )
 
     img = autoencoder.decode(img)
+    return img
 
 
 def denoise(
@@ -167,7 +168,7 @@ def denoise(
     empty_t5_encodings: torch.Tensor | None = None,
     empty_clip_encodings: torch.Tensor | None = None,
     classifier_free_guidance_scale: float | None = None,
-):
+) -> torch.Tensor:
     """
     Sampling images from noise using a given prompt, by running inference with trained Flux model.
     Save the generated images to the given output path.
@@ -213,6 +214,8 @@ def denoise(
 
     # convert sequences of patches into img-like latents
     latents = unpack_latents(latents, latent_height, latent_width)
+
+    print("Latent: ", latents.shape)
 
     return latents
 
