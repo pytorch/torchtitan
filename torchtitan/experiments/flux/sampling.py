@@ -156,10 +156,8 @@ def denoise(
     device: torch.device,
     dtype: torch.dtype,
     model: FluxModel,
-    # image params:
     img_width: int,
     img_height: int,
-    # sampling params:
     denoising_steps: int,
     seed: int,
     clip_encodings: torch.Tensor,

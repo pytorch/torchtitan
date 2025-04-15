@@ -156,9 +156,9 @@ class FluxTrainer(Trainer):
 
         assert len(model_parts) == 1
 
-        model_parts[0].train().requires_grad_(True)
+        model = self.model_parts[0].train().requires_grad_(True)
         pred = self._predict_noise(
-            model_parts[0],
+            model,
             noisy_latents,
             clip_encodings,
             t5_encodings,
@@ -205,16 +205,14 @@ class FluxTrainer(Trainer):
             or self.step == self.job_config.training.steps
         ):
             self._eval_flux_model()
-            self.model_parts[0].train().requires_grad_(True)
 
-    def _eval_flux_model(self):
+    def _eval_flux_model(self, prompt: str = "A photo of a cat"):
         """
         Evaluate the Flux model.
         1) generate and save images every few steps; 2) Calculate loss with fixed t value on validation set.
         """
         self.model_parts[0].eval().requires_grad_(False)
 
-        prompt = "A photo of a cat"
         image = generate_image(
             device=self.device,
             dtype=self._dtype,

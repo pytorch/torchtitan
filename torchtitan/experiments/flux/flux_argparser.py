@@ -46,12 +46,6 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Whether to shard the encoder using FSDP",
     )
     # sampling configs
-    #     enable_classifer_free_guidance = true
-    # classifer_free_guidance_scale = 5.0
-    # sample_img_width = 512
-    # sample_img_height = 512
-    # denoising_steps = 30
-    # output_dir = "outputs/img"
     parser.add_argument(
         "--sampling.enable_classifer_free_guidance",
         action="store_true",
