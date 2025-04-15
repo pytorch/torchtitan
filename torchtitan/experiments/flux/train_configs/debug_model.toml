@@ -18,6 +18,7 @@ disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
+eval_freq = 10
 
 [model]
 name = "flux"
@@ -47,6 +48,14 @@ t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
+
+[sampling]
+enable_classifer_free_guidance = true
+classifer_free_guidance_scale = 5.0
+sample_img_width = 512
+sample_img_height = 512
+denoising_steps = 30
+
 
 [parallelism]
 data_parallel_replicate_degree = 1

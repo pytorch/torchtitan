@@ -15,6 +15,7 @@ from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
+from torchtitan.experiments.flux.sampling import generate_images
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -118,7 +119,7 @@ class FluxTrainer(Trainer):
         return latent_noise_pred
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        # generate t5 and clip
+        # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
             device=self.device,
@@ -154,6 +155,7 @@ class FluxTrainer(Trainer):
 
         assert len(model_parts) == 1
 
+        model_parts[0].requires_grad_(True)
         pred = self._predict_noise(
             model_parts[0],
             noisy_latents,
@@ -195,6 +197,40 @@ class FluxTrainer(Trainer):
             global_avg_loss = global_max_loss = loss.item()
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
+
+        # Eval:
+        if (
+            self.step % self.job_config.training.eval_interval == 0
+            or self.step == self.job_config.training.steps
+        ):
+            self.
+            self._eval_flux_model(self,  model)
+
+    def _eval_flux_model(
+        self,
+        job_config: JobConfig,
+        model: FluxModel,
+    ):
+        """
+        Evaluate the Flux model.
+        1) generate and save images every few steps; 2) Calculate loss with fixed t value on validation set.
+        """
+        generate_images(
+            device=self.device,
+            dtype=self._dtype,
+            model=self.model,
+            decoder= self.autoencoder,
+            img_width=job_config.sampling.img_width,
+            img_height=job_config.sampling.img_height,
+            denoising_steps: job_config.sampling.denoising_steps,
+            seed=,
+            clip_encodings: torch.Tensor,
+            t5_encodings: torch.Tensor,
+            enable_classifer_free_guidance: bool = False,
+            empty_t5_encodings: torch.Tensor | None = None,
+            empty_clip_encodings: torch.Tensor | None = None,
+            classifier_free_guidance_scale: float | None = None,
+        )
 
 
 if __name__ == "__main__":
