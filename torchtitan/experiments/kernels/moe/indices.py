@@ -12,64 +12,95 @@ import triton.language as tl
 __all__ = ["generate_permute_indices"]
 
 
+# parallelized kernel
 @triton.jit
-def fill_indices_kernel(
-    tokens_per_expert_group_ptr,  # *Pointer* to first input vector.
-    start_index_values_ptr,  # *Pointer* to second input vector.
-    write_offsets_ptr,  # *Pointer* to third input vector.
-    output_ptr,  # *Pointer* to output vector.
-    experts_per_rank,  # Number of experts per rank.
-    num_ranks,  # Number of expert ranks.
+def _fill_indices_kernel(
+    tokens_per_expert_group_ptr,
+    start_index_values_ptr,
+    write_offsets_ptr,
+    output_ptr,
+    experts_per_rank: tl.constexpr,
+    num_ranks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,  # Number of threads per block
 ):
-    # There are multiple 'programs' processing different data. We identify which program
-    # we are here:
-    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
-    # The total number of programs in the launch grid.
+    pid = tl.program_id(axis=0)
     num_programs = tl.num_programs(axis=0)
-    # We map the programs (blocks) to the experts.
-    for expert_id in tl.range(pid, experts_per_rank, step=num_programs):
-        # Read this expert's write offset.
+
+    # map programs (blocks) to the experts and loop (grid stride) if needed
+    for expert_id in range(pid, experts_per_rank, num_programs):
+        # read this experts write offset
         write_offset = tl.load(write_offsets_ptr + expert_id)
-        # Loop over the ranks.
-        for r in tl.range(num_ranks):
-            # Slot in the tokens_per_expert_group array.
+
+        # loop over all ranks
+        for r in range(num_ranks):
+            # index into tokens_per_expert_group array
             i = r * experts_per_rank + expert_id
+
+            # load start index and number of tokens for this expert-rank pair
             start_index = tl.load(start_index_values_ptr + i)
             length = tl.load(tokens_per_expert_group_ptr + i)
-            # Write the indices.
-            for l in tl.range(length):
-                val = start_index + l
-                tl.store(output_ptr + write_offset + l, val)
+
+            # each thread in block processes tokens in parallel
+            offsets = tl.arange(0, BLOCK_SIZE)
+
+            # tokens are processed in chunks of BLOCK_SIZE
+            for chunk_start in range(0, length, BLOCK_SIZE):
+                chunk_offsets = chunk_start + offsets
+
+                # mask valid indices
+                mask = chunk_offsets < length
+
+                values = start_index + chunk_offsets
+
+                # destination
+                dest_indices = write_offset + chunk_offsets
+
+                # store
+                tl.store(output_ptr + dest_indices, values, mask=mask)
+
+            # update write offset for next rank
             write_offset += length
 
 
-def fill_indices(
+# ==============
+# wrapper
+# ==============
+
+
+def fill_indices_wrapper(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
     write_offsets: torch.Tensor,
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
+    block_size: int = 128,
+    max_blocks: int = 1024,  # cap on total number of blocks to launch
 ):
-    # We need to preallocate the output.
+    # preallocate output
     permuted_indices = torch.full(
         (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
     )
-    # Analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
-    # In this case, we use a 1D grid where the size is the number of blocks (TODO: bump this value).
-    grid = lambda meta: (1,)
-    #  Each torch.tensor object is implicitly converted into a pointer to its first element.
-    fill_indices_kernel[grid](
+
+    # write offsets is per local expert...
+    num_blocks = min(experts_per_rank, max_blocks)
+    # grid = one block per expert unless capped and then we loop...
+    grid = (num_blocks,)
+
+    # launch kernel
+    _fill_indices_kernel[grid](
         tokens_per_expert_group,
         start_index_values,
         write_offsets,
         permuted_indices,
         experts_per_rank,
         num_ranks,
+        BLOCK_SIZE=block_size,
     )
     return permuted_indices
 
 
+# reference
 def fill_indices_cpu(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
@@ -78,21 +109,31 @@ def fill_indices_cpu(
     num_ranks: int,
     max_len: int,
 ):
-    # We need to preallocate the output.
-    permuted_indices = torch.full((max_len,), -1, dtype=torch.int32)
+    # We need to preallocate the output - we ignore device and force it on cpu
+    # device = tokens_per_expert_group.device
+    permuted_indices = torch.full(
+        (max_len,),
+        -1,
+        dtype=torch.int32,
+    )  # device=device)
     # Fill the permuted indices
     # For each local expert
     for e in range(experts_per_rank):
-        write_start = write_offsets[e]
+        write_start = write_offsets[e].item()
         # For each remote rank
         for r in range(num_ranks):
             i = r * experts_per_rank + e
-            start_index = start_index_values[i]
-            length = tokens_per_expert_group[i]
+            start_index = start_index_values[i].item()
+            length = tokens_per_expert_group[i].item()
             # Fill in the indices
-            permuted_indices[write_start : write_start + length] = torch.arange(
-                start_index, start_index + length
-            )
+            if length > 0:
+                end_idx = min(write_start + length, max_len)
+                permuted_indices[write_start:end_idx] = torch.arange(
+                    start_index,
+                    start_index + (end_idx - write_start),
+                    dtype=torch.int32,
+                    # device=device,
+                )
             write_start += length
     return permuted_indices
 
@@ -105,60 +146,75 @@ def generate_permute_indices(
     alignment: int,
     use_cpu: bool = False,
 ):
-    # Prepare permutation indices and the number of tokens for each expert.  The
-    # permutation indices are the indices of the tokens for each expert.  The
-    # number of tokens for each expert is the sum of the number of tokens for
-    # such experts from all ranks. This number is aligned to the provided
-    # alignment requirement (usually comes from group gemm).
+    """
+    Prepare permutation indices and the number of tokens for each expert.
 
-    # Args:
-    #     tokens_per_expert_group: number of tokens for each expert from all ranks.
-    #     experts_per_rank: number of experts per rank.
-    #     num_ranks: number of ranks.
-    #     max_len: maximum length of the output index vector. If greater than
-    #     total number of tokens, the remaining indices are set to -1.
-    #     alignment: alignment for each returned element in `m_sizes`.
-    #     use_cpu: whether to use cpu or gpu.
-    # Returns:
-    #     permuted_indices: permutation indices.
-    #     m_sizes: number of tokens for each expert.
+    Args:
+        tokens_per_expert_group: number of tokens for each expert from all ranks.
+        experts_per_rank: number of experts per rank.
+        num_ranks: number of ranks.
+        max_len: maximum length of the output index vector.
+        alignment: alignment for each returned element in `m_sizes`.
+        use_cpu: whether to use CPU implementation.
+        use_optimized: whether to use optimized Triton implementation.
+        block_size: block size for optimized implementation.
 
-    # `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
-    # From: |       rank 0      |       rank 1      |
-    # To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
-    #       |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
+    Returns:
+        permuted_indices: Tensor of indices that map original token order to the expert-grouped order.
+        m_sizes: aligned number of tokens for each expert (padded to alignment boundary).
+        m_offsets: Cumulative sum of m_sizes. The exclusive ending position for each expert's tokens.
 
-    # Prefix sum to get the start index value of each expert
+    Explanatory details:
+        `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
+        From: |       rank 0      |       rank 1      |
+        To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
+              |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
+    """
+    # prefix sum to get start index of each expert (parallel scan kernel in future?)
     start_index_values = (
         torch.cumsum(tokens_per_expert_group, 0) - tokens_per_expert_group
     )
-    # Chunk sizes for each expert
+
+    # chunk sizes for each expert
     chunk_size_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
-    # Align the chunk sizes to the given alignment
+
+    # align the chunk sizes (cdiv)
     m_sizes = ((chunk_size_per_expert + alignment - 1) // alignment * alignment).to(
         torch.int32
     )
-    # Perform another prefix sum to get the write offset of each expert in `permuted_indices`
+
+    # additional prefix sum to get write offset of each expert in permuted_indices
+    # write offsets is per local expert, not global
     m_offsets = torch.cumsum(m_sizes, 0)
     write_offsets = m_offsets - m_sizes
-    # Select the method to fill the permuted indices
-    fill_fn = fill_indices_cpu if use_cpu else fill_indices
-    # Fill the permuted indices
-    permuted_indices = fill_fn(
-        tokens_per_expert_group,
-        start_index_values,
-        write_offsets,
-        experts_per_rank,
-        num_ranks,
-        max_len,
-    )
+
+    # Select the implementation to use
+    if use_cpu:
+        permuted_indices = fill_indices_cpu(
+            tokens_per_expert_group,
+            start_index_values,
+            write_offsets,
+            experts_per_rank,
+            num_ranks,
+            max_len,
+        )
+    else:
+        permuted_indices = fill_indices_wrapper(
+            tokens_per_expert_group,
+            start_index_values,
+            write_offsets,
+            experts_per_rank,
+            num_ranks,
+            max_len,
+        )
+
     return permuted_indices, m_sizes, m_offsets.to(torch.int32)
 
 
 # Below is for testing only
 
 
-def test():
+def simple_test():
     device = torch.device("cuda", 0)
     experts_per_rank = 4
     num_ranks = 4
@@ -172,7 +228,7 @@ def test():
         tokens_per_expert_group, experts_per_rank, num_ranks, max_len, alignment
     )
     # Use the CPU method
-    permuted_indices_cpu, _, _ = generate_permute_indices(
+    permuted_indices_cpu, m_sizes, _ = generate_permute_indices(
         tokens_per_expert_group,
         experts_per_rank,
         num_ranks,
@@ -181,16 +237,18 @@ def test():
         use_cpu=True,
     )
     # Check that the results are the same
+
     assert torch.equal(permuted_indices_gpu.cpu(), permuted_indices_cpu)
     assert torch.equal(
         torch.remainder(m_sizes, alignment),
         torch.zeros(experts_per_rank, device=device),
     )
     # Print the results
-    print(permuted_indices_gpu)
-    print(m_sizes)
+    print(f"{permuted_indices_gpu=}, \n{permuted_indices_cpu=}")
+    print(f"{m_sizes=}")
     print("Success")
+    return True  # assert would have failed meaning getting here is success.
 
 
 if __name__ == "__main__":
-    test()
+    simple_test()
