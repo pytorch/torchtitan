@@ -15,7 +15,7 @@ from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.model import FluxModel
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
-from torchtitan.experiments.flux.sampling import generate_images
+from torchtitan.experiments.flux.sampling import generate_image, save_image
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -203,33 +203,38 @@ class FluxTrainer(Trainer):
             self.step % self.job_config.training.eval_interval == 0
             or self.step == self.job_config.training.steps
         ):
-            self.
-            self._eval_flux_model(self,  model)
+            self.model_parts[0].eval()
+            self._eval_flux_model(self)
 
     def _eval_flux_model(
         self,
-        job_config: JobConfig,
-        model: FluxModel,
     ):
         """
         Evaluate the Flux model.
         1) generate and save images every few steps; 2) Calculate loss with fixed t value on validation set.
         """
-        generate_images(
+        self.model_parts[0].eval().requires_grad_(False)
+
+        prompt = "A photo of a cat"
+        image = generate_image(
             device=self.device,
             dtype=self._dtype,
-            model=self.model,
-            decoder= self.autoencoder,
-            img_width=job_config.sampling.img_width,
-            img_height=job_config.sampling.img_height,
-            denoising_steps: job_config.sampling.denoising_steps,
-            seed=,
-            clip_encodings: torch.Tensor,
-            t5_encodings: torch.Tensor,
-            enable_classifer_free_guidance: bool = False,
-            empty_t5_encodings: torch.Tensor | None = None,
-            empty_clip_encodings: torch.Tensor | None = None,
-            classifier_free_guidance_scale: float | None = None,
+            job_config=self.job_config,
+            model=self.model_parts[0],
+            prompt=prompt,  # TODO(jianiw): change this to a prompt from dataloader
+            autoencoder=self.autoencoder,
+            t5_encoder=self.t5_encoder,
+            t5_tokenizer=self.t5_tokenizer,
+            clip_encoder=self.clip_encoder,
+            clip_tokenizer=self.clip_tokenizer,
+        )
+
+        save_image(
+            name=f"image_{self.step}.png",
+            output_dir=self.job_config.sampling.output_dir,
+            x=image,
+            add_sampling_metadata=True,
+            prompt=prompt,
         )
 
 

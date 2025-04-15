@@ -4,68 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
-import os
+import sys
 import time
-from typing import Callable
 
 import torch
-from einops import rearrange
-
-from PIL import ExifTags, Image
-
-from torch import Tensor
-
+from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux import flux_configs
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 
-from torchtitan.experiments.flux.model.autoencoder import (
-    AutoEncoder,
-    AutoEncoderParams,
-    load_ae,
-)
+from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams, load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 
 from torchtitan.experiments.flux.model.model import FluxModel
-from torchtitan.experiments.flux.utils import (
-    create_position_encoding_for_latents,
-    generate_noise_latent,
-    pack_latents,
-    preprocess_flux_data,
-    unpack_latents,
-)
-
-
-def time_shift(mu: float, sigma: float, t: Tensor):
-    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
-
-
-def get_lin_function(
-    x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
-) -> Callable[[float], float]:
-    m = (y2 - y1) / (x2 - x1)
-    b = y1 - m * x1
-    return lambda x: m * x + b
-
-
-def get_schedule(
-    num_steps: int,
-    image_seq_len: int,
-    base_shift: float = 0.5,
-    max_shift: float = 1.15,
-    shift: bool = True,
-) -> list[float]:
-    # extra step for zero
-    timesteps = torch.linspace(1, 0, num_steps + 1)
-
-    # shifting the schedule to favor high timesteps for higher signal images
-    if shift:
-        # estimate mu based on linear estimation between two points
-        mu = get_lin_function(y1=base_shift, y2=max_shift)(image_seq_len)
-        timesteps = time_shift(mu, 1.0, timesteps)
-
-    return timesteps.tolist()
+from torchtitan.experiments.flux.sampling import generate_image, save_image
 
 
 class TestGenerateImage:
@@ -82,34 +34,48 @@ class TestGenerateImage:
             '"FLUX" is painted over it in big, red brush strokes with visible texture'
         )
         device = "cuda"
-        num_steps = None
-        loop = False
+        num_steps = 30
         output_dir = "outputs/img/"
-        add_sampling_metadata = True
 
         # sampling params:
         enable_classifer_free_guidance = True
         classifier_free_guidance_scale = 5.0
 
-        prompt = prompt.split("|")
-        if len(prompt) == 1:
-            prompt = prompt[0]
-            additional_prompts = None
-        else:
-            additional_prompts = prompt[1:]
-            prompt = prompt[0]
+        # Contracting JobConfig
+        path = "torchtitan.experiments.flux.flux_argparser"
+        sys.argv.append(f"--experimental.custom_args_module={path}")
+        config = JobConfig()
+        config.maybe_add_custom_args()
+        config.parse_args(
+            [
+                "--training.seed",
+                "0",
+                "--training.classifer_free_guidance_prob",
+                "0.1",
+                "--encoder.t5_encoder",
+                "google/t5-v1_1-base",
+                "--encoder.clip_encoder",
+                "openai/clip-vit-large-patch14",
+                "--encoder.max_t5_encoding_len",
+                "512",
+                # sampling params
+                "--sampling.denoising_steps",
+                str(num_steps),
+                "--sampling.enable_classifer_free_guidance",
+                "--sampling.classifier_free_guidance_scale",
+                str(classifier_free_guidance_scale),
+                "--sampling.sample_img_width",
+                str(img_width),
+                "--sampling.sample_img_height",
+                str(img_height),
+                "--sampling.output_dir",
+                output_dir,
+            ]
+        )
 
-        assert not (
-            (additional_prompts is not None) and loop
-        ), "Do not provide additional prompts and set loop to True"
+        t0 = time.perf_counter()
 
         torch_device = torch.device(device)
-        if num_steps is None:
-            num_steps = 30
-
-        # allow for packing and conversion to latent space
-        img_height = 16 * (img_height // 16)
-        img_width = 16 * (img_width // 16)
 
         # Init all components
         ae = load_ae(
@@ -119,191 +85,50 @@ class TestGenerateImage:
             dtype=torch.bfloat16,
         )
         clip_tokenizer = FluxTokenizer(
-            model_path="openai/clip-vit-large-patch14", max_length=77
+            model_path=config.encoder.clip_encoder, max_length=77
         )
-        t5_tokenizer = FluxTokenizer(model_path="google/t5-v1_1-xxl", max_length=4096)
-        clip_encoder = (
-            FluxEmbedder(version="openai/clip-vit-large-patch14")
-            .to(torch_device, dtype=torch.bfloat16)
-            .eval()
+        t5_tokenizer = FluxTokenizer(
+            model_path=config.encoder.t5_encoder,
+            max_length=config.encoder.max_t5_encoding_len,
         )
-        t5_encoder = (
-            FluxEmbedder(version="google/t5-v1_1-xxl")
-            .to(torch_device, dtype=torch.bfloat16)
-            .eval()
+        clip_encoder = FluxEmbedder(version=config.encoder.clip_encoder).to(
+            torch_device, dtype=torch.bfloat16
         )
-
-        rng = torch.Generator(device="cpu")
-
-        if seed is None:
-            seed = rng.seed()
-        print(f"Generating with seed {seed}:\n{prompt}")
-        t0 = time.perf_counter()
-        output_name = os.path.join(output_dir, f"img_{seed}.jpg")
-
-        # Tokenize the prompt. Unsqueeze to add a batch dimension.
-        clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
-        t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
-        print(
-            f"Tokens shape: clip_tokens {clip_tokens.shape}, t5_tokens {t5_tokens.shape}"
-        )
-
-        batch = preprocess_flux_data(
-            device=torch_device,
-            dtype=torch.bfloat16,
-            autoencoder=None,
-            clip_encoder=clip_encoder,
-            t5_encoder=t5_encoder,
-            batch={
-                "clip_tokens": clip_tokens,
-                "t5_tokens": t5_tokens,
-            },
-        )
-
-        if enable_classifer_free_guidance:
-            empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
-            empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
-            empty_batch = preprocess_flux_data(
-                device=torch_device,
-                dtype=torch.bfloat16,
-                autoencoder=None,
-                clip_encoder=clip_encoder,
-                t5_encoder=t5_encoder,
-                batch={
-                    "clip_tokens": empty_clip_tokens,
-                    "t5_tokens": empty_t5_tokens,
-                },
-            )
-
-        # off load T5 model and CLIP model
-        t5_encoder = t5_encoder.to("cpu")
-        clip_encoder = clip_encoder.to("cpu")
-
-        # Init Flux model
-        model = self._get_test_model(
-            context_in_dim=768, device=torch_device, dtype=torch.bfloat16
-        )
-
-        img = self._generate_images(
-            device=torch_device,
-            dtype=torch.bfloat16,
-            model=model,
-            decoder=ae,
-            img_width=img_width,
-            img_height=img_height,
-            denoising_steps=num_steps,
-            seed=seed,
-            clip_encodings=batch["clip_encodings"],
-            t5_encodings=batch["t5_encodings"],
-            enable_classifer_free_guidance=enable_classifer_free_guidance,
-            empty_t5_encodings=(
-                empty_batch["t5_encodings"] if enable_classifer_free_guidance else None
-            ),
-            empty_clip_encodings=(
-                empty_batch["clip_encodings"]
-                if enable_classifer_free_guidance
-                else None
-            ),
-            classifier_free_guidance_scale=classifier_free_guidance_scale,
+        t5_encoder = FluxEmbedder(version=config.encoder.t5_encoder).to(
+            torch_device, dtype=torch.bfloat16
         )
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t1 = time.perf_counter()
 
-        print(f"Done in {t1 - t0:.1f}s.")
+        model = self._get_test_model(
+            context_in_dim=768, device=torch_device, dtype=torch.bfloat16
+        )
+        model.eval().requires_grad_(False)
 
-        self._save_image(name, output_name, img, add_sampling_metadata, prompt)
+        image = generate_image(
+            device=torch_device,
+            dtype=torch.bfloat16,
+            job_config=config,
+            model=model,
+            prompt=prompt,
+            autoencoder=ae,
+            t5_encoder=t5_encoder,
+            t5_tokenizer=t5_tokenizer,
+            clip_encoder=clip_encoder,
+            clip_tokenizer=clip_tokenizer,
+        )
 
-    def _generate_images(
-        self,
-        device: torch.device,
-        dtype: torch.dtype,
-        model: FluxModel,
-        decoder: AutoEncoder,
-        # image params:
-        img_width: int,
-        img_height: int,
-        # sampling params:
-        denoising_steps: int,
-        seed: int,
-        clip_encodings: torch.Tensor,
-        t5_encodings: torch.Tensor,
-        enable_classifer_free_guidance: bool = False,
-        empty_t5_encodings: torch.Tensor | None = None,
-        empty_clip_encodings: torch.Tensor | None = None,
-        classifier_free_guidance_scale: float | None = None,
-    ):
-        """
-        Generate images from a given prompt, by running inference with trained Flux model.
-        """
-        bsz = clip_encodings.shape[0]
-        latents = generate_noise_latent(bsz, img_height, img_width, device, dtype, seed)
-        _, latent_channels, latent_height, latent_width = latents.shape
+        print(f"Generate Image Done in {t1 - t0:.1f}s.")
 
-        # create denoising schedule
-        timesteps = get_schedule(denoising_steps, latent_channels, shift=True)
-
-        # create positional encodings
-        POSITION_DIM = 3  # constant for Flux flow model
-        latent_pos_enc = create_position_encoding_for_latents(
-            bsz, latent_height, latent_width, POSITION_DIM
-        ).to(latents)
-        text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
-
-        if enable_classifer_free_guidance:
-            latents = torch.cat([latents, latents], dim=0)
-            t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
-            clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
-
-        # convert img-like latents into sequences of patches
-        latents = pack_latents(latents)
-
-        # this is ignored for schnell
-        for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
-            t_vec = torch.full((bsz,), t_curr, dtype=dtype, device=device)
-            pred = model(
-                img=latents,
-                img_ids=latent_pos_enc,
-                txt=t5_encodings,
-                txt_ids=text_pos_enc,
-                y=clip_encodings,
-                timesteps=t_vec,
-            )
-            if enable_classifer_free_guidance:
-                pred_u, pred_c = pred.chunk(2)
-                pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
-
-            latents = latents + (t_prev - t_curr) * pred
-
-        # convert sequences of patches into img-like latents
-        latents = unpack_latents(latents, latent_height, latent_width)
-
-        img = decoder.decode(latents)
-        return img
-
-    def _save_image(
-        self,
-        name: str,
-        output_name: str,
-        x: torch.Tensor,
-        add_sampling_metadata: bool,
-        prompt: str,
-    ):
-        print(f"Saving {output_name}")
-        # bring into PIL format and save
-        x = x.clamp(-1, 1)
-        x = rearrange(x[0], "c h w -> h w c")
-
-        img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
-
-        exif_data = Image.Exif()
-        exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"
-        exif_data[ExifTags.Base.Make] = "Black Forest Labs"
-        exif_data[ExifTags.Base.Model] = name
-        if add_sampling_metadata:
-            exif_data[ExifTags.Base.ImageDescription] = prompt
-        img.save(output_name, exif=exif_data, quality=95, subsampling=0)
+        save_image(
+            name=f"img_unit_test_{seed}.jpg",
+            output_dir=config.sampling.output_dir,
+            x=image,
+            add_sampling_metadata=True,
+            prompt=prompt,
+        )
 
     def _get_test_model(
         self, context_in_dim: int, device: torch.device, dtype: torch.dtype
