@@ -51,7 +51,7 @@ enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
 sample_img_width = 512
 sample_img_height = 512
-denoising_steps = 30
+denoising_steps = 50
 eval_freq = 1000
 
 [parallelism]
