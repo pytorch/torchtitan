@@ -207,11 +207,9 @@ class FluxDataset(IterableDataset, Stateful):
                     continue
 
                 # Classifier-free guidance: Replace some of the strings with empty strings.
-                # Using random seed to ensure each rank has the same dropouted samples when TP and CP are enabled.
-                seed = self.job_config.training.seed
+                # Distinct random seed is initialized at the beginning of training for each FSDP rank.
                 dropout_prob = self.job_config.training.classifer_free_guidance_prob
-                if seed is not None and dropout_prob > 0.0:
-                    random.seed(seed)
+                if dropout_prob > 0.0:
                     if random.random() < dropout_prob:
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token

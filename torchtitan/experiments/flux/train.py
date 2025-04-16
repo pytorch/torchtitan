@@ -210,7 +210,7 @@ class FluxTrainer(Trainer):
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
         # Evaluate the model during training
-        if torch.distributed.get_rank() == 0 and (
+        if (
             self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
@@ -228,7 +228,7 @@ class FluxTrainer(Trainer):
             dtype=self._dtype,
             job_config=self.job_config,
             model=self.model_parts[0],
-            prompt=prompt,  # TODO(jianiw): change this to a prompt from dataloader
+            prompt=prompt,  # TODO(jianiw): change this to a prompt from validation set
             autoencoder=self.autoencoder,
             t5_tokenizer=FluxTokenizer(
                 self.job_config.encoder.t5_encoder,
@@ -242,8 +242,8 @@ class FluxTrainer(Trainer):
         )
 
         save_image(
-            name=f"image_{self.step}.png",
-            output_dir=self.job_config.sampling.output_dir,
+            name=f"image_rank{str(torch.distributed.get_rank())}_{self.step}.png",
+            output_dir=self.job_config.eval.output_dir,
             x=image,
             add_sampling_metadata=True,
             prompt=prompt,
