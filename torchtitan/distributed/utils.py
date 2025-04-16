@@ -17,28 +17,34 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.ft import ft_clip_grad_norm_util, ft_dist_reduce
+from torchtitan.components.ft import ft_dist_reduce
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 
-def _dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
-    # Remove FT replicate dimension if it exists.
-    x, reduceOp, mesh = ft_dist_reduce(x, reduceOp, mesh)
-
+def _dist_reduce(
+    x: torch.Tensor,
+    reduceOp: str,
+    mesh: DeviceMesh,
+    pg: dist.ProcessGroup | None = None,
+) -> float:
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
         x = x.full_tensor()
+
+    if pg is not None:
+        x = funcol.all_reduce(x, reduceOp=reduceOp, group=pg)
+
     assert x.numel() == 1  # required by `.item()`
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
 
-def dist_max(x: torch.Tensor, mesh: DeviceMesh) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh)
+def dist_max(x: torch.Tensor, mesh: DeviceMesh, pg: dist.ProcessGroup | None) -> float:
+    return _dist_reduce(x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, pg=pg)
 
 
-def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh)
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh, pg: dist.ProcessGroup | None) -> float:
+    return _dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, pg=pg)
 
 
 def set_determinism(
@@ -290,8 +296,6 @@ def clip_grad_norm_(
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
 
-        # Remove FT replicate dimension if it exists.
-        total_norm = ft_clip_grad_norm_util(total_norm)
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:

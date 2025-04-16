@@ -12,6 +12,7 @@ from typing import Optional
 import torch
 import torch.distributed._functional_collectives as funcol
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.tensor import DTensor
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -34,6 +35,7 @@ class FTManager:
         self._manager = manager
         self.group_size = group_size
         self.replica_id = replica_id
+        self.replicate_pg = None
 
     @property
     def enabled(self) -> bool:
@@ -47,6 +49,25 @@ class FTManager:
     def get_dp_info(self, dp_degree: int, dp_rank: int) -> tuple[int, int]:
         return dp_degree * self.group_size, dp_degree * self.replica_id + dp_rank
 
+    def build_pg(self) -> None:
+        self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
+        self.replicate_pg.register("dp_replicate")
+
+    def set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
+        def all_reduce_hook(output):
+            torch.distributed.all_reduce(
+                output,
+                group=self.replicate_pg,
+                op=ReduceOp.AVG,
+            )
+
+        def apply_set_all_reduce_hook(m):
+            if hasattr(m, "set_all_reduce_hook"):
+                m.set_all_reduce_hook(all_reduce_hook)
+
+        for part in model_parts:
+            part.apply(apply_set_all_reduce_hook)
+
 
 def init_ft_manager(job: JobConfig) -> FTManager:
     """Initialize the FT manager if TorchFT is enabled.
@@ -55,7 +76,7 @@ def init_ft_manager(job: JobConfig) -> FTManager:
         job (JobConfig): The job configuration.
 
     Returns:
-        Optional[ft.Manager]: The FT manager if TorchFT is enabled, otherwise None.
+        FTManager: A wrapper around TorchFT.Manager
     """
     if not job.fault_tolerance.enable:
         return FTManager(None)
@@ -66,7 +87,7 @@ def init_ft_manager(job: JobConfig) -> FTManager:
     if job.fault_tolerance.min_replica_size < 1:
         raise ValueError("At least one FT replica is required.")
 
-    pg = ft.ProcessGroupBabyNCCL()
+    pg = ft.ProcessGroupNCCL()
 
     return FTManager(
         ft.Manager(
