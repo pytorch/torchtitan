@@ -12,27 +12,32 @@ from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 
 class TestDatasetCheckpointing:
     def test_c4_resumption(self):
-        dataset_name = "c4_test"
-        batch_size = 1
-        seq_len = 1024
-        world_size = 4
-        rank = 0
+        for dataset_name in ["c4_test", "c4_test_streaming"]:
+            dataset_name = "c4_test"
+            batch_size = 1
+            seq_len = 1024
+            world_size = 4
+            rank = 0
 
-        dl = self._build_dataloader(dataset_name, batch_size, seq_len, world_size, rank)
+            dl = self._build_dataloader(
+                dataset_name, batch_size, seq_len, world_size, rank
+            )
 
-        it = iter(dl)
-        for _ in range(250):
-            next(it)
-        state = dl.state_dict()
-        expected_input_ids, expected_labels = next(it)
+            it = iter(dl)
+            for _ in range(250):
+                next(it)
+            state = dl.state_dict()
+            expected_input_ids, expected_labels = next(it)
 
-        # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
-        dl = self._build_dataloader(dataset_name, batch_size, seq_len, world_size, rank)
-        dl.load_state_dict(state)
-        input_ids, labels = next(iter(dl))
+            # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
+            dl = self._build_dataloader(
+                dataset_name, batch_size, seq_len, world_size, rank
+            )
+            dl.load_state_dict(state)
+            input_ids, labels = next(iter(dl))
 
-        assert torch.equal(input_ids["input"], expected_input_ids["input"])
-        assert torch.equal(labels, expected_labels)
+            assert torch.equal(input_ids["input"], expected_input_ids["input"])
+            assert torch.equal(labels, expected_labels)
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
         tokenizer = TikTokenizer("./tests/assets/test_tiktoken.model")
