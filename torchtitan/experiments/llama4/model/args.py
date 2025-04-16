@@ -6,7 +6,6 @@
 
 
 from dataclasses import dataclass
-from typing import Optional
 
 from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
@@ -22,10 +21,10 @@ class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
-    n_kv_heads: Optional[int] = None
+    n_kv_heads: int | None = None
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
+    ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
 
@@ -35,9 +34,18 @@ class TransformerModelArgs(BaseModelArgs):
     depth_init: bool = True
     norm_type: str = "rmsnorm"
 
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
+    use_flex_attn: bool = True
+    attn_mask_type: str = "block_causal"
     eos_id: int = 0
+    # iRoPE settings
+    # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
+    # used every n layers. Other layers uses RoPE (rotary positional embedding) and
+    # the inner attention of those layer will use the fixed block size specified by
+    # ``fixed_attn_block_size``. ``fixed_attn_block_size`` means that the query will
+    # only attend to the tokens within the same block regardless how long is the
+    # sequence.
+    every_n_layers_nope: int | None = None
+    fixed_attn_block_size: int = 8192
 
     # MoE args
     moe_enabled: bool = True
