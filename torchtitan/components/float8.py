@@ -56,12 +56,8 @@ class Float8Converter(ModelConverter):
         self.filter_fqns = float8_config.filter_fqns
 
         if float8_config.recipe_name is not None:
-            assert (
-                not float8_config.enable_fsdp_float8_all_gather
-            ), "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
-            assert (
-                not float8_config.force_recompute_fp8_weight_in_bwd
-            ), "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
+            assert not float8_config.enable_fsdp_float8_all_gather, "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
+            assert not float8_config.force_recompute_fp8_weight_in_bwd, "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
             self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
             self.precompute_scale = False
             logger.info(
@@ -71,7 +67,9 @@ class Float8Converter(ModelConverter):
             # short-term solution for https://github.com/pytorch/pytorch/issues/150859
             if float8_config.recipe_name == "rowwise":
                 torch._inductor.config.emulate_precision_casts = True
-                logger.debug("Set torch._inductor.config.emulate_precision_casts to True")
+                logger.debug(
+                    "Set torch._inductor.config.emulate_precision_casts to True"
+                )
 
         else:
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
