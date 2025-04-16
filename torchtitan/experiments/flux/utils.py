@@ -14,7 +14,7 @@ from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 
 
-def preprocess_flux_data(
+def preprocess_data(
     # arguments from the recipe
     device: torch.device,
     dtype: torch.dtype,

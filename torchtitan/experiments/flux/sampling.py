@@ -24,7 +24,7 @@ from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     generate_noise_latent,
     pack_latents,
-    preprocess_flux_data,
+    preprocess_data,
     unpack_latents,
 )
 
@@ -98,7 +98,7 @@ def generate_image(
     clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
     t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
 
-    batch = preprocess_flux_data(
+    batch = preprocess_data(
         device=device,
         dtype=torch.bfloat16,
         autoencoder=None,
@@ -113,7 +113,7 @@ def generate_image(
     if enable_classifer_free_guidance:
         empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
         empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
-        empty_batch = preprocess_flux_data(
+        empty_batch = preprocess_data(
             device=device,
             dtype=torch.bfloat16,
             autoencoder=None,

@@ -37,7 +37,6 @@ class TestGenerateImage:
         num_steps = 30
         output_dir = "outputs/img"
 
-        # sampling params:
         classifier_free_guidance_scale = 5.0
 
         # Contracting JobConfig
@@ -47,6 +46,8 @@ class TestGenerateImage:
         config.maybe_add_custom_args()
         config.parse_args(
             [
+                "--job.dump_folder",
+                "./outputs",
                 "--training.seed",
                 "0",
                 "--training.classifer_free_guidance_prob",
@@ -57,18 +58,16 @@ class TestGenerateImage:
                 "openai/clip-vit-large-patch14",
                 "--encoder.max_t5_encoding_len",
                 "512",
-                # sampling params
-                "--sampling.denoising_steps",
+                # eval params
+                "--eval.denoising_steps",
                 str(num_steps),
-                "--sampling.enable_classifer_free_guidance",
-                "--sampling.classifier_free_guidance_scale",
+                "--eval.enable_classifer_free_guidance",
+                "--eval.classifier_free_guidance_scale",
                 str(classifier_free_guidance_scale),
-                "--sampling.sample_img_width",
+                "--eval.sample_img_width",
                 str(img_width),
-                "--sampling.sample_img_height",
+                "--eval.sample_img_height",
                 str(img_height),
-                "--sampling.output_dir",
-                output_dir,
             ]
         )
 
@@ -123,7 +122,7 @@ class TestGenerateImage:
 
         save_image(
             name=f"img_unit_test_{config.training.seed}.jpg",
-            output_dir=config.sampling.output_dir,
+            output_dir=config.job.dump_folder + "/img",
             x=image,
             add_sampling_metadata=True,
             prompt=prompt,

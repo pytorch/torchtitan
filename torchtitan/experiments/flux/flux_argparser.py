@@ -60,26 +60,20 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--eval.sample_img_width",
         type=int,
-        default=512,
+        default=256,
         help="Image width to sample",
     )
     parser.add_argument(
         "--eval.sample_img_height",
         type=int,
-        default=512,
+        default=256,
         help="Image height to sample",
     )
     parser.add_argument(
         "--eval.denoising_steps",
         type=int,
-        default=512,
+        default=50,
         help="How many denoising steps to sample when generating an image",
-    )
-    parser.add_argument(
-        "--eval.output_dir",
-        type=str,
-        default="outputs/images",
-        help="Output directory for the generated images",
     )
     parser.add_argument(
         "--eval.eval_freq",

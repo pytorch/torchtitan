@@ -20,7 +20,7 @@ from torchtitan.experiments.flux.sampling import generate_image, save_image
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
-    preprocess_flux_data,
+    preprocess_data,
     unpack_latents,
 )
 from torchtitan.tools.logging import init_logger, logger
@@ -39,10 +39,10 @@ class FluxTrainer(Trainer):
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
-            distinct_seed_mesh_dims="dp_shard",
+            distinct_seed_mesh_dim="dp_shard",
         )
 
-        self.preprocess_fn = preprocess_flux_data
+        self.preprocess_fn = preprocess_data
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
         # We cast the encoders and it's input/output to this dtype.
         # For Flux model, we use FSDP with mixed precision training.
@@ -147,6 +147,9 @@ class FluxTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         model_parts = self.model_parts
+        assert len(self.model_parts) == 1
+        model = self.model_parts[0]
+
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
@@ -166,7 +169,7 @@ class FluxTrainer(Trainer):
 
         assert len(model_parts) == 1
 
-        model = self.model_parts[0].train().requires_grad_(True)
+        model.train()
         pred = self._predict_noise(
             model,
             noisy_latents,
@@ -214,14 +217,19 @@ class FluxTrainer(Trainer):
             self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
-            self._eval_flux_model()
+            model.eval()
+            self.eval_step()
+            model.train()
 
-    def _eval_flux_model(self, prompt: str = "A photo of a cat"):
+    def eval_step(self, prompt: str = "A photo of a cat"):
         """
         Evaluate the Flux model.
-        1) generate and save images every few steps; 2) Calculate loss with fixed t value on validation set.
+        1) generate and save images every few steps. Currently, we run the eval and on the same
+        prompts across all DP ranks. We will change this behavior to run on validation set prompts.
+        Due to random noise generation, results could be different across DP ranks cause we assign
+        different random seeds to each DP rank.
+        2) [TODO] Calculate loss with fixed t value on validation set.
         """
-        self.model_parts[0].eval().requires_grad_(False)
 
         image = generate_image(
             device=self.device,
@@ -243,7 +251,7 @@ class FluxTrainer(Trainer):
 
         save_image(
             name=f"image_rank{str(torch.distributed.get_rank())}_{self.step}.png",
-            output_dir=self.job_config.eval.output_dir,
+            output_dir=os.path.join(self.job_config.job.dump_folder, "img"),
             x=image,
             add_sampling_metadata=True,
             prompt=prompt,
