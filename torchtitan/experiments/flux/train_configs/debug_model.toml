@@ -40,6 +40,7 @@ steps = 10
 compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
+img_size = 512
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -50,9 +51,8 @@ auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetenso
 [eval]
 enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
-sample_img_width = 512
-sample_img_height = 512
 denoising_steps = 4
+save_img_folder = "img"
 eval_freq = 5
 
 [parallelism]

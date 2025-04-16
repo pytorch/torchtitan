@@ -13,8 +13,14 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--training.classifer_free_guidance_prob",
         type=float,
-        default=0.1,
+        default=0.0,
         help="Classifier-free guidance with probability p to dropout the text conditioning",
+    )
+    parser.add_argument(
+        "--training.img_size",
+        type=int,
+        default=256,
+        help="Image width to sample",
     )
     parser.add_argument(
         "--encoder.t5_encoder",
@@ -58,18 +64,6 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Classifier-free guidance scale when sampling",
     )
     parser.add_argument(
-        "--eval.sample_img_width",
-        type=int,
-        default=256,
-        help="Image width to sample",
-    )
-    parser.add_argument(
-        "--eval.sample_img_height",
-        type=int,
-        default=256,
-        help="Image height to sample",
-    )
-    parser.add_argument(
         "--eval.denoising_steps",
         type=int,
         default=50,
@@ -80,4 +74,10 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=100,
         help="Frequency of evaluation/sampling during training",
+    )
+    parser.add_argument(
+        "--eval.save_img_folder",
+        type=str,
+        default="img",
+        help="Directory to save image generated/sampled from the model",
     )

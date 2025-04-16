@@ -88,9 +88,9 @@ def generate_image(
     Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
     """
 
-    # allow for packing and conversion to latent space
-    img_height = 16 * (job_config.eval.sample_img_width // 16)
-    img_width = 16 * (job_config.eval.sample_img_height // 16)
+    # allow for packing and conversion to latent space. Use the same resolution as training time.
+    img_height = 16 * (job_config.training.img_size // 16)
+    img_width = 16 * (job_config.training.img_size // 16)
 
     enable_classifer_free_guidance = job_config.eval.enable_classifer_free_guidance
 

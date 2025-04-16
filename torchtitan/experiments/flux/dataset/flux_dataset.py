@@ -196,7 +196,10 @@ class FluxDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Use the dataset-specific preprocessor
                 sample_dict = self._data_processor(
-                    sample, self._t5_tokenizer, self._clip_tokenizer, output_size=256
+                    sample,
+                    self._t5_tokenizer,
+                    self._clip_tokenizer,
+                    output_size=self.job_config.training.img_size,
                 )
 
                 # skip low quality image or image with color channel = 1

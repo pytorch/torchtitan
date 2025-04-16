@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import sys
 import time
 
@@ -25,17 +26,13 @@ class TestGenerateImage:
         """
         Run a forward pass of flux model to generate an image.
         """
-        name = "flux-dev"
-        img_width = 512
-        img_height = 512
-        seed = None
+        img_width = 256
         prompt = (
             "a photo of a forest with mist swirling around the tree trunks. The word "
             '"FLUX" is painted over it in big, red brush strokes with visible texture'
         )
         device = "cuda"
         num_steps = 30
-        output_dir = "outputs/img"
 
         classifier_free_guidance_scale = 5.0
 
@@ -58,16 +55,16 @@ class TestGenerateImage:
                 "openai/clip-vit-large-patch14",
                 "--encoder.max_t5_encoding_len",
                 "512",
+                "--training.img_size",
+                str(img_width),
                 # eval params
                 "--eval.denoising_steps",
                 str(num_steps),
                 "--eval.enable_classifer_free_guidance",
                 "--eval.classifier_free_guidance_scale",
                 str(classifier_free_guidance_scale),
-                "--eval.sample_img_width",
-                str(img_width),
-                "--eval.sample_img_height",
-                str(img_height),
+                "--eval.save_img_folder",
+                "img",
             ]
         )
 
@@ -103,7 +100,7 @@ class TestGenerateImage:
         model = self._get_test_model(
             context_in_dim=768, device=torch_device, dtype=torch.bfloat16
         )
-        model.eval().requires_grad_(False)
+        model.eval()
 
         image = generate_image(
             device=torch_device,
@@ -122,7 +119,9 @@ class TestGenerateImage:
 
         save_image(
             name=f"img_unit_test_{config.training.seed}.jpg",
-            output_dir=config.job.dump_folder + "/img",
+            output_dir=os.path.join(
+                config.job.dump_folder, config.eval.save_img_folder
+            ),
             x=image,
             add_sampling_metadata=True,
             prompt=prompt,
@@ -137,5 +136,4 @@ class TestGenerateImage:
         config = flux_configs["flux-debug"]
         config.context_in_dim = context_in_dim
         model = FluxModel(config).to(device, dtype)
-        model = model.eval().requires_grad_(False)
         return model
