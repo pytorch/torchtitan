@@ -11,6 +11,7 @@ from typing import Optional
 
 import torch
 import torch.distributed._functional_collectives as funcol
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.tensor import DTensor
@@ -55,11 +56,7 @@ class FTManager:
 
     def set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
         def all_reduce_hook(output):
-            torch.distributed.all_reduce(
-                output,
-                group=self.replicate_pg,
-                op=ReduceOp.AVG,
-            )
+            dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
 
         def apply_set_all_reduce_hook(m):
             if hasattr(m, "set_all_reduce_hook"):

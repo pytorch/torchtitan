@@ -17,7 +17,6 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.ft import ft_dist_reduce
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
