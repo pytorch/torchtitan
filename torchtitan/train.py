@@ -71,11 +71,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.job.print_args:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
-        # short-term solution for https://github.com/pytorch/pytorch/issues/150859
-        if job_config.float8.recipe_name == "rowwise":
-            torch._inductor.config.emulate_precision_casts = True
-            logger.debug("Set torch._inductor.config.emulate_precision_casts to True")
-
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
 
