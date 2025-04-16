@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-import torch.distributed._functional_collectives as funcol
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.tensor import DTensor
@@ -36,7 +36,8 @@ class FTManager:
         self._manager = manager
         self.group_size = group_size
         self.replica_id = replica_id
-        self.replicate_pg = None
+        self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
+        self.replicate_pg.register("dp_replicate")
 
     @property
     def enabled(self) -> bool:
@@ -49,10 +50,6 @@ class FTManager:
 
     def get_dp_info(self, dp_degree: int, dp_rank: int) -> tuple[int, int]:
         return dp_degree * self.group_size, dp_degree * self.replica_id + dp_rank
-
-    def build_pg(self) -> None:
-        self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
-        self.replicate_pg.register("dp_replicate")
 
     def set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
         def all_reduce_hook(output):

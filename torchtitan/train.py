@@ -78,7 +78,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
-        self.ft_manager = ft.init_ft_manager(job_config)
 
         # init distributed
         world_size = int(os.environ["WORLD_SIZE"])
@@ -102,10 +101,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             dp_degree, dp_rank = 1, 0
 
+        self.ft_manager = ft.init_ft_manager(job_config)
         # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
         # dataloader must be changed.
         if self.ft_manager.enabled:
-            self.ft_manager.build_pg()
             dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
 
         # Set random seed, and maybe enable deterministic mode
