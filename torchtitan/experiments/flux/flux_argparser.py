@@ -45,44 +45,44 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Whether to shard the encoder using FSDP",
     )
-    # sampling configs
+    # eval configs
     parser.add_argument(
-        "--sampling.enable_classifer_free_guidance",
+        "--eval.enable_classifer_free_guidance",
         action="store_true",
         help="Whether to use classifier-free guidance during sampling",
     )
     parser.add_argument(
-        "--sampling.classifier_free_guidance_scale",
+        "--eval.classifier_free_guidance_scale",
         type=float,
         default=5.0,
         help="Classifier-free guidance scale when sampling",
     )
     parser.add_argument(
-        "--sampling.sample_img_width",
+        "--eval.sample_img_width",
         type=int,
         default=512,
         help="Image width to sample",
     )
     parser.add_argument(
-        "--sampling.sample_img_height",
+        "--eval.sample_img_height",
         type=int,
         default=512,
         help="Image height to sample",
     )
     parser.add_argument(
-        "--sampling.denoising_steps",
+        "--eval.denoising_steps",
         type=int,
         default=512,
         help="How many denoising steps to sample when generating an image",
     )
     parser.add_argument(
-        "--sampling.output_dir",
+        "--eval.output_dir",
         type=str,
         default="outputs/images",
         help="Output directory for the generated images",
     )
     parser.add_argument(
-        "--sampling.eval_freq",
+        "--eval.eval_freq",
         type=int,
         default=100,
         help="Frequency of evaluation/sampling during training",

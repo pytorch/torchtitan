@@ -63,9 +63,9 @@ def generate_noise_latent(
     width: int,
     device: str | torch.device,
     dtype: torch.dtype,
-    seed: int,
+    seed: int | None = None,
 ) -> Tensor:
-    """Generate noise latents for the Flux flow model.
+    """Generate noise latents for the Flux flow model. The random seed will be set at the begining of training.
 
     Args:
         bsz (int): batch_size.
@@ -73,7 +73,6 @@ def generate_noise_latent(
         width (int): The width of the image.
         device (str | torch.device): The device to use.
         dtype (torch.dtype): The dtype to use.
-        seed (int): The seed to use for randomize.
 
     Returns:
         Tensor: The noise latents.
@@ -87,7 +86,6 @@ def generate_noise_latent(
         height // IMAGE_LATENT_SIZE_RATIO,
         width // IMAGE_LATENT_SIZE_RATIO,
         dtype=dtype,
-        generator=torch.Generator().manual_seed(seed),
     ).to(device)
 
 

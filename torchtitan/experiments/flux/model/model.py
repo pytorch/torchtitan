@@ -121,11 +121,9 @@ class FluxModel(nn.Module, ModelProtocol):
         nn.init.xavier_uniform_(self.txt_in.weight)
         nn.init.constant_(self.txt_in.bias, 0)
 
-        # Initialize time_in, vector_in, guidance_in (MLPEmbedder)
+        # Initialize time_in, vector_in (MLPEmbedder)
         self.time_in.init_weights(init_std=0.02)
         self.vector_in.init_weights(init_std=0.02)
-        if self.model_args.guidance_embed:
-            self.guidance_in.init_weights(init_std=0.02)
 
         # Initialize transformer blocks:
         for block in self.single_blocks:

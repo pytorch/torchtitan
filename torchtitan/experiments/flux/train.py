@@ -31,12 +31,22 @@ class FluxTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
 
+        # Set random seed, and maybe enable deterministic mode
+        # (mainly for debugging, expect perf loss).
+        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        dist_utils.set_determinism(
+            self.world_mesh,
+            self.device,
+            job_config.training.seed,
+            job_config.training.deterministic,
+            distinct_seed_mesh_dims="dp_shard",
+        )
+
         self.preprocess_fn = preprocess_flux_data
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
         # We cast the encoders and it's input/output to this dtype.
         # For Flux model, we use FSDP with mixed precision training.
         self._dtype = torch.bfloat16
-        self._seed = job_config.training.seed
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
@@ -200,8 +210,8 @@ class FluxTrainer(Trainer):
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
         # Evaluate the model during training
-        if (
-            self.step % self.job_config.sampling.eval_freq == 0
+        if torch.distributed.get_rank() == 0 and (
+            self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
             self._eval_flux_model()

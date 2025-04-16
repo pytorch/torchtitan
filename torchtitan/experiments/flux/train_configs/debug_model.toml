@@ -39,7 +39,6 @@ max_norm = 2.0  # grad norm clipping
 steps = 10
 compile = false
 dataset = "cc12m-wds"
-seed = 0
 classifer_free_guidance_prob = 0.1
 
 [encoder]
@@ -48,7 +47,7 @@ clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
-[sampling]
+[eval]
 enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
 sample_img_width = 512

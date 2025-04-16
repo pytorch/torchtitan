@@ -84,18 +84,15 @@ def generate_image(
 ) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
+    For randomized noise generation, the random seend should already be set at the begining of training.
+    Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
     """
-    rng = torch.Generator(device="cpu")
-    seed = job_config.training.seed
-    if seed is None:
-        seed = rng.seed()
-    print(f"Generating with seed {seed}:\n{prompt}")
 
     # allow for packing and conversion to latent space
-    img_height = 16 * (job_config.sampling.sample_img_width // 16)
-    img_width = 16 * (job_config.sampling.sample_img_height // 16)
+    img_height = 16 * (job_config.eval.sample_img_width // 16)
+    img_width = 16 * (job_config.eval.sample_img_height // 16)
 
-    enable_classifer_free_guidance = job_config.sampling.enable_classifer_free_guidance
+    enable_classifer_free_guidance = job_config.eval.enable_classifer_free_guidance
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
     clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
@@ -134,8 +131,7 @@ def generate_image(
         model=model,
         img_width=img_width,
         img_height=img_height,
-        denoising_steps=job_config.sampling.denoising_steps,
-        seed=seed,
+        denoising_steps=job_config.eval.denoising_steps,
         clip_encodings=batch["clip_encodings"],
         t5_encodings=batch["t5_encodings"],
         enable_classifer_free_guidance=enable_classifer_free_guidance,
@@ -145,7 +141,7 @@ def generate_image(
         empty_clip_encodings=(
             empty_batch["clip_encodings"] if enable_classifer_free_guidance else None
         ),
-        classifier_free_guidance_scale=job_config.sampling.classifier_free_guidance_scale,
+        classifier_free_guidance_scale=job_config.eval.classifier_free_guidance_scale,
     )
 
     img = autoencoder.decode(img)
@@ -159,7 +155,6 @@ def denoise(
     img_width: int,
     img_height: int,
     denoising_steps: int,
-    seed: int,
     clip_encodings: torch.Tensor,
     t5_encodings: torch.Tensor,
     enable_classifer_free_guidance: bool = False,
@@ -172,7 +167,7 @@ def denoise(
     Save the generated images to the given output path.
     """
     bsz = clip_encodings.shape[0]
-    latents = generate_noise_latent(bsz, img_height, img_width, device, dtype, seed)
+    latents = generate_noise_latent(bsz, img_height, img_width, device, dtype)
     _, latent_channels, latent_height, latent_width = latents.shape
 
     # create denoising schedule
