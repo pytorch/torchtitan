@@ -37,14 +37,22 @@ seq_len = 512
 max_norm = 1.0  # grad norm clipping
 steps = 300_000
 compile = false
-dataset = "cc12m"
-guidance = 3.5
+dataset = "cc12m-wds"
+classifer_free_guidance_prob = 0.1
+img_size = 256
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 4096
 auto_encoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
+
+[eval]
+enable_classifer_free_guidance = true
+classifer_free_guidance_scale = 5.0
+denoising_steps = 50
+save_img_folder = "img"
+eval_freq = 1000
 
 [parallelism]
 data_parallel_replicate_degree = 1

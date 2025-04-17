@@ -40,7 +40,6 @@ class FluxModelArgs(BaseModelArgs):
     axes_dim: tuple = (16, 56, 56)
     theta: int = 10_000
     qkv_bias: bool = True
-    guidance_embed: bool = True
     autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
@@ -89,11 +88,6 @@ class FluxModel(nn.Module, ModelProtocol):
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
         self.vector_in = MLPEmbedder(model_args.vec_in_dim, self.hidden_size)
-        self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-            if model_args.guidance_embed
-            else nn.Identity()
-        )
         self.txt_in = nn.Linear(model_args.context_in_dim, self.hidden_size)
 
         self.double_blocks = nn.ModuleList(
@@ -127,11 +121,9 @@ class FluxModel(nn.Module, ModelProtocol):
         nn.init.xavier_uniform_(self.txt_in.weight)
         nn.init.constant_(self.txt_in.bias, 0)
 
-        # Initialize time_in, vector_in, guidance_in (MLPEmbedder)
+        # Initialize time_in, vector_in (MLPEmbedder)
         self.time_in.init_weights(init_std=0.02)
         self.vector_in.init_weights(init_std=0.02)
-        if self.model_args.guidance_embed:
-            self.guidance_in.init_weights(init_std=0.02)
 
         # Initialize transformer blocks:
         for block in self.single_blocks:
@@ -150,7 +142,6 @@ class FluxModel(nn.Module, ModelProtocol):
         txt_ids: Tensor,
         timesteps: Tensor,
         y: Tensor,
-        guidance: Tensor | None = None,
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
@@ -158,12 +149,6 @@ class FluxModel(nn.Module, ModelProtocol):
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
-        if self.model_args.guidance_embed:
-            if guidance is None:
-                raise ValueError(
-                    "Didn't get guidance strength for guidance distilled model."
-                )
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 

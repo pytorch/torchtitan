@@ -10,12 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import numpy as np
+import PIL
 
 import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
-from PIL import Image
 
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -28,7 +27,7 @@ from torchtitan.tools.logging import logger
 
 
 def _process_cc12m_image(
-    img: Image.Image,
+    img: PIL.Image.Image,
     output_size: int = 256,
 ) -> Optional[torch.Tensor]:
     """Process CC12M image to the desired size."""
@@ -56,9 +55,9 @@ def _process_cc12m_image(
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
 
-    # Skip grayscale images, and RGBA, CMYK images
+    # Convert grayscale images, and RGBA, CMYK images
     if resized_img.mode != "RGB":
-        return None
+        resized_img = resized_img.convert("RGB")
 
     np_img = np.array(resized_img).transpose((2, 0, 1))
     tensor_img = torch.tensor(np_img).float() / 255.0
@@ -76,7 +75,7 @@ def _process_cc12m_image(
     return tensor_img
 
 
-def _flux_data_processor(
+def _cc12m_wds_data_processor(
     sample: dict[str, Any],
     t5_tokenizer: FluxTokenizer,
     clip_tokenizer: FluxTokenizer,
@@ -111,10 +110,10 @@ class TextToImageDatasetConfig:
 
 
 DATASETS = {
-    "cc12m": TextToImageDatasetConfig(
+    "cc12m-wds": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
-        data_processor=_flux_data_processor,
+        data_processor=_cc12m_wds_data_processor,
     ),
 }
 
@@ -171,7 +170,9 @@ class FluxDataset(IterableDataset, Stateful):
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._t5_tokenizer = t5_tokenizer
+        self._t5_empty_token = t5_tokenizer.encode("")
         self._clip_tokenizer = clip_tokenizer
+        self._clip_empty_token = clip_tokenizer.encode("")
         self._data_processor = data_processor
         self.job_config = job_config
 
@@ -195,7 +196,10 @@ class FluxDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Use the dataset-specific preprocessor
                 sample_dict = self._data_processor(
-                    sample, self._t5_tokenizer, self._clip_tokenizer, output_size=256
+                    sample,
+                    self._t5_tokenizer,
+                    self._clip_tokenizer,
+                    output_size=self.job_config.training.img_size,
                 )
 
                 # skip low quality image or image with color channel = 1
@@ -204,6 +208,14 @@ class FluxDataset(IterableDataset, Stateful):
                         f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
                     )
                     continue
+
+                # Classifier-free guidance: Replace some of the strings with empty strings.
+                # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+                dropout_prob = self.job_config.training.classifer_free_guidance_prob
+                if dropout_prob > 0.0:
+                    if random.random() < dropout_prob:
+                        sample_dict["t5_tokens"] = self._t5_empty_token
+                        sample_dict["clip_tokens"] = self._clip_empty_token
 
                 self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
@@ -254,6 +266,7 @@ def build_flux_dataloader(
         clip_tokenizer=FluxTokenizer(
             clip_encoder_name, max_length=77
         ),  # fix max_length for CLIP
+        job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,

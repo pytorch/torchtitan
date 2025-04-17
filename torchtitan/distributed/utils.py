@@ -46,10 +46,12 @@ def set_determinism(
     device: torch.device,
     seed: int | None = None,
     deterministic: bool = False,
+    distinct_seed_mesh_dim: str = "pp",
 ) -> None:
     """
-    Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
-    seeds across PP groups (if applicable).
+    Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
+    across dimension denoted by `distinct_seed_mesh_dim`. An example use case is pipeline parallelism,
+    where we want to have the same seed across SPMD groups, but different seeds across PP groups.
 
     Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
     and DTensor manages its own RNG tracker, but we could extend to support both if needed.
@@ -81,22 +83,31 @@ def set_determinism(
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
 
+    # Set distinct seed for each rank in mesh dimensions, with dimension name provdied by `distinct_seed_mesh_dim`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
-    if c10d.get_world_size() > 1 and "pp" in world_mesh.mesh_dim_names:
-        pp_mesh = world_mesh["pp"]
-        seed += pp_mesh.get_local_rank()
+    # TODO(jianiw): We could further extend this to support mutiple distinct dimensions instead of just one.
+    if (
+        c10d.get_world_size() > 1
+        and distinct_seed_mesh_dim in world_mesh.mesh_dim_names
+    ):
+        distinct_mesh = world_mesh[distinct_seed_mesh_dim]
+        seed += distinct_mesh.get_local_rank()
         seed %= 2**64
 
         logger.debug(
-            f"PP rank {pp_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"{distinct_seed_mesh_dim} rank {distinct_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
-        spmd_mesh_dims = list(
-            filter(lambda name: name != "pp", world_mesh.mesh_dim_names)
+        duplicate_seed_mesh = list(
+            filter(
+                lambda name: name != distinct_seed_mesh_dim, world_mesh.mesh_dim_names
+            )
         )
-        spmd_mesh = world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None
+        duplicate_seed_mesh = (
+            world_mesh[duplicate_seed_mesh] if len(duplicate_seed_mesh) else None
+        )
     else:
-        spmd_mesh = world_mesh
+        duplicate_seed_mesh = world_mesh
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
@@ -106,8 +117,8 @@ def set_determinism(
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
-    if spmd_mesh and spmd_mesh.get_coordinate() is not None:
-        torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
+    if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
+        torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
 def create_context_parallel_ctx(
