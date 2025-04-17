@@ -65,14 +65,6 @@ def parallelize_llama(
         apply_moe_tp(model, world_mesh["tp"])
 
     if job_config.activation_checkpoint.mode != "none":
-        if (
-            job_config.activation_checkpoint.mode == "selective"
-            and job_config.model.use_flex_attn
-        ):
-            raise ValueError(
-                "FlexAttention is not compatible with selective AC yet. "
-                "See https://github.com/pytorch/pytorch/issues/147879"
-            )
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP

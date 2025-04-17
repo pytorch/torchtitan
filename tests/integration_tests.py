@@ -322,8 +322,7 @@ def build_test_list():
                 [
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode='full'",
-                    "--model.use_flex_attn",
-                    "--model.attn_mask_type='block_causal'",
+                    "--model.flavor=debugmodel_flex_attn",
                 ]
             ],
             "FSDP+FLEX_ATTN",
