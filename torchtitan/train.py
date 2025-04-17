@@ -285,7 +285,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"global batch size {job_config.training.batch_size * dp_degree}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
-            f"(warmup {job_config.lr_scheduler.warmup_steps})."
+            f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
     def next_batch(
@@ -393,7 +393,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
-        logger.info(f"Training starts at step {self.step + 1}.")
+        logger.info(f"Training starts at step {self.step + 1}")
 
         with maybe_enable_profiling(
             job_config, global_step=self.step
@@ -471,4 +471,4 @@ if __name__ == "__main__":
 
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
-            logger.info("Process group destroyed.")
+            logger.info("Process group destroyed")
