@@ -102,6 +102,26 @@ def _cc12m_wds_data_processor(
     }
 
 
+def _flux_data_processor_from_encodings(
+    sample: dict[str, Any],
+    t5_tokenizer: FluxTokenizer,
+    clip_tokenizer: FluxTokenizer,
+    output_size: int = 256,
+) -> dict[str, Any]:
+    """
+    Preprocess CC12M dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        t5_encoder: T5 encoder
+        clip_encoder: CLIP encoder
+        output_size: The output image size
+
+    """
+    print(sample)
+    return sample
+
+
 @dataclass
 class TextToImageDatasetConfig:
     path: str
@@ -114,6 +134,11 @@ DATASETS = {
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
+    ),
+    "cc12m-preprocessed": TextToImageDatasetConfig(
+        path="assets/preprocess",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        data_processor=_flux_data_processor_from_encodings,
     ),
 }
 

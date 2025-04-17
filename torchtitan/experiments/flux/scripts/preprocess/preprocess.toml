@@ -3,7 +3,7 @@ dump_folder = "./assets/preprocess/"
 
 [training]
 batch_size = 4
-dataset = "cc12m"
+dataset = "cc12m-wds"
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
