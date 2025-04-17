@@ -30,7 +30,7 @@ llama4_configs = {
         n_heads=16,
         rope_theta=500000,
         every_n_layers_nope=4,
-        fixed_attn_block_size=256,
+        #fixed_attn_block_size=256,
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
