@@ -13,7 +13,8 @@ from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import TransformerModelArgs
+from .args import EarlyFusionModelArgs, TransformerModelArgs
+from .encoder import Llama4VisionEncoder
 from .moe import MoE
 
 
@@ -492,3 +493,84 @@ class Transformer(nn.Module, ModelProtocol):
 
         """
         return cls(model_args)
+
+
+class EarlyFusionTransformer(Transformer):
+    """
+    EarlyFusionTransformer Module
+
+    Args:
+        model_args (TransformerModelArgs): Model configuration arguments.
+
+    Attributes:
+        encoder (Llama4VisionEncoder): Encoder module.
+        encoder_token (int): Vision encoder placeholder token.
+    """
+
+    def __init__(self, model_args: EarlyFusionModelArgs):
+        super().__init__(model_args)
+        self.encoder = Llama4VisionEncoder(model_args)
+        self.encoder_token = model_args.encoder_tokens
+
+        # Freeze vision CLIP parameters
+        for v in self.encoder.clip.parameters():
+            v.requires_grad_(False)
+
+    def init_weights(
+        self,
+        buffer_device: Optional[torch.device] = None,
+    ):
+        super().init_weights(buffer_device)
+        self.encoder.init_weights(buffer_device)
+
+    def fuse_embeddings(self, tokens, encoder_input) -> torch.Tensor:
+        bsz, seq_len = tokens.shape
+
+        # Embed tokens
+        # [bsz, seq_len], True indicates the token is not an encoder special token
+        is_text = tokens != self.encoder_token
+        text_tokens = torch.masked_select(tokens, is_text)
+        # [num_text, embed_dim]
+        text_embeds = self.tok_embeddings(text_tokens)
+        embed_dim = text_embeds.shape[-1]
+
+        # Holds the final embedding vector
+        fused_embeds = torch.empty(
+            bsz, seq_len, embed_dim, dtype=text_embeds.dtype, device=text_embeds.device
+        )
+        # Place the text-only embeddings
+        fused_embeds = fused_embeds.masked_scatter(is_text.unsqueeze(-1), text_embeds)
+
+        # Generate encoder embeddings
+        # [bsz, num_encoder_token, embed_dim]
+        encoder_embeds = self.encoder(**encoder_input)
+        # [bsz * num_encoder_token, embed_dim]
+        encoder_embeds = encoder_embeds.view(-1, embed_dim)
+        # [bsz, seq_len, 1]
+        encoder_mask = (tokens == self.encoder_token).unsqueeze(-1)
+
+        # Place the encoder embeddings
+        fused_embeds = fused_embeds.masked_scatter(encoder_mask, encoder_embeds)
+        return fused_embeds
+
+    def forward(self, tokens: torch.Tensor, encoder_input: Dict):
+        """
+        Perform a forward pass through the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input token indices.
+            encoder_input (Dict): Encoder input Dict
+
+        Returns:
+            torch.Tensor: Output logits after applying the Transformer model.
+
+        """
+        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        h = self.fuse_embeddings(tokens, encoder_input)
+
+        for layer in self.layers.values():
+            h = layer(h, self.freqs_cis)
+
+        h = self.norm(h) if self.norm else h
+        output = self.output(h) if self.output else h
+        return output

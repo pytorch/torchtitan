@@ -133,3 +133,32 @@ class TransformerModelArgs(BaseModelArgs):
         )
 
         return nparams, num_flops_per_token
+
+
+@dataclass
+class EarlyFusionModelArgs(TransformerModelArgs):
+    # encoder part
+    encoder_embed_dim: int = 1408
+    encoder_projection_embed_dim: int = 4096
+    encoder_n_layers: int = 34
+    encoder_n_heads: int = 16
+    encoder_n_kv_heads: Optional[int] = None
+    encoder_ffn_dim_multiplier: float = 4
+    patch_size: int = 14
+    tile_size: int = 336
+    max_num_tiles: int = 16
+    encoder_activation: nn.Module = nn.GELU
+    pixel_shuffle_scaling_factor: float = 0.5
+    encoder_token: int = 200092  # "<|patch|>" token id
+    # in_channels (int): The number of image input channels.
+    in_channels: int = 3
+
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        super().update_from_config(job_config, tokenizer)
+        self.max_num_tiles = tokenizer.max_num_tiles
+        self.tile_size = tokenizer.tile_size
+
+    def get_num_flop_per_token(self, num_params: int, seq_len: int) -> int:
+        raise NotImplementedError(
+            "get_num_flop_per_token (used for MFU) is not supported for fusion models"
+        )
