@@ -45,7 +45,8 @@ class TransformerModelArgs(BaseModelArgs):
     # only attend to the tokens within the same block regardless how long is the
     # sequence.
     every_n_layers_nope: int | None = None
-    fixed_attn_block_size: int = 8192
+    #fixed_attn_block_size: int = 8192
+    fixed_attn_block_size: int | None = None
 
     # MoE args
     moe_enabled: bool = True
@@ -62,6 +63,7 @@ class TransformerModelArgs(BaseModelArgs):
         self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
+        self.attn_mask_type = job_config.model.attn_mask_type
         self.use_flex_attn = job_config.model.use_flex_attn
         if self.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
