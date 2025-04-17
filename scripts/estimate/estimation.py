@@ -34,10 +34,6 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
-    if job_config.model.norm_type == "compiled_rmsnorm":
-        logger.info("Compiled RMSNorm is not supported yet. Switching to RMSNorm.")
-        job_config.model.norm_type = "rmsnorm"
-
     if job_config.training.compile or job_config.parallelism.enable_compiled_autograd:
         logger.info("Compile mode is not supported yet. Switching to eager mode.")
         job_config.training.compile = False
@@ -91,14 +87,8 @@ def estimate_memory(job_config: JobConfig):
 
     # build model (using meta init)
     model_cls = train_spec.cls
-    model_config = train_spec.config[job_config.model.flavor]
-    # set the model configs from training inputs:
-    # 1. norm type to decide which norm layer to use
-    # 2. vocab size from tokenizer
-    # 3. max_seq_len base on inputs
-    model_config.norm_type = job_config.model.norm_type
-    model_config.vocab_size = tokenizer.n_words
-    model_config.max_seq_len = job_config.training.seq_len
+    model_args = train_spec.config[job_config.model.flavor]
+    model_args.update_from_config(job_config, tokenizer)
 
     with (
         FakeTensorMode()
@@ -106,10 +96,10 @@ def estimate_memory(job_config: JobConfig):
         else contextlib.nullcontext()
     ):
         logger.info(
-            f"Building {train_spec.name} {job_config.model.flavor} with {model_config}"
+            f"Building {train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_config)
+            model = model_cls.from_model_args(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -134,19 +124,19 @@ def estimate_memory(job_config: JobConfig):
             lambda *args, **kwargs: model_converters.post_optimizer_hook(model)
         )
 
-        logger.info(f"Vocab size: {model_config.vocab_size}")
+        logger.info(f"Vocab size: {model_args.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
             torch.randint(
                 0,
-                model_config.vocab_size,
-                (job_config.training.batch_size, model_config.max_seq_len),
+                model_args.vocab_size,
+                (job_config.training.batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
             torch.randint(
                 0,
-                model_config.vocab_size,
-                (job_config.training.batch_size, model_config.max_seq_len),
+                model_args.vocab_size,
+                (job_config.training.batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
         )

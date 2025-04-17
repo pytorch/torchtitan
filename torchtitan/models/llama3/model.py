@@ -17,7 +17,6 @@ from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
 
@@ -37,14 +36,12 @@ class TransformerModelArgs(BaseModelArgs):
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
 
@@ -341,20 +338,13 @@ class TransformerBlock(nn.Module):
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
         )
-        self.layer_id = layer_id
-        self.num_layers = model_args.n_layers
-
-        self.attention_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-        self.ffn_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
+        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
+            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         else:
-            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+            self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
 
     def forward(
         self,
@@ -423,11 +413,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-
-        self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-
+        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 

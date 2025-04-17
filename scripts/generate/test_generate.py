@@ -85,9 +85,9 @@ def test_generate(
     color = utils.Color
 
     # Load configuration from toml file
-    config = JobConfig()
-    config.parse_args([f"--job.config_file={config_path}"])
-    config._validate_config()
+    job_config = JobConfig()
+    job_config.parse_args([f"--job.config_file={config_path}"])
+    job_config._validate_config()
 
     if len(args.prompt) == 0:
         logger.warning(
@@ -100,27 +100,26 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    train_spec = get_train_spec(config.model.name)
+    train_spec = get_train_spec(job_config.model.name)
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
-    tokenizer = train_spec.build_tokenizer_fn(config)
-    model_config = train_spec.config[config.model.flavor]
-    model_config.norm_type = config.model.norm_type
-    model_config.max_seq_len = config.training.seq_len
-    model_config.vocab_size = tokenizer.n_words
+    tokenizer = train_spec.build_tokenizer_fn(job_config)
 
     model_cls = train_spec.cls
+    model_args = train_spec.config[job_config.model.flavor]
+    model_args.update_from_config(job_config, tokenizer)
+
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
-        model = model_cls.from_model_args(model_config)
+        model = model_cls.from_model_args(model_args)
 
     world_mesh = None
     # Init distributed env
     if world_size > 1:
-        dist_utils.init_distributed(config)
+        dist_utils.init_distributed(job_config)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,
