@@ -56,7 +56,6 @@ class ModelArgs:
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "rmsnorm"
 
 
 class Fp32LayerNorm(nn.LayerNorm):

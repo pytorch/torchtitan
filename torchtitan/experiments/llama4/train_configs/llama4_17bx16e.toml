@@ -17,7 +17,6 @@ save_tb_folder = "tb"
 [model]
 name = "llama4"
 flavor = "17bx16e"
-norm_type = "rmsnorm"  # layernorm / np_layernorm / rmsnorm
 tokenizer_path = "./assets/tokenizer/tokenizer.model"
 # converters = "float8"
 

@@ -32,7 +32,6 @@ class TransformerModelArgs(BaseModelArgs):
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
@@ -59,7 +58,6 @@ class TransformerModelArgs(BaseModelArgs):
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         if self.use_grouped_mm and not has_cuda_capability(9, 0):
