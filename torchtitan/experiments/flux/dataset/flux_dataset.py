@@ -115,6 +115,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
+    "cc12m-wds-test": TextToImageDatasetConfig(
+        path="torchtitan/experiments/flux/assets/cc12m_test",  # load from local path
+        loader=lambda path: load_dataset(path, split="train"),
+        data_processor=_cc12m_wds_data_processor,
+    ),
 }
 
 
