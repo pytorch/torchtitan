@@ -51,13 +51,17 @@ def _dist_reduce(
 def dist_max(
     x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
 ) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=pg)
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
+    )
 
 
 def dist_mean(
     x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
 ) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=pg)
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
+    )
 
 
 def set_determinism(
