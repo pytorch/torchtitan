@@ -39,7 +39,7 @@ steps = 300_000
 compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
-img_size = 512
+img_size = 256
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
