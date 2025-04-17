@@ -12,6 +12,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
+from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.tensor import DTensor
@@ -36,8 +37,9 @@ class FTManager:
         self._manager = manager
         self.group_size = group_size
         self.replica_id = replica_id
-        self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
-        self.replicate_pg.register("dp_replicate")
+        if has_torchft and manager is not None:
+            self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
+            self.replicate_pg.register("dp_replicate")
 
     @property
     def enabled(self) -> bool:
@@ -56,7 +58,7 @@ class FTManager:
             dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
 
         def apply_set_all_reduce_hook(m):
-            if hasattr(m, "set_all_reduce_hook"):
+            if isinstance(m, FSDPModule):
                 m.set_all_reduce_hook(all_reduce_hook)
 
         for part in model_parts:
