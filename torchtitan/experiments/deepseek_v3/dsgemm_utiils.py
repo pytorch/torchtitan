@@ -12,6 +12,37 @@ def get_m_indices(num_groups: int, m: int) -> torch.Tensor:
     return m_indices
 
 
+def make_grouped_layout(num_groups: int, x: torch.Tensor, y: torch.Tensor):
+
+    m = x.size(0)
+    n = y.size(1)
+    k = x.size(1)
+
+    # create fp8 containers
+    out = torch.empty((num_groups, m, n), device="cuda", dtype=torch.bfloat16)
+    x_fp8 = (
+        torch.empty_like(x, dtype=torch.float8_e4m3fn),
+        torch.empty((num_groups, m, k // 128), device="cuda", dtype=torch.float),
+    )
+    y_fp8 = (
+        torch.empty_like(y, dtype=torch.float8_e4m3fn),
+        torch.empty(
+            (num_groups, (n + 127) // 128, k // 128), device="cuda", dtype=torch.float
+        ),
+    )
+
+    for i in range(num_groups):
+        x_fp8[0][i], x_fp8[1][i] = per_token_cast_to_fp8(x[i])
+        y_fp8[0][i], y_fp8[1][i] = per_block_cast_to_fp8(y[i])
+
+    x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
+    out = out.view(-1, n)  # collapse the group and M dims
+
+    # Transpose earlier so that the testing will not trigger transposing kernels
+    x_fp8 = (x_fp8[0], get_col_major_tma_aligned_tensor(x_fp8[1]))
+    return x_fp8, y_fp8, out
+
+
 def set_num_sms(num_sms: int) -> None:
     """
     Set the maximum SM count for all GEMM kernels to use.

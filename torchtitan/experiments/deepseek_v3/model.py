@@ -483,6 +483,7 @@ class MoE(nn.Module):
         self.ep_size = config.ep_size
         self.ep_rank = self.ep_group.rank()
         self.experts_per_rank = config.n_routed_experts // config.ep_size
+        print(f"{self.experts_per_rank=}, {self.ep_size=}, {self.ep_rank=}")
         # Use ModuleDict instead of ModuleList to preserve absoulte expert
         # IDs while avoiding `None` experts. The absolute expert IDs match
         # with checkpoint FQNs.
@@ -502,6 +503,7 @@ class MoE(nn.Module):
     def combine_experts(self, submod_name: str):
         all_weights = []
         for expert in self.experts.values():
+            # print(f"EP rank [{self.ep_rank}]: Combining expert weights for Group GEMM")
             lin = expert.get_submodule(submod_name)
             all_weights.append(lin.weight)
             lin.weight = None
@@ -511,7 +513,7 @@ class MoE(nn.Module):
         elif self.group_mm == "torchao":
             combined_weight = torch.cat(all_weights)
         elif self.group_mm == "ds":
-            combined_weight = torch.stack(all_weights)  # , dim=0)
+            combined_weight = torch.cat(all_weights)  # , dim=0)
         else:
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
@@ -559,8 +561,9 @@ class MoE(nn.Module):
             dtype=dtype,
             device=device,
         )
-        print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
-        print("Combining expert weights for Group GEMM")
+        # print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
+
+    # print("Combining expert weights for Group GEMM")
 
     def get_send_buf(self):
         # [Why detach?] During a first forward-backward step, the buffer would
@@ -775,6 +778,9 @@ class MoE(nn.Module):
         contig_tokens = token_gather_buf[permuted_indices]
 
         # Run the first grouped GEMM
+        # contig_tokens: torch.Size([196608, 2048])
+        # w1: torch.Size([22528, 2048])  or torch.Size([16, 1408, 2048])
+
         w1 = self.get_parameter("gate_proj_weight")
         if self.group_mm == "torchao":
             gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
@@ -787,7 +793,9 @@ class MoE(nn.Module):
             print(
                 f"contig_tokens: {contig_tokens.shape}"
             )  # contig_tokens: torch.Size([196608, 2048])
-            print(f"w1: {w1.shape}")  # w1: torch.Size([16, 1408, 2048])
+            print(
+                f"w1: {w1.shape}"
+            )  # w1: [22528, 2048])  or torch.Size([16, 1408, 2048])
             print(f"m_sizes: {m_sizes}")
             print(f"m_offsets: {m_offsets}")
             print(f"Index Shapes: { m_sizes.shape=}, {m_offsets.shape=}")
@@ -803,13 +811,13 @@ class MoE(nn.Module):
             num_groups_check = len(m_offsets)
             assert num_groups == num_groups_check
 
-            m = [m_offsets[i + 1] - m_offsets[i] for i in range(num_groups - 1)]
-            k = w1.shape[2]
-            n = w1.shape[0]
-            print(f"m: {m}")
-            print(f"k: {k}")
-            print(f"n: {n}")
-            assert False, "check"
+            # m = [m_offsets[i + 1] - m_offsets[i] for i in range(num_groups - 1)]
+            # k = w1.shape[2]
+            # n = w1.shape[0]
+            # print(f"m: {m}")
+            # print(f"k: {k}")
+            # print(f"n: {n}")
+
             """
             x_fp8, y_fp8, out = construct_grouped(num_groups, m, k, n, is_masked=False)
 
@@ -824,8 +832,15 @@ class MoE(nn.Module):
                 contig_tokens, w1.transpose(-2, -1), m_sizes, m_offsets
             )
             """
+        # proxy
+        gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
+        # print(f"gate_proj: {gate_proj.shape}")
+        # gate_proj: torch.Size([196608, 1408])
 
         # Run the second grouped GEMM
+        # contig_tokens: torch.Size([196608, 2048])
+        # w3: torch.Size([22528, 2048])
+
         w3 = self.get_parameter("up_proj_weight")
         if self.group_mm == "torchao":
             up_proj = grouped_gemm_forward(contig_tokens, w3, m_sizes)
@@ -840,14 +855,19 @@ class MoE(nn.Module):
             print(f"m_sizes: {m_sizes}")
             print(f"m_offsets: {m_offsets}")
 
-            up_proj = up_proj = torch._grouped_mm(
-                contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
+            up_proj = up_proj = up_proj = grouped_gemm_forward(
+                contig_tokens, w3, m_sizes
             )
+            print(f"up_proj: {up_proj.shape}")
+            # up_proj: torch.Size([196608, 1408])
 
         # Apply activation
         hidden_outputs = MLP.act_fn(gate_proj) * up_proj
 
         # Run the third grouped GEMM
+        # w2: torch.Size([32768, 1408])
+        # hidden_outputs: torch.Size([196608, 1408])
+
         w2 = self.get_parameter("down_proj_weight")
         if self.group_mm == "torchao":
             hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
@@ -866,12 +886,8 @@ class MoE(nn.Module):
             print(f"m_offsets: {m_offsets}")
             # construct_grouped
             # deep_gemm.gemm_fp8_fp8_bf16_nt(x_fp8, y_fp8, out)
-            hidden_outputs = torch._grouped_mm(
-                hidden_outputs,
-                w2.transpose(-2, -1),
-                m_offsets,
-                out_dtype=torch.bfloat16,
-            )
+            hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
+            print(f"hidden_outputs: {hidden_outputs.shape}")
 
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are
@@ -899,6 +915,8 @@ class MoE(nn.Module):
             .sum(dim=1)
             .type(returned_tokens.dtype)
         )
+        # print(f"final_out: {final_out.shape}")  # final_out: torch.Size([71, 2048])
+
         return final_out
 
 
