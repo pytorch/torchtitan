@@ -483,7 +483,7 @@ class MoE(nn.Module):
         self.ep_size = config.ep_size
         self.ep_rank = self.ep_group.rank()
         self.experts_per_rank = config.n_routed_experts // config.ep_size
-        print(f"{self.experts_per_rank=}, {self.ep_size=}, {self.ep_rank=}")
+        # print(f"{self.experts_per_rank=}, {self.ep_size=}, {self.ep_rank=}")
         # Use ModuleDict instead of ModuleList to preserve absoulte expert
         # IDs while avoiding `None` experts. The absolute expert IDs match
         # with checkpoint FQNs.
@@ -513,7 +513,7 @@ class MoE(nn.Module):
         elif self.group_mm == "torchao":
             combined_weight = torch.cat(all_weights)
         elif self.group_mm == "ds":
-            combined_weight = torch.cat(all_weights)  # , dim=0)
+            combined_weight = torch.stack(all_weights)  #  becomes 3d
         else:
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
@@ -778,6 +778,7 @@ class MoE(nn.Module):
         contig_tokens = token_gather_buf[permuted_indices]
 
         # Run the first grouped GEMM
+        # =================================
         # contig_tokens: torch.Size([196608, 2048])
         # w1: torch.Size([22528, 2048])  or torch.Size([16, 1408, 2048])
 
@@ -789,15 +790,11 @@ class MoE(nn.Module):
                 contig_tokens, w1.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
             )
         elif self.group_mm == "ds":
-            print("Using DS Grouped GEMM, g1")
             print(
-                f"contig_tokens: {contig_tokens.shape}"
-            )  # contig_tokens: torch.Size([196608, 2048])
-            print(
-                f"w1: {w1.shape}"
-            )  # w1: [22528, 2048])  or torch.Size([16, 1408, 2048])
-            print(f"m_sizes: {m_sizes}")
-            print(f"m_offsets: {m_offsets}")
+                f"Using DS Grouped GEMM, g1, contig_tokens: {contig_tokens.shape}, w1: {w1.shape} "
+            )
+
+            # w1: [22528, 2048])  or torch.Size([16, 1408, 2048])
             print(f"Index Shapes: { m_sizes.shape=}, {m_offsets.shape=}")
             """
             m_sizes: tensor([128,   0, 128, 128, 256, 128, 128, 128, 128, 128, 256, 128, 128, 0, 128,  0], device='cuda:0', dtype=torch.int32)
@@ -808,8 +805,110 @@ class MoE(nn.Module):
 
             # construct_grouped
             num_groups = len(m_sizes)
-            num_groups_check = len(m_offsets)
-            assert num_groups == num_groups_check
+            num_groups_from_weights = w1.shape[0]
+            assert (
+                num_groups == num_groups_from_weights
+            ), "mismatch in M_sizes and expert layout, dim 0 of w1"
+
+            # =========== 1st GEMM ===========
+
+            def split_tensor_by_sizes(
+                tokens: torch.Tensor, sizes: torch.Tensor
+            ) -> list:
+                """
+                Split a tensor along the first dimension based on a list of sizes.
+
+                Args:
+                    tensor: Input tensor to split, e.g., [196608, 2048]
+                    sizes: Tensor containing sizes for each split, e.g., [128, 0, 128, ...]
+
+                Returns:
+                    List of tensors, where each tensor corresponds to a slice of the input tensor.
+                    Zero-sized entries will return empty tensors with the correct dimensions.
+                """
+                result = []
+                offset = 0
+
+                for size in sizes:
+                    size_val = size.item()
+                    if size_val == 0:
+                        # Create empty tensor with correct dimensions
+                        empty_shape = list(tokens.shape)
+                        empty_shape[0] = 0
+                        result.append(tokens.new_empty(empty_shape))
+                    else:
+                        # Extract the slice
+                        result.append(tokens[offset : offset + size_val])
+                        offset += size_val
+
+                return result
+
+            m = contig_tokens.shape[0]
+            k1 = contig_tokens.shape[1]
+            n = w1.size(1)
+            k = w1.size(2)
+
+            print(f"{m=} {k=} {n=}, {k1=}")
+            # m=24576 k=2048 n=1408, k1=2048
+
+            # create fp8 containers
+            out = torch.empty((num_groups, m, n), device="cuda", dtype=torch.bfloat16)
+            print(f"out: {out.shape}")
+
+            print(f"{m_sizes=}, {m_offsets=}")
+            # token scaling
+            valid_tokens = contig_tokens[: m_offsets[-1]]
+            print(f"valid_tokens: {valid_tokens.shape}")
+            x_fp8 = (
+                torch.empty_like(valid_tokens, dtype=torch.float8_e4m3fn),
+                torch.empty((m + 127) // 128, k // 128),
+            )
+            print(f"x_fp8: {x_fp8[0].shape}, {x_fp8[1].shape}")
+
+            """x_fp8 = (
+                torch.empty_like(x, dtype=torch.float8_e4m3fn),
+                torch.empty(
+                    (num_groups, m, k // 128), device="cuda", dtype=torch.float
+                ),
+            )
+            """
+            # y_fp8: torch.Size([16, 1408, 2048]), torch.Size([16, 11, 16])
+            y_fp8 = (
+                torch.empty_like(w1, dtype=torch.float8_e4m3fn),
+                torch.empty(
+                    (num_groups, (n + 127) // 128, k // 128),
+                    device="cuda",
+                    dtype=torch.float,
+                ),
+            )
+
+            print(f"y_fp8: {y_fp8[0].shape}, {y_fp8[1].shape}")
+
+            for i in range(num_groups):
+                x_fp8[0][i], x_fp8[1][i] = dsgemm_utils.per_token_cast_to_fp8(x[i])
+                y_fp8[0][i], y_fp8[1][i] = dsgemm_utils.per_block_cast_to_fp8(w1[i])
+
+            # input scaling
+            print(f"Input Scaling complete: {x_fp8[0][0]=}, {x_fp8[1][0]=}")
+
+            # weight scaling
+            print(f"Weight1 Scaling complete: {y_fp8[0][0]=}, {y_fp8[1][0]=}")
+
+            # x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
+
+            # weight scaling
+            # print(f"Weight1 Scaling complete: {y_fp8[0][0]=}, {y_fp8[1][0]=}")
+
+            # x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
+            out = out.view(-1, n)  # collapse the group and M dims
+
+            assert False, "check"
+
+            # Transpose earlier so that the testing will not trigger transposing kernels
+            # x_fp8 = (x_fp8[0], get_col_major_tma_aligned_tensor(x_fp8[1]))
+            # return x_fp8, y_fp8, out
+
+            #
 
             # m = [m_offsets[i + 1] - m_offsets[i] for i in range(num_groups - 1)]
             # k = w1.shape[2]
@@ -833,8 +932,11 @@ class MoE(nn.Module):
             )
             """
         # proxy
-        gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
-        # print(f"gate_proj: {gate_proj.shape}")
+        # gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
+        gate_proj = torch._grouped_mm(
+            contig_tokens, w1.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
+        )
+        print(f"gate_proj: {gate_proj.shape}")
         # gate_proj: torch.Size([196608, 1408])
 
         # Run the second grouped GEMM
@@ -849,14 +951,18 @@ class MoE(nn.Module):
                 contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
             )
         elif self.group_mm == "ds":
-            print("Using DS Grouped GEMM, g2")
-            print(f"contig_tokens: {contig_tokens.shape}")
-            print(f"w3: {w3.shape}")
-            print(f"m_sizes: {m_sizes}")
-            print(f"m_offsets: {m_offsets}")
+            print(
+                "Using DS Grouped GEMM, g2, contig_tokens: {contig_tokens.shape}, w3: {w3.shape} "
+            )
 
-            up_proj = up_proj = up_proj = grouped_gemm_forward(
-                contig_tokens, w3, m_sizes
+            # print(f"m_sizes: {m_sizes}")
+            # print(f"m_offsets: {m_offsets}")
+
+            # up_proj = up_proj = up_proj = grouped_gemm_forward(
+            #    contig_tokens, w3, m_sizes
+            # )
+            up_proj = torch._grouped_mm(
+                contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
             )
             print(f"up_proj: {up_proj.shape}")
             # up_proj: torch.Size([196608, 1408])
@@ -880,14 +986,20 @@ class MoE(nn.Module):
             )
         elif self.group_mm == "ds":
             print("Using DS Grouped GEMM, g3")
-            print(f"hidden_outputs: {hidden_outputs.shape}")
+            print(f"hidden_outputs preW2: {hidden_outputs.shape}")
             print(f"w2: {w2.shape}")
-            print(f"m_sizes: {m_sizes}")
-            print(f"m_offsets: {m_offsets}")
+            # print(f"m_sizes: {m_sizes}")
+            # print(f"m_offsets: {m_offsets}")
             # construct_grouped
             # deep_gemm.gemm_fp8_fp8_bf16_nt(x_fp8, y_fp8, out)
-            hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
-            print(f"hidden_outputs: {hidden_outputs.shape}")
+            # hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
+            hidden_outputs = torch._grouped_mm(
+                hidden_outputs,
+                w2.transpose(-2, -1),
+                m_offsets,
+                out_dtype=torch.bfloat16,
+            )
+            print(f"postW2 * hidden_outputs: {hidden_outputs.shape}")
 
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are

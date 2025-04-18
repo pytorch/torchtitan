@@ -126,7 +126,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
+    model_args.max_seq_len = 2048  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
