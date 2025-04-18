@@ -784,12 +784,36 @@ class MoE(nn.Module):
             )
         elif self.group_mm == "ds":
             print("Using DS Grouped GEMM, g1")
-            print(f"contig_tokens: {contig_tokens.shape}")
-            print(f"w1: {w1.shape}")
+            print(
+                f"contig_tokens: {contig_tokens.shape}"
+            )  # contig_tokens: torch.Size([196608, 2048])
+            print(f"w1: {w1.shape}")  # w1: torch.Size([16, 1408, 2048])
             print(f"m_sizes: {m_sizes}")
             print(f"m_offsets: {m_offsets}")
+            print(f"Index Shapes: { m_sizes.shape=}, {m_offsets.shape=}")
+            """
+            m_sizes: tensor([128,   0, 128, 128, 256, 128, 128, 128, 128, 128, 256, 128, 128, 0, 128,  0], device='cuda:0', dtype=torch.int32)
+            m_offsets: tensor([ 128,  128,  256,  384,  640,  768,  896, 1024, 1152, 1280, 1536, 1664, 1792, 1792, 1920, 1920], device='cuda:0', dtype=torch.int32)
+            m_sizes.shape= torch.Size([16]), m_offsets.shape= torch.Size([16])
+
+            """
 
             # construct_grouped
+            num_groups = len(m_sizes)
+            num_groups_check = len(m_offsets)
+            assert num_groups == num_groups_check
+
+            m = [m_offsets[i + 1] - m_offsets[i] for i in range(num_groups - 1)]
+            k = w1.shape[2]
+            n = w1.shape[0]
+            print(f"m: {m}")
+            print(f"k: {k}")
+            print(f"n: {n}")
+            assert False, "check"
+            """
+            x_fp8, y_fp8, out = construct_grouped(num_groups, m, k, n, is_masked=False)
+
+        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(x_fp8, y_fp8, out, m_indices)
             x_fp8, y_fp8, out = dsgemm_utils.construct_grouped(
                 contig_tokens, w1, m_sizes
             )
@@ -799,6 +823,7 @@ class MoE(nn.Module):
             gate_proj = torch.ops.fbgemm.grouped_gemm(
                 contig_tokens, w1.transpose(-2, -1), m_sizes, m_offsets
             )
+            """
 
         # Run the second grouped GEMM
         w3 = self.get_parameter("up_proj_weight")

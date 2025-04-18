@@ -6,6 +6,12 @@ import torch
 _num_sms = None
 
 
+def get_m_indices(num_groups: int, m: int) -> torch.Tensor:
+    m_indices = torch.arange(0, num_groups, device="cuda", dtype=torch.int)
+    m_indices = m_indices.unsqueeze(-1).expand(num_groups, m).contiguous().view(-1)
+    return m_indices
+
+
 def set_num_sms(num_sms: int) -> None:
     """
     Set the maximum SM count for all GEMM kernels to use.
