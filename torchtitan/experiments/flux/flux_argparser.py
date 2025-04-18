@@ -6,8 +6,6 @@
 
 import argparse
 
-import torch
-
 
 def extend_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -35,10 +33,10 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Clip encoder to use, HuggingFace model name.",
     )
     parser.add_argument(
-        "--encoder.encoder_dtype",
-        type=torch.dtype,
-        default=torch.bfloat16,
-        help="Which dtype to load for autoencoder. ",
+        "--encoder.autoencoder_path",
+        type=str,
+        default="torchtitan/experiments/flux/assets/autoencoder/ae.safetensors",
+        help="Autoencoder checkpoint path to load.",
     )
     parser.add_argument(
         "--encoder.max_t5_encoding_len",
@@ -47,9 +45,10 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         help="Maximum length of the T5 encoding.",
     )
     parser.add_argument(
-        "--encoder.offload_encoder",
+        "--encoder.use_local_encoder",
         action="store_true",
-        help="Whether to shard the encoder using FSDP",
+        help="Where to use local file path to load T5 and CLIP encoder. \
+        If True, T5 and CLIP encoder path needs to be specified as local file path.",
     )
     # eval configs
     parser.add_argument(

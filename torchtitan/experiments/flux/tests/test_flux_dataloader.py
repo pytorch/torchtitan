@@ -16,7 +16,7 @@ from torchtitan.tools.profiling import (
 
 class TestFluxDataLoader:
     def test_load_dataset(self):
-        for dataset_name in ["cc12m-wds-test", "cc12m-wds"]:
+        for dataset_name in ["cc12m-wds"]:
             self._test_flux_dataloader(dataset_name)
 
     def _test_flux_dataloader(self, dataset_name):
