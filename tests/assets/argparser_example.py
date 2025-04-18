@@ -17,6 +17,7 @@ class CustomArgs:
 
 @dataclass
 class Training:
+    steps: int = 99
     my_custom_steps: int = 32
 
 
