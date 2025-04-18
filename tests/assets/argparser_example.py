@@ -23,13 +23,20 @@ class CustomArgsTwo:
 
 
 @dataclass
-class ExtendedConfig:
+class Training:
+    steps: int = 4
+    num_steps: int = 1
+
+
+@dataclass
+class JobConfig:
     """
     This is an example of how to extend the tyro parser with custom config classes.
     """
 
     custom_args: CustomArgs = field(default_factory=CustomArgs)
     custom_args_two: CustomArgsTwo = field(default_factory=CustomArgsTwo)
+    training: Training = field(default_factory=Training)
 
 
 def extend_parser(parser: argparse.ArgumentParser) -> None:

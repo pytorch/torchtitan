@@ -9,7 +9,7 @@ import os
 import sys
 
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, make_dataclass
-from typing import Annotated, Any, Dict, Literal, Optional, Type, Union
+from typing import Any, Literal, Type
 
 import torch
 import tyro
@@ -27,25 +27,12 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-# Constructor for comma separated lists of strings for tyro
-CommaSeparatedList = Annotated[
-    list[str],
-    tyro.constructors.PrimitiveConstructorSpec(
-        nargs=1,
-        metavar="A,B,C",
-        instance_from_str=lambda args: [
-            s.strip() for s in args[0].split(",") if s.strip()
-        ],
-        is_instance=lambda instance: isinstance(instance, list)
-        and all(isinstance(i, str) for i in instance),
-        str_from_instance=lambda instance: [",".join(instance)],
-    ),
-]
+custom_registry = tyro.constructors.ConstructorRegistry()
 
 
 @dataclass
 class Job:
-    config_file: Optional[str] = None
+    config_file: str | None = None
     """Job config file"""
 
     dump_folder: str = "./torchtitan/outputs"
@@ -119,7 +106,7 @@ class Model:
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
     """Tokenizer path"""
 
-    converters: CommaSeparatedList = field(default_factory=list)
+    converters: list[str] = field(default_factory=list)
     """
     Comma separated list of converters to apply to the model.
     For instance, the `float8` converter swaps `torch.nn.Linear`
@@ -163,13 +150,13 @@ class Optimizer:
 
 
 @dataclass
-class LrScheduler:
+class LRScheduler:
     warmup_steps: int = 200
     """
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
     """
 
-    decay_ratio: Optional[float] = None
+    decay_ratio: float | None = None
     """
     Controls the proportion of the training steps allocated to the learning rate decay phase.
     If `None`, the learning rate will begin decaying immediately after the warmup period.
@@ -199,7 +186,7 @@ class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
 
-    dataset_path: Optional[str] = None
+    dataset_path: str | None = None
     """
     Path to the dataset in the file system. If provided, data will be
     loaded from this path instead of downloaded.
@@ -211,7 +198,7 @@ class Training:
     seq_len: int = 2048
     """Sequence length"""
 
-    max_norm: Union[float, int] = 1.0
+    max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
 
     steps: int = 10000
@@ -240,7 +227,7 @@ class Training:
     gc_freq: int = 50
     """Python garbage control scheduling interval, in steps"""
 
-    seed: Optional[int] = None
+    seed: int | None = None
     """Choose the base RNG seed used for training"""
 
     deterministic: bool = False
@@ -304,7 +291,7 @@ class Parallelism:
     of stages. Stages per rank are inferred from split points degree, and schedule.
     """
 
-    pipeline_parallel_split_points: CommaSeparatedList = field(default_factory=list)
+    pipeline_parallel_split_points: list[str] = field(default_factory=list)
     """
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
@@ -315,7 +302,7 @@ class Parallelism:
     but currently the split points must be specified manually.
     """
 
-    pipeline_parallel_layers_per_stage: Optional[int] = None
+    pipeline_parallel_layers_per_stage: int | None = None
     """
     The number of layers per (virtual) pipeline stage. If specified, the split points will be
     calculated from the number of layers and pipeline_parallel_degree. If not specified, the
@@ -331,7 +318,7 @@ class Parallelism:
     and split_points = number of stages - 1
     """
 
-    pipeline_parallel_schedule_csv: Optional[str] = ""
+    pipeline_parallel_schedule_csv: str | None = ""
     """
     Specify the path to the pipeline parallel schedule csv file to use.
     The pipeline_parallel_schedule argument must be either
@@ -395,7 +382,7 @@ class Checkpoint:
     Could be implemented as a separate script, but this way shares more code.
     """
 
-    async_mode: str = "disabled"
+    async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
     """
     Which async checkpoint mode to use. Currently there are 3 different modes.
     1. "disabled": synchronized checkpointing will be used.
@@ -424,7 +411,7 @@ class Checkpoint:
     load_step: int = -1
     """Load the checkpoint at the specified step. If -1, load the latest checkpoint."""
 
-    exclude_from_loading: CommaSeparatedList = field(default_factory=list)
+    exclude_from_loading: list[str] = field(default_factory=list)
     """
     Exclude specific keys from being loaded from the checkpoint.
     Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
@@ -460,13 +447,13 @@ class Float8:
     for backward computation.
     """
 
-    recipe_name: Optional[Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"]] = None
+    recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
     """
     If specified, creates float8 config from recipe name, valid choices are
     `tensorwise`, `rowwise` and `rowwise_with_gw_hp`.
     """
 
-    filter_fqns: CommaSeparatedList = field(default_factory=list)
+    filter_fqns: list[str] = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
@@ -537,12 +524,9 @@ class Experimental:
 
     custom_args_module: str = ""
     """
-    This option allows users to extend TorchTitan's existing JobConfig by importing
-    a customized module. Similar to ``--experimental.custom_model_path``, the user
-    needs to ensure that the path can be imported. The module should contain exactly
-    one public function and the function has the signature
-    ``def func(parser: argparse.ArgumentParser) -> None:``. The user can use the
-    given parser to add new argument by calling``parser.add_argument``, as wish.
+    This option allows users to extend TorchTitan's existing JobConfig by extending
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    needs to ensure that the path can be imported.
     """
 
 
@@ -552,12 +536,12 @@ class JobConfig:
     A helper class to manage the train configuration.
     Semantics:
     - Default config is loaded from a toml file. If no toml file is provided,
-    then the default config is loaded from argparse defaults.
-    - if toml file has missing keys, they are filled with argparse defaults.
+    then the default config is loaded from JobConfig defaults.
+    - if toml file has missing keys, they are filled with defaults.
     - if additional explicit cmd args are provided in addition to the toml
-    file, they will override the toml config and the argparse defaults
+    file, they will override the toml config and the defaults
 
-    precedence order: cmdline > toml > argparse default
+    precedence order: cmdline > toml > JobConfig default
 
     Arg parsing semantics:
 
@@ -574,7 +558,7 @@ class JobConfig:
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
     optimizer: Optimizer = field(default_factory=Optimizer)
-    lr_scheduler: LrScheduler = field(default_factory=LrScheduler)
+    lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
@@ -587,7 +571,7 @@ class JobConfig:
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def update_instance(self, instance) -> None:
@@ -596,9 +580,7 @@ class JobConfig:
             value = getattr(instance, field_name)
             setattr(self, field_name, value)
 
-    def parse_args(self, args=None) -> None:
-        if args is None:
-            args = sys.argv[1:]
+    def parse_args(self, args=sys.argv[1:]) -> None:
         config_cls = self.maybe_add_custom_args(args)
         toml_values = self.maybe_load_toml(args)
         base_config = (
@@ -606,16 +588,19 @@ class JobConfig:
             if toml_values
             else config_cls()
         )
-        parsed_config = tyro.cli(config_cls, args=args, default=base_config)
+        self.register_tyro_rules(custom_registry)
+        parsed_config = tyro.cli(
+            config_cls, args=args, default=base_config, registry=custom_registry
+        )
 
         #  Apply configuration
         self.update_instance(parsed_config)
-        self.validate_config()
+        self._validate_config()
 
     def maybe_load_toml(self, args):
-        config_flags = {"--job.config-file", "--job.config_file"}
+        valid_keys = {"--job.config-file", "--job.config_file"}
         for i, arg in enumerate(args[:-1]):
-            if arg in config_flags:
+            if arg in valid_keys:
                 file_path = args[i + 1]
                 try:
                     with open(file_path, "rb") as f:
@@ -625,22 +610,25 @@ class JobConfig:
                     raise e
         return None
 
-    def maybe_add_custom_args(self, args=None) -> Type:
+    def maybe_add_custom_args(self, args=[]) -> Type:  # noqa: B006
         """Find and merge custom arguments module with current JobConfig class"""
-        args = args or []
         module_path = None
+        valid_keys = {
+            "--experimental.custom_args_module",
+            "--experimental.custom-args-module",
+        }
         for i, arg in enumerate(args):
-            if arg.startswith("--experimental.custom"):
+            key = arg.split("=")[0]
+            if key in valid_keys:
                 module_path = arg.split("=", 1)[1] if "=" in arg else args[i + 1]
                 break
 
         if not module_path:
             return self.__class__
 
-        # Import and get custom config class
-        custom_cls = importlib.import_module(module_path).ExtendedConfig
+        JobConfigExtended = importlib.import_module(module_path).JobConfig
 
-        return self.merge_dataclasses(self.__class__, custom_cls)
+        return self.merge_dataclasses(self.__class__, JobConfigExtended)
 
     def merge_dataclasses(self, base, custom) -> Type:
         """Merge two dataclass types, preserving nested structures."""
@@ -684,7 +672,7 @@ class JobConfig:
                     result[f.name] = value
         return cls(**result)
 
-    def validate_config(self) -> None:
+    def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in
         #       tokenizer default path, need to remove later
         if not os.path.exists(self.model.tokenizer_path):
@@ -700,3 +688,19 @@ class JobConfig:
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
                     "Please update your config."
                 )
+
+    @staticmethod
+    def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
+        @registry.primitive_rule
+        def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Support for comma seperated string parsing"""
+            if type_info.type != list[str]:
+                return None
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar="A,B,C,...",
+                instance_from_str=lambda args: args[0].split(","),
+                is_instance=lambda instance: isinstance(instance, list)
+                and all(isinstance(i, str) for i in instance),
+                str_from_instance=lambda instance: [",".join(instance)],
+            )
