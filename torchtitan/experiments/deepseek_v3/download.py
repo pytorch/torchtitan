@@ -68,3 +68,5 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     trust_remote_code=True,
 )
+
+print(f"{model=}")

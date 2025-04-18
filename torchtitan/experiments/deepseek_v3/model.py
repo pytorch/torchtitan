@@ -25,9 +25,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 """ PyTorch DeepSeek model."""
 import math
 from typing import Optional, Tuple
+
+import deep_gemm
+
+import dsgemm_utiils as dsgemm_utils
 
 import torch
 import torch.distributed as dist
@@ -47,6 +53,7 @@ from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
     grouped_gemm_forward,
 )
+
 
 # Get model parallel subgroup by name:
 # e.g. "pp", "ep", None
@@ -453,8 +460,8 @@ class MoE(nn.Module):
     # 1. "torch_all_to_all"
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
-    # Group GEMM method, "torch" or "torchao"
-    group_mm = "torch"
+    # Group GEMM method, "torch" or "torchao" or "ds"
+    group_mm = "ds"  # torch"
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -503,6 +510,8 @@ class MoE(nn.Module):
             combined_weight = torch.stack(all_weights)
         elif self.group_mm == "torchao":
             combined_weight = torch.cat(all_weights)
+        elif self.group_mm == "ds":
+            combined_weight = torch.stack(all_weights)  # , dim=0)
         else:
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
@@ -769,17 +778,44 @@ class MoE(nn.Module):
         w1 = self.get_parameter("gate_proj_weight")
         if self.group_mm == "torchao":
             gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
-        else:  # "torch"
+        elif self.group_mm == "torch":
             gate_proj = torch._grouped_mm(
                 contig_tokens, w1.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
+            )
+        elif self.group_mm == "ds":
+            print("Using DS Grouped GEMM, g1")
+            print(f"contig_tokens: {contig_tokens.shape}")
+            print(f"w1: {w1.shape}")
+            print(f"m_sizes: {m_sizes}")
+            print(f"m_offsets: {m_offsets}")
+
+            # construct_grouped
+            x_fp8, y_fp8, out = dsgemm_utils.construct_grouped(
+                contig_tokens, w1, m_sizes
+            )
+
+            out = deep_gemm.gemm_fp8_fp8_bf16_nt(contig_tokens, w1, out)
+
+            gate_proj = torch.ops.fbgemm.grouped_gemm(
+                contig_tokens, w1.transpose(-2, -1), m_sizes, m_offsets
             )
 
         # Run the second grouped GEMM
         w3 = self.get_parameter("up_proj_weight")
         if self.group_mm == "torchao":
             up_proj = grouped_gemm_forward(contig_tokens, w3, m_sizes)
-        else:  # "torch"
+        elif self.group_mm == "torch":
             up_proj = torch._grouped_mm(
+                contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
+            )
+        elif self.group_mm == "ds":
+            print("Using DS Grouped GEMM, g2")
+            print(f"contig_tokens: {contig_tokens.shape}")
+            print(f"w3: {w3.shape}")
+            print(f"m_sizes: {m_sizes}")
+            print(f"m_offsets: {m_offsets}")
+
+            up_proj = up_proj = torch._grouped_mm(
                 contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
             )
 
@@ -790,7 +826,21 @@ class MoE(nn.Module):
         w2 = self.get_parameter("down_proj_weight")
         if self.group_mm == "torchao":
             hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
-        else:  # "torch"
+        elif self.group_mm == "torch":
+            hidden_outputs = torch._grouped_mm(
+                hidden_outputs,
+                w2.transpose(-2, -1),
+                m_offsets,
+                out_dtype=torch.bfloat16,
+            )
+        elif self.group_mm == "ds":
+            print("Using DS Grouped GEMM, g3")
+            print(f"hidden_outputs: {hidden_outputs.shape}")
+            print(f"w2: {w2.shape}")
+            print(f"m_sizes: {m_sizes}")
+            print(f"m_offsets: {m_offsets}")
+            # construct_grouped
+            # deep_gemm.gemm_fp8_fp8_bf16_nt(x_fp8, y_fp8, out)
             hidden_outputs = torch._grouped_mm(
                 hidden_outputs,
                 w2.transpose(-2, -1),

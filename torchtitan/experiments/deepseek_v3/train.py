@@ -31,7 +31,9 @@ def run_full_model(
     device = torch.device("cuda", rank % device_count)
 
     pp_mesh = mesh["pp"]
+
     ep_mesh = mesh["ep"]
+
     pp_rank = pp_mesh.get_local_rank()
     ep_rank = ep_mesh.get_local_rank()
     pp_size = pp_mesh.size()
@@ -47,19 +49,30 @@ def run_full_model(
     model_args.ep_size = ep_size
     model_args.num_stages = pp_size
     model_args.stage_idx = pp_rank
-    print(model_args)
+    print(
+        f"Parallelism: {rank=}, {ep_size=}, {pp_size=}, {model_args.ep_size=}, {model_args.num_stages=}, {model_args.stage_idx=}"
+    )
+    # print(model_args)
 
     # Instantiate model
     with device, mesh:
         model = DeepseekForCausalLM(model_args)
+    """if rank in [0]:
+        print("*" * 80)
+        print(f"{rank=}")
+        print(model)
+        print("*" * 80)
+    """
 
     # Load weights
-    load_weights_from_hf(model, model_id, device)
+    # load_weights_from_hf(model, model_id, device)
     model.train()
 
     # Apply data parallelism
     fsdp_mesh = mesh["fsdp"]
     hsdp_mesh = mesh["ep", "fsdp"]
+    print(f"{rank=}, fsdp_mesh: {fsdp_mesh}")
+    print(f"{rank=}, hsdp_mesh: {hsdp_mesh}")
     # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
     # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
     # Reason: the MoE is "sparsely activated" compared to the dense model, thus
@@ -85,6 +98,7 @@ def run_full_model(
     # model.setup_symm_mem(torch.bfloat16, device)
 
     # Example inputs
+    print(f"**** {rank=}, {ep_rank=}")
     torch.manual_seed(ep_rank)
     bs = 4
     seqlen = 128
@@ -95,7 +109,7 @@ def run_full_model(
     loss_fn = torch.nn.functional.cross_entropy
 
     # Run forward and backward
-    steps = 20
+    steps = 2
     for _ in range(steps):
         if pp_size > 1:
             # Create pipeline stage
