@@ -305,7 +305,6 @@ class Parallelism:
     """
 
     pipeline_parallel_split_points: CommaSeparatedList = field(default_factory=list)
-
     """
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
@@ -339,7 +338,7 @@ class Parallelism:
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
     """
 
-    pipeline_parallel_microbatch_ize: int = 1
+    pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
     This value is used to compute the total number of microbatches by dividing batch_size with
@@ -468,7 +467,6 @@ class Float8:
     """
 
     filter_fqns: CommaSeparatedList = field(default_factory=list)
-
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
