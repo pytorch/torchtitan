@@ -205,6 +205,7 @@ class TestJobConfig(unittest.TestCase):
 
     def test_custom_parser(self):
         path = "tests.assets.argparser_example"
+
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
@@ -230,22 +231,22 @@ class TestJobConfig(unittest.TestCase):
                     "--abcde",
                 ]
             )
-        sys.argv.pop()
 
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "experimental": {
-                            "custom_args_module": path,
-                        }
-                    },
-                    f,
-                )
-            sys.argv.append(f"--job.config_file={fp.name}")
+        with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
+            tomli_w.dump(
+                {
+                    "experimental": {
+                        "custom_args_module": path,
+                    }
+                },
+                fp,
+            )
+            fp.flush()
+
             config_manager = ConfigManager()
             config = config_manager.parse_args(
                 [
+                    f"--job.config_file={fp.name}",
                     f"--experimental.custom_args_module={path}",
                     "--custom_args.how-is-your-day",
                     "bad",
@@ -254,6 +255,33 @@ class TestJobConfig(unittest.TestCase):
                 ]
             )
             assert config.custom_args.how_is_your_day == "bad"
+            assert config.model.converters == ["float8", "mxfp"]
+
+        with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
+            tomli_w.dump(
+                {
+                    "experimental": {
+                        "custom_args_module": path,
+                    },
+                    "custom_args": {"how_is_your_day": "really good"},
+                    "model": {
+                        "converters": ["float8", "mxfp"]
+                        # "converters": "float8,mxfp" # does not work
+                    },
+                },
+                fp,
+            )
+            fp.flush()
+
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(
+                [
+                    f"--job.config_file={fp.name}",
+                    f"--experimental.custom_args_module={path}",
+                ]
+            )
+
+            assert config.custom_args.how_is_your_day == "really good"
             assert config.model.converters == ["float8", "mxfp"]
             sys.argv.pop()
 

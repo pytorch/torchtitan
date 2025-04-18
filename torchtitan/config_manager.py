@@ -453,7 +453,7 @@ class Float8:
     `tensorwise`, `rowwise` and `rowwise_with_gw_hp`.
     """
 
-    filter_fqns: list[str] = field(default_factory=list)
+    filter_fqns: list[str] | str = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
@@ -533,24 +533,7 @@ class Experimental:
 @dataclass
 class JobConfig:
     """
-    A helper class to manage the train configuration.
-    Semantics:
-    - Default config is loaded from a toml file. If no toml file is provided,
-    then the default config is loaded from JobConfig defaults.
-    - if toml file has missing keys, they are filled with defaults.
-    - if additional explicit cmd args are provided in addition to the toml
-    file, they will override the toml config and the defaults
-
-    precedence order: cmdline > toml > JobConfig default
-
-    Arg parsing semantics:
-
-    Each argument starts with <prefix>_ which is the section name in the toml file
-    followed by name of the option in the toml file. For ex,
-    model.name translates to:
-        [model]
-        name
-    in the toml file
+    Structured container for training configuration.
     """
 
     job: Job = field(default_factory=Job)
@@ -577,7 +560,17 @@ class JobConfig:
 
 class ConfigManager:
     """
-    Handles loading, merging, and validation of a `JobConfig` from TOML or CLI arguments.
+    Parses, merges, and validates a JobConfig from TOML and CLI sources.
+
+    Configuration precedence:
+        CLI args > TOML file > JobConfig defaults
+
+    CLI arguments use the format <section>.<key> to map to TOML entries.
+    Example:
+        model.name →
+
+        [model]
+        name
     """
 
     def __init__(self, config_cls: Type[JobConfig] = JobConfig):
@@ -604,6 +597,28 @@ class ConfigManager:
         return self.config
 
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
+        valid_keys = {"--job.config-file", "--job.config_file"}
+
+        for i, arg in enumerate(args):
+            if "=" in arg:
+                key, value = arg.split("=", 1)
+                if key in valid_keys:
+                    file_path = value
+                    break
+            elif i < len(args) - 1 and arg in valid_keys:
+                file_path = args[i + 1]
+                break
+        else:
+            return None  # No matching config argument found
+
+        try:
+            with open(file_path, "rb") as f:
+                return tomllib.load(f)
+        except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
+            logger.exception(f"Error while loading config file: {file_path}")
+            raise e
+
+    def _maybe_load_toml2(self, args: list[str]) -> dict[str, Any] | None:
         valid_keys = {"--job.config-file", "--job.config_file"}
         for i, arg in enumerate(args[:-1]):
             if arg in valid_keys:
