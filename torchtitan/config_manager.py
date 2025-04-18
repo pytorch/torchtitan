@@ -339,8 +339,8 @@ class Parallelism:
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """
     The collective to use in context parallel SDPA for kv shards exchange.
-    'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
-    'alltoall' means to all-to-all shuffle the kv shards.
+    - 'allgather' means to all-gather all kv shards on ranks after the first sub-SDPA computation,
+    - 'alltoall' means to all-to-all shuffle the kv shards.
     The default value is 'allgather'.
     """
 
@@ -371,8 +371,6 @@ class Checkpoint:
     export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     """
     Converts to the specified precision when training completes and model_weights_only=true.
-    Currently supports float32, float16, and bfloat16.
-    The default value is float32.
     """
 
     create_seed_checkpoint: bool = False
@@ -385,17 +383,15 @@ class Checkpoint:
     async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
     """
     Which async checkpoint mode to use. Currently there are 3 different modes.
-    1. "disabled": synchronized checkpointing will be used.
-    2. "async": torch.distributed.checkpoint.async_save will be used.
-    3. "async_with_pinned_mem": this option utilizes a dedicated pinned memory
-       space and creates a separate process for faster GPU->CPU transfer
-       performance and eliminating GIL contention. The cost is increased CPU
-       memory usage. If insufficient CPU memory is available, performance may
-       degrade due to memory paging. For most users, "async" should suffice as
-       the performance overhead is typically small (on the order of tens of
-       seconds) compared to checkpointing frequency. This mode can be employed
-       to pursue near-zero checkpointing times (e.g., < 1 second) given
-       appropriate hardware support such as ample CPU memory and fast PCIe.
+    - "disabled": synchronized checkpointing will be used.
+    - "async": torch.distributed.checkpoint.async_save will be used.
+    - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
+      separate process for faster GPU->CPU transfer performance and eliminating GIL contention.
+      The cost is increased CPU memory usage. If insufficient CPU memory is available, performance
+      may degrade due to memory paging. For most users, "async" should suffice as the performance
+      overhead is typically small (on the order of tens of seconds) compared to checkpointing
+      frequency. This mode can be employed to pursue near-zero checkpointing times
+      (e.g., < 1 second) given appropriate hardware support such as ample CPU memory and fast PCIe.
 
     "disabled" is the default mode.
     """
@@ -421,8 +417,8 @@ class Checkpoint:
 
 @dataclass
 class ActivationCheckpoint:
-    mode: str = "selective"
-    """Type of activation checkpointing to use ['none', 'full', 'selective']"""
+    mode: Literal["selective", "full", "none"] = "selective"
+    """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
     """
@@ -448,10 +444,7 @@ class Float8:
     """
 
     recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
-    """
-    If specified, creates float8 config from recipe name, valid choices are
-    `tensorwise`, `rowwise` and `rowwise_with_gw_hp`.
-    """
+    """If specified, creates float8 config from recipe name"""
 
     filter_fqns: list[str] | str = field(default_factory=list)
     """
@@ -533,7 +526,7 @@ class Experimental:
 @dataclass
 class JobConfig:
     """
-    Structured container for training configuration.
+    Default container for training configuration.
     """
 
     job: Job = field(default_factory=Job)
@@ -579,8 +572,8 @@ class ConfigManager:
         self.register_tyro_rules(custom_registry)
 
     def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
-        config_cls = self._maybe_add_custom_args(args)
         toml_values = self._maybe_load_toml(args)
+        config_cls = self._maybe_add_custom_args(args, toml_values)
 
         base_config = (
             self._dict_to_dataclass(config_cls, toml_values)
@@ -597,8 +590,9 @@ class ConfigManager:
         return self.config
 
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
-        valid_keys = {"--job.config-file", "--job.config_file"}
 
+        # 1. Check CLI
+        valid_keys = {"--job.config-file", "--job.config_file"}
         for i, arg in enumerate(args):
             if "=" in arg:
                 key, value = arg.split("=", 1)
@@ -609,7 +603,7 @@ class ConfigManager:
                 file_path = args[i + 1]
                 break
         else:
-            return None  # No matching config argument found
+            return None
 
         try:
             with open(file_path, "rb") as f:
@@ -618,9 +612,13 @@ class ConfigManager:
             logger.exception(f"Error while loading config file: {file_path}")
             raise e
 
-    def _maybe_add_custom_args(self, args: list[str]) -> Type[JobConfig]:  # noqa: B006
+    def _maybe_add_custom_args(
+        self, args: list[str], toml_values: dict[str, Any] | None
+    ) -> Type[JobConfig]:  # noqa: B006
         """Find and merge custom arguments module with current JobConfig class"""
         module_path = None
+
+        # 1. Check CLI
         valid_keys = {
             "--experimental.custom_args_module",
             "--experimental.custom-args-module",
@@ -631,14 +629,20 @@ class ConfigManager:
                 module_path = arg.split("=", 1)[1] if "=" in arg else args[i + 1]
                 break
 
+        # 2. If not found in CLI, check TOML
+        if not module_path and toml_values:
+            experimental = toml_values.get("experimental", {})
+            if isinstance(experimental, dict):
+                module_path = experimental.get("custom_args_module")
+
         if not module_path:
             return self.config_cls
 
         JobConfigExtended = importlib.import_module(module_path).JobConfig
-
         return self._merge_configs(self.config_cls, JobConfigExtended)
 
-    def _merge_configs(self, base, custom) -> Type:
+    @staticmethod
+    def _merge_configs(base, custom) -> Type:
         """
         Merges a base JobConfig class with user-defined extensions.
 
@@ -661,7 +665,7 @@ class ConfigManager:
                 and is_dataclass(f.type)
                 and is_dataclass(c_map[name].type)
             ):
-                m_type = self._merge_configs(f.type, c_map[name].type)
+                m_type = ConfigManager._merge_configs(f.type, c_map[name].type)
                 result.append((name, m_type, field(default_factory=m_type)))
 
             # Custom field overrides base type

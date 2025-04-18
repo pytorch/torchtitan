@@ -4,9 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import sys
-
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
@@ -27,11 +25,10 @@ class TestFluxDataLoader:
         num_steps = 10
 
         path = "torchtitan.experiments.flux.flux_argparser"
-        sys.argv.append(f"--experimental.custom_args_module={path}")
-        config = JobConfig()
-        config.maybe_add_custom_args()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
+                f"--experimental.custom_args_module={path}",
                 # Profiling options
                 # "--profiling.enable_profiling",
                 # "--profiling.profile_freq",

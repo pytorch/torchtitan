@@ -26,7 +26,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.components.metrics import build_device_memory_monitor
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
@@ -85,9 +85,8 @@ def test_generate(
     color = utils.Color
 
     # Load configuration from toml file
-    job_config = JobConfig()
-    job_config.parse_args([f"--job.config_file={config_path}"])
-    job_config._validate_config()
+    config_manager = ConfigManager()
+    config = config_manager.parse_args([f"--job.config_file={config_path}"])
 
     if len(args.prompt) == 0:
         logger.warning(
@@ -100,16 +99,16 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    train_spec = get_train_spec(job_config.model.name)
+    train_spec = get_train_spec(config.model.name)
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
-    tokenizer = train_spec.build_tokenizer_fn(job_config)
+    tokenizer = train_spec.build_tokenizer_fn(config)
 
     model_cls = train_spec.cls
-    model_args = train_spec.config[job_config.model.flavor]
-    model_args.update_from_config(job_config, tokenizer)
+    model_args = train_spec.config[config.model.flavor]
+    model_args.update_from_config(config, tokenizer)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
@@ -119,7 +118,7 @@ def test_generate(
     world_mesh = None
     # Init distributed env
     if world_size > 1:
-        dist_utils.init_distributed(job_config)
+        dist_utils.init_distributed(config)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,

@@ -6,10 +6,11 @@
 
 import tempfile
 import unittest
+from dataclasses import dataclass
 
 import pytest
 import tomli_w
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config_manager import ConfigManager, JobConfig
 
 
 class TestJobConfig(unittest.TestCase):
@@ -202,8 +203,32 @@ class TestJobConfig(unittest.TestCase):
         parser = get_parser(ConfigManager)
         parser.print_help()
 
+    def test_extend_jobconfig_directly(self):
+        @dataclass
+        class CustomCheckpoint:
+            convert_path: str = "/custom/path"
+            fake_model: bool = True
+
+        @dataclass
+        class CustomJobConfig:
+            checkpoint: CustomCheckpoint
+
+        MergedJobConfig = ConfigManager._merge_configs(JobConfig, CustomJobConfig)
+
+        cli_args = [
+            "--checkpoint.convert_path=/override/path",
+            "--checkpoint.fake_model",
+        ]
+
+        config_manager = ConfigManager(config_cls=MergedJobConfig)
+        config = config_manager.parse_args(cli_args)
+
+        assert config.checkpoint.convert_path == "/override/path"
+        assert config.checkpoint.fake_model is True
+        assert hasattr(config, "model")
+
     def test_custom_parser(self):
-        path = "tests.assets.argparser_example"
+        path = "tests.assets.extend_jobconfig_example"
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(
@@ -263,10 +288,7 @@ class TestJobConfig(unittest.TestCase):
                         "custom_args_module": path,
                     },
                     "custom_args": {"how_is_your_day": "really good"},
-                    "model": {
-                        "converters": ["float8", "mxfp"]
-                        # "converters": "float8,mxfp" # does not work
-                    },
+                    "model": {"converters": ["float8", "mxfp"]},
                 },
                 fp,
             )
@@ -276,7 +298,6 @@ class TestJobConfig(unittest.TestCase):
             config = config_manager.parse_args(
                 [
                     f"--job.config_file={fp.name}",
-                    f"--experimental.custom_args_module={path}",
                 ]
             )
 

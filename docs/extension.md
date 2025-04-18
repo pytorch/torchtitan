@@ -65,6 +65,13 @@ class JobConfig:
 
 To utilize the custom argument, specify the following arguments when running the training script:
 
+```bash
+--experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args
 ```
---experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args --custom_args.how-is-your-day=wonderful
+
+Alternatively, you can also specify module to extend in the `toml` file
+
+```toml
+[experimental]
+custom_args_module = torchtitan.experiments.your_folder.custom_args
 ```
