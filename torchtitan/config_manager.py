@@ -260,7 +260,7 @@ class Parallelism:
     1 means disabled.
     """
 
-    enable_complied_autograd: bool = False
+    enable_compiled_autograd: bool = False
     """Enable CompiledAutograd to compile the backward."""
 
     data_parallel_shard_degree: int = -1
