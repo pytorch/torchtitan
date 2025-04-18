@@ -254,7 +254,6 @@ def build_flux_dataloader(
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
-    local_files_only = job_config.encoder.use_local_encoder
 
     t5_encoder_name = job_config.encoder.t5_encoder
     clip_encoder_name = job_config.encoder.clip_encoder
@@ -266,12 +265,10 @@ def build_flux_dataloader(
         t5_tokenizer=FluxTokenizer(
             t5_encoder_name,
             max_length=max_t5_encoding_len,
-            local_files_only=local_files_only,
         ),
         clip_tokenizer=FluxTokenizer(
             clip_encoder_name,
             max_length=77,
-            local_files_only=local_files_only,
         ),  # fix max_length for CLIP
         job_config=job_config,
         dp_rank=dp_rank,

@@ -44,12 +44,6 @@ def extend_parser(parser: argparse.ArgumentParser) -> None:
         default=512,
         help="Maximum length of the T5 encoding.",
     )
-    parser.add_argument(
-        "--encoder.use_local_encoder",
-        action="store_true",
-        help="Where to use local file path to load T5 and CLIP encoder. \
-        If True, T5 and CLIP encoder path needs to be specified as local file path.",
-    )
     # eval configs
     parser.add_argument(
         "--eval.enable_classifer_free_guidance",

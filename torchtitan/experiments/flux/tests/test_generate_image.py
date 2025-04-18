@@ -81,21 +81,17 @@ class TestGenerateImage:
         )
         t5_encoder = FluxEmbedder(
             version=config.encoder.t5_encoder,
-            local_files_only=config.encoder.use_local_encoder,
         ).to(torch_device, dtype=torch.bfloat16)
         t5_tokenizer = FluxTokenizer(
             model_path=config.encoder.t5_encoder,
             max_length=config.encoder.max_t5_encoding_len,
-            local_files_only=config.encoder.use_local_encoder,
         )
         clip_encoder = FluxEmbedder(
             version=config.encoder.clip_encoder,
-            local_files_only=config.encoder.use_local_encoder,
         ).to(torch_device, dtype=torch.bfloat16)
         clip_tokenizer = FluxTokenizer(
             model_path=config.encoder.clip_encoder,
             max_length=77,
-            local_files_only=config.encoder.use_local_encoder,
         )
 
         if torch.cuda.is_available():
@@ -103,7 +99,7 @@ class TestGenerateImage:
         t1 = time.perf_counter()
 
         model = self._get_test_model(
-            context_in_dim=768, device=torch_device, dtype=torch.bfloat16
+            context_in_dim=4096, device=torch_device, dtype=torch.bfloat16
         )
         model.eval()
 

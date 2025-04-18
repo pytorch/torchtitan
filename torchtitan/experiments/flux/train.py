@@ -59,11 +59,9 @@ class FluxTrainer(Trainer):
 
         self.clip_encoder = FluxEmbedder(
             version=job_config.encoder.clip_encoder,
-            local_files_only=job_config.encoder.use_local_encoder,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
             version=job_config.encoder.t5_encoder,
-            local_files_only=job_config.encoder.use_local_encoder,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
