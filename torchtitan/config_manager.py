@@ -574,30 +574,36 @@ class JobConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def update_instance(self, instance) -> None:
-        instance_fields = {f.name for f in fields(instance)}
-        for field_name in instance_fields:
-            value = getattr(instance, field_name)
-            setattr(self, field_name, value)
 
-    def parse_args(self, args=sys.argv[1:]) -> None:
-        config_cls = self.maybe_add_custom_args(args)
-        toml_values = self.maybe_load_toml(args)
+class ConfigManager:
+    """
+    Handles loading, merging, and validation of a `JobConfig` from TOML or CLI arguments.
+    """
+
+    def __init__(self, config_cls: Type[JobConfig] = JobConfig):
+        self.config_cls = config_cls
+        self.config: JobConfig = config_cls()
+        self.register_tyro_rules(custom_registry)
+
+    def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
+        config_cls = self._maybe_add_custom_args(args)
+        toml_values = self._maybe_load_toml(args)
+
         base_config = (
-            self.dict_to_dataclass(config_cls, toml_values)
+            self._dict_to_dataclass(config_cls, toml_values)
             if toml_values
             else config_cls()
         )
-        self.register_tyro_rules(custom_registry)
-        parsed_config = tyro.cli(
+
+        self.config = tyro.cli(
             config_cls, args=args, default=base_config, registry=custom_registry
         )
 
-        #  Apply configuration
-        self.update_instance(parsed_config)
         self._validate_config()
 
-    def maybe_load_toml(self, args):
+        return self.config
+
+    def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
         valid_keys = {"--job.config-file", "--job.config_file"}
         for i, arg in enumerate(args[:-1]):
             if arg in valid_keys:
@@ -610,7 +616,7 @@ class JobConfig:
                     raise e
         return None
 
-    def maybe_add_custom_args(self, args=[]) -> Type:  # noqa: B006
+    def _maybe_add_custom_args(self, args: list[str]) -> Type[JobConfig]:  # noqa: B006
         """Find and merge custom arguments module with current JobConfig class"""
         module_path = None
         valid_keys = {
@@ -624,13 +630,13 @@ class JobConfig:
                 break
 
         if not module_path:
-            return self.__class__
+            return self.config_cls
 
         JobConfigExtended = importlib.import_module(module_path).JobConfig
 
-        return self.merge_dataclasses(self.__class__, JobConfigExtended)
+        return self._merge_dataclasses(self.config_cls, JobConfigExtended)
 
-    def merge_dataclasses(self, base, custom) -> Type:
+    def _merge_dataclasses(self, base, custom) -> Type:
         """Merge two dataclass types, preserving nested structures."""
         result = []
         b_map = {f.name: f for f in fields(base)}
@@ -643,7 +649,7 @@ class JobConfig:
                 and is_dataclass(c_map[name].type)
             ):
                 # Recursively merge nested dataclasses
-                m_type = self.merge_dataclasses(f.type, c_map[name].type)
+                m_type = self._merge_dataclasses(f.type, c_map[name].type)
                 result.append((name, m_type, field(default_factory=m_type)))
             else:
                 result.append((name, f.type, f))
@@ -654,20 +660,17 @@ class JobConfig:
 
         return make_dataclass(f"Merged{base.__name__}", result, bases=(object,))
 
-    def dict_to_dataclass(self, cls, data) -> Any:
+    def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
         """Convert dictionary to dataclass, handling nested structures."""
         if not is_dataclass(cls):
             return data
-
-        if not isinstance(data, dict):
-            raise ValueError(f"Expected a dictionary, got {type(data)} instead.")
 
         result = {}
         for f in fields(cls):
             if f.name in data:
                 value = data[f.name]
                 if is_dataclass(f.type) and isinstance(value, dict):
-                    result[f.name] = self.dict_to_dataclass(f.type, value)
+                    result[f.name] = self._dict_to_dataclass(f.type, value)
                 else:
                     result[f.name] = value
         return cls(**result)
@@ -675,15 +678,15 @@ class JobConfig:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in
         #       tokenizer default path, need to remove later
-        if not os.path.exists(self.model.tokenizer_path):
+        if not os.path.exists(self.config.model.tokenizer_path):
             logger.warning(
-                f"Tokenizer path {self.model.tokenizer_path} does not exist!"
+                f"Tokenizer path {self.config.model.tokenizer_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
-                self.model.tokenizer_path = old_tokenizer_path
+                self.config.model.tokenizer_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
                     "Please update your config."
@@ -700,7 +703,6 @@ class JobConfig:
                 nargs=1,
                 metavar="A,B,C,...",
                 instance_from_str=lambda args: args[0].split(","),
-                is_instance=lambda instance: isinstance(instance, list)
-                and all(isinstance(i, str) for i in instance),
+                is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
             )

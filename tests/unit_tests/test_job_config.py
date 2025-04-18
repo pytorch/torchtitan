@@ -10,18 +10,18 @@ import unittest
 
 import pytest
 import tomli_w
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 
 
 class TestJobConfig(unittest.TestCase):
     def test_command_line_args(self):
-        config = JobConfig()
-        config.parse_args([])
+        config_manager = ConfigManager()
+        config = config_manager.parse_args([])
         assert config.training.steps == 10000
 
     def test_job_config_file(self):
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -31,18 +31,18 @@ class TestJobConfig(unittest.TestCase):
 
     def test_job_file_does_not_exist(self):
         with pytest.raises(FileNotFoundError):
-            config = JobConfig()
-            config.parse_args(["--job.config_file", "ohno.toml"])
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(["--job.config_file", "ohno.toml"])
 
     def test_empty_config_file(self):
         with tempfile.NamedTemporaryFile() as fp:
-            config = JobConfig()
-            config.parse_args(["--job.config_file", fp.name])
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(["--job.config_file", fp.name])
             assert config.job.description
 
     def test_job_config_file_cmd_overrides(self):
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -56,8 +56,8 @@ class TestJobConfig(unittest.TestCase):
         toml_splits = ["layers.2", "layers.4", "layers.6"]
         cmdline_splits = ["layers.1", "layers.3", "layers.5"]
         # no split points specified
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -66,8 +66,8 @@ class TestJobConfig(unittest.TestCase):
         assert config.parallelism.pipeline_parallel_split_points == []
 
         # toml has no split points, but cmdline splits are specified
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -90,8 +90,8 @@ class TestJobConfig(unittest.TestCase):
                     },
                     f,
                 )
-            config = JobConfig()
-            config.parse_args(["--job.config_file", fp.name])
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
                 config.parallelism.pipeline_parallel_split_points == toml_splits
             ), config.parallelism.pipeline_parallel_split_points
@@ -107,8 +107,8 @@ class TestJobConfig(unittest.TestCase):
                     },
                     f,
                 )
-            config = JobConfig()
-            config.parse_args(
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(
                 [
                     "--job.config_file",
                     fp.name,
@@ -124,8 +124,8 @@ class TestJobConfig(unittest.TestCase):
         toml_splits = ["optimizer", "dataloader"]
         cmdline_splits = ["optimizer", "lr_scheduler"]
         # no split points specified
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -134,8 +134,8 @@ class TestJobConfig(unittest.TestCase):
         assert config.checkpoint.exclude_from_loading == []
 
         # toml has no split points, but cmdline splits are specified
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--job.config_file",
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
@@ -158,8 +158,8 @@ class TestJobConfig(unittest.TestCase):
                     },
                     f,
                 )
-            config = JobConfig()
-            config.parse_args(["--job.config_file", fp.name])
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
                 config.checkpoint.exclude_from_loading == toml_splits
             ), config.checkpoint.exclude_from_loading
@@ -175,8 +175,8 @@ class TestJobConfig(unittest.TestCase):
                     },
                     f,
                 )
-            config = JobConfig()
-            config.parse_args(
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(
                 [
                     "--job.config_file",
                     fp.name,
@@ -189,24 +189,24 @@ class TestJobConfig(unittest.TestCase):
             ), config.checkpoint.exclude_from_loading
 
     def test_job_config_model_converters_split(self):
-        config = JobConfig()
-        config.parse_args([])
+        config_manager = ConfigManager()
+        config = config_manager.parse_args([])
         assert config.model.converters == []
 
-        config = JobConfig()
-        config.parse_args(["--model.converters", "float8,mxfp"])
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(["--model.converters", "float8,mxfp"])
         assert config.model.converters == ["float8", "mxfp"]
 
     def test_print_help(self):
         from tyro.extras import get_parser
 
-        parser = get_parser(JobConfig)
+        parser = get_parser(ConfigManager)
         parser.print_help()
 
     def test_custom_parser(self):
         path = "tests.assets.argparser_example"
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 f"--experimental.custom_args_module={path}",
                 "--custom_args.how-is-your-day",
@@ -220,7 +220,7 @@ class TestJobConfig(unittest.TestCase):
 
         # There will be a SystemExit raised by ArgumentParser with exist status 2.
         with self.assertRaisesRegex(SystemExit, "2"):
-            config.parse_args(
+            config = config_manager.parse_args(
                 [
                     f"--experimental.custom_args_module={path}",
                     "--custom_args.how-is-your-day",
@@ -243,8 +243,8 @@ class TestJobConfig(unittest.TestCase):
                     f,
                 )
             sys.argv.append(f"--job.config_file={fp.name}")
-            config = JobConfig()
-            config.parse_args(
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(
                 [
                     f"--experimental.custom_args_module={path}",
                     "--custom_args.how-is-your-day",
