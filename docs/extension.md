@@ -51,6 +51,7 @@ Suppose you want to add a custom section `custom_args` with some fields. You can
 your own `JobConfig` in a Python module (e.g., `torchtitan/experiments/your_folder/custom_args.py`):
 
 ```python
+# torchtitan.experiments.your_folder.custom_args.py
 from dataclasses import dataclass, field
 
 @dataclass
@@ -73,5 +74,5 @@ Alternatively, you can also specify module to extend in the `toml` file
 
 ```toml
 [experimental]
-custom_args_module = torchtitan.experiments.your_folder.custom_args
+custom_args_module = "torchtitan.experiments.your_folder.custom_args"
 ```
