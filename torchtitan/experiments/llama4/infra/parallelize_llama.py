@@ -21,6 +21,8 @@ from torchtitan.models.llama3.parallelize_llama import (
 )
 from torchtitan.tools.logging import logger
 
+from ..model.moe import MoE
+
 
 def parallelize_llama(
     model: nn.Module,
@@ -74,6 +76,7 @@ def parallelize_llama(
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
 
+    dp_mesh: DeviceMesh | None = None
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
     ):  # apply FSDP or HSDP, potentially with Context Parallel
@@ -81,10 +84,11 @@ def parallelize_llama(
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
+        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -105,12 +109,35 @@ def parallelize_llama(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
+        dp_mesh = world_mesh
         apply_ddp(
             model,
-            world_mesh,
+            dp_mesh,
             enable_compile=job_config.training.compile,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
+
+    # for MoE auxiliary-loss-free load balancing
+    if dp_mesh is not None:
+        # NOTE: Currently this sync is blocking (thus exposed) and happens on the
+        # default compute stream. Need to assess if this is OK performance-wise.
+        def _sync_tokens_per_expert(module, *_):
+            assert isinstance(module, MoE)
+            torch.distributed.all_reduce(
+                module.tokens_per_expert, group=dp_mesh.get_group()
+            )
+
+        for transformer_block in model.layers.values():
+            if transformer_block.moe_enabled:
+                load_balance_coeff = transformer_block.moe.load_balance_coeff
+                if load_balance_coeff is not None and load_balance_coeff > 0:
+                    # prepend=True so that the sync runs before
+                    # the _update_expert_bias hook in MoE
+                    transformer_block.moe.register_full_backward_hook(
+                        _sync_tokens_per_expert, prepend=True
+                    )
+                else:
+                    break
 
     return model
 
@@ -127,7 +154,7 @@ def apply_moe_tp(
 
     from .expert_parallel import NoParallel, TensorParallel
 
-    for _, transformer_block in model.layers.items():
+    for transformer_block in model.layers.values():
         moe_layer_plan = {
             # input / output sharding on the seqlen dim
             # all-gather for input, reduce-scatter for output

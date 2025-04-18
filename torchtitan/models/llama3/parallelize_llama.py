@@ -175,7 +175,7 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for layer_id, transformer_block in model.layers.items():
+    for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
