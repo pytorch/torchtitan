@@ -11,21 +11,13 @@ from dataclasses import dataclass, field
 @dataclass
 class CustomArgs:
     how_is_your_day: str = "good"  # Just an example.
-
-
-@dataclass
-class CustomArgsTwo:
-    how_is_your_week: str = "great"
-    """Just another example."""
-
     num_days: int = 7
-    """Number of days in a week."""
+    """Number of days in a week"""
 
 
 @dataclass
 class Training:
-    steps: int = 4
-    num_steps: int = 1
+    my_custom_steps: int = 32
 
 
 @dataclass
@@ -35,7 +27,6 @@ class JobConfig:
     """
 
     custom_args: CustomArgs = field(default_factory=CustomArgs)
-    custom_args_two: CustomArgsTwo = field(default_factory=CustomArgsTwo)
     training: Training = field(default_factory=Training)
 
 
