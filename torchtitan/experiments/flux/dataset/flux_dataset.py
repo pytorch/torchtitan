@@ -111,8 +111,8 @@ class TextToImageDatasetConfig:
 
 DATASETS = {
     "cc12m-wds": TextToImageDatasetConfig(
-        path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        path="/home/jianiw/tmp/mffuse/cc12m-wds/",
+        loader=lambda path: load_dataset(path, split="train"),
         data_processor=_cc12m_wds_data_processor,
     ),
 }
