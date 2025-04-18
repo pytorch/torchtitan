@@ -51,17 +51,18 @@ class FluxTrainer(Trainer):
         model_config = self.train_spec.config[job_config.model.flavor]
 
         self.autoencoder = load_ae(
-            job_config.encoder.auto_encoder_path,
+            job_config.encoder.autoencoder_path,
             model_config.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
         )
-        self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
-            device=self.device, dtype=self._dtype
-        )
-        self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
-            device=self.device, dtype=self._dtype
-        )
+
+        self.clip_encoder = FluxEmbedder(
+            version=job_config.encoder.clip_encoder,
+        ).to(device=self.device, dtype=self._dtype)
+        self.t5_encoder = FluxEmbedder(
+            version=job_config.encoder.t5_encoder,
+        ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
@@ -159,9 +160,10 @@ class FluxTrainer(Trainer):
             or parallel_dims.cp_enabled
         ):
             loss = loss.detach()
+            ft_pg = self.ft_manager.replicate_pg if self.ft_manager.enabled else None
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, world_mesh["dp_cp"]),
-                dist_utils.dist_max(loss, world_mesh["dp_cp"]),
+                dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
             )
         else:
             global_avg_loss = global_max_loss = loss.item()

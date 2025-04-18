@@ -262,9 +262,13 @@ def build_flux_dataloader(
     ds = FluxDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
-        t5_tokenizer=FluxTokenizer(t5_encoder_name, max_length=max_t5_encoding_len),
+        t5_tokenizer=FluxTokenizer(
+            t5_encoder_name,
+            max_length=max_t5_encoding_len,
+        ),
         clip_tokenizer=FluxTokenizer(
-            clip_encoder_name, max_length=77
+            clip_encoder_name,
+            max_length=77,
         ),  # fix max_length for CLIP
         job_config=job_config,
         dp_rank=dp_rank,
