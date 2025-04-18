@@ -42,6 +42,7 @@ CommaSeparatedList = Annotated[
     ),
 ]
 
+
 @dataclass
 class Job:
     config_file: Optional[str] = None
@@ -546,6 +547,7 @@ class Experimental:
     given parser to add new argument by calling``parser.add_argument``, as wish.
     """
 
+
 @dataclass
 class JobConfig:
     """
@@ -600,8 +602,12 @@ class JobConfig:
         if args is None:
             args = sys.argv[1:]
         config_cls = self.maybe_add_custom_args(args)
-        toml_values  = self.maybe_load_toml(args)
-        base_config = self.dict_to_dataclass(config_cls, toml_values) if toml_values else config_cls()
+        toml_values = self.maybe_load_toml(args)
+        base_config = (
+            self.dict_to_dataclass(config_cls, toml_values)
+            if toml_values
+            else config_cls()
+        )
         parsed_config = tyro.cli(config_cls, args=args, default=base_config)
 
         #  Apply configuration
@@ -624,15 +630,15 @@ class JobConfig:
     def maybe_add_custom_args(self, args=None) -> Type:
         """Find and merge custom arguments module with current JobConfig class"""
         args = args or []
-        module_path = None 
+        module_path = None
         for i, arg in enumerate(args):
             if arg.startswith("--experimental.custom"):
-                module_path = arg.split("=", 1)[1] if "=" in arg else args[i+1]
+                module_path = arg.split("=", 1)[1] if "=" in arg else args[i + 1]
                 break
 
         if not module_path:
             return self.__class__
-        
+
         # Import and get custom config class
         custom_cls = getattr(importlib.import_module(module_path), "ExtendedConfig")
 
@@ -645,7 +651,11 @@ class JobConfig:
         c_map = {f.name: f for f in fields(custom)}
 
         for name, f in b_map.items():
-            if name in c_map and is_dataclass(f.type) and is_dataclass(c_map[name].type):
+            if (
+                name in c_map
+                and is_dataclass(f.type)
+                and is_dataclass(c_map[name].type)
+            ):
                 # Recursively merge nested dataclasses
                 m_type = self.merge_dataclasses(f.type, c_map[name].type)
                 result.append((name, m_type, field(default_factory=m_type)))

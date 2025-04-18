@@ -14,7 +14,7 @@ import tyro
 
 @dataclass
 class CustomArgs:
-    how_is_your_day: str = "good" # Just an example.
+    how_is_your_day: str = "good"  # Just an example.
 
 
 @dataclass
