@@ -638,7 +638,7 @@ class JobConfig:
             return self.__class__
 
         # Import and get custom config class
-        custom_cls = getattr(importlib.import_module(module_path), "ExtendedConfig")
+        custom_cls = importlib.import_module(module_path).ExtendedConfig
 
         return self.merge_dataclasses(self.__class__, custom_cls)
 
