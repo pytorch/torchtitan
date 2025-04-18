@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
 from dataclasses import dataclass, field
 
 
 @dataclass
 class CustomArgs:
-    how_is_your_day: str = "good"  # Just an example.
+    how_is_your_day: str = "good"
+    """Just an example helptext"""
+
     num_days: int = 7
     """Number of days in a week"""
 
@@ -29,13 +30,3 @@ class JobConfig:
 
     custom_args: CustomArgs = field(default_factory=CustomArgs)
     training: Training = field(default_factory=Training)
-
-
-def extend_parser(parser: argparse.ArgumentParser) -> None:
-    # TODO: Remove
-    parser.add_argument(
-        "--custom_args.how-is-your-day",
-        type=str,
-        default="good",
-        help="Just an example.",
-    )

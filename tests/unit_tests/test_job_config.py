@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import sys
 import tempfile
 import unittest
 
@@ -283,7 +282,6 @@ class TestJobConfig(unittest.TestCase):
 
             assert config.custom_args.how_is_your_day == "really good"
             assert config.model.converters == ["float8", "mxfp"]
-            sys.argv.pop()
 
 
 if __name__ == "__main__":

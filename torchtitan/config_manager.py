@@ -618,19 +618,6 @@ class ConfigManager:
             logger.exception(f"Error while loading config file: {file_path}")
             raise e
 
-    def _maybe_load_toml2(self, args: list[str]) -> dict[str, Any] | None:
-        valid_keys = {"--job.config-file", "--job.config_file"}
-        for i, arg in enumerate(args[:-1]):
-            if arg in valid_keys:
-                file_path = args[i + 1]
-                try:
-                    with open(file_path, "rb") as f:
-                        return tomllib.load(f)
-                except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
-                    logger.exception(f"Error while loading config file: {file_path}")
-                    raise e
-        return None
-
     def _maybe_add_custom_args(self, args: list[str]) -> Type[JobConfig]:  # noqa: B006
         """Find and merge custom arguments module with current JobConfig class"""
         module_path = None
@@ -649,10 +636,21 @@ class ConfigManager:
 
         JobConfigExtended = importlib.import_module(module_path).JobConfig
 
-        return self._merge_dataclasses(self.config_cls, JobConfigExtended)
+        return self._merge_configs(self.config_cls, JobConfigExtended)
 
-    def _merge_dataclasses(self, base, custom) -> Type:
-        """Merge two dataclass types, preserving nested structures."""
+    def _merge_configs(self, base, custom) -> Type:
+        """
+        Merges a base JobConfig class with user-defined extensions.
+
+        This method creates a new dataclass type that combines fields from both `base` and `custom`,
+        allowing users to extend or override JobConfig configuration structure.
+
+        Merge behavior:
+        - If a field exists in both `base` and `custom`:
+            - If both field types are dataclasses, they are merged recursively.
+            - Otherwise, the field from `custom` overrides the one in `base` (type, default, etc.).
+        - Fields only present in `base` or `custom` are preserved as-is.
+        """
         result = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}
@@ -663,12 +661,18 @@ class ConfigManager:
                 and is_dataclass(f.type)
                 and is_dataclass(c_map[name].type)
             ):
-                # Recursively merge nested dataclasses
-                m_type = self._merge_dataclasses(f.type, c_map[name].type)
+                m_type = self._merge_configs(f.type, c_map[name].type)
                 result.append((name, m_type, field(default_factory=m_type)))
+
+            # Custom field overrides base type
+            elif name in c_map:
+                result.append((name, c_map[name].type, c_map[name]))
+
+            # Only in Base
             else:
                 result.append((name, f.type, f))
 
+        # Only in Custom
         for name, f in c_map.items():
             if name not in b_map:
                 result.append((name, f.type, field(default_factory=f.type)))
