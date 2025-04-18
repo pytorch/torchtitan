@@ -871,6 +871,33 @@ class MoE(nn.Module):
 
             print(f"x_fp8: {x_fp8[0].shape}, {x_fp8[1].shape},")
 
+            # ---- assemble groups for m -------
+            assembled_tensors = []
+            offsets = 0
+            m_indices = torch.zeros((m_offsets[-1], 1), dtype=torch.int32)
+            print(f"{m_indices.shape=}, {m_offsets[-1]=}")
+
+            for i in range(num_groups):
+                if m_sizes[i] > 0:
+                    assembled_tensors.append(
+                        contig_tokens[offsets : offsets + m_sizes[i]]
+                    )
+                    # indexing
+                    m_indices[offsets : offsets + m_sizes[i]] = i
+                    # advance
+                    offsets += m_sizes[i]
+                """else:
+                    assembled_tensors.append(
+                        torch.zeros(
+                            (m_sizes[i], k1), device="cuda", dtype=torch.bfloat16
+                        )
+                    )
+                """
+            # ---- assemble groups for m -------
+            print(f"{assembled_tensors[0].shape=}")
+            print(f"{assembled_tensors[1].shape=}")
+            print(f"{assembled_tensors[2].shape=}")
+            print(f"{m_indices[4*128]=}, {m_indices[5*128]=}, {m_indices[6*128]=}")
             """x_fp8 = (
                 torch.empty_like(x, dtype=torch.float8_e4m3fn),
                 torch.empty(
@@ -906,10 +933,6 @@ class MoE(nn.Module):
             print(f"********** Successfully casted to FP8 **********")
             print(f"{x_fp8.shape=}, {x_fp8_sc.shape=}")
             print(f"{x_fp8[0]=}, {x_fp8_sc[0]=}")
-
-            print(f"y_fp8: {y_fp8[0].shape}, {y_fp8[1].shape}")
-            print(f"{valid_tokens.shape=}, {valid_tokens[0].shape=}")
-            print(f"{valid_tokens[0][0]=}")
 
             for i in range(num_groups):
                 # x_fp8[0][i], x_fp8[1][i] = dsgemm_utils.per_token_cast_to_fp8(
