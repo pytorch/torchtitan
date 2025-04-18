@@ -14,8 +14,9 @@ import torch
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-from torch.distributed.elastic.multiprocessing.errors import record
 
+from torch.distributed.elastic.multiprocessing.errors import record
+from torchft.local_sgd import DiLoCo, LocalSGD
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -23,7 +24,6 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.fault_tolerance.train import FtTrainer
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -33,7 +33,7 @@ from torchtitan.tools.profiling import (
 )
 
 
-class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+class FtTrainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
     gc_handler: utils.GarbageCollection
 
@@ -80,6 +80,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         ft_manager = ft.init_ft_manager(job_config)
+        self.ft_manager = ft_manager
 
         # init distributed
         world_size = int(os.environ["WORLD_SIZE"])
@@ -410,30 +411,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config, global_step=self.step
         ) as memory_profiler:
             data_iterator = iter(self.dataloader)
-            while self.step < job_config.training.steps:
-                self.step += 1
-                self.gc_handler.run(self.step)
-                inputs, labels = self.next_batch(data_iterator)
-                self.train_step(inputs, labels)
-                self.checkpointer.save(
-                    self.step, force=(self.step == job_config.training.steps)
-                )
 
-                # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+            params = [group["params"] for group in self.optimizers.param_groups]
+            params = [param for sublist in params for param in sublist]
+            outer_optimizer = torch.optim.SGD(
+                params, lr=0.7, momentum=0.9, nesterov=True
+            )
+            # with LocalSGD(manager=self.ft_manager._manager, model=self.model_parts[0], optimizer=self.optimizers, sync_every=5):
+            with DiLoCo(
+                manager=self.ft_manager._manager,
+                model=self.model_parts[0],
+                inner_optimizer=self.optimizers,
+                outer_optimizer=outer_optimizer,
+                sync_every=5,
+                backup_device=self.device,
+            ):
 
-                # reduce timeout after first train step for faster signal
-                # (assuming lazy init and compilation are finished)
-                if self.step == 1:
-                    dist_utils.set_pg_timeouts(
-                        timeout=timedelta(
-                            seconds=job_config.comm.train_timeout_seconds
-                        ),
-                        world_mesh=self.world_mesh,
+                while self.step < job_config.training.steps:
+                    self.step += 1
+                    self.gc_handler.run(self.step)
+                    inputs, labels = self.next_batch(data_iterator)
+                    self.train_step(inputs, labels)
+                    self.checkpointer.save(
+                        self.step, force=(self.step == job_config.training.steps)
                     )
+
+                    # signal the profiler that the next profiling step has started
+                    if torch_profiler:
+                        torch_profiler.step()
+                    if memory_profiler:
+                        memory_profiler.step()
+
+                    # reduce timeout after first train step for faster signal
+                    # (assuming lazy init and compilation are finished)
+                    if self.step == 1:
+                        dist_utils.set_pg_timeouts(
+                            timeout=timedelta(
+                                seconds=job_config.comm.train_timeout_seconds
+                            ),
+                            world_mesh=self.world_mesh,
+                        )
 
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
@@ -461,8 +478,7 @@ if __name__ == "__main__":
     trainer: Optional[Trainer] = None
 
     try:
-        # import fbvscode
-        # fbvscode.set_trace()
+        from torchtitan.experiments.fault_tolerance.train import FtTrainer
 
         trainer = FtTrainer(config)
 

@@ -66,7 +66,7 @@ def init_ft_manager(job: JobConfig) -> FTManager:
     if job.fault_tolerance.min_replica_size < 1:
         raise ValueError("At least one FT replica is required.")
 
-    pg = ft.ProcessGroupBabyNCCL()
+    pg = ft.ProcessGroupNCCL()
 
     return FTManager(
         ft.Manager(
@@ -74,7 +74,7 @@ def init_ft_manager(job: JobConfig) -> FTManager:
             min_replica_size=job.fault_tolerance.min_replica_size,
             load_state_dict=None,
             state_dict=None,
-            use_async_quorum=True,
+            use_async_quorum=False,
             replica_id=f"torchtitan_ft_{job.fault_tolerance.replica_id}",
         ),
         group_size=job.fault_tolerance.group_size,
@@ -121,6 +121,7 @@ def ft_dist_reduce(
     x: torch.Tensor, reduceOp: str, mesh: DeviceMesh
 ) -> tuple[torch.Tensor, str, DeviceMesh]:
     if has_torchft and isinstance(mesh, ft.device_mesh._FlattenDeviceMesh):
+        print("CALLING ALL_REDUCE !!!!!!")
         x = funcol.all_reduce(
             x, reduceOp=reduceOp, group=mesh.managed_mesh.replicate_pg
         )
