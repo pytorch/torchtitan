@@ -29,6 +29,7 @@
 
 """ PyTorch DeepSeek model."""
 import math
+from re import X
 from typing import Optional, Tuple
 
 import deep_gemm
@@ -813,36 +814,38 @@ class MoE(nn.Module):
             # =========== 1st GEMM ===========
 
             def split_tensor_by_sizes(
-                tokens: torch.Tensor, sizes: torch.Tensor
-            ) -> list:
+                tensor: torch.Tensor, sizes: torch.Tensor
+            ) -> torch.Tensor:
                 """
-                Split a tensor along the first dimension based on a list of sizes.
+                Split a tensor along the first dimension based on a list of sizes and return as a 3D tensor.
+                Ensures each group has at least 128 rows, with exact allocation for non-zero sizes.
 
                 Args:
                     tensor: Input tensor to split, e.g., [196608, 2048]
                     sizes: Tensor containing sizes for each split, e.g., [128, 0, 128, ...]
 
                 Returns:
-                    List of tensors, where each tensor corresponds to a slice of the input tensor.
-                    Zero-sized entries will return empty tensors with the correct dimensions.
+                    A 3D tensor of shape [num_groups, max(max_size, 128), feature_dim] where empty groups have 128 zeros
                 """
-                result = []
-                offset = 0
+                num_groups = len(sizes)
+                max_size = max(sizes.max().item(), 128)  # Ensure minimum size of 128
+                feature_dim = tensor.shape[1]
 
-                for size in sizes:
+                # Create output tensor filled with zeros
+                result = tensor.new_zeros((num_groups, max_size, feature_dim))
+
+                offset = 0
+                for i, size in enumerate(sizes):
                     size_val = size.item()
-                    if size_val == 0:
-                        # Create empty tensor with correct dimensions
-                        empty_shape = list(tokens.shape)
-                        empty_shape[0] = 0
-                        result.append(tokens.new_empty(empty_shape))
-                    else:
-                        # Extract the slice
-                        result.append(tokens[offset : offset + size_val])
+                    if size_val > 0:
+                        # Copy the slice to the result tensor
+                        result[i, :size_val] = tensor[offset : offset + size_val]
                         offset += size_val
+                    # For zero sizes, we already have zeros from initialization
 
                 return result
 
+            # ====================
             m = contig_tokens.shape[0]
             k1 = contig_tokens.shape[1]
             n = w1.size(1)
@@ -857,13 +860,16 @@ class MoE(nn.Module):
 
             print(f"{m_sizes=}, {m_offsets=}")
             # token scaling
-            valid_tokens = contig_tokens[: m_offsets[-1]]
-            print(f"valid_tokens: {valid_tokens.shape}")
-            x_fp8 = (
-                torch.empty_like(valid_tokens, dtype=torch.float8_e4m3fn),
-                torch.empty((m + 127) // 128, k // 128),
+            valid_tokens = contig_tokens[: m_offsets[0]]
+            print(f"valid_tokens: {valid_tokens.shape}, {valid_tokens[0]=}")
+
+            x_fp8 = torch.zeros_like(valid_tokens, dtype=torch.float8_e4m3fn)
+
+            x_fp8_sc = torch.zeros(
+                (m, k // 128),
             )
-            print(f"x_fp8: {x_fp8[0].shape}, {x_fp8[1].shape}")
+
+            print(f"x_fp8: {x_fp8[0].shape}, {x_fp8[1].shape},")
 
             """x_fp8 = (
                 torch.empty_like(x, dtype=torch.float8_e4m3fn),
@@ -882,10 +888,33 @@ class MoE(nn.Module):
                 ),
             )
 
+            first_group_m = m_sizes[0]
+            print(f"first_group_m: {first_group_m}")
+            buffer_first_group = torch.zeros_like(valid_tokens[:first_group_m])
+            print(
+                f"buffer_first_group: {buffer_first_group.shape}, {buffer_first_group[0]=}"
+            )
+            # buffer_first_group = buffer_first_group.unsqueeze(0)
+            # print(f"buffer_first_group after unsqueeze: {buffer_first_group.shape}")
+            i = 0
+            x = valid_tokens
+            print(f"{valid_tokens.dim()=}, {valid_tokens.shape=}")
+            assert x.dim() == 2 and x.size(1) % 128 == 0
+
+            x_fp8, x_fp8_sc = dsgemm_utils.per_token_cast_to_fp8(valid_tokens)
+
+            print(f"********** Successfully casted to FP8 **********")
+            print(f"{x_fp8.shape=}, {x_fp8_sc.shape=}")
+            print(f"{x_fp8[0]=}, {x_fp8_sc[0]=}")
+
             print(f"y_fp8: {y_fp8[0].shape}, {y_fp8[1].shape}")
+            print(f"{valid_tokens.shape=}, {valid_tokens[0].shape=}")
+            print(f"{valid_tokens[0][0]=}")
 
             for i in range(num_groups):
-                x_fp8[0][i], x_fp8[1][i] = dsgemm_utils.per_token_cast_to_fp8(x[i])
+                # x_fp8[0][i], x_fp8[1][i] = dsgemm_utils.per_token_cast_to_fp8(
+                #    valid_tokens[i]
+                # )
                 y_fp8[0][i], y_fp8[1][i] = dsgemm_utils.per_block_cast_to_fp8(w1[i])
 
             # input scaling
@@ -893,7 +922,7 @@ class MoE(nn.Module):
 
             # weight scaling
             print(f"Weight1 Scaling complete: {y_fp8[0][0]=}, {y_fp8[1][0]=}")
-
+            assert False, "check"
             # x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
 
             # weight scaling
