@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 name = "llama4"
 flavor = "17bx128e"
 tokenizer_path = "./assets/tokenizer/tokenizer.model"
-# converters = "float8"
+# converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
