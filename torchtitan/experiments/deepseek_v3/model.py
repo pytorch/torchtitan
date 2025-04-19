@@ -855,13 +855,15 @@ class MoE(nn.Module):
             # m=24576 k=2048 n=1408, k1=2048
 
             # create fp8 containers
-            out = torch.empty((num_groups, m, n), device="cuda", dtype=torch.bfloat16)
-            print(f"out: {out.shape}")
 
             print(f"{m_sizes=}, {m_offsets=}")
             # token scaling
-            valid_tokens = contig_tokens[: m_offsets[0]]
-            print(f"valid_tokens: {valid_tokens.shape}, {valid_tokens[0]=}")
+            valid_tokens = contig_tokens[: m_offsets[-1]]
+            print(f"valid_tokens: {valid_tokens.shape}, ")
+            vm = valid_tokens.shape[0]
+            print(f"vm: {vm}")
+            out = torch.empty((vm, n), device="cuda", dtype=torch.bfloat16)
+            print(f"out: {out.shape}")
 
             x_fp8 = torch.zeros_like(valid_tokens, dtype=torch.float8_e4m3fn)
 
@@ -879,9 +881,9 @@ class MoE(nn.Module):
 
             for i in range(num_groups):
                 if m_sizes[i] > 0:
-                    assembled_tensors.append(
-                        contig_tokens[offsets : offsets + m_sizes[i]]
-                    )
+                    # assembled_tensors.append(
+                    #    contig_tokens[offsets : offsets + m_sizes[i]]
+                    # )
                     # indexing
                     m_indices[offsets : offsets + m_sizes[i]] = i
                     # advance
@@ -894,9 +896,7 @@ class MoE(nn.Module):
                     )
                 """
             # ---- assemble groups for m -------
-            print(f"{assembled_tensors[0].shape=}")
-            print(f"{assembled_tensors[1].shape=}")
-            print(f"{assembled_tensors[2].shape=}")
+
             print(f"{m_indices[4*128]=}, {m_indices[5*128]=}, {m_indices[6*128]=}")
             """x_fp8 = (
                 torch.empty_like(x, dtype=torch.float8_e4m3fn),
@@ -914,6 +914,8 @@ class MoE(nn.Module):
                     dtype=torch.float,
                 ),
             )
+
+            print(f"{type(y_fp8)=}")
 
             first_group_m = m_sizes[0]
             print(f"first_group_m: {first_group_m}")
@@ -941,11 +943,12 @@ class MoE(nn.Module):
                 y_fp8[0][i], y_fp8[1][i] = dsgemm_utils.per_block_cast_to_fp8(w1[i])
 
             # input scaling
+
             print(f"Input Scaling complete: {x_fp8[0][0]=}, {x_fp8[1][0]=}")
 
             # weight scaling
             print(f"Weight1 Scaling complete: {y_fp8[0][0]=}, {y_fp8[1][0]=}")
-            assert False, "check"
+
             # x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
 
             # weight scaling
@@ -954,12 +957,46 @@ class MoE(nn.Module):
             # x_fp8 = (x_fp8[0].view(-1, k), per_token_cast_to_fp8(x.view(-1, k))[1])
             out = out.view(-1, n)  # collapse the group and M dims
 
-            assert False, "check"
-
             # Transpose earlier so that the testing will not trigger transposing kernels
-            # x_fp8 = (x_fp8[0], get_col_major_tma_aligned_tensor(x_fp8[1]))
-            # return x_fp8, y_fp8, out
+            x_fp8_sct = dsgemm_utils.get_col_major_tma_aligned_tensor(x_fp8_sc)
+            x_in = (x_fp8, x_fp8_sc)
+            # ===== ds checke   =======
+            lhs, lhs_scales = x_in
+            rhs, rhs_scales = y_fp8
+            m, k = lhs.shape
+            num_groups, n, k_ = rhs.shape
+            m_, n_ = out.shape
+            print(f"{m=}, {m_=}")
 
+            m__ = m_indices.numel()
+
+            # Type and shape checks
+            assert m == m_, f"m {m=} should be equal to m_ {m_=}"
+            assert k == k_ and n == n_, "k and n should be equal to k_ and n_"
+            assert m_ == m__, "m_ should be equal to m__"
+            assert m == m_ == m__ and k == k_ and n == n_
+            assert lhs_scales.shape == (m, (k + 127) // 128)
+            assert rhs_scales.shape == (num_groups, (n + 127) // 128, (k + 127) // 128)
+            assert (
+                lhs.dtype == torch.float8_e4m3fn and lhs_scales.dtype == torch.float32
+            )
+            assert (
+                rhs.dtype == torch.float8_e4m3fn and rhs_scales.dtype == torch.float32
+            )
+            assert out.dtype == torch.bfloat16
+            assert m_indices.dtype == torch.int32
+            assert lhs.is_contiguous() and rhs.is_contiguous()
+            assert out.is_contiguous() and m_indices.is_contiguous()
+            # ============================
+
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                x_in, y_fp8, out, m_indices
+            )
+            print(f"\n++++++++++++++   SUCCESS!  \n")
+            print(f"+++++++++++++++++++++++++++++++++++++")
+            print(f"out: {out[0]=}, {out[1]=}")
+            # return x_fp8, y_fp8, out
+            gate_proj = out  # .view(m, n)
             #
 
             # m = [m_offsets[i + 1] - m_offsets[i] for i in range(num_groups - 1)]
@@ -972,7 +1009,7 @@ class MoE(nn.Module):
             """
             x_fp8, y_fp8, out = construct_grouped(num_groups, m, k, n, is_masked=False)
 
-        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(x_fp8, y_fp8, out, m_indices)
+
             x_fp8, y_fp8, out = dsgemm_utils.construct_grouped(
                 contig_tokens, w1, m_sizes
             )
