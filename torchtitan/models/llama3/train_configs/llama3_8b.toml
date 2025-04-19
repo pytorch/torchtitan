@@ -19,7 +19,7 @@ save_tb_folder = "tb"
 name = "llama3"
 flavor = "8B"
 tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
-# converters = "float8"
+# converters = ["float8"]
 
 [optimizer]
 name = "AdamW"

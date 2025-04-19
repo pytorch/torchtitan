@@ -23,7 +23,7 @@ name = "llama4"
 flavor = "debugmodel"
 # test tokenizer.model, for debug purpose only
 tokenizer_path = "./tests/assets/test_tiktoken.model"
-# converters = "float8"
+# converters = ["float8"]
 
 [optimizer]
 # TODO: currently grouped mm in MoE doesn't work with AdamW, need to investigate
