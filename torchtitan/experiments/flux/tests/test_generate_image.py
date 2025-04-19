@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import sys
 import time
 
 import torch
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.experiments.flux import flux_configs
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
@@ -38,11 +37,10 @@ class TestGenerateImage:
 
         # Contracting JobConfig
         path = "torchtitan.experiments.flux.flux_argparser"
-        sys.argv.append(f"--experimental.custom_args_module={path}")
-        config = JobConfig()
-        config.maybe_add_custom_args()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
+                f"--experimental.custom_args_module={path}",
                 "--job.dump_folder",
                 "./outputs",
                 "--training.seed",

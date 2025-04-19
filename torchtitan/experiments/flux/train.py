@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
@@ -220,9 +220,8 @@ class FluxTrainer(Trainer):
 
 if __name__ == "__main__":
     init_logger()
-    config = JobConfig()
-    config.maybe_add_custom_args()
-    config.parse_args()
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
     trainer: Optional[FluxTrainer] = None
 
     try:

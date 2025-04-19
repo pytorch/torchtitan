@@ -21,7 +21,7 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -446,9 +446,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 if __name__ == "__main__":
     init_logger()
-    config = JobConfig()
-    config.maybe_add_custom_args()
-    config.parse_args()
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
 
     try:

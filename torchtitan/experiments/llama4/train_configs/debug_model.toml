@@ -64,10 +64,10 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = 'none'  # ['none', 'selective', 'full']
+mode = "none"  # ["none", "selective", "full"]
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
-filter_fqns = "output,router.gate"
+filter_fqns = ["output", "router.gate"]

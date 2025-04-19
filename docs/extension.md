@@ -35,24 +35,52 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 
 ### Extending `JobConfig`
-[`JobConfig`](../torchtitan/config_manager.py) provides an argument `--experimental.custom_args_module`. When specified, `JobConfig` attempts to import the module provided by the argument. The imported module should contain exactly one public function. `JobConfig` executes this public function, passing its own argparser as an argument. This allows you to extend `JobConfig` with custom functionality.
 
-Suppose you want to add a custom argument `--custom_args.how-is-your-day` to `JobConfig`. You can create a Python module (e.g., `custom_args.py`) with a single public function and put it to `torchtitan/experiments/your_folder/`:
+[`JobConfig`](../torchtitan/config_manager.py) supports custom extension through the `--experimental.custom_args_module` flag.
+This lets you define a custom module that extends `JobConfig` with additional fields.
 
+When specified, your custom `JobConfig` is merged with the default:
+- If a field exists in both, the custom config’s value replaces the default.
+- Fields unique to either config are retained.
+
+#### Example
+
+To add a custom `custom_args` section, define your own `JobConfig`:
+
+```python
+# torchtitan/experiments/your_folder/custom_args.py
+from dataclasses import dataclass, field
+
+@dataclass
+class CustomArgs:
+    how_is_your_day: str = "good"
+    """Just an example."""
+
+@dataclass
+class Training:
+    steps: int = 500
+    """Replaces the default value"""
+
+    my_mini_steps: int = 10000
+    """New field is added"""
+
+    ... # Original fields are preserved
+
+@dataclass
+class JobConfig:
+    custom_args: CustomArgs = field(default_factory=CustomArgs)
+    training: Training= field(default_factory=Training)
 ```
-import argparse
 
+Then run your script with:
 
-def extend_parser(parser: argparse.ArgumentParser) -> None:
-     parser.add_argument(
-         "--custom_args.how-is-your-day",
-         type=str,
-         default="good",
-         help="Just an example.",
-     )
+```bash
+--experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args
 ```
 
-To utilize the custom argument, specify the following arguments when running the training script:
-```
---experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args --custom_args.how-is-your-day=wonderful
+Or specify it in your `.toml` config:
+
+```toml
+[experimental]
+custom_args_module = "torchtitan.experiments.your_folder.custom_args"
 ```
