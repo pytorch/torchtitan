@@ -36,22 +36,19 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 ### Extending `JobConfig`
 
-[`JobConfig`](../torchtitan/config_manager.py) supports extension through the `--experimental.custom_args_module` flag.
-This allows users to supply their own configuration layout by importing a custom module
-that defines a new `JobConfig` dataclass with additional or overridden fields.
+[`JobConfig`](../torchtitan/config_manager.py) supports custom extension through the `--experimental.custom_args_module` flag.
+This lets you define a custom module that extends `JobConfig` with additional fields.
 
-When provided, the custom `JobConfig` is automatically merged with the default one:
-- Fields in the custom config override those in the base config when names match.
-- Nested dataclass fields are merged recursively.
-- Fields unique to either config are preserved.
+When specified, your custom `JobConfig` is merged with the default:
+- If a field exists in both, the custom config’s value replaces the default.
+- Fields unique to either config are retained.
 
 #### Example
 
-Suppose you want to add a custom section `custom_args` with some fields. You can define
-your own `JobConfig` in a Python module (e.g., `torchtitan/experiments/your_folder/custom_args.py`):
+To add a custom `custom_args` section, define your own `JobConfig`:
 
 ```python
-# torchtitan.experiments.your_folder.custom_args.py
+# torchtitan/experiments/your_folder/custom_args.py
 from dataclasses import dataclass, field
 
 @dataclass
@@ -60,17 +57,28 @@ class CustomArgs:
     """Just an example."""
 
 @dataclass
+class Training:
+    steps: int = 500
+    """Replaces the default value"""
+
+    my_mini_steps: int = 10000
+    """New field is added"""
+
+    ... # Original fields are preserved
+
+@dataclass
 class JobConfig:
     custom_args: CustomArgs = field(default_factory=CustomArgs)
+    training: Training= field(default_factory=Training)
 ```
 
-To utilize the custom argument, specify the following arguments when running the training script:
+Then run your script with:
 
 ```bash
 --experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args
 ```
 
-Alternatively, you can also specify module to extend in the `toml` file
+Or specify it in your `.toml` config:
 
 ```toml
 [experimental]
