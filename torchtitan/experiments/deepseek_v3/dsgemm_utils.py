@@ -6,6 +6,95 @@ import torch
 _num_sms = None
 
 
+def create_indices_from_offsets_nosync(m_offsets: torch.Tensor) -> torch.Tensor:
+    """
+    Create m_indices tensor from m_offsets tensor without CPU-GPU sync points.
+
+    Args:
+        m_offsets: Tensor containing cumulative offsets for each group
+            e.g., [128, 128, 256, 384, 640, ...]
+
+    Returns:
+        m_indices: Tensor mapping each row to its group index
+    """
+    # Get total size from the last offset
+    total_size = m_offsets[-1]
+
+    # Pre-allocate output tensor
+    indices = torch.empty(total_size, device=m_offsets.device, dtype=torch.int32)
+
+    # Create a range tensor for each section
+    prev_offset = torch.zeros(1, device=m_offsets.device, dtype=m_offsets.dtype)
+
+    for i in range(len(m_offsets)):
+        # Calculate current section size
+        section_size = m_offsets[i] - prev_offset
+
+        # Only fill if section has elements
+        if section_size > 0:
+            indices[prev_offset : m_offsets[i]] = i
+
+        # Update prev_offset for next iteration
+        prev_offset = m_offsets[i]
+
+    return indices
+
+
+def create_m_indices_from_offsets(m_offsets: torch.Tensor) -> torch.Tensor:
+    """
+    Create m_indices tensor from m_offsets tensor.
+
+    Args:
+        m_offsets: Tensor containing cumulative offsets for each group
+            e.g., [128, 128, 256, 384, 640, ...]
+
+    Returns:
+        m_indices: Tensor mapping each row to its group index
+    """
+    # Get total size from the last offset
+    total_size = m_offsets[-1].item()
+
+    # Pre-allocate output tensor
+    indices = torch.empty(total_size, device=m_offsets.device, dtype=torch.int32)
+
+    # Fill indices directly using offsets
+    prev_offset = 0
+    for i, offset in enumerate(m_offsets):
+        offset_val = offset.item()
+        if offset_val > prev_offset:
+            indices[prev_offset:offset_val] = i
+        prev_offset = offset_val
+
+    return indices
+
+
+def create_m_indices_from_sizes(m_sizes: torch.Tensor) -> torch.Tensor:
+    """
+    Fast implementation to create m_indices when tokens are already contiguous.
+
+    Args:
+        m_sizes: Tensor containing the number of rows for each group
+
+    Returns:
+        m_indices: Tensor mapping each row to its group index
+    """
+    # Use cumulative sum to create offsets
+    total_size = m_sizes.sum().item()
+
+    # Pre-allocate output tensor
+    indices = torch.empty(total_size, device=m_sizes.device, dtype=torch.int32)
+
+    # Fill indices directly
+    offset = 0
+    for i, size in enumerate(m_sizes):
+        size_val = size.item()
+        if size_val > 0:
+            indices[offset : offset + size_val] = i
+            offset += size_val
+
+    return indices
+
+
 def get_m_indices(num_groups: int, m: int) -> torch.Tensor:
     m_indices = torch.arange(0, num_groups, device="cuda", dtype=torch.int)
     m_indices = m_indices.unsqueeze(-1).expand(num_groups, m).contiguous().view(-1)

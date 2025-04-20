@@ -12,13 +12,13 @@ from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize_llama import parallelize_llama
-from .model.args import DSV2ModelArgs
-from .model.model import Transformer
+# from .infra.parallelize_llama import parallelize_llama
+# from .model.args import DSV2ModelArgs
+# from .model.model import Transformer
 
-__all__ = ["DSV2ModelArgs", "deepseek_configs"]
+# __all__ = ["DSV2ModelArgs", "deepseek_configs"]
 
-
+"""
 deepseek_configs = {
     "debugmodel": DSV2ModelArgs(
         dim=256,
@@ -44,3 +44,4 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
     )
 )
+"""

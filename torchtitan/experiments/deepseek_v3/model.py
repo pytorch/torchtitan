@@ -34,7 +34,7 @@ from typing import Optional, Tuple
 
 import deep_gemm
 
-import dsgemm_utiils as dsgemm_utils
+import dsgemm_utils
 
 import torch
 import torch.distributed as dist
