@@ -6,6 +6,54 @@ import torch
 _num_sms = None
 
 
+def prepare_fp8_input(x):
+    """
+    Convert input tensor to FP8 format with per-token scaling for DeepSeek GEMM.
+
+    Args:
+        x: Input tensor
+
+    Returns:
+        Tuple of (FP8 tensor, scale factors) in the format expected by DeepSeek GEMM
+    """
+    # Apply per-token quantization
+    x_fp8, x_scales = per_token_cast_to_fp8(x)
+
+    # Get TMA-aligned format for scales
+    x_scales_aligned = get_col_major_tma_aligned_tensor(x_scales)
+
+    return (x_fp8, x_scales_aligned)
+
+
+def prepare_fp8_weight(w):
+    """
+    Convert weight tensor to FP8 format with per-block scaling for DeepSeek GEMM.
+
+    Args:
+        w: Weight tensor (3D)
+
+    Returns:
+        Tuple of (FP8 tensor, scale factors) in the format expected by DeepSeek GEMM
+    """
+    num_experts = w.shape[0]
+    n = w.shape[1]
+    k = w.shape[2]
+
+    # Create containers for FP8 weights and scales
+    w_fp8 = torch.empty_like(w, dtype=torch.float8_e4m3fn)
+    w_scales = torch.empty(
+        (num_experts, (n + 127) // 128, (k + 127) // 128),
+        device=w.device,
+        dtype=torch.float32,
+    )
+
+    # Process each expert's weights
+    for i in range(num_experts):
+        w_fp8[i], w_scales[i] = per_block_cast_to_fp8(w[i])
+
+    return (w_fp8, w_scales)
+
+
 def create_indices_from_offsets_nosync(m_offsets: torch.Tensor) -> torch.Tensor:
     """
     Create m_indices tensor from m_offsets tensor without CPU-GPU sync points.

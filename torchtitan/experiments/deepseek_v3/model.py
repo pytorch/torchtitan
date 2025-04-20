@@ -777,11 +777,79 @@ class MoE(nn.Module):
 
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
+        # print(f"ending options: {m_sizes.sum()=},{m_offsets[-1]=}")
+        valid_tokens = contig_tokens[: m_offsets[-1]]
+        print(f"valid_tokens: {valid_tokens.shape=}, {valid_tokens.dtype=}")
+        # DS rework
+        print(
+            f"EP rank [{self.ep_rank}]: Running DS Grouped GEMM, {m_sizes=}, {m_offsets.shape=}, {m_offsets=}"
+        )
+        m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+        print(f"{m_indices.shape=}, {m_indices=}")
+
+        # get expert weights for the 3 linear projections
+        gate_proj_weight = self.get_parameter("gate_proj_weight")
+        up_proj_weight = self.get_parameter("up_proj_weight")
+        down_proj_weight = self.get_parameter("down_proj_weight")
 
         # Run the first grouped GEMM
-        # =================================
-        # contig_tokens: torch.Size([196608, 2048])
-        # w1: torch.Size([22528, 2048])  or torch.Size([16, 1408, 2048])
+        total_tokens = valid_tokens.shape[0]
+        # output size for gate and up will match the intermediate size
+        intermediate_size = gate_proj_weight.shape[1]  # 3D weights
+
+        gate_proj_out = torch.empty(
+            (valid_tokens.shape[0], intermediate_size),
+            device=contig_tokens.device,
+            dtype=contig_tokens.dtype,
+        )
+
+        # debug
+        x_fp8 = dsgemm_utils.prepare_fp8_input(contig_tokens)
+        print(f"contig_tokens: {contig_tokens.shape}, {contig_tokens.dtype}")
+        print(f"{x_fp8[0].shape=}, {x_fp8[1].shape=}")
+        y_fp8 = dsgemm_utils.prepare_fp8_weight(gate_proj_weight)
+        print(f"{y_fp8[0].shape=}, {y_fp8[1].shape=}")
+
+        """ results
+        contig_tokens: torch.Size([24576, 2048]), torch.bfloat16
+        x_fp8[0].shape=torch.Size([24576, 2048]), x_fp8[1].shape=torch.Size([24576, 16])
+        y_fp8[0].shape=torch.Size([16, 1408, 2048]), y_fp8[1].shape=torch.Size([16, 11, 16])
+
+
+        """
+
+        lhs, lhs_scales = x_fp8
+        rhs, rhs_scales = y_fp8
+        m, k = lhs.shape
+        num_groups, n, k_ = rhs.shape
+        m_, n_ = gate_proj_out.shape
+        m__ = m_indices.numel()
+        # m_=24576 n_=1408 m__=1664
+        print(f"{m_indices.shape=}, {m__=}")
+        print(f"{m_=} {n_=} {m__=}")
+
+        """
+        y_fp8[0].shape=torch.Size([16, 1408, 2048]), y_fp8[1].shape=torch.Size([16, 11, 16])
+        m_=24576 n_=1408 m__=1408
+        contig_tokens: torch.Size([24576, 2048]), torch.bfloat16
+        x_fp8[0].shape=torch.Size([24576, 2048]), x_fp8[1].shape=torch.Size([24576, 16])
+        assert m == m_ == m__
+        and k == k_ and n == n_
+
+"""
+        assert m_ == m__, "mismatch in m_ and m__"
+
+        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            dsgemm_utils.prepare_fp8_input(valid_tokens),
+            dsgemm_utils.prepare_fp8_weight(gate_proj_weight),
+            gate_proj_out,
+            m_indices,
+        )
+
+        print(
+            f"Success - gate proj output: {gate_proj_out.shape}, {gate_proj_out.dtype}, {gate_proj_out[0]=}"
+        )
+        assert False, "check results"
 
         w1 = self.get_parameter("gate_proj_weight")
         if self.group_mm == "torchao":
