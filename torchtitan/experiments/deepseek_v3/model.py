@@ -887,7 +887,6 @@ class MoE(nn.Module):
 
         print(f"Success - 3! ")
         print(f"{down_proj_out.shape=}, {down_proj_out.dtype=}, {down_proj_out[0]=}")
-        assert False, "DS rework"
 
         # Prepare buffer for tokens processed by experts
         # Take necessary space from `token_gather_buf` symm mem because we are
@@ -895,7 +894,8 @@ class MoE(nn.Module):
         processed_tokens = self.get_gather_buf()
 
         # Move into Symmetric Memory for the return shuffle
-        processed_tokens[permuted_indices] = down_proj_out
+        contig_tokens[: m_offsets[-1]] = down_proj_out
+        processed_tokens[permuted_indices] = contig_tokens  # down_proj_out
 
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
@@ -915,7 +915,7 @@ class MoE(nn.Module):
             .sum(dim=1)
             .type(returned_tokens.dtype)
         )
-        # print(f"final_out: {final_out.shape}")  # final_out: torch.Size([71, 2048])
+        print(f"final_out: {final_out.shape}")  # final_out: torch.Size([71, 2048])
 
         return final_out
 
