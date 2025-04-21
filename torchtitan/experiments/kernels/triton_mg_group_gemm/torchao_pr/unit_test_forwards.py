@@ -43,7 +43,7 @@ class TestMG_GroupedGEMM(unittest.TestCase):
         m_start = 0
         for g in range(G):
             m_end = m_start + m_sizes[g]
-            b_slice = b[N * g : N * (g+1), :]
+            b_slice = b[N * g : N * (g + 1), :]
             expected_result[m_start:m_end, :] = a[m_start:m_end, :] @ b_slice.T
             m_start = m_end
 

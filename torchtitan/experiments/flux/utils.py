@@ -14,7 +14,7 @@ from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 
 
-def preprocess_flux_data(
+def preprocess_data(
     # arguments from the recipe
     device: torch.device,
     dtype: torch.dtype,
@@ -24,7 +24,6 @@ def preprocess_flux_data(
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],
-    offload: bool = False,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and encoder as input and return a batch of preprocessed data.
@@ -33,23 +32,16 @@ def preprocess_flux_data(
         device (torch.device): device to do preprocessing on
         dtype (torch.dtype): data type to do preprocessing in
         autoencoer(AutoEncoder): autoencoder to use for preprocessing
-        clip_encoder
-        t5_encoder
-        batch (dict[str, Tensor]): batch of data to preprocess
+        clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
+        t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
+        batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]
 
     Returns:
         dict[str, Tensor]: batch of preprocessed data
     """
 
-    # The input of encoder should be torch.int type
-    if offload:
-        clip_encoder.to(device)
-        t5_encoder.to(device)
-        if autoencoder is not None:
-            autoencoder.to(device)
-
-    clip_tokens = batch["clip_tokens"].squeeze().to(device=device, dtype=torch.int)
-    t5_tokens = batch["t5_tokens"].squeeze().to(device=device, dtype=torch.int)
+    clip_tokens = batch["clip_tokens"].squeeze(1).to(device=device, dtype=torch.int)
+    t5_tokens = batch["t5_tokens"].squeeze(1).to(device=device, dtype=torch.int)
 
     clip_text_encodings = clip_encoder(clip_tokens)
     t5_text_encodings = t5_encoder(t5_tokens)
@@ -62,13 +54,6 @@ def preprocess_flux_data(
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
 
-    # offload encoders to cpu after preprocessing
-    if offload:
-        clip_encoder.to("cpu")
-        t5_encoder.to("cpu")
-        if autoencoder is not None:
-            autoencoder.to("cpu")
-
     return batch
 
 
@@ -78,9 +63,9 @@ def generate_noise_latent(
     width: int,
     device: str | torch.device,
     dtype: torch.dtype,
-    seed: int,
+    seed: int | None = None,
 ) -> Tensor:
-    """Generate noise latents for the Flux flow model.
+    """Generate noise latents for the Flux flow model. The random seed will be set at the begining of training.
 
     Args:
         bsz (int): batch_size.
@@ -88,7 +73,6 @@ def generate_noise_latent(
         width (int): The width of the image.
         device (str | torch.device): The device to use.
         dtype (torch.dtype): The dtype to use.
-        seed (int): The seed to use for randomize.
 
     Returns:
         Tensor: The noise latents.
@@ -102,7 +86,6 @@ def generate_noise_latent(
         height // IMAGE_LATENT_SIZE_RATIO,
         width // IMAGE_LATENT_SIZE_RATIO,
         dtype=dtype,
-        generator=torch.Generator().manual_seed(seed),
     ).to(device)
 
 

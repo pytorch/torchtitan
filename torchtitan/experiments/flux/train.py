@@ -9,15 +9,17 @@ from typing import Optional
 
 import torch
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.experiments.flux.model.model import FluxModel
+from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
+from torchtitan.experiments.flux.sampling import generate_image, save_image
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
-    preprocess_flux_data,
+    preprocess_data,
     unpack_latents,
 )
 from torchtitan.tools.logging import init_logger, logger
@@ -28,90 +30,51 @@ class FluxTrainer(Trainer):
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
 
-        self.preprocess_fn = preprocess_flux_data
-        # self.dtype = job_config.encoder.dtype
+        # Set random seed, and maybe enable deterministic mode
+        # (mainly for debugging, expect perf loss).
+        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        dist_utils.set_determinism(
+            self.world_mesh,
+            self.device,
+            job_config.training.seed,
+            job_config.training.deterministic,
+            distinct_seed_mesh_dim="dp_shard",
+        )
+
+        self.preprocess_fn = preprocess_data
+        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
+        # We cast the encoders and it's input/output to this dtype.
+        # For Flux model, we use FSDP with mixed precision training.
         self._dtype = torch.bfloat16
-        self._seed = job_config.training.seed
-        self._guidance = job_config.training.guidance
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
+
         self.autoencoder = load_ae(
-            job_config.encoder.auto_encoder_path,
+            job_config.encoder.autoencoder_path,
             model_config.autoencoder_params,
-            device="cpu",
+            device=self.device,
             dtype=self._dtype,
         )
-        self.clip_encoder = FluxEmbedder(version=job_config.encoder.clip_encoder).to(
-            dtype=self._dtype
+
+        self.clip_encoder = FluxEmbedder(
+            version=job_config.encoder.clip_encoder,
+        ).to(device=self.device, dtype=self._dtype)
+        self.t5_encoder = FluxEmbedder(
+            version=job_config.encoder.t5_encoder,
+        ).to(device=self.device, dtype=self._dtype)
+
+        # Apply FSDP to the T5 model / CLIP model
+        self.t5_encoder, self.clip_encoder = parallelize_encoders(
+            t5_model=self.t5_encoder,
+            clip_model=self.clip_encoder,
+            world_mesh=self.world_mesh,
+            parallel_dims=self.parallel_dims,
+            job_config=job_config,
         )
-        self.t5_encoder = FluxEmbedder(version=job_config.encoder.t5_encoder).to(
-            dtype=self._dtype
-        )
-
-    def _predict_noise(
-        self,
-        model: FluxModel,
-        latents: torch.Tensor,
-        clip_encodings: torch.Tensor,
-        t5_encodings: torch.Tensor,
-        timesteps: torch.Tensor,
-        guidance: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Use Flux's flow-matching model to predict the noise in image latents.
-        Args:
-            model (FluxFlowModel): The Flux flow model.
-            latents (Tensor): Image encodings from the Flux autoencoder.
-                Shape: [bsz, 16, latent height, latent width]
-            clip_encodings (Tensor): CLIP text encodings.
-                Shape: [bsz, 768]
-            t5_encodings (Tensor): T5 text encodings.
-                Shape: [bsz, sequence length, 256 or 512]
-            timesteps (Tensor): The amount of noise (0 to 1).
-                Shape: [bsz]
-            guidance (Optional[Tensor]): The guidance value (1.5 to 4) if guidance-enabled model.
-                Shape: [bsz]
-                Default: None
-            model_ctx (ContextManager): Optional context to wrap the model call (e.g. for activation offloading)
-                Default: nullcontext
-        Returns:
-            Tensor: The noise prediction.
-                Shape: [bsz, 16, latent height, latent width]
-        """
-        bsz, _, latent_height, latent_width = latents.shape
-
-        POSITION_DIM = 3  # constant for Flux flow model
-        with torch.no_grad():
-            # Create positional encodings
-            latent_pos_enc = create_position_encoding_for_latents(
-                bsz, latent_height, latent_width, POSITION_DIM
-            )
-            text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
-
-            # Convert latent into a sequence of patches
-            latents = pack_latents(latents)
-
-        # Predict noise
-        latent_noise_pred = model(
-            img=latents,
-            img_ids=latent_pos_enc.to(latents),
-            txt=t5_encodings.to(latents),
-            txt_ids=text_pos_enc.to(latents),
-            y=clip_encodings.to(latents),
-            timesteps=timesteps.to(latents),
-            guidance=guidance.to(latents) if guidance is not None else None,
-        )
-
-        # Convert sequence of patches to latent shape
-        latent_noise_pred = unpack_latents(
-            latent_noise_pred, latent_height, latent_width
-        )
-
-        return latent_noise_pred
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        # generate t5 and clip
+        # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
             device=self.device,
@@ -120,7 +83,6 @@ class FluxTrainer(Trainer):
             clip_encoder=self.clip_encoder,
             t5_encoder=self.t5_encoder,
             batch=input_dict,
-            offload=True,
         )
         labels = input_dict["img_encodings"]
 
@@ -129,6 +91,9 @@ class FluxTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         model_parts = self.model_parts
+        assert len(self.model_parts) == 1
+        model = self.model_parts[0]
+
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
@@ -142,23 +107,33 @@ class FluxTrainer(Trainer):
             noise = torch.randn_like(labels)
             timesteps = torch.rand((bsz,)).to(labels)
             sigmas = timesteps.view(-1, 1, 1, 1)
-            noisy_latents = (1 - sigmas) * labels + sigmas * noise
-            guidance = torch.full((bsz,), self._guidance).to(labels)
+            latents = (1 - sigmas) * labels + sigmas * noise
 
-        target = noise - labels
+        bsz, _, latent_height, latent_width = latents.shape
 
-        assert len(model_parts) == 1
-        # TODO(jianiw): model_parts will be wrapped by FSDP, which will cacluate
-        model_parts[0] = model_parts[0].to(dtype=self._dtype)
+        POSITION_DIM = 3  # constant for Flux flow model
+        with torch.no_grad():
+            # Create positional encodings
+            latent_pos_enc = create_position_encoding_for_latents(
+                bsz, latent_height, latent_width, POSITION_DIM
+            )
+            text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
 
-        pred = self._predict_noise(
-            model_parts[0],
-            noisy_latents,
-            clip_encodings,
-            t5_encodings,
-            timesteps,
-            guidance,
+            # Patchify: Convert latent into a sequence of patches
+            latents = pack_latents(latents)
+
+        latent_noise_pred = model(
+            img=latents,
+            img_ids=latent_pos_enc.to(latents),
+            txt=t5_encodings.to(latents),
+            txt_ids=text_pos_enc.to(latents),
+            y=clip_encodings.to(latents),
+            timesteps=timesteps.to(latents),
         )
+
+        # Convert sequence of patches to latent shape
+        pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+        target = noise - labels
         loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
         # need to free to before bwd to avoid peaking memory
@@ -185,28 +160,75 @@ class FluxTrainer(Trainer):
             or parallel_dims.cp_enabled
         ):
             loss = loss.detach()
+            ft_pg = self.ft_manager.replicate_pg if self.ft_manager.enabled else None
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, world_mesh["dp_cp"]),
-                dist_utils.dist_max(loss, world_mesh["dp_cp"]),
+                dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
             )
         else:
             global_avg_loss = global_max_loss = loss.item()
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
+        # Evaluate the model during training
+        if (
+            self.step % self.job_config.eval.eval_freq == 0
+            or self.step == self.job_config.training.steps
+        ):
+            model.eval()
+            self.eval_step()
+            model.train()
+
+    def eval_step(self, prompt: str = "A photo of a cat"):
+        """
+        Evaluate the Flux model.
+        1) generate and save images every few steps. Currently, we run the eval and on the same
+        prompts across all DP ranks. We will change this behavior to run on validation set prompts.
+        Due to random noise generation, results could be different across DP ranks cause we assign
+        different random seeds to each DP rank.
+        2) [TODO] Calculate loss with fixed t value on validation set.
+        """
+
+        image = generate_image(
+            device=self.device,
+            dtype=self._dtype,
+            job_config=self.job_config,
+            model=self.model_parts[0],
+            prompt=prompt,  # TODO(jianiw): change this to a prompt from validation set
+            autoencoder=self.autoencoder,
+            t5_tokenizer=FluxTokenizer(
+                self.job_config.encoder.t5_encoder,
+                max_length=self.job_config.encoder.max_t5_encoding_len,
+            ),
+            clip_tokenizer=FluxTokenizer(
+                self.job_config.encoder.clip_encoder, max_length=77
+            ),
+            t5_encoder=self.t5_encoder,
+            clip_encoder=self.clip_encoder,
+        )
+
+        save_image(
+            name=f"image_rank{str(torch.distributed.get_rank())}_{self.step}.png",
+            output_dir=os.path.join(
+                self.job_config.job.dump_folder, self.job_config.eval.save_img_folder
+            ),
+            x=image,
+            add_sampling_metadata=True,
+            prompt=prompt,
+        )
+
 
 if __name__ == "__main__":
     init_logger()
-    config = JobConfig()
-    config.maybe_add_custom_args()
-    config.parse_args()
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
     trainer: Optional[FluxTrainer] = None
 
     try:
         trainer = FluxTrainer(config)
         if config.checkpoint.create_seed_checkpoint:
-            assert int(
-                os.environ["WORLD_SIZE"]
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
                 config.checkpoint.enable_checkpoint

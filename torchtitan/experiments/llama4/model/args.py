@@ -6,7 +6,6 @@
 
 
 from dataclasses import dataclass
-from typing import Optional
 
 from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
@@ -14,6 +13,7 @@ from torchtitan.config_manager import JobConfig
 
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 
 @dataclass
@@ -21,10 +21,10 @@ class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
-    n_kv_heads: Optional[int] = None
+    n_kv_heads: int | None = None
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
+    ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
 
@@ -32,11 +32,19 @@ class TransformerModelArgs(BaseModelArgs):
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+    # iRoPE settings
+    # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
+    # used every n layers. Other layers uses RoPE (rotary positional embedding) and
+    # the inner attention of those layer will use the fixed block size specified by
+    # ``fixed_attn_block_size``. ``fixed_attn_block_size`` means that the query will
+    # only attend to the tokens within the same block regardless how long is the
+    # sequence.
+    every_n_layers_nope: int | None = None
+    fixed_attn_block_size: int = 8192
 
     # MoE args
     moe_enabled: bool = True
@@ -47,12 +55,29 @@ class TransformerModelArgs(BaseModelArgs):
     interleave_moe_layer_step: int = 2
     # token-choice
     top_k: int = 1
+    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
+    load_balance_coeff: float | None = 1e-3
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
-        self.use_flex_attn = job_config.model.use_flex_attn
+        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+            logger.warning(
+                "Failed to use grouped mm, which is only supported on SM90 or later",
+            )
+            self.use_grouped_mm = False
+
+        if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
+            raise ValueError(
+                "FlexAttention is not compatible with selective AC yet. "
+                "See https://github.com/pytorch/pytorch/issues/147879"
+            )
+
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise ValueError(
+                "FlexAttention is not compatible with CP yet. "
+                "We are still working on this."
+            )
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int

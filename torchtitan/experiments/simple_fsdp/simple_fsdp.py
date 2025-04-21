@@ -96,12 +96,10 @@ class ReplicateComputation(torch.nn.Module):
             )
 
             # the actuall FSDP all-gather on dp_mesh
-            # TODO(ruisizhang123): enable mixed-precision training here
-            # add the forward_dtype and backward_dtype back after landing changes in PyTorch DTensor
             replicated_dtensor = sharded_dtensor.redistribute(
                 placements=self.compute_placements,
-                # forward_dtype=self.param_dtype,
-                # backward_dtype=self.reduce_dtype,
+                forward_dtype=self.param_dtype,
+                backward_dtype=self.reduce_dtype,
             )
 
             # re-wrap 1D all-gathered DTensor on dp_mesh to 1D DTensor on tp_mesh
@@ -115,8 +113,8 @@ class ReplicateComputation(torch.nn.Module):
         else:
             output = x.redistribute(
                 placements=self.compute_placements,
-                # forward_dtype=self.param_dtype,
-                # backward_dtype=self.reduce_dtype,
+                forward_dtype=self.param_dtype,
+                backward_dtype=self.reduce_dtype,
             ).to_local(grad_placements=self.grad_placements)
 
         return output

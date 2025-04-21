@@ -26,8 +26,8 @@ from triton.runtime import driver  # @manual
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from tma_autotuning import (
-    ALIGN_SIZE_M,
     _NV_CONFIGS,
+    ALIGN_SIZE_M,
     CudaUtils,
     early_config_prune,
     TmaDescriptorHelper,

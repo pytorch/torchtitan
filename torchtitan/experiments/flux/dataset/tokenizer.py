@@ -23,20 +23,20 @@ class FluxTokenizer(Tokenizer):
 
     """
 
-    def __init__(self, model_path: str = "t5-small", max_length: int = 77):
+    def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
         super().__init__()
         self._n_words = 8  # TODO(jianiw): check
         self._max_length = max_length
 
-        self.is_clip = model_path.startswith("openai")
+        self.is_clip = "clip" in model_path.lower()
 
         if self.is_clip:
             self._tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(
-                model_path, max_length=max_length
+                model_path, max_length=max_length, **hf_kwargs
             )
         else:
             self._tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
-                model_path, max_length=max_length
+                model_path, max_length=max_length, **hf_kwargs
             )
 
     def encode(

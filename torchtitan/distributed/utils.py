@@ -17,28 +17,51 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.ft import ft_clip_grad_norm_util, ft_dist_reduce
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 
-def _dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
-    # Remove FT replicate dimension if it exists.
-    x, reduceOp, mesh = ft_dist_reduce(x, reduceOp, mesh)
+def _dist_reduce(
+    x: torch.Tensor,
+    reduceOp: str,
+    mesh: DeviceMesh,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> float:
+    """Perform distributed reduction on a tensor.
 
+    Args:
+        x (torch.Tensor): Input tensor.
+        reduceOp (str): Reduce operation to perform.
+        mesh (DeviceMesh): Device mesh to use for reduction.
+        extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
+            Defaults to None. If provided, this all_reduce will be called for the extra
+            process group, and then the result will be all_reduced for the mesh.
+    """
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
         x = x.full_tensor()
+
+    if extra_pg is not None:
+        x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
+
     assert x.numel() == 1  # required by `.item()`
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
 
-def dist_max(x: torch.Tensor, mesh: DeviceMesh) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh)
+def dist_max(
+    x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
+) -> float:
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
+    )
 
 
-def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
-    return _dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh)
+def dist_mean(
+    x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
+) -> float:
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
+    )
 
 
 def set_determinism(
@@ -46,10 +69,12 @@ def set_determinism(
     device: torch.device,
     seed: int | None = None,
     deterministic: bool = False,
+    distinct_seed_mesh_dim: str = "pp",
 ) -> None:
     """
-    Set the same DTensor manual seed for all ranks within the same DTensor SPMD group, but different
-    seeds across PP groups (if applicable).
+    Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
+    across dimension denoted by `distinct_seed_mesh_dim`. An example use case is pipeline parallelism,
+    where we want to have the same seed across SPMD groups, but different seeds across PP groups.
 
     Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
     and DTensor manages its own RNG tracker, but we could extend to support both if needed.
@@ -81,22 +106,31 @@ def set_determinism(
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
 
+    # Set distinct seed for each rank in mesh dimensions, with dimension name provdied by `distinct_seed_mesh_dim`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
-    if c10d.get_world_size() > 1 and "pp" in world_mesh.mesh_dim_names:
-        pp_mesh = world_mesh["pp"]
-        seed += pp_mesh.get_local_rank()
+    # TODO(jianiw): We could further extend this to support mutiple distinct dimensions instead of just one.
+    if (
+        c10d.get_world_size() > 1
+        and distinct_seed_mesh_dim in world_mesh.mesh_dim_names
+    ):
+        distinct_mesh = world_mesh[distinct_seed_mesh_dim]
+        seed += distinct_mesh.get_local_rank()
         seed %= 2**64
 
         logger.debug(
-            f"PP rank {pp_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"{distinct_seed_mesh_dim} rank {distinct_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
-        spmd_mesh_dims = list(
-            filter(lambda name: name != "pp", world_mesh.mesh_dim_names)
+        duplicate_seed_mesh = list(
+            filter(
+                lambda name: name != distinct_seed_mesh_dim, world_mesh.mesh_dim_names
+            )
         )
-        spmd_mesh = world_mesh[spmd_mesh_dims] if len(spmd_mesh_dims) else None
+        duplicate_seed_mesh = (
+            world_mesh[duplicate_seed_mesh] if len(duplicate_seed_mesh) else None
+        )
     else:
-        spmd_mesh = world_mesh
+        duplicate_seed_mesh = world_mesh
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
@@ -106,8 +140,8 @@ def set_determinism(
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
-    if spmd_mesh and spmd_mesh.get_coordinate() is not None:
-        torch.distributed.tensor._random.manual_seed(seed, spmd_mesh)
+    if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
+        torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
 def create_context_parallel_ctx(
@@ -207,11 +241,6 @@ def init_distributed(job_config):
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
-    # to mitigate the memory issue that collectives using
-    # async_op=True hold memory longer than they should
-    # such as those in tensor parallelism
-    os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
-
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(job_config),
         timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
@@ -295,8 +324,6 @@ def clip_grad_norm_(
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
 
-        # Remove FT replicate dimension if it exists.
-        total_norm = ft_clip_grad_norm_util(total_norm)
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:

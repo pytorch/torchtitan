@@ -6,8 +6,8 @@
 
 import torch
 import unittest
-from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader, DATASETS, DatasetConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 from datasets import load_dataset
 
@@ -57,8 +57,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
         tokenizer = TikTokenizer("./tests/assets/test_tiktoken.model")
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--training.dataset",
                 dataset_name,

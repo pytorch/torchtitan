@@ -8,13 +8,13 @@
 from functools import partial
 from typing import Optional, Tuple
 
+import torch
 import torch.nn as nn
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
     distribute_tensor,
     DTensor,
-    Partial,
     Replicate,
     Shard,
 )
@@ -22,7 +22,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
 
-# implementation of Tensor Parallel on the non-shared experts in MoE
+# implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
     def __init__(
         self,
@@ -32,33 +32,31 @@ class TensorParallel(ParallelStyle):
         use_local_output: bool = True,
     ):
         super().__init__()
-        self.input_layouts = input_layouts or (Replicate(), None)
-        self.output_layout = output_layout or Partial()
-        self.desired_input_layouts = (Replicate(), None)
+        self.input_layouts = input_layouts or (Replicate(), Replicate())
+        self.output_layout = output_layout or Replicate()
+        self.desired_input_layouts = (Replicate(), Replicate())
         self.use_local_output = use_local_output
 
     @staticmethod
     def _prepare_input_fn(
         input_layouts, desired_input_layouts, mod, inputs, device_mesh
     ):
-        # TODO: figure out dynamo support for instance method and switch this to instance method
-
+        prepared_inputs = []
         # annotate module input placements/sharding with input_layouts
-        input_tensor, input_layout, desired_input_layout = (
-            inputs[0],
-            input_layouts[0],
-            desired_input_layouts[0],
-        )
-        if not isinstance(input_tensor, DTensor):
-            input_tensor = DTensor.from_local(
-                input_tensor, device_mesh, (input_layout,), run_check=False
-            )
-
-        if input_layouts != desired_input_layouts:
-            input_tensor = input_tensor.redistribute(
-                placements=(desired_input_layout,), async_op=True
-            )
-        return (input_tensor, *inputs[1:])
+        for inp, input_layout, desired_input_layout in zip(
+            inputs, input_layouts, desired_input_layouts
+        ):
+            if isinstance(inp, torch.Tensor):
+                if not isinstance(inp, DTensor):
+                    inp = DTensor.from_local(
+                        inp, device_mesh, (input_layout,), run_check=False
+                    )
+                if input_layout != desired_input_layout:
+                    inp = inp.redistribute(
+                        placements=(desired_input_layout,), async_op=True
+                    )
+            prepared_inputs.append(inp)
+        return tuple(prepared_inputs)
 
     def _partition_fn(self, name, module, device_mesh):
         module.register_parameter(

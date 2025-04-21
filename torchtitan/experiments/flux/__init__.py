@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
@@ -29,7 +30,7 @@ flux_configs = {
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
-        context_in_dim=512,
+        context_in_dim=4096,
         hidden_size=3072,
         mlp_ratio=4.0,
         num_heads=24,
@@ -38,7 +39,6 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        guidance_embed=True,
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -64,7 +64,6 @@ flux_configs = {
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        guidance_embed=False,
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,
@@ -81,16 +80,15 @@ flux_configs = {
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
-        context_in_dim=512,
-        hidden_size=512,
+        context_in_dim=4096,
+        hidden_size=3072,
         mlp_ratio=4.0,
-        num_heads=4,
+        num_heads=24,
         depth=2,
         depth_single_blocks=2,
         axes_dim=(16, 56, 56),
         theta=10_000,
         qkv_bias=True,
-        guidance_embed=True,
         autoencoder_params=AutoEncoderParams(
             resolution=256,
             in_channels=3,

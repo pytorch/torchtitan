@@ -28,10 +28,10 @@ def read_weights_from_json(file_path: str) -> Optional[Dict[str, str]]:
         if "weight_map" in data and isinstance(data["weight_map"], dict):
             return data["weight_map"]
         else:
-            logger.info("No 'weight_map' dictionary found in the JSON file.")
+            logger.error("No 'weight_map' dictionary found in the JSON file.")
             return None
     except (json.JSONDecodeError, Exception) as e:
-        logger.info(f"An error occurred while reading the JSON file: {str(e)}")
+        logger.error(f"An error occurred while reading the JSON file: {str(e)}")
         return None
 
 
@@ -66,7 +66,7 @@ def get_needed_files(
             raise ValueError(
                 f"Parameter {param} not found in weight map, please check..."
             )
-    logger.info(f"Needed files: {needed_files}")
+    logger.debug(f"Needed files: {needed_files}")
     return needed_files
 
 
@@ -77,7 +77,7 @@ def load_safetensor_file(
     with safe_open(full_path, framework="pt", device=device) as f:
         for k in f.keys():
             tensors[k] = f.get_tensor(k)
-    logger.info(f"Loaded {len(tensors)} tensors from {full_path}")
+    logger.debug(f"Loaded {len(tensors)} tensors from {full_path}")
     return tensors
 
 
@@ -130,7 +130,7 @@ def load_safetensor_weights(
         )
 
     model.load_state_dict(model_state_dict, strict=False, assign=True)
-    logger.info(f"Successfully loaded {len(updated_states)} weights into model")
+    logger.debug(f"Successfully loaded {len(updated_states)} weights into model")
 
 
 def load_weights_from_hf(

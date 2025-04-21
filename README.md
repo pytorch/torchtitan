@@ -2,32 +2,47 @@
 
 # torchtitan
 
-#### A PyTorch native library for large-scale model training
+#### A PyTorch native platform for training generative AI models
 
 [![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
-[![docs](https://img.shields.io/badge/docs-latest-blue.svg)](docs/)
+[![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
 
 </div>
 
-`torchtitan` is currently in a pre-release state and under extensive development. Currently we showcase pre-training **Llama 3.1** LLMs of various sizes from scratch. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
+`torchtitan` is currently in a pre-release state and under extensive development. We showcase training Llama 3.1 LLMs at scale, and are working on other types of generative AI models, including LLMs with MoE architectures, multimodal LLMs, and diffusion models, in the [`experiments`](torchtitan/experiments) folder.
+To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
+
+
+## Latest News
+- [2025/04] Our paper has been accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620). The poster will be presented on Friday April 25th.
+- [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
+- [2025/04] Training the diffusion model [FLUX](torchtitan/experiments/flux/) with FSDP/HSDP is available as an experiment.
+- [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
+- [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
+- [2024/11] [Presentation](https://www.alluxio.io/videos/ai-ml-infra-meetup-torchtitan-one-stop-pytorch-native-solution-for-production-ready-llm-pre-training) at an AI/ML Infra Meetup.
+- [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
+- [2024/04] [Intro video](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE) - learn more about `torchtitan` in under 4 minutes.
+
 
 ## Overview
 
-`torchtitan` is a proof-of-concept for large-scale LLM training using native PyTorch. It is (and will continue to be) a repo to showcase PyTorch's latest distributed training features in a clean, minimal codebase. `torchtitan` is complementary to and not a replacement for any of the great large-scale LLM training codebases such as Megatron, MegaBlocks, LLM Foundry, DeepSpeed, etc. Instead, we hope that the features showcased in `torchtitan` will be adopted by these codebases quickly. `torchtitan` is unlikely to ever grow a large community around it.
+`torchtitan` is a PyTorch native platform designed for **rapid experimentation and large-scale training** of generative AI models. As a minimal clean-room implementation of PyTorch native scaling techniques, `torchtitan` provides a flexible foundation for developers to build upon. With `torchtitan` [extension points](docs/extension.md), one can easily create custom extensions tailored to specific needs.
 
-Our guiding principles when building `torchtitan`:
+Our mission is to accelerate innovation in the field of generative AI by empowering researchers and developers to explore new modeling architectures and infrastructure techniques.
 
+The guiding principles when building `torchtitan`
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code when applying multi-dimensional parallelism.
-* Modular components instead of a monolithic codebase.
-* Get started in minutes, not hours!
+* Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
-### Intro video - learn more about `torchtitan` in under 4 mins
+`torchtitan` has been showcasing PyTorch's latest distributed training features, via pretraining Llama 3.1 LLMs of various sizes.
+To accelerate contributions to and innovations around torchtitan, we are hosting a new [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
 
-[![Welcome to torchtitan!](assets/images/titan_play_video.png)](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE "Welcome to torchtitan!")
+
+## Llama 3.1 pretraining
 
 ### Key features available
 
@@ -37,7 +52,7 @@ Our guiding principles when building `torchtitan`:
    - [Pipeline Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-training-with-zero-bubble-pipeline-parallelism/214420)
    - [Context Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-breaking-barriers-training-long-context-llms-with-1m-sequence-length-in-pytorch-using-context-parallel/215082)
 2. [Meta device](https://pytorch.org/docs/stable/meta.html) initialization
-3. Selective (layer or operator) activation checkpointing
+3. Selective (layer or operator) and full activation checkpointing
 4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
@@ -115,20 +130,23 @@ srun torchrun --nnodes 2
 
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
+
 ## Citation
 
-We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques:  [TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://arxiv.org/abs/2410.06511).
+We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
+
+[TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://openreview.net/forum?id=SFN6Wm7YBI)
 ```
-@misc{torchtitan,
-      title={TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training},
-      author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
-      year={2024},
-      eprint={2410.06511},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2410.06511},
+@inproceedings{
+   liang2025torchtitan,
+   title={TorchTitan: One-stop PyTorch native solution for production ready {LLM} pretraining},
+   author={Wanchao Liang and Tianyu Liu and Less Wright and Will Constable and Andrew Gu and Chien-Chin Huang and Iris Zhang and Wei Feng and Howard Huang and Junjie Wang and Sanket Purandare and Gokul Nadathur and Stratos Idreos},
+   booktitle={The Thirteenth International Conference on Learning Representations},
+   year={2025},
+   url={https://openreview.net/forum?id=SFN6Wm7YBI}
 }
 ```
+
 
 ## License
 
