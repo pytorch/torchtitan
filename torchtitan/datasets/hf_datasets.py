@@ -44,16 +44,6 @@ DATASETS = {
         loader=_load_c4_dataset,
         text_processor=_process_c4_text,
     ),
-    "c4_test": DatasetConfig(
-        path="tests/assets/c4_test",
-        loader=lambda path: load_dataset(path, split="train"),
-        text_processor=_process_c4_text,
-    ),
-    "c4_test_streaming": DatasetConfig(
-        path="tests/assets/c4_test",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
-        text_processor=_process_c4_text,
-    ),
 }
 
 
@@ -101,8 +91,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_tokens: list[int] = []
-        self._data_state_dict_loaded = False
+        self._token_buffer: list[int] = []
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset):
@@ -110,11 +99,6 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 return iter([])
             else:
                 return iter(self._data.skip(self._sample_idx))
-        elif not self._data_state_dict_loaded:  # backward compatibility
-            it = iter(self._data)
-            for _ in range(self._sample_idx):
-                next(it)
-            return it
 
         return iter(self._data)
 
@@ -126,13 +110,13 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
-                self._all_tokens.extend(sample_tokens)
+                self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
-                while len(self._all_tokens) >= max_buffer_token_len:
-                    x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
+                while len(self._token_buffer) >= max_buffer_token_len:
+                    x = torch.LongTensor(self._token_buffer[:max_buffer_token_len])
                     # update tokens to the remaining tokens
-                    self._all_tokens = self._all_tokens[max_buffer_token_len:]
+                    self._token_buffer = self._token_buffer[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
                     yield {"input": input}, label
@@ -144,25 +128,25 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 # Reset offset for the next iteration
                 self._sample_idx = 0
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                if not isinstance(self._data, Dataset):
+                    if hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
+                        self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
-        self._all_tokens = state_dict["token_buffer"]
+        self._token_buffer = state_dict["token_buffer"]
 
-        if isinstance(self._data, IterableDataset):
-            if "data" in state_dict:  # backward compatibility
-                self._data.load_state_dict(state_dict["data"])
-                self._data_state_dict_loaded = True
-            else:
-                self._data_state_dict_loaded = False
+        if isinstance(self._data, Dataset):
+            self._sample_idx = state_dict["sample_idx"]
+        else:
+            assert "data" in state_dict
+            self._data.load_state_dict(state_dict["data"])
 
     def state_dict(self):
-        _state_dict = {
-            "token_buffer": self._all_tokens,
-            "sample_idx": self._sample_idx,
-        }
+        _state_dict = {"token_buffer": self._token_buffer}
 
-        if isinstance(self._data, IterableDataset):
+        if isinstance(self._data, Dataset):
+            _state_dict["sample_idx"] = self._sample_idx
+        else:
             _state_dict["data"] = self._data.state_dict()
 
         return _state_dict
