@@ -595,7 +595,7 @@ class MoE(nn.Module):
             token_indices,
             sorted_tokens_shape,
             tokens_per_expert,
-        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
 
         # all to all
         # This part exchange the information about the number of tokens send and
@@ -701,7 +701,7 @@ class MoE(nn.Module):
         )
         return final_out
 
-    def prepare_expert_routing(self, x, topk_ids, topk_weights):
+    def sort_tokens(self, x, topk_ids, topk_weights):
         # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
         # Since this is an "aritificial" index creation (final outcome being
@@ -728,7 +728,7 @@ class MoE(nn.Module):
             token_indices,
             sorted_tokens_shape,
             tokens_per_expert,
-        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
 
         # all to all
         # This part exchange the information about the number of tokens send and
