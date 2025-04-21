@@ -462,7 +462,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method, "torch" or "torchao" or "ds"
-    group_mm = "ds"  # torch"
+    group_mm = "torchao"  # torch"
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -820,6 +820,14 @@ class MoE(nn.Module):
                     out_dtype=torch.bfloat16,
                 )
 
+            # Prepare buffer for tokens processed by experts
+            # Take necessary space from `token_gather_buf` symm mem because we are
+            # going to send them out after expert processing
+            processed_tokens = self.get_gather_buf()
+
+            # Move into Symmetric Memory for the return shuffle
+            processed_tokens[permuted_indices] = hidden_outputs
+
         # -------- end bf16 group gemm ------
         elif self.group_mm == "ds":
 
@@ -886,16 +894,16 @@ class MoE(nn.Module):
 
             contig_tokens[: m_offsets[-1]] = down_proj_out
 
+            # Prepare buffer for tokens processed by experts
+            # Take necessary space from `token_gather_buf` symm mem because we are
+            # going to send them out after expert processing
+            processed_tokens = self.get_gather_buf()
+
+            # Move into Symmetric Memory for the return shuffle
+
+            processed_tokens[permuted_indices] = contig_tokens  # down_proj_out
+
         # -------- end ds group gemm ------
-
-        # Prepare buffer for tokens processed by experts
-        # Take necessary space from `token_gather_buf` symm mem because we are
-        # going to send them out after expert processing
-        processed_tokens = self.get_gather_buf()
-
-        # Move into Symmetric Memory for the return shuffle
-
-        processed_tokens[permuted_indices] = contig_tokens  # down_proj_out
 
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
@@ -904,6 +912,7 @@ class MoE(nn.Module):
             output_splits,
             self.ep_group,
         )
+
         returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
 
         output_tokens = torch.empty_like(returned_tokens)
