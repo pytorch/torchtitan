@@ -461,8 +461,8 @@ class MoE(nn.Module):
     # 1. "torch_all_to_all"
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
-    # Group GEMM method, "torch" or "torchao" or "ds"
-    group_mm = "torchao"  # torch"
+    # Group GEMM method
+    group_mm = "ds"  # [ torch, torchao, ds (ds==fp8) ]
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -519,6 +519,14 @@ class MoE(nn.Module):
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(combined_weight))
+        if self.group_mm == "ds":
+            fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weight)
+            self.register_parameter(
+                f"{submod_name}_fp8", nn.Parameter(fp8, requires_grad=False)
+            )
+            self.register_parameter(
+                f"{submod_name}_scales", nn.Parameter(scales, requires_grad=False)
+            )
 
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
@@ -838,8 +846,16 @@ class MoE(nn.Module):
             # get expert weights for the 3 linear projections
             # TODO - this can be done just once...
             gate_proj_weight = self.get_parameter("gate_proj_weight")
+            gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
+            gate_proj_scales = self.get_parameter("gate_proj_scales")
+
             up_proj_weight = self.get_parameter("up_proj_weight")
+            up_proj_weight_fp8 = self.get_parameter("up_proj_fp8")
+            up_proj_scales = self.get_parameter("up_proj_scales")
+
             down_proj_weight = self.get_parameter("down_proj_weight")
+            down_proj_weight_fp8 = self.get_parameter("down_proj_fp8")
+            down_proj_scales = self.get_parameter("down_proj_scales")
 
             # Run the first grouped GEMM
             m_actual_tokens = valid_tokens.shape[0]
@@ -854,7 +870,10 @@ class MoE(nn.Module):
 
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 dsgemm_utils.prepare_fp8_input(valid_tokens),
-                dsgemm_utils.prepare_fp8_weight(gate_proj_weight),
+                (
+                    gate_proj_weight_fp8,
+                    gate_proj_scales,
+                ),
                 gate_proj_out,
                 m_indices,
             )
@@ -867,7 +886,7 @@ class MoE(nn.Module):
 
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 dsgemm_utils.prepare_fp8_input(valid_tokens),
-                dsgemm_utils.prepare_fp8_weight(up_proj_weight),
+                (up_proj_weight_fp8, up_proj_scales),
                 up_proj_out,
                 m_indices,
             )
@@ -887,7 +906,7 @@ class MoE(nn.Module):
             # 3rd GEMM
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 dsgemm_utils.prepare_fp8_input(hidden_states),
-                dsgemm_utils.prepare_fp8_weight(down_proj_weight),
+                (down_proj_weight_fp8, down_proj_scales),
                 down_proj_out,
                 m_indices,
             )
