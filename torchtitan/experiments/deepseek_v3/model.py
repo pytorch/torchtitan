@@ -844,7 +844,7 @@ class MoE(nn.Module):
             m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
 
             # get expert weights for the 3 linear projections
-            # TODO - this can be done just once...
+
             gate_proj_weight = self.get_parameter("gate_proj_weight")
             gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
             gate_proj_scales = self.get_parameter("gate_proj_scales")

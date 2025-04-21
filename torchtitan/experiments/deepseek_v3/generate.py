@@ -188,7 +188,8 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 50,
+    n_tokens: int = 300,
+    use_timer: bool = True,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -200,6 +201,12 @@ def generate(
     next_idx = x.shape[-1]
     x = torch.cat([x, torch.zeros(x.shape[0], n_tokens, dtype=torch.int64)], dim=-1)
     x = x.to(device)
+
+    # Setup timer if requested
+    if use_timer:
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
 
     for _ in range(n_tokens):
         if dist_config.pp_size > 1:
@@ -234,6 +241,15 @@ def generate(
             x[:, next_idx] = next_token
             next_idx += 1
 
+    # Record end time and calculate elapsed time
+    if use_timer:
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+        if rank == 0:
+            print(f"Generation time: {elapsed_time:.2f} ms")
+            print(f"Tokens per second: {n_tokens / (elapsed_time / 1000):.2f}")
+
     if rank == 0:
         colored_output = decode(tokenizer, x)
         print(f"Without CUDA Graph:\n{colored_output}")
@@ -246,6 +262,7 @@ def generate_with_cuda_graph(
     dist_config,
     messages: list[dict],
     n_tokens: int = 10,
+    use_timer: bool = False,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -260,6 +277,12 @@ def generate_with_cuda_graph(
 
     torch.cuda.synchronize()
 
+    # Setup timer if requested
+    if use_timer:
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
     # Create CUDA graph
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
@@ -271,6 +294,17 @@ def generate_with_cuda_graph(
         next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
         x[:, next_idx] = next_token
         next_idx += 1
+
+    # Record end time and calculate elapsed time
+    if use_timer:
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+        if rank == 0:
+            print(f"CUDA Graph generation time: {elapsed_time:.2f} ms")
+            print(
+                f"CUDA Graph tokens per second: {n_tokens / (elapsed_time / 1000):.2f}"
+            )
 
     if rank == 0:
         colored_output = decode(tokenizer, x)
@@ -300,7 +334,7 @@ if __name__ == "__main__":
     ]
 
     generate(model, pp_schedule, tokenizer, dist_config, messages)
-    generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+    # generate_with_cuda_graph(model, tokenizer, dist_config, messages)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
