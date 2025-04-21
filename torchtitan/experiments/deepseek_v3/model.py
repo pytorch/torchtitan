@@ -412,7 +412,9 @@ class MoEGate(nn.Module):
             )  # [n, n_group]
             group_idx = torch.topk(
                 group_scores, k=self.topk_group, dim=-1, sorted=False
-            )[1]  # [n, top_k_group]
+            )[
+                1
+            ]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
             score_mask = (
@@ -1156,9 +1158,9 @@ class DeepseekModel(torch.nn.Module):
         self.vocab_size = config.vocab_size
 
         # Creating model parts related to my stage
-        assert config.stage_idx < config.num_stages, (
-            f"Stage {config.stage_idx} is not in the model"
-        )
+        assert (
+            config.stage_idx < config.num_stages
+        ), f"Stage {config.stage_idx} is not in the model"
         print(f"Creating model stage {config.stage_idx} of {config.num_stages}")
 
         self.embed_tokens = (
