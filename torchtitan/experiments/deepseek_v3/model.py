@@ -39,7 +39,6 @@ import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
-from logging_utils import setup_logger
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
@@ -50,8 +49,6 @@ from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
     grouped_gemm_forward,
 )
-
-logger = setup_logger(name="moe")
 
 
 # Get model parallel subgroup by name:
@@ -471,8 +468,6 @@ class MoE(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        self.rank = torch.distributed.get_rank()
-
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
             raise ValueError(
@@ -599,9 +594,25 @@ class MoE(nn.Module):
             sorted_tokens,
             token_indices,
             sorted_tokens_shape,
-            input_splits,
-            tokens_per_expert_group,
+            tokens_per_expert,
         ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
+
+        # all to all
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+
+        # Sum the tokens over local experts, then we get tokens per EP rank,
+        # which is the input splits
+        with torch.no_grad():
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
 
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
@@ -706,14 +717,28 @@ class MoE(nn.Module):
 
             sorted_tokens_shape = token_indices.shape + x.shape[1:]
 
-            # This part exchange the information about the number of tokens send and
-            # received by each expert. We can understand this information as "side
-            # band", which is not part of the actual data. Thus no gradient is
-            # needed.
+        sorted_tokens = x[token_indices // topk_ids.shape[1]]
+        # assert sorted_tokens.shape == sorted_tokens_shape
 
-            # Sum the tokens over local experts, then we get tokens per EP rank,
-            # which is the input splits
+        return (sorted_tokens, token_indices, sorted_tokens_shape, tokens_per_expert)
 
+    def moe_on_device(self, x, topk_ids, topk_weight):
+        (
+            sorted_tokens,
+            token_indices,
+            sorted_tokens_shape,
+            tokens_per_expert,
+        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
+
+        # all to all
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+
+        # Sum the tokens over local experts, then we get tokens per EP rank,
+        # which is the input splits
+        with torch.no_grad():
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
@@ -721,26 +746,6 @@ class MoE(nn.Module):
                 tokens_per_expert_group, tokens_per_expert, group=self.ep_group
             )
             input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-
-        sorted_tokens = x[token_indices // topk_ids.shape[1]]
-        # assert sorted_tokens.shape == sorted_tokens_shape
-
-        return (
-            sorted_tokens,
-            token_indices,
-            sorted_tokens_shape,
-            input_splits,
-            tokens_per_expert_group,
-        )
-
-    def moe_on_device(self, x, topk_ids, topk_weight):
-        (
-            sorted_tokens,
-            token_indices,
-            sorted_tokens_shape,
-            input_splits,
-            tokens_per_expert_group,
-        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
 
         # Move input to the `token_send_buf` symm mem
         token_send_buf = self.get_send_buf()
