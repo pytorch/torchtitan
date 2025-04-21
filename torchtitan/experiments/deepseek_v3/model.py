@@ -25,7 +25,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch DeepSeek model."""
+"""PyTorch DeepSeek model."""
+
 import math
 from typing import Optional, Tuple
 
@@ -37,6 +38,8 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
+
+from logging_utils import setup_logger
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
@@ -47,6 +50,9 @@ from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
     grouped_gemm_forward,
 )
+
+logger = setup_logger(name="moe")
+
 
 # Get model parallel subgroup by name:
 # e.g. "pp", "ep", None
@@ -406,9 +412,7 @@ class MoEGate(nn.Module):
             )  # [n, n_group]
             group_idx = torch.topk(
                 group_scores, k=self.topk_group, dim=-1, sorted=False
-            )[
-                1
-            ]  # [n, top_k_group]
+            )[1]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
             score_mask = (
@@ -464,6 +468,8 @@ class MoE(nn.Module):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
+
+        self.rank = torch.distributed.get_rank()
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -587,43 +593,19 @@ class MoE(nn.Module):
         return y
 
     def moe_forward(self, x, topk_ids, topk_weight):
-        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
-        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
-        # Since this is an "aritificial" index creation (final outcome being
-        # `idxs`), we don't need gradients here.
-        with torch.no_grad():
-            # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
-            # Fill 1 to the selected experts
-            cnts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = cnts.sum(dim=0)
-            # Token indices for each expert
-            idxs = topk_ids.view(-1).argsort()
-            sorted_tokens_shape = idxs.shape + x.shape[1:]
-
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        assert sorted_tokens.shape == sorted_tokens_shape
-
-        # This part exchange the information about the number of tokens send and
-        # received by each expert. We can understand this information as "side
-        # band", which is not part of the actual data. Thus no gradient is
-        # needed.
-        with torch.no_grad():
-            # Sum the tokens over local experts, then we get tokens per EP rank,
-            # which is the input splits
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(
-                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
-            )
-            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+        (
+            sorted_tokens,
+            token_indices,
+            sorted_tokens_shape,
+            input_splits,
+            tokens_per_expert_group,
+        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
 
         # DP to EP token shuffle. This part needs gradient.
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
             token_send_buf = self.get_send_buf()
-            token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+            token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
             token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
@@ -696,7 +678,7 @@ class MoE(nn.Module):
             )
 
         output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[idxs] = returned_tokens
+        output_tokens[token_indices] = returned_tokens
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)
             .type(topk_weight.dtype)
@@ -706,31 +688,30 @@ class MoE(nn.Module):
         )
         return final_out
 
-    def moe_on_device(self, x, topk_ids, topk_weight):
+    def prepare_expert_routing(self, x, topk_ids, topk_weights):
         # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
         # Since this is an "aritificial" index creation (final outcome being
         # `idxs`), we don't need gradients here.
         with torch.no_grad():
-            # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
-            # Fill 1 to the selected experts
-            cnts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = cnts.sum(dim=0)
-            # Token indices for each expert
-            idxs = topk_ids.view(-1).argsort()
-            sorted_tokens_shape = idxs.shape + x.shape[1:]
+            expert_counts = topk_ids.new_zeros(
+                (topk_ids.shape[0], self.config.n_routed_experts)
+            )
+            expert_counts.scatter_(1, topk_ids, 1)
+            tokens_per_expert = expert_counts.sum(dim=0)
 
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        assert sorted_tokens.shape == sorted_tokens_shape
+            token_indices = topk_ids.view(-1).argsort()
 
-        # This part exchange the information about the number of tokens send and
-        # received by each expert. We can understand this information as "side
-        # band", which is not part of the actual data. Thus no gradient is
-        # needed.
-        with torch.no_grad():
+            sorted_tokens_shape = token_indices.shape + x.shape[1:]
+
+            # This part exchange the information about the number of tokens send and
+            # received by each expert. We can understand this information as "side
+            # band", which is not part of the actual data. Thus no gradient is
+            # needed.
+
             # Sum the tokens over local experts, then we get tokens per EP rank,
             # which is the input splits
+
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
             )
@@ -739,9 +720,29 @@ class MoE(nn.Module):
             )
             input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
 
+        sorted_tokens = x[token_indices // topk_ids.shape[1]]
+        # assert sorted_tokens.shape == sorted_tokens_shape
+
+        return (
+            sorted_tokens,
+            token_indices,
+            sorted_tokens_shape,
+            input_splits,
+            tokens_per_expert_group,
+        )
+
+    def moe_on_device(self, x, topk_ids, topk_weight):
+        (
+            sorted_tokens,
+            token_indices,
+            sorted_tokens_shape,
+            input_splits,
+            tokens_per_expert_group,
+        ) = self.prepare_expert_routing(x, topk_ids, topk_weight)
+
         # Move input to the `token_send_buf` symm mem
         token_send_buf = self.get_send_buf()
-        token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
         # Note: `out=` avoids copy, but it is not differentiable
         # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
         token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
@@ -816,7 +817,7 @@ class MoE(nn.Module):
         returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
 
         output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[idxs] = returned_tokens
+        output_tokens[token_indices] = returned_tokens
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)
             .type(topk_weight.dtype)
@@ -1155,9 +1156,9 @@ class DeepseekModel(torch.nn.Module):
         self.vocab_size = config.vocab_size
 
         # Creating model parts related to my stage
-        assert (
-            config.stage_idx < config.num_stages
-        ), f"Stage {config.stage_idx} is not in the model"
+        assert config.stage_idx < config.num_stages, (
+            f"Stage {config.stage_idx} is not in the model"
+        )
         print(f"Creating model stage {config.stage_idx} of {config.num_stages}")
 
         self.embed_tokens = (
