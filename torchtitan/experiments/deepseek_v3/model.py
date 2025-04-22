@@ -868,8 +868,11 @@ class MoE(nn.Module):
                 dtype=contig_tokens.dtype,
             )
 
+            # gate and up input is the same
+            gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
+
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                dsgemm_utils.prepare_fp8_input(valid_tokens),
+                gate_up_input,
                 (
                     gate_proj_weight_fp8,
                     gate_proj_scales,
@@ -885,7 +888,7 @@ class MoE(nn.Module):
             )
 
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                dsgemm_utils.prepare_fp8_input(valid_tokens),
+                gate_up_input,
                 (up_proj_weight_fp8, up_proj_scales),
                 up_proj_out,
                 m_indices,
