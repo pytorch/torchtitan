@@ -11,12 +11,35 @@
 
 # A subset of functions (marked below) are directly copied over from DeepGemm testing and utils
 # in order to support grouped gemm creation and testing of our integration.
+# Please see their respective MIT license agreement.
 
 from typing import Any, Callable, cast, Dict, List, Optional, overload, Tuple, Union
 
 import torch
 
 _num_sms = None
+
+
+def compare_fp8_tensors(a: torch.Tensor, b: torch.Tensor) -> float:
+    """
+    Compare two FP8 tensors by converting them to float32 first.
+
+    Args:
+        a: First tensor (float8_e4m3fn)
+        b: Second tensor (float8_e4m3fn)
+
+    Returns:
+        Maximum absolute difference between tensors
+    """
+    # Convert to float32 before comparison
+    a_float = a.to(torch.float32)
+    b_float = b.to(torch.float32)
+
+    # Calculate difference
+    diff = torch.abs(a_float - b_float)
+
+    # Return maximum difference
+    return diff.max().item()
 
 
 def prepare_fp8_input(x):
@@ -154,6 +177,9 @@ def create_m_indices_from_sizes(m_sizes: torch.Tensor) -> torch.Tensor:
             offset += size_val
 
     return indices
+
+
+# ------ Quant kernel from DeepSeek: --------------------------
 
 
 # ----- Functions below are copied from DeepGeMM testing and utilities

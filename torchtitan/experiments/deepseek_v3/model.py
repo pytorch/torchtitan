@@ -39,7 +39,9 @@ try:
 except ImportError:
     DEEPGEMM_AVAILABLE = False
 
-import dsgemm_utils
+if DEEPGEMM_AVAILABLE:
+    import dsgemm_kernels
+    import dsgemm_utils
 
 import torch
 import torch.distributed as dist
@@ -483,6 +485,7 @@ class MoE(nn.Module):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
+        self.use_triton_quant = True
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -811,7 +814,12 @@ class MoE(nn.Module):
             hidden_size = self.get_parameter("down_proj_weight").shape[1]
 
             # Prepare input in FP8 format (shared by gate and up projections)
-            gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
+            if self.use_triton_quant:
+                gate_up_input = dsgemm_kernels.grid_stride_act_quant(
+                    valid_tokens
+                )  # dsgemm_kernels.activation_quant_triton(valid_tokens)
+            else:
+                gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
 
             # Allocate output buffers
             gate_proj_out = torch.empty(
@@ -848,8 +856,17 @@ class MoE(nn.Module):
             )
 
             # Run third GEMM (down projection)
+            if self.use_triton_quant:
+                hidden_states_quantized = dsgemm_kernels.grid_stride_act_quant(
+                    hidden_states
+                )  # activation_quant_triton(
+                # hidden_states
+                # )
+            else:
+                hidden_states_quantized = dsgemm_utils.prepare_fp8_input(hidden_states)
+
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                dsgemm_utils.prepare_fp8_input(hidden_states),
+                hidden_states_quantized,
                 (down_proj_weight_fp8, down_proj_scales),
                 down_proj_out,
                 m_indices,
