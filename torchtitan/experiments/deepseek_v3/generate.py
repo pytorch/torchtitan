@@ -126,7 +126,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 2048  # 16384
+    model_args.max_seq_len = 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -181,15 +181,51 @@ def decode(tokenizer, x):
     return colored_output
 
 
-@torch.inference_mode()
+def time_generation(func):
+    """Decorator to time generation functions and display timing and token per second results."""
+
+    @torch.inference_mode()
+    def wrapper(*args, use_timer=True, **kwargs):
+        rank = dist.get_rank()
+
+        # Setup timer if requested
+        if use_timer:
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+
+        # Call the original function
+        result = func(*args, **kwargs)
+
+        # Record end time and calculate elapsed time
+        if use_timer:
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time = start_event.elapsed_time(end_event)
+            n_tokens = kwargs.get("n_tokens", 200)
+
+            if rank == 0:
+                print(
+                    f"\nGeneration time: {color.yellow}{elapsed_time/1000:.2f} seconds{color.reset}"
+                )
+                print(
+                    f"Tokens per second: {color.green}{n_tokens / (elapsed_time / 1000):.2f}\n{color.reset}"
+                )
+
+        return result
+
+    return wrapper
+
+
+@time_generation
 def generate(
     model,
     pp_schedule,
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 250,
-    use_timer: bool = True,
+    n_tokens: int = 200,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -201,12 +237,6 @@ def generate(
     next_idx = x.shape[-1]
     x = torch.cat([x, torch.zeros(x.shape[0], n_tokens, dtype=torch.int64)], dim=-1)
     x = x.to(device)
-
-    # Setup timer if requested
-    if use_timer:
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
 
     for _ in range(n_tokens):
         if dist_config.pp_size > 1:
@@ -241,28 +271,18 @@ def generate(
             x[:, next_idx] = next_token
             next_idx += 1
 
-    # Record end time and calculate elapsed time
-    if use_timer:
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time = start_event.elapsed_time(end_event)
-        if rank == 0:
-            print(f"Generation time: {elapsed_time:.2f} ms")
-            print(f"Tokens per second: {n_tokens / (elapsed_time / 1000):.2f}")
-
     if rank == 0:
         colored_output = decode(tokenizer, x)
         print(f"Without CUDA Graph:\n{colored_output}")
 
 
-@torch.inference_mode()
+@time_generation
 def generate_with_cuda_graph(
     model,
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 250,
-    use_timer: bool = False,
+    n_tokens: int = 100,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -277,12 +297,6 @@ def generate_with_cuda_graph(
 
     torch.cuda.synchronize()
 
-    # Setup timer if requested
-    if use_timer:
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-
     # Create CUDA graph
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
@@ -294,17 +308,6 @@ def generate_with_cuda_graph(
         next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
         x[:, next_idx] = next_token
         next_idx += 1
-
-    # Record end time and calculate elapsed time
-    if use_timer:
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_time = start_event.elapsed_time(end_event)
-        if rank == 0:
-            print(f"CUDA Graph generation time: {elapsed_time:.2f} ms")
-            print(
-                f"CUDA Graph tokens per second: {n_tokens / (elapsed_time / 1000):.2f}"
-            )
 
     if rank == 0:
         colored_output = decode(tokenizer, x)
@@ -333,8 +336,8 @@ if __name__ == "__main__":
         {"role": "user", "content": user_prompt},
     ]
 
-    generate(model, pp_schedule, tokenizer, dist_config, messages)
-    # generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+    generate(model, pp_schedule, tokenizer, dist_config, messages, use_timer=True)
+    # generate_with_cuda_graph(model, tokenizer, dist_config, messages, use_timer=True)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")

@@ -462,7 +462,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "ds"  # ao"  # [ torch, torchao, ds (ds==fp8) ]
+    group_mm = "torch"  # ao"  # [ torch, torchao, ds (ds==fp8) ]
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -607,23 +607,13 @@ class MoE(nn.Module):
         return y
 
     def moe_forward(self, x, topk_ids, topk_weight):
-        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
-        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
-        # Since this is an "aritificial" index creation (final outcome being
-        # `idxs`), we don't need gradients here.
-        with torch.no_grad():
-            # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
-            # Fill 1 to the selected experts
-            cnts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = cnts.sum(dim=0)
-            # Token indices for each expert
-            idxs = topk_ids.view(-1).argsort()
-            sorted_tokens_shape = idxs.shape + x.shape[1:]
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
 
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        assert sorted_tokens.shape == sorted_tokens_shape
-
+        # all to all
         # This part exchange the information about the number of tokens send and
         # received by each expert. We can understand this information as "side
         # band", which is not part of the actual data. Thus no gradient is
@@ -643,7 +633,7 @@ class MoE(nn.Module):
         if self.shuffle_method == "symm_mem":
             # Move input to the `token_send_buf` symm mem
             token_send_buf = self.get_send_buf()
-            token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+            token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
             # Note: `out=` avoids copy, but it is not differentiable
             # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
             token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
@@ -706,7 +696,7 @@ class MoE(nn.Module):
                 output_splits,
                 self.ep_group,
             )
-            returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
+            returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
@@ -716,7 +706,7 @@ class MoE(nn.Module):
             )
 
         output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[idxs] = returned_tokens
+        output_tokens[token_indices] = returned_tokens
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)
             .type(topk_weight.dtype)
@@ -726,23 +716,36 @@ class MoE(nn.Module):
         )
         return final_out
 
-    """def moe_on_device(self, x, topk_ids, topk_weight):
+    def sort_tokens(self, x, topk_ids, topk_weights):
         # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
         # Since this is an "aritificial" index creation (final outcome being
         # `idxs`), we don't need gradients here.
+
         with torch.no_grad():
             # [seq_len, n_routed_experts]
-            cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
+            expert_counts = topk_ids.new_zeros(
+                (topk_ids.shape[0], self.config.n_routed_experts)
+            )
             # Fill 1 to the selected experts
-            cnts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = cnts.sum(dim=0)
+            expert_counts.scatter_(1, topk_ids, 1)
+            tokens_per_expert = expert_counts.sum(dim=0)
             # Token indices for each expert
-            idxs = topk_ids.view(-1).argsort()
-            sorted_tokens_shape = idxs.shape + x.shape[1:]
+            token_indices = topk_ids.view(-1).argsort()
 
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        assert sorted_tokens.shape == sorted_tokens_shape
+            sorted_tokens_shape = token_indices.shape + x.shape[1:]
+
+        sorted_tokens = x[token_indices // topk_ids.shape[1]]
+        # assert sorted_tokens.shape == sorted_tokens_shape
+
+        return (sorted_tokens, token_indices, tokens_per_expert)
+
+    def moe_on_device(self, x, topk_ids, topk_weight):
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
 
         # This part exchange the information about the number of tokens send and
         # received by each expert. We can understand this information as "side
@@ -761,7 +764,7 @@ class MoE(nn.Module):
 
         # Move input to the `token_send_buf` symm mem
         token_send_buf = self.get_send_buf()
-        token_send_buf[: idxs.shape[0]].copy_(sorted_tokens)
+        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
         # Note: `out=` avoids copy, but it is not differentiable
         # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
         token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
@@ -934,10 +937,11 @@ class MoE(nn.Module):
             self.ep_group,
         )
 
-        returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
+        returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
 
         output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[idxs] = returned_tokens
+        output_tokens[token_indices] = returned_tokens
+
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)
             .type(topk_weight.dtype)
@@ -947,142 +951,6 @@ class MoE(nn.Module):
         )
         # print(f"final_out: {final_out.shape}")  # final_out: torch.Size([71, 2048])
 
-        return final_out
-"""
-
-    def sort_tokens(self, x, topk_ids, topk_weights):
-        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
-        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
-        # Since this is an "aritificial" index creation (final outcome being
-        # `idxs`), we don't need gradients here.
-
-        with torch.no_grad():
-            # [seq_len, n_routed_experts]
-            expert_counts = topk_ids.new_zeros(
-                (topk_ids.shape[0], self.config.n_routed_experts)
-            )
-            # Fill 1 to the selected experts
-            expert_counts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = expert_counts.sum(dim=0)
-            # Token indices for each expert
-            token_indices = topk_ids.view(-1).argsort()
-
-            sorted_tokens_shape = token_indices.shape + x.shape[1:]
-
-        sorted_tokens = x[token_indices // topk_ids.shape[1]]
-        # assert sorted_tokens.shape == sorted_tokens_shape
-
-        return (sorted_tokens, token_indices, tokens_per_expert)
-
-    def moe_on_device(self, x, topk_ids, topk_weight):
-        (
-            sorted_tokens,
-            token_indices,
-            tokens_per_expert,
-        ) = self.sort_tokens(x, topk_ids, topk_weight)
-
-        # all to all
-        # This part exchange the information about the number of tokens send and
-        # received by each expert. We can understand this information as "side
-        # band", which is not part of the actual data. Thus no gradient is
-        # needed.
-
-        # Sum the tokens over local experts, then we get tokens per EP rank,
-        # which is the input splits
-        with torch.no_grad():
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(
-                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
-            )
-            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-
-        # Move input to the `token_send_buf` symm mem
-        token_send_buf = self.get_send_buf()
-        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
-        # Note: `out=` avoids copy, but it is not differentiable
-        # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
-        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
-            token_send_buf,
-            input_splits,
-            self.ep_group,
-        )
-
-        # We need to permute the received tokens so that tokens for the same expert are contiguous.
-        # This part prepares a 1D tensor `permuted_indices` for such permutation.
-        # This part doesn't need gradient.
-        with torch.no_grad():
-            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
-                tokens_per_expert_group,
-                self.experts_per_rank,
-                self.ep_size,
-                token_gather_buf.shape[0],
-                ALIGN_SIZE_M,
-            )
-
-        # Permute the received tokens so that tokens for the same expert are contiguous.
-        contig_tokens = token_gather_buf[permuted_indices]
-
-        # Run the first grouped GEMM
-        w1 = self.get_parameter("gate_proj_weight")
-        if self.group_mm == "torchao":
-            gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
-        else:  # "torch"
-            gate_proj = torch._grouped_mm(
-                contig_tokens, w1.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
-            )
-
-        # Run the second grouped GEMM
-        w3 = self.get_parameter("up_proj_weight")
-        if self.group_mm == "torchao":
-            up_proj = grouped_gemm_forward(contig_tokens, w3, m_sizes)
-        else:  # "torch"
-            up_proj = torch._grouped_mm(
-                contig_tokens, w3.transpose(-2, -1), m_offsets, out_dtype=torch.bfloat16
-            )
-
-        # Apply activation
-        hidden_outputs = MLP.act_fn(gate_proj) * up_proj
-
-        # Run the third grouped GEMM
-        w2 = self.get_parameter("down_proj_weight")
-        if self.group_mm == "torchao":
-            hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
-        else:  # "torch"
-            hidden_outputs = torch._grouped_mm(
-                hidden_outputs,
-                w2.transpose(-2, -1),
-                m_offsets,
-                out_dtype=torch.bfloat16,
-            )
-
-        # Prepare buffer for tokens processed by experts
-        # Take necessary space from `token_gather_buf` symm mem because we are
-        # going to send them out after expert processing
-        processed_tokens = self.get_gather_buf()
-
-        # Move into Symmetric Memory for the return shuffle
-        processed_tokens[permuted_indices] = hidden_outputs
-
-        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
-        # The input/output splits are just a reverse of the previous shuffle.
-        token_return_buf, _ = OnDeviceAllToAllV.apply(
-            processed_tokens,
-            output_splits,
-            self.ep_group,
-        )
-        returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
-
-        output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[token_indices] = returned_tokens
-        final_out = (
-            output_tokens.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(returned_tokens.dtype)
-        )
         return final_out
 
 
