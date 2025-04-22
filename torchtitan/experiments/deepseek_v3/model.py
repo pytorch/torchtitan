@@ -32,7 +32,12 @@ import math
 from re import X
 from typing import Optional, Tuple
 
-import deep_gemm
+try:
+    import deep_gemm
+
+    DEEPGEMM_AVAILABLE = True
+except ImportError:
+    DEEPGEMM_AVAILABLE = False
 
 import dsgemm_utils
 
@@ -462,7 +467,13 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "torch"  # ao"  # [ torch, torchao, ds (ds==fp8) ]
+    group_mm = "ds"  # ao"  # [ torch, torchao, ds (ds==fp8) ]
+
+    if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
+        print(
+            f"DeepGemm is not available on your system.  Please install and try again."
+        )
+        raise ValueError("Missing DeepGemm install")
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -529,7 +540,7 @@ class MoE(nn.Module):
 
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
-    # all_to_all APIs which requrie a GPU-to-CPU sync of the splits.  If a user
+    # all_to_all APIs which require a GPU-to-CPU sync of the splits.  If a user
     # calls this function, the `shuffle_method` would switch from
     # `torch_all_to_all` to `symm_mem`.
     def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
@@ -740,6 +751,114 @@ class MoE(nn.Module):
 
         return (sorted_tokens, token_indices, tokens_per_expert)
 
+    # ------- Group GEMM implementation ------
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets, permuted_indices):
+        if self.group_mm in ["torch", "torchao"]:
+            # Get weights
+            w_gate = self.get_parameter("gate_proj_weight")
+            w_up = self.get_parameter("up_proj_weight")
+            w_down = self.get_parameter("down_proj_weight")
+
+            # Run first two GEMMs (gate and up projections)
+            if self.group_mm == "torchao":
+                gate_proj = grouped_gemm_forward(contig_tokens, w_gate, m_sizes)
+                up_proj = grouped_gemm_forward(contig_tokens, w_up, m_sizes)
+            else:  # "torch"
+                gate_proj = torch._grouped_mm(
+                    contig_tokens,
+                    w_gate.transpose(-2, -1),
+                    m_offsets,
+                    out_dtype=torch.bfloat16,
+                )
+                up_proj = torch._grouped_mm(
+                    contig_tokens,
+                    w_up.transpose(-2, -1),
+                    m_offsets,
+                    out_dtype=torch.bfloat16,
+                )
+
+            # Apply activation
+            hidden_outputs = MLP.act_fn(gate_proj) * up_proj
+
+            # Run the third GEMM (down projection)
+            if self.group_mm == "torchao":
+                hidden_outputs = grouped_gemm_forward(hidden_outputs, w_down, m_sizes)
+            else:  # "torch"
+                hidden_outputs = torch._grouped_mm(
+                    hidden_outputs,
+                    w_down.transpose(-2, -1),
+                    m_offsets,
+                    out_dtype=torch.bfloat16,
+                )
+
+            return hidden_outputs
+
+        elif self.group_mm == "ds":
+            valid_tokens = contig_tokens[: m_offsets[-1]]
+            m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+
+            # Get expert weights for all projections
+            gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
+            gate_proj_scales = self.get_parameter("gate_proj_scales")
+            up_proj_weight_fp8 = self.get_parameter("up_proj_fp8")
+            up_proj_scales = self.get_parameter("up_proj_scales")
+            down_proj_weight_fp8 = self.get_parameter("down_proj_fp8")
+            down_proj_scales = self.get_parameter("down_proj_scales")
+
+            # Get dimensions
+            m_actual_tokens = valid_tokens.shape[0]
+            intermediate_size = self.get_parameter("gate_proj_weight").shape[1]
+            hidden_size = self.get_parameter("down_proj_weight").shape[1]
+
+            # Prepare input in FP8 format (shared by gate and up projections)
+            gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
+
+            # Allocate output buffers
+            gate_proj_out = torch.empty(
+                (m_actual_tokens, intermediate_size),
+                device=contig_tokens.device,
+                dtype=contig_tokens.dtype,
+            )
+            up_proj_out = torch.empty_like(gate_proj_out)
+
+            # Run first GEMM (gate projection)
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                gate_up_input,
+                (gate_proj_weight_fp8, gate_proj_scales),
+                gate_proj_out,
+                m_indices,
+            )
+
+            # Run second GEMM (up projection)
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                gate_up_input,
+                (up_proj_weight_fp8, up_proj_scales),
+                up_proj_out,
+                m_indices,
+            )
+
+            # Apply activation
+            hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
+
+            # Allocate output buffer for down projection
+            down_proj_out = torch.empty(
+                (m_actual_tokens, hidden_size),
+                device=contig_tokens.device,
+                dtype=contig_tokens.dtype,
+            )
+
+            # Run third GEMM (down projection)
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                dsgemm_utils.prepare_fp8_input(hidden_states),
+                (down_proj_weight_fp8, down_proj_scales),
+                down_proj_out,
+                m_indices,
+            )
+
+            # Copy results back to contig_tokens
+            contig_tokens[: m_offsets[-1]] = down_proj_out
+            return contig_tokens
+
     def moe_on_device(self, x, topk_ids, topk_weight):
         (
             sorted_tokens,
@@ -788,146 +907,16 @@ class MoE(nn.Module):
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
 
-        # ------- bf16 group gemm ------
-        if self.group_mm in ["torch", "torchao"]:
+        # group gemm
+        hidden_outputs = self._run_group_gemm(
+            contig_tokens, m_sizes, m_offsets, permuted_indices
+        )
 
-            # Run the first grouped GEMM
-            w1 = self.get_parameter("gate_proj_weight")
-            if self.group_mm == "torchao":
-                gate_proj = grouped_gemm_forward(contig_tokens, w1, m_sizes)
-            else:  # "torch"
-                gate_proj = torch._grouped_mm(
-                    contig_tokens,
-                    w1.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
+        # Prepare buffer for tokens processed by experts
+        processed_tokens = self.get_gather_buf()
 
-            # Run the second grouped GEMM
-            w3 = self.get_parameter("up_proj_weight")
-            if self.group_mm == "torchao":
-                up_proj = grouped_gemm_forward(contig_tokens, w3, m_sizes)
-            else:  # "torch"
-                up_proj = torch._grouped_mm(
-                    contig_tokens,
-                    w3.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
-
-            # Apply activation
-            hidden_outputs = MLP.act_fn(gate_proj) * up_proj
-
-            # Run the third grouped GEMM
-            w2 = self.get_parameter("down_proj_weight")
-            if self.group_mm == "torchao":
-                hidden_outputs = grouped_gemm_forward(hidden_outputs, w2, m_sizes)
-            else:  # "torch"
-                hidden_outputs = torch._grouped_mm(
-                    hidden_outputs,
-                    w2.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
-
-            # Prepare buffer for tokens processed by experts
-            # Take necessary space from `token_gather_buf` symm mem because we are
-            # going to send them out after expert processing
-            processed_tokens = self.get_gather_buf()
-
-            # Move into Symmetric Memory for the return shuffle
-            processed_tokens[permuted_indices] = hidden_outputs
-
-        # -------- end bf16 group gemm ------
-        elif self.group_mm == "ds":
-
-            valid_tokens = contig_tokens[: m_offsets[-1]]
-
-            m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
-
-            # get expert weights for the 3 linear projections
-
-            gate_proj_weight = self.get_parameter("gate_proj_weight")
-            gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
-            gate_proj_scales = self.get_parameter("gate_proj_scales")
-
-            up_proj_weight = self.get_parameter("up_proj_weight")
-            up_proj_weight_fp8 = self.get_parameter("up_proj_fp8")
-            up_proj_scales = self.get_parameter("up_proj_scales")
-
-            down_proj_weight = self.get_parameter("down_proj_weight")
-            down_proj_weight_fp8 = self.get_parameter("down_proj_fp8")
-            down_proj_scales = self.get_parameter("down_proj_scales")
-
-            # Run the first grouped GEMM
-            m_actual_tokens = valid_tokens.shape[0]
-            # output size for gate and up will match the intermediate size
-            intermediate_size = gate_proj_weight.shape[1]  # 3D weights
-
-            gate_proj_out = torch.empty(
-                (m_actual_tokens, intermediate_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
-            )
-
-            # gate and up input is the same
-            gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
-
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                gate_up_input,
-                (
-                    gate_proj_weight_fp8,
-                    gate_proj_scales,
-                ),
-                gate_proj_out,
-                m_indices,
-            )
-
-            up_proj_out = torch.empty(
-                (m_actual_tokens, intermediate_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
-            )
-
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                gate_up_input,
-                (up_proj_weight_fp8, up_proj_scales),
-                up_proj_out,
-                m_indices,
-            )
-
-            # apply Activation function (Silu(gate_proj_out) * up_proj_out))
-            hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
-
-            hidden_size = down_proj_weight.shape[1]
-
-            # output buffer for down projection
-            down_proj_out = torch.empty(
-                (m_actual_tokens, hidden_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
-            )
-
-            # 3rd GEMM
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                dsgemm_utils.prepare_fp8_input(hidden_states),
-                (down_proj_weight_fp8, down_proj_scales),
-                down_proj_out,
-                m_indices,
-            )
-
-            contig_tokens[: m_offsets[-1]] = down_proj_out
-
-            # Prepare buffer for tokens processed by experts
-            # Take necessary space from `token_gather_buf` symm mem because we are
-            # going to send them out after expert processing
-            processed_tokens = self.get_gather_buf()
-
-            # Move into Symmetric Memory for the return shuffle
-
-            processed_tokens[permuted_indices] = contig_tokens  # down_proj_out
-
-        # -------- end ds group gemm ------
+        # Move into Symmetric Memory for the return shuffle
+        processed_tokens[permuted_indices] = hidden_outputs
 
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
