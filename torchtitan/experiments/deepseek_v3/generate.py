@@ -188,7 +188,7 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 300,
+    n_tokens: int = 250,
     use_timer: bool = True,
 ):
     rank = dist.get_rank()
@@ -261,7 +261,7 @@ def generate_with_cuda_graph(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 10,
+    n_tokens: int = 250,
     use_timer: bool = False,
 ):
     rank = dist.get_rank()
