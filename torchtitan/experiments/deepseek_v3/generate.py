@@ -181,14 +181,51 @@ def decode(tokenizer, x):
     return colored_output
 
 
-@torch.inference_mode()
+def time_generation(func):
+    """Decorator to time generation functions and display timing and token per second results."""
+
+    @torch.inference_mode()
+    def wrapper(*args, use_timer=True, **kwargs):
+        rank = dist.get_rank()
+
+        # Setup timer if requested
+        if use_timer:
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+
+        # Call the original function
+        result = func(*args, **kwargs)
+
+        # Record end time and calculate elapsed time
+        if use_timer:
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time = start_event.elapsed_time(end_event)
+            n_tokens = kwargs.get("n_tokens", 200)
+
+            if rank == 0:
+                print(
+                    f"\nGeneration time: {color.yellow}{elapsed_time/1000:.2f} seconds{color.reset}"
+                )
+                print(
+                    f"Tokens per second: {color.green}{n_tokens / (elapsed_time / 1000):.2f}\n{color.reset}"
+                )
+
+        return result
+
+    return wrapper
+
+
+@time_generation
 def generate(
     model,
     pp_schedule,
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 50,
+    n_tokens: int = 200,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -239,13 +276,13 @@ def generate(
         print(f"Without CUDA Graph:\n{colored_output}")
 
 
-@torch.inference_mode()
+@time_generation
 def generate_with_cuda_graph(
     model,
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 10,
+    n_tokens: int = 100,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -299,8 +336,8 @@ if __name__ == "__main__":
         {"role": "user", "content": user_prompt},
     ]
 
-    generate(model, pp_schedule, tokenizer, dist_config, messages)
-    generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+    generate(model, pp_schedule, tokenizer, dist_config, messages, use_timer=True)
+    generate_with_cuda_graph(model, tokenizer, dist_config, messages, use_timer=True)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
