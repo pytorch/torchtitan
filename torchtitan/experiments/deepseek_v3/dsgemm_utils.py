@@ -1,4 +1,17 @@
-# code from DeepGEMM
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
+# This module contains code to support working with DeepGEMM:
+# DeepGEMM: clean and efficient FP8 GEMM kernels with fine-grained scaling
+# https://github.com/deepseek-ai/DeepGEMM
+
+# A subset of functions (marked below) are directly copied over from DeepGemm testing and utils
+# in order to support grouped gemm creation and testing of our integration.
+
 from typing import Any, Callable, cast, Dict, List, Optional, overload, Tuple, Union
 
 import torch
@@ -141,6 +154,10 @@ def create_m_indices_from_sizes(m_sizes: torch.Tensor) -> torch.Tensor:
             offset += size_val
 
     return indices
+
+
+# ----- Functions below are copied from DeepGeMM testing and utilities
+# https://github.com/deepseek-ai/DeepGEMM
 
 
 def get_m_indices(num_groups: int, m: int) -> torch.Tensor:
