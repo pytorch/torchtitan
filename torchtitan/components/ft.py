@@ -6,8 +6,9 @@
 
 import copy
 import importlib
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Optional
+from typing import ContextManager, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -21,6 +22,9 @@ from torchtitan.distributed import ParallelDims
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
+
+    if TYPE_CHECKING:
+        from torchft import local_sgd
 
     has_torchft = True
 else:
@@ -85,13 +89,16 @@ def init_ft_manager(job: JobConfig) -> FTManager:
 
     pg = ft.ProcessGroupNCCL()
 
+    # If the training method is specific, then the quorum should be synchronous
+    use_async_quorum = job.fault_tolerance.semi_sync_method is None
+
     return FTManager(
         ft.Manager(
             pg=pg,
             min_replica_size=job.fault_tolerance.min_replica_size,
             load_state_dict=None,
             state_dict=None,
-            use_async_quorum=True,
+            use_async_quorum=use_async_quorum,
             replica_id=f"torchtitan_ft_{job.fault_tolerance.replica_id}",
         ),
         group_size=job.fault_tolerance.group_size,
@@ -158,3 +165,50 @@ def ft_clip_grad_norm_util(total_norm: DTensor) -> torch.Tensor:
             return DTensor.from_local(local_tensor, mesh.mesh, placements)
 
     return total_norm
+
+
+def maybe_semi_sync_training(
+    config: JobConfig,
+    ft_manager: FTManager,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    sync_every: int,
+) -> ContextManager[Union["local_sgd.DiLoCo", "local_sgd.LocalSGD", None]]:
+    """
+    If TorchFT is enabled and the config is set, use semi_sync_method
+    """
+    semi_sync_method = config.fault_tolerance.semi_sync_method
+    torchft_enabled = config.fault_tolerance.enable
+    if torchft_enabled and semi_sync_method is not None:
+        from torchft import local_sgd
+
+        assert (
+            ft_manager._manager is not None
+        ), "FTManager must be enabled to use semi-sync training."
+        if semi_sync_method.lower() == "diloco":
+            # Create the outer optimizer based on the inner optimizer parameters.
+            params = [group["params"] for group in optimizer.param_groups]
+            params = [param for sublist in params for param in sublist]
+            outer_optimizer = torch.optim.SGD(
+                params, lr=0.7, momentum=0.9, nesterov=True
+            )
+
+            return local_sgd.DiLoCo(
+                manager=ft_manager._manager,
+                model=model,
+                inner_optimizer=optimizer,
+                outer_optimizer=outer_optimizer,
+                sync_every=sync_every,
+            )
+        elif semi_sync_method.lower() == "local_sgd":
+            return local_sgd.LocalSGD(
+                manager=ft_manager._manager,
+                model=model,
+                optimizer=optimizer,
+                sync_every=sync_every,
+            )
+        else:
+            raise ValueError(
+                f"Unknown training method: {semi_sync_method}, only 'diloco' and 'local_sgd' are supported."
+            )
+    return nullcontext()
