@@ -162,7 +162,7 @@ def grid_stride_act_quant(
     stride_s = 1  # Stride for scaling factors
 
     # n_threads_per_row is determined as a fraction of the total blocks needed per row
-    threads_per_sm = 2048  # 1024
+    threads_per_sm = 512  # 1024
     n_threads_per_row = min(n_blocks_per_row, max(1, threads_per_sm // n_rows))
 
     # Launch kernel with 2D grid: (rows, threads_per_row)
