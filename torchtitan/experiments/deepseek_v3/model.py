@@ -593,7 +593,6 @@ class MoE(nn.Module):
         (
             sorted_tokens,
             token_indices,
-            sorted_tokens_shape,
             tokens_per_expert,
         ) = self.sort_tokens(x, topk_ids, topk_weight)
 
@@ -681,7 +680,7 @@ class MoE(nn.Module):
                 output_splits,
                 self.ep_group,
             )
-            returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
+            returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
