@@ -100,9 +100,6 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    norm_type: Literal["layernorm", "np_layernorm", "rmsnorm"] = "rmsnorm"
-    """Type of layer normalization to use [layernorm, np_layernorm, rmsnorm]"""
-
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
     """Tokenizer path"""
 
