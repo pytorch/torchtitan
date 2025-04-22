@@ -706,13 +706,16 @@ class MoE(nn.Module):
         # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
         # Since this is an "aritificial" index creation (final outcome being
         # `idxs`), we don't need gradients here.
+
         with torch.no_grad():
+            # [seq_len, n_routed_experts]
             expert_counts = topk_ids.new_zeros(
                 (topk_ids.shape[0], self.config.n_routed_experts)
             )
+            # Fill 1 to the selected experts
             expert_counts.scatter_(1, topk_ids, 1)
             tokens_per_expert = expert_counts.sum(dim=0)
-
+            # Token indices for each expert
             token_indices = topk_ids.view(-1).argsort()
 
             sorted_tokens_shape = token_indices.shape + x.shape[1:]
@@ -720,13 +723,12 @@ class MoE(nn.Module):
         sorted_tokens = x[token_indices // topk_ids.shape[1]]
         # assert sorted_tokens.shape == sorted_tokens_shape
 
-        return (sorted_tokens, token_indices, sorted_tokens_shape, tokens_per_expert)
+        return (sorted_tokens, token_indices, tokens_per_expert)
 
     def moe_on_device(self, x, topk_ids, topk_weight):
         (
             sorted_tokens,
             token_indices,
-            sorted_tokens_shape,
             tokens_per_expert,
         ) = self.sort_tokens(x, topk_ids, topk_weight)
 
@@ -821,7 +823,7 @@ class MoE(nn.Module):
             output_splits,
             self.ep_group,
         )
-        returned_tokens = token_return_buf[: sorted_tokens_shape[0]]
+        returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
 
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[token_indices] = returned_tokens
