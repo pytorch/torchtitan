@@ -148,7 +148,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         if isinstance(self._data, Dataset):
             _state_dict["sample_idx"] = self._sample_idx
         else:
-            # Save the iterable dataset's state to later efficiently resume it
+            # Save the iterable dataset's state to later efficiently resume from it
             # https://huggingface.co/docs/datasets/v3.5.0/en/stream#save-a-dataset-checkpoint-and-resume-iteration
             _state_dict["data"] = self._data.state_dict()
 
