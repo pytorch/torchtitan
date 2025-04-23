@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+__all__ = ["groupwise_activation_quant"]
+
 
 @triton.jit
 def grid_stride_quant_kernel(

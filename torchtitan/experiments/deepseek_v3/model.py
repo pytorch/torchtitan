@@ -766,6 +766,13 @@ class MoE(nn.Module):
         return (sorted_tokens, token_indices, tokens_per_expert)
 
     # ------- Group GEMM implementation ------
+    # TODO - let's make a dict to order these ala:
+    # group_mlp_impls: Dict[str, Callable] = {
+    # "torch": group_mlp_torch,
+    # "torchao": group_mlp_torchao,
+    # "ds": group_mlp_ds,
+    # }
+
     def _run_group_gemm(
         self,
         contig_tokens,
