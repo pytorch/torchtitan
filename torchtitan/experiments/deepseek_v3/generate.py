@@ -241,6 +241,10 @@ def generate(
     # Create tensor on device for comparison
     eos_tensor = torch.tensor([eos_token_id], device=device)
 
+    # Print initial progress indicator
+    if rank == 0:
+        print("Generating: ", end="", flush=True)
+
     for _ in range(n_tokens):
         if dist_config.pp_size > 1:
             if dist_config.pp_rank == 0:
@@ -284,7 +288,13 @@ def generate(
 
         tokens_generated += 1
 
+        # Print progress indicator every 20 tokens
+        if rank == 0 and tokens_generated % 20 == 0:
+            print(".", end="", flush=True)
+
+    # Print newline after progress indicator
     if rank == 0:
+        print()
         colored_output = decode(tokenizer, x)
         print(f"Without CUDA Graph:\n{colored_output}")
 

@@ -473,7 +473,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "torchao"  # "  # [ torch, torchao, ds (ds==fp8) ]
+    group_mm = "torch"  # "  # [ torch, torchao, ds (ds==fp8) ]
 
     if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
         print(
@@ -489,6 +489,7 @@ class MoE(nn.Module):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
+        # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.use_triton_quant = True
 
         # ep_size is the number of ranks in expert dimension
@@ -502,7 +503,7 @@ class MoE(nn.Module):
         self.ep_size = config.ep_size
         self.ep_rank = self.ep_group.rank()
         self.experts_per_rank = config.n_routed_experts // config.ep_size
-        # print(f"{self.experts_per_rank=}, {self.ep_size=}, {self.ep_rank=}")
+
         # Use ModuleDict instead of ModuleList to preserve absoulte expert
         # IDs while avoiding `None` experts. The absolute expert IDs match
         # with checkpoint FQNs.
@@ -522,7 +523,7 @@ class MoE(nn.Module):
     def combine_experts(self, submod_name: str):
         all_weights = []
         for expert in self.experts.values():
-            # print(f"EP rank [{self.ep_rank}]: Combining expert weights for Group GEMM")
+
             lin = expert.get_submodule(submod_name)
             all_weights.append(lin.weight)
             lin.weight = None
@@ -539,10 +540,16 @@ class MoE(nn.Module):
         if self.group_mm == "ds":
             fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weight)
             self.register_parameter(
-                f"{submod_name}_fp8", nn.Parameter(fp8, requires_grad=False)
+                f"{submod_name}_fp8",
+                nn.Parameter(
+                    fp8,
+                ),
             )
             self.register_parameter(
-                f"{submod_name}_scales", nn.Parameter(scales, requires_grad=False)
+                f"{submod_name}_scales",
+                nn.Parameter(
+                    scales,
+                ),
             )
 
     # This function is used to create a symm mem buffer for MoE's. It is for
@@ -587,9 +594,6 @@ class MoE(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # print(f"EP rank [{self.ep_rank}]: Created Symmetric Memory for MoE")
-
-    # print("Combining expert weights for Group GEMM")
 
     def get_send_buf(self):
         # [Why detach?] During a first forward-backward step, the buffer would
@@ -630,6 +634,9 @@ class MoE(nn.Module):
             token_indices,
             tokens_per_expert,
         ) = self.sort_tokens(x, topk_ids, topk_weight)
+
+        # keep the seqlen dimension for later use without holding onto the sorted tokens
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
 
         # all to all
         # This part exchange the information about the number of tokens send and
@@ -715,7 +722,7 @@ class MoE(nn.Module):
                 output_splits,
                 self.ep_group,
             )
-            returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
+            returned_tokens = token_return_buf[:seqlen_sorted_tokens]
         else:  # "torch_all_to_all"
             returned_tokens = all_to_all_single_autograd(
                 processed_tokens,
@@ -759,7 +766,12 @@ class MoE(nn.Module):
         return (sorted_tokens, token_indices, tokens_per_expert)
 
     # ------- Group GEMM implementation ------
-    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets, permuted_indices):
+    def _run_group_gemm(
+        self,
+        contig_tokens,
+        m_sizes,
+        m_offsets,
+    ):
         if self.group_mm in ["torch", "torchao"]:
             # Get weights
             w_gate = self.get_parameter("gate_proj_weight")
@@ -801,7 +813,10 @@ class MoE(nn.Module):
             return hidden_outputs
 
         elif self.group_mm == "ds":
+            # TODO - ds gg doesn't like the ending padding, so I currently lift only valid tokens out.
+            # This needs to be fixed as cpu sync and also breaks cuda graph by overwriting memory at the last update.
             valid_tokens = contig_tokens[: m_offsets[-1]]
+            # this function creates the required m_indices for dsgemm while ensuring no cpu-gpu sync.
             m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
 
             # Get expert weights for all projections
@@ -885,20 +900,9 @@ class MoE(nn.Module):
             tokens_per_expert,
         ) = self.sort_tokens(x, topk_ids, topk_weight)
 
+        # keep the seqlen dimension for later use without holding onto the sorted tokens
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
 
-        sorted_tokens = x[token_indices // topk_ids.shape[1]]
-        # assert sorted_tokens.shape == sorted_tokens_shape
-
-        return (sorted_tokens, token_indices, tokens_per_expert)
-
-    def moe_on_device(self, x, topk_ids, topk_weight):
-        (
-            sorted_tokens,
-            token_indices,
-            tokens_per_expert,
-        ) = self.sort_tokens(x, topk_ids, topk_weight)
-
-        # all to all
         # This part exchange the information about the number of tokens send and
         # received by each expert. We can understand this information as "side
         # band", which is not part of the actual data. Thus no gradient is
@@ -978,7 +982,6 @@ class MoE(nn.Module):
             .sum(dim=1)
             .type(returned_tokens.dtype)
         )
-        # print(f"final_out: {final_out.shape}")  # final_out: torch.Size([71, 2048])
 
         return final_out
 

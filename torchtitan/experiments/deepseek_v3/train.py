@@ -29,11 +29,8 @@ def run_full_model(
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
-
     pp_mesh = mesh["pp"]
-
     ep_mesh = mesh["ep"]
-
     pp_rank = pp_mesh.get_local_rank()
     ep_rank = ep_mesh.get_local_rank()
     pp_size = pp_mesh.size()
@@ -57,12 +54,6 @@ def run_full_model(
     # Instantiate model
     with device, mesh:
         model = DeepseekForCausalLM(model_args)
-    """if rank in [0]:
-        print("*" * 80)
-        print(f"{rank=}")
-        print(model)
-        print("*" * 80)
-    """
 
     # Load weights
     # load_weights_from_hf(model, model_id, device)
