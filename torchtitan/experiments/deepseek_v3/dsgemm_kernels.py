@@ -10,7 +10,7 @@
 # https://github.com/deepseek-ai/DeepGEMM
 
 
-# Groupwise input_quant kernel from DeepSeek-AI, with modifications:
+# Groupwise dynamic_quant kernel from DeepSeek-AI, with modifications:
 # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/kernel.py
 
 from typing import Tuple
@@ -89,15 +89,13 @@ def grid_stride_quant_kernel(
 
             x_ptrs = x_row_ptr + col_offs * stride_xc
 
-            # Load values for this block
             x = tl.load(x_ptrs).to(tl.float32)
 
-            x_abs = tl.abs(x)
-
             # Find maximum value in this block
+            x_abs = tl.abs(x)
             block_max = tl.max(x_abs)
 
-            # Calculate scaling factor
+            # scaling factor
             s = block_max / CLAMP_VALUE
 
             # Add small epsilon to avoid division by zero
@@ -118,8 +116,10 @@ def grid_stride_quant_kernel(
             tl.store(s_ptr_idx, s)
 
 
-def grid_stride_act_quant(
-    x: torch.Tensor, block_size: int = 128
+def groupwise_activation_quant(
+    x: torch.Tensor,
+    block_size: int = 128,
+    switching_size=2048,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Grid stride loop quantization for ds input format (1x128)
@@ -127,6 +127,7 @@ def grid_stride_act_quant(
     Args:
         x (torch.Tensor): The input tensor to be quantized. Last dimension size must be divisible by block_size.
         block_size (int, optional): The size of the blocks to be used for quantization. Default is 128.
+        switching size (int, optional): The row size at which point we toggle between simple rowwise and gride stride loop kernel.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
@@ -152,6 +153,14 @@ def grid_stride_act_quant(
     y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s_shape = list(shape[:-1]) + [n_blocks_per_row]
     s = x.new_empty(s_shape, dtype=torch.float32)
+
+    # toggle between dynamic and grid stride loop kernels
+    if n_rows < switching_size:
+        grid = lambda meta: (triton.cdiv(x.numel(), meta["BLOCK_SIZE"]),)
+        dynamic_quant_kernel[grid](x, y, s, BLOCK_SIZE=block_size)
+        return y, s
+
+    # otherwise use grid stride loop kernel
 
     # Calculate strides
     # For 2D view of the tensor (rows × columns)
@@ -188,7 +197,7 @@ def grid_stride_act_quant(
 
 # --------  DeepSeek original kernel ---------------------------------
 @triton.jit
-def input_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
+def dynamic_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
 

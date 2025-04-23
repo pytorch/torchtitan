@@ -469,7 +469,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "ds"  # ao"  # [ torch, torchao, ds (ds==fp8) ]
+    group_mm = "torchao"  # "  # [ torch, torchao, ds (ds==fp8) ]
 
     if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
         print(
@@ -815,7 +815,7 @@ class MoE(nn.Module):
 
             # Prepare input in FP8 format (shared by gate and up projections)
             if self.use_triton_quant:
-                gate_up_input = dsgemm_kernels.grid_stride_act_quant(
+                gate_up_input = dsgemm_kernels.groupwise_activation_quant(
                     valid_tokens
                 )  # dsgemm_kernels.activation_quant_triton(valid_tokens)
             else:
@@ -857,11 +857,9 @@ class MoE(nn.Module):
 
             # Run third GEMM (down projection)
             if self.use_triton_quant:
-                hidden_states_quantized = dsgemm_kernels.grid_stride_act_quant(
+                hidden_states_quantized = dsgemm_kernels.groupwise_activation_quant(
                     hidden_states
-                )  # activation_quant_triton(
-                # hidden_states
-                # )
+                )
             else:
                 hidden_states_quantized = dsgemm_utils.prepare_fp8_input(hidden_states)
 

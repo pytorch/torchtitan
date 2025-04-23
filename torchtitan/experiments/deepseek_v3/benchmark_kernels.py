@@ -23,75 +23,52 @@ def benchmark_quant_kernels(shapes, dtype=torch.bfloat16, warmup=10, iters=100):
         # Create input tensor
         x = torch.randn(m, k, device="cuda", dtype=dtype)
 
-        # Warmup
+        # Warmup groupwise_activation_quant
         for _ in range(warmup):
-            _ = dsgemm_kernels.grid_stride_act_quant(x)
+            _ = dsgemm_kernels.groupwise_activation_quant(x)
             torch.cuda.synchronize()
 
-        # Benchmark grid_stride_act_quant
+        # Benchmark groupwise_activation_quant
         torch.cuda.synchronize()
         start = time.time()
         for _ in range(iters):
-            y1 = dsgemm_kernels.grid_stride_act_quant(x)
+            y1 = dsgemm_kernels.groupwise_activation_quant(x)
             torch.cuda.synchronize()
-        grid_stride_time = (time.time() - start) / iters * 1000  # ms
-
-        # Benchmark activation_quant_triton
-        for _ in range(warmup):
-            _ = dsgemm_kernels.activation_quant_triton(x)
-            torch.cuda.synchronize()
-
-        torch.cuda.synchronize()
-        start = time.time()
-        for _ in range(iters):
-            y2 = dsgemm_kernels.activation_quant_triton(x)
-            torch.cuda.synchronize()
-        triton_time = (time.time() - start) / iters * 1000  # ms
+        groupwise_time = (time.time() - start) / iters * 1000  # ms
 
         # Benchmark per_token_cast_to_fp8
         for _ in range(warmup):
-
             _ = dsgemm_utils.per_token_cast_to_fp8(x)
             torch.cuda.synchronize()
         torch.cuda.synchronize()
         start = time.time()
         for _ in range(iters):
-            y3 = dsgemm_utils.per_token_cast_to_fp8(x)
+            y2 = dsgemm_utils.per_token_cast_to_fp8(x)
             torch.cuda.synchronize()
         per_token_time = (time.time() - start) / iters * 1000  # ms
 
-        # Calculate speedups
-        grid_vs_triton = triton_time / grid_stride_time
-        grid_vs_per_token = per_token_time / grid_stride_time
+        # Calculate speedup
+        groupwise_vs_per_token = per_token_time / groupwise_time
 
         # Check correctness
-        max_diff_triton = dsgemm_utils.compare_fp8_tensors(y1[0], y2[0])
-        max_diff_per_token = dsgemm_utils.compare_fp8_tensors(y1[0], y3[0])
+        max_diff = dsgemm_utils.compare_fp8_tensors(y1[0], y2[0])
 
         results.append(
             {
                 "shape": shape,
-                "grid_stride_ms": grid_stride_time,
-                "triton_ms": triton_time,
+                "groupwise_ms": groupwise_time,
                 "per_token_ms": per_token_time,
-                "grid_vs_triton": grid_vs_triton,
-                "grid_vs_per_token": grid_vs_per_token,
-                "max_diff_triton": max_diff_triton,
-                "max_diff_per_token": max_diff_per_token,
+                "groupwise_vs_per_token": groupwise_vs_per_token,
+                "max_diff": max_diff,
             }
         )
 
-        print(f"  grid_stride: {grid_stride_time:.3f} ms")
-        print(f"  triton: {triton_time:.3f} ms")
+        print(f"  groupwise: {groupwise_time:.3f} ms")
         print(f"  per_token: {per_token_time:.3f} ms")
         print(
-            f"  grid vs triton: Grid stride is {grid_vs_triton:.2f}x faster than Triton"
+            f"  groupwise vs per_token: Groupwise is {groupwise_vs_per_token:.2f}x faster than per_token"
         )
-        print(
-            f"  grid vs per_token: Grid stride is {grid_vs_per_token:.2f}x faster than per_token"
-        )
-        print(f"  max_diff_triton: {max_diff_triton}")
-        print(f"  max_diff_per_token: {max_diff_per_token}")
+        print(f"  max_diff: {max_diff}")
         print()
 
     return results
@@ -100,13 +77,13 @@ def benchmark_quant_kernels(shapes, dtype=torch.bfloat16, warmup=10, iters=100):
 def print_results_table(results):
     print("\nResults Summary:")
     print(
-        f"{'Shape':>15} | {'Grid (ms)':>10} | {'Row (ms)':>10} | {'PyTorch Eager(ms)':>10} | {'Grid/Row':>10} | {'Grid/PyTorch':>8} | {'Max Diff':>5}"
+        f"{'Shape':>15} | {'Groupwise (ms)':>15} | {'PyTorch Eager(ms)':>18} | {'Groupwise/PyTorch':>18} "
     )
     print("-" * 85)
 
     for r in results:
         print(
-            f"{str(r['shape']):>15} | {r['grid_stride_ms']:>10.3f} | {r['triton_ms']:>10.3f} | {r['per_token_ms']:>14.3f} | {r['grid_vs_triton']:>10.2f}x | {r['grid_vs_per_token']:>10.2f}x | {r['max_diff_triton']:>8.3f}"
+            f"{str(r['shape']):>15} | {r['groupwise_ms']:>15.3f} | {r['per_token_ms']:>18.3f} | {r['groupwise_vs_per_token']:>18.2f}x | "
         )
 
 
