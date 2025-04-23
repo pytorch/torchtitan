@@ -7,7 +7,7 @@
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torchtitan.components.checkpoint import MODEL
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
@@ -448,32 +448,33 @@ def _verify_state_dict(
 
 if __name__ == "__main__":
     init_logger()
-    config = JobConfig()
-    config.parser.add_argument(
-        "--checkpoint.convert_path",
-        type=str,
-        default="",
-        help="""Specify the path of the target checkpoint to convert.""",
-    )
-    config.parser.add_argument(
-        "--checkpoint.convert_load_every_n_ranks",
-        type=int,
-        default=8,
-        help="""
-            Specify the interval at which ranks are assigned to load checkpoints.
 
-            For example, if this number is 4, then ranks 0, 4, 8, ... will load the
-            checkpoint. Each loader is responsible for loading one file. If there
-            are more loaders than files, only the first few loaders will be assigned
-            to load the checkpoint. The default value is 8.
-        """,
-    )
-    config.parser.add_argument(
-        "--checkpoint.fake_model",
-        action="store_true",
-        help="""If true, the model will be fake.""",
-    )
-    config.parse_args()
+    @dataclass
+    class Checkpoint:
+        convert_path: str = ""
+        """Specify the path of the target checkpoint to convert."""
+
+        convert_load_every_n_ranks: int = 8
+        """
+        Specify the interval at which ranks are assigned to load checkpoints.
+
+        For example, if this number is 4, then ranks 0, 4, 8, ... will load the
+        checkpoint. Each loader is responsible for loading one file. If there
+        are more loaders than files, only the first few loaders will be assigned
+        to load the checkpoint. The default value is 8.
+        """
+
+        fake_model: bool = False
+        """If true, the model will be fake."""
+
+    @dataclass
+    class MyJobConfig:
+        checkpoint: Checkpoint = field(default_factory=Checkpoint)
+
+    MergedJobConfig = ConfigManager._merge_configs(JobConfig, MyJobConfig)
+    config_manager = ConfigManager(config_cls=MergedJobConfig)
+    config = config_manager.parse_args()
+
     assert config.checkpoint.convert_path != ""
 
     trainer: Optional[Trainer] = None

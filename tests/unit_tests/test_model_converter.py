@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.float8 import Float8Converter
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     build_model_converters,
@@ -28,8 +28,8 @@ def build_parallel_dims(job_config, world_size):
 
 
 def test_build_model_converters_empty_list():
-    config = JobConfig()
-    config.parse_args([])
+    config_manager = ConfigManager()
+    config = config_manager.parse_args([])
     parallel_dims = build_parallel_dims(config, 1)
 
     model_converters = build_model_converters(config, parallel_dims)
@@ -38,8 +38,8 @@ def test_build_model_converters_empty_list():
 
 
 def test_build_model_converters_float8_converter():
-    config = JobConfig()
-    config.parse_args(["--model.converters", "float8"])
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(["--model.converters", "float8"])
     parallel_dims = build_parallel_dims(config, 1)
 
     model_converters = build_model_converters(config, parallel_dims)

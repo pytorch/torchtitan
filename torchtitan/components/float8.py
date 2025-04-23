@@ -13,6 +13,7 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
+import torch
 import torch.nn as nn
 
 from torchtitan.config_manager import JobConfig
@@ -66,6 +67,13 @@ class Float8Converter(ModelConverter):
             logger.info(
                 f"Float8 training active with recipe {float8_config.recipe_name}"
             )
+
+            # short-term solution for https://github.com/pytorch/pytorch/issues/150859
+            if float8_config.recipe_name == "rowwise":
+                torch._inductor.config.emulate_precision_casts = True
+                logger.debug(
+                    "Set torch._inductor.config.emulate_precision_casts to True"
+                )
 
         else:
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear

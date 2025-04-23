@@ -17,7 +17,7 @@ For more details on motivation, API, and system design, refer to [here](https://
 
 ## FSDP1 <> FSDP2 API Differences
 We go over some API differences between FSDP1 and FSDP2. Overall, we hope to minimize the API surface (including the number of arguments) to avoid having a monolithic API.
-```
+```python
 @contract(state_cls=FSDPState)
 def fully_shard(
   module: nn.Module,
@@ -85,7 +85,7 @@ def fully_shard(
 
 ## Meta-Device Initialization
 Before with FSDP1:
-```
+```python
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 with torch.device("meta"):
     model = Transformer()
@@ -97,7 +97,7 @@ def param_init_fn(module: nn.Module) -> None: ...
 model = FSDP(model, auto_wrap_policy=policy, param_init_fn=param_init_fn)
 ```
 After with FSDP2:
-```
+```python
 with torch.device("meta"):
     model = Transformer()
 for module in model.modules():

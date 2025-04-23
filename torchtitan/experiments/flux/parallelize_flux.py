@@ -77,7 +77,6 @@ def apply_fsdp(
     linear_layers = [
         model.img_in,
         model.time_in,
-        model.guidance_in,
         model.vector_in,
         model.txt_in,
     ]

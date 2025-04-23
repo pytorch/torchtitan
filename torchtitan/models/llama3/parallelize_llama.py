@@ -72,19 +72,6 @@ def parallelize_llama(
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
-    if job_config.model.use_flex_attn:
-        if job_config.activation_checkpoint.mode == "selective":
-            raise ValueError(
-                "FlexAttention is not compatible with selective AC yet. "
-                "See https://github.com/pytorch/pytorch/issues/147879"
-            )
-
-        if parallel_dims.cp_enabled:
-            raise ValueError(
-                "FlexAttention is not compatible with CP yet. "
-                "We are still working on this."
-            )
-
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
@@ -188,7 +175,7 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for layer_id, transformer_block in model.layers.items():
+    for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
@@ -232,6 +219,7 @@ _save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.

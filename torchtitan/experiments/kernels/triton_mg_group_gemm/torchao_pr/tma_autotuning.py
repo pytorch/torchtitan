@@ -157,7 +157,9 @@ _NV_CONFIGS = [
         num_warps=num_warps,
         num_ctas=num_ctas,
     )
-    for block_size_m in [ALIGN_SIZE_M, ]
+    for block_size_m in [
+        ALIGN_SIZE_M,
+    ]
     for block_size_n in [64, 128, 256]
     for block_size_k in [64, 128, 256]
     for num_stages in [3, 4]

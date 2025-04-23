@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 
@@ -36,8 +36,8 @@ class TestDatasetCheckpointing:
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
         tokenizer = TikTokenizer("./tests/assets/test_tiktoken.model")
-        config = JobConfig()
-        config.parse_args(
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
             [
                 "--training.dataset",
                 dataset_name,

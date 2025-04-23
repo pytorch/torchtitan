@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import TransformerModelArgs
@@ -126,7 +125,12 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(
+        self,
+        model_args: TransformerModelArgs,
+        use_rope: bool = True,
+        fixed_block_size: int | None = None,
+    ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -145,7 +149,15 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+
+        # We could not get use_rope and fixed_block_size from model_args as these two
+        # are computed during the model initialization and each layer has its own
+        # values of these two variables.
+        self.use_rope = use_rope
+
+        self.sdpa = build_attention(
+            model_args.use_flex_attn, model_args.attn_mask_type, fixed_block_size
+        )
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -179,7 +191,8 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        if self.use_rope:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -262,11 +275,25 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: TransformerModelArgs):
+    def __init__(
+        self,
+        layer_id: int,
+        model_args: TransformerModelArgs,
+    ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
-        self.attention = Attention(model_args)
+
+        attn_use_rope = True
+        fixed_attn_block_size = None
+        if model_args.every_n_layers_nope is not None:
+            if model_args.every_n_layers_nope <= 1:
+                raise ValueError("every_n_layers_nope must be greater than 1")
+            if layer_id % model_args.every_n_layers_nope == 0:
+                attn_use_rope = False
+            else:
+                fixed_attn_block_size = model_args.fixed_attn_block_size
+        self.attention = Attention(model_args, attn_use_rope, fixed_attn_block_size)
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
         self.moe_enabled = (
@@ -283,20 +310,13 @@ class TransformerBlock(nn.Module):
                 ffn_dim_multiplier=model_args.ffn_dim_multiplier,
             )
 
-        self.layer_id = layer_id
-        self.num_layers = model_args.n_layers
-
-        self.attention_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-        self.ffn_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
+        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
+            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         else:
-            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+            self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
 
     def forward(
         self,
@@ -321,12 +341,12 @@ class TransformerBlock(nn.Module):
             out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self):
+    def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std)
+            self.moe.init_weights(self.weight_init_std, buffer_device)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -371,11 +391,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-
-        self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-
+        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
@@ -401,7 +417,7 @@ class Transformer(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights()
+                layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5

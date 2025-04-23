@@ -8,7 +8,6 @@
 
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -17,7 +16,6 @@ from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.models.norms import build_norm
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
 
 
@@ -26,10 +24,10 @@ class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
-    n_kv_heads: Optional[int] = None
+    n_kv_heads: int | None = None
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
+    ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
 
@@ -37,18 +35,26 @@ class TransformerModelArgs(BaseModelArgs):
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
-    norm_type: str = "rmsnorm"
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.norm_type = job_config.model.norm_type
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
-        self.use_flex_attn = job_config.model.use_flex_attn
-        self.attn_mask_type = job_config.model.attn_mask_type
+
+        if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
+            raise ValueError(
+                "FlexAttention is not compatible with selective AC yet. "
+                "See https://github.com/pytorch/pytorch/issues/147879"
+            )
+
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise ValueError(
+                "FlexAttention is not compatible with CP yet. "
+                "We are still working on this."
+            )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
@@ -86,7 +92,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
     Args:
         dim (int): Dimension of the frequency tensor.
         end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+        theta (float | None): Scaling factor for frequency computation. Defaults to 10000.0.
 
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
@@ -264,7 +270,7 @@ class FeedForward(nn.Module):
         dim (int): Input dimension.
         hidden_dim (int): Hidden dimension of the feedforward layer.
         multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (Optional[float]): Custom multiplier for hidden dimension. Defaults to None.
+        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
 
     Attributes:
         w1 (Linear): Linear transformation for the first layer.
@@ -278,7 +284,7 @@ class FeedForward(nn.Module):
         dim: int,
         hidden_dim: int,
         multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
+        ffn_dim_multiplier: float | None,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -331,20 +337,13 @@ class TransformerBlock(nn.Module):
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
         )
-        self.layer_id = layer_id
-        self.num_layers = model_args.n_layers
-
-        self.attention_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-        self.ffn_norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
+        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (self.layer_id + 1)) ** 0.5
+            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         else:
-            self.weight_init_std = 0.02 / (2 * self.num_layers) ** 0.5
+            self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
 
     def forward(
         self,
@@ -413,17 +412,13 @@ class Transformer(nn.Module, ModelProtocol):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-
-        self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
-        )
-
+        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
     def init_weights(
         self,
-        buffer_device: Optional[torch.device] = None,
+        buffer_device: torch.device | None = None,
     ):
         """
         [Note: On ``init_weights`` vs. ``reset_parameters``]

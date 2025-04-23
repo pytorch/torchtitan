@@ -120,7 +120,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.use_sigmoid = use_sigmoid
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, expert_bias: torch.Tensor = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -139,13 +139,17 @@ class TokenChoiceTopKRouter(nn.Module):
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.use_sigmoid:
-            scores = torch.sigmoid(scores.to(torch.float32)).to(x.dtype)
+            scores = torch.sigmoid(scores.to(torch.float32))
         else:
-            scores = F.softmax(scores.to(torch.float32), dim=1).to(x.dtype)
+            scores = F.softmax(scores.to(torch.float32), dim=1)
 
         # top scores shape (bs*slen, top_k)
-        top_scores, selected_experts_indices = torch.topk(scores, k=self.top_k, dim=1)
-        # top_scores /= top_scores.sum(dim=-1, keep_dim=True).to(x.dtype)
+        # NOTE: The expert_bias is only used for routing. The gating value
+        #       top_scores is still derived from the original scores.
+        _, selected_experts_indices = torch.topk(
+            scores + expert_bias, k=self.top_k, dim=1
+        )
+        top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_local_tokens_per_expert = torch.histc(
@@ -167,7 +171,6 @@ class TokenChoiceTopKRouter(nn.Module):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
-# TODO: implement load balancing auxiliary loss for token-choice routing
 class MoE(nn.Module):
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__()
@@ -209,6 +212,35 @@ class MoE(nn.Module):
             else None
         )
 
+        # auxiliary-loss-free load balancing
+        self.load_balance_coeff = model_args.load_balance_coeff
+        # the fields below are defined even when load_balance_coeff is None
+        # to make initialization and checkpointing code simpler
+        self.register_buffer(
+            "expert_bias",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "tokens_per_expert",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=True,
+        )
+
+        # NOTE: forward hook, forward pre hook, or backward pre hook
+        #       would conflict with activation checkpointing
+        if self.load_balance_coeff is not None and self.load_balance_coeff > 0:
+            self.register_full_backward_hook(self._update_expert_bias)
+
+    def _update_expert_bias(self, *_):
+        expert_bias_delta = self.load_balance_coeff * torch.sign(
+            self.tokens_per_expert.mean() - self.tokens_per_expert
+        )
+        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+        self.expert_bias = self.expert_bias + expert_bias_delta
+
+        self.tokens_per_expert.zero_()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -218,13 +250,17 @@ class MoE(nn.Module):
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
         bs, slen, dim = x.shape
+
         # top_scores and selected_indices shape (bs*slen*top_k,)
         # num_local_tokens_per_expert shape (num_experts,)
         (
             top_scores,
             token_indices,
             num_local_tokens_per_expert,
-        ) = self.router(x.reshape(bs * slen, dim))
+        ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
+
+        # will be used to update the expert bias for load balancing
+        self.tokens_per_expert += num_local_tokens_per_expert
 
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
@@ -235,7 +271,9 @@ class MoE(nn.Module):
             dim=0,
             index=token_indices,
         )
-        routed_input = routed_input * top_scores.reshape(-1, 1)
+        routed_input = (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(
+            x.dtype
+        )
 
         if self.use_grouped_mm:
             # NOTE: In order to use torch._grouped_mm, we need to make sure
@@ -285,8 +323,20 @@ class MoE(nn.Module):
         out = out.reshape(bs, slen, dim)
         return out
 
-    def init_weights(self, init_std: float):
+    def init_weights(
+        self,
+        init_std: float,
+        buffer_device: torch.device,
+    ):
         self.experts.init_weights(init_std)
         self.router.init_weights(init_std)
         if self.shared_expert is not None:
             self.shared_expert.init_weights(init_std)
+
+        with torch.device(buffer_device):
+            self.expert_bias = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )
+            self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )

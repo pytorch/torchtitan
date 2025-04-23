@@ -8,7 +8,7 @@ import click
 from mm_dataset import build_mm_dataloader
 from tokenizer.tiktoken import build_tiktoken_tokenizer
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import ConfigManager
 from torchtitan.tools.logging import init_logger
 
 
@@ -30,8 +30,8 @@ def main(
     batch_number: int,
 ):
     init_logger()
-    job_config = JobConfig()
-    job_config.parse_args(
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(
         [
             "--training.dataset",
             dataset,
@@ -43,12 +43,12 @@ def main(
             tokenizer_path,
         ]
     )
-    tokenizer = build_tiktoken_tokenizer(job_config)
+    tokenizer = build_tiktoken_tokenizer(config)
     dl = build_mm_dataloader(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
-        job_config=job_config,
+        job_config=config,
     )
     dl_iter = iter(dl)
 
