@@ -19,8 +19,9 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
+
+from torchtitan.tools.utils import Color
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -203,7 +204,7 @@ def time_generation(func):
 
         if rank == 0:
             print(
-                f"\nGeneration time: {color.yellow}{elapsed_time/1000:.2f} seconds{color.reset}"
+                f"\nGeneration time: {color.yellow}{elapsed_time / 1000:.2f} seconds{color.reset}"
             )
             print(f"Tokens generated: {color.blue}{tokens_generated}{color.reset}")
             print(

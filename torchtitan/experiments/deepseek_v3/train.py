@@ -9,7 +9,8 @@
 
 import torch
 import torch.distributed as dist
-from checkpoint import load_weights_from_hf
+
+# from checkpoint import load_weights_from_hf
 from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 

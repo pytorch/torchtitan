@@ -18,7 +18,6 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
-from triton import Config
 
 
 @triton.jit

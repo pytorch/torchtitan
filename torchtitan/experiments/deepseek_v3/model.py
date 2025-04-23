@@ -27,12 +27,12 @@
 # limitations under the License.
 
 
-
 """ PyTorch DeepSeek model."""
 
 
 import math
-from re import X
+
+# from re import X
 from typing import Optional, Tuple
 
 try:
@@ -477,7 +477,7 @@ class MoE(nn.Module):
 
     if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
         print(
-            f"DeepGemm is not available on your system.  Please install and try again."
+            "DeepGemm is not available on your system.  Please install and try again."
         )
         raise ValueError("Missing DeepGemm install")
 
@@ -947,7 +947,9 @@ class MoE(nn.Module):
 
         # group gemm
         hidden_outputs = self._run_group_gemm(
-            contig_tokens, m_sizes, m_offsets, permuted_indices
+            contig_tokens,
+            m_sizes,
+            m_offsets,
         )
 
         # Prepare buffer for tokens processed by experts
@@ -964,16 +966,9 @@ class MoE(nn.Module):
             self.ep_group,
         )
 
-
-=======
-
         returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
-
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[token_indices] = returned_tokens
-
-
-=======
 
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)

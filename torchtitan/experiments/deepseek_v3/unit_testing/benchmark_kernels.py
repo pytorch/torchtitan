@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 # benchmark quantization kernels
 
 # sizes to benchmark:
@@ -9,7 +15,6 @@ import time
 
 import dsgemm_kernels
 import dsgemm_utils
-import numpy as np
 import torch
 
 
@@ -83,7 +88,8 @@ def print_results_table(results):
 
     for r in results:
         print(
-            f"{str(r['shape']):>15} | {r['groupwise_ms']:>15.3f} | {r['per_token_ms']:>18.3f} | {r['groupwise_vs_per_token']:>18.2f}x | "
+            f"{str(r['shape']):>15} | {r['groupwise_ms']:>15.3f} | {r['per_token_ms']:>18.3f} | "
+            f"{r['groupwise_vs_per_token']:>18.2f}x | "
         )
 
 
