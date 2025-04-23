@@ -288,22 +288,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
         )
 
-    def next_batch(
+    def batch_generator(
         self, data_iterator: Iterable
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        data_load_start = time.perf_counter()
-        batch = next(data_iterator)
-        input_dict, labels = batch
-        self.metrics_processor.ntokens_since_last_log += labels.numel()
-        self.metrics_processor.data_loading_times.append(
-            time.perf_counter() - data_load_start
-        )
-
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
-        for k, _ in input_dict.items():
-            input_dict[k] = input_dict[k].to(device_type)
-        labels = labels.to(device_type)
-        return input_dict, labels
+
+        def batch_processor():
+            while True:
+                try:
+                    data_load_start = time.perf_counter()
+                    batch = next(data_iterator)
+                    input_dict, labels = batch
+                    self.metrics_processor.ntokens_since_last_log += labels.numel()
+                    self.metrics_processor.data_loading_times.append(
+                        time.perf_counter() - data_load_start
+                    )
+
+                    # Move tensors to the appropriate device
+                    for k, _ in input_dict.items():
+                        input_dict[k] = input_dict[k].to(device_type)
+                    labels = labels.to(device_type)
+
+                    yield input_dict, labels
+                except StopIteration:
+                    break
+
+        return batch_processor()
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         self.optimizers.zero_grad()
@@ -395,16 +406,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
-        with maybe_enable_profiling(
-            job_config, global_step=self.step
-        ) as torch_profiler, maybe_enable_memory_snapshot(
-            job_config, global_step=self.step
-        ) as memory_profiler:
-            data_iterator = iter(self.dataloader)
-            while self.step < job_config.training.steps:
+        with (
+            maybe_enable_profiling(job_config, global_step=self.step) as torch_profiler,
+            maybe_enable_memory_snapshot(
+                job_config, global_step=self.step
+            ) as memory_profiler,
+        ):
+            data_iterator = self.batch_generator(iter(self.dataloader))
+            for inputs, labels in data_iterator:
+                if self.step >= job_config.training.steps:
+                    break
                 self.step += 1
                 self.gc_handler.run(self.step)
-                inputs, labels = self.next_batch(data_iterator)
                 self.train_step(inputs, labels)
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
@@ -454,12 +467,12 @@ if __name__ == "__main__":
         trainer = Trainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable_checkpoint
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable_checkpoint, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, force=True)
             logger.info("Created seed checkpoint")
         else:
