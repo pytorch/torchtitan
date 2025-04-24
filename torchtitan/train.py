@@ -294,27 +294,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
 
-        def batch_processor():
-            while True:
-                try:
-                    data_load_start = time.perf_counter()
-                    batch = next(data_iterator)
-                    input_dict, labels = batch
-                    self.metrics_processor.ntokens_since_last_log += labels.numel()
-                    self.metrics_processor.data_loading_times.append(
-                        time.perf_counter() - data_load_start
-                    )
+        while True:
+            try:
+                data_load_start = time.perf_counter()
+                batch = next(data_iterator)
+                input_dict, labels = batch
+                self.metrics_processor.ntokens_since_last_log += labels.numel()
+                self.metrics_processor.data_loading_times.append(
+                    time.perf_counter() - data_load_start
+                )
 
-                    # Move tensors to the appropriate device
-                    for k, _ in input_dict.items():
-                        input_dict[k] = input_dict[k].to(device_type)
-                    labels = labels.to(device_type)
+                # Move tensors to the appropriate device
+                for k, _ in input_dict.items():
+                    input_dict[k] = input_dict[k].to(device_type)
+                labels = labels.to(device_type)
 
-                    yield input_dict, labels
-                except StopIteration:
-                    break
-
-        return batch_processor()
+                yield input_dict, labels
+            except StopIteration:
+                break
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         self.optimizers.zero_grad()
@@ -412,8 +409,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 job_config, global_step=self.step
             ) as memory_profiler,
         ):
-            data_iterator = self.batch_generator(iter(self.dataloader))
-            for inputs, labels in data_iterator:
+            for inputs, labels in self.batch_generator(iter(self.dataloader)):
                 if self.step >= job_config.training.steps:
                     break
                 self.step += 1
