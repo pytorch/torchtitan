@@ -83,7 +83,7 @@ class TorchFP8GroupGEMM(GroupGEMMStrategy):
 
     # def prep_experts(self, weights, module):
     #    return module.
-    def arrange_expert_weights(self, all_weights):
+    def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
         return torch.stack(all_weights)
 
@@ -123,6 +123,242 @@ class TorchFP8GroupGEMM(GroupGEMMStrategy):
     @staticmethod
     def is_available() -> bool:
         return TORCHAO_FP8_GG_AVAILABLE
+
+
+class DSGroupGEMM(GroupGEMMStrategy):
+    """Implementation using DeepGEMM with FP8 quantization"""
+
+    def __init__(self):
+        # Cache for quantized tensors to avoid repeated work
+        self.input_cache = {}
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """prep the expert weights for group gemm usage"""
+        combined_weights = torch.stack(all_weights)
+
+        fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weights)
+
+        # prescale weights
+        module.register_parameter(
+            f"{submod_name}_fp8",
+            nn.Parameter(
+                fp8,
+            ),
+        )
+
+        module.register_parameter(
+            f"{submod_name}_scales",
+            nn.Parameter(
+                scales,
+            ),
+        )
+
+        return combined_weights
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get only valid tokens
+        valid_tokens = contig_tokens[: m_offsets[-1]]
+
+        # Create indices from offsets without CPU-GPU sync
+        m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+
+        # Get expert weights for all projections
+        gate_proj_weight_fp8 = module.get_parameter("gate_proj_fp8")
+        gate_proj_scales = module.get_parameter("gate_proj_scales")
+        up_proj_weight_fp8 = module.get_parameter("up_proj_fp8")
+        up_proj_scales = module.get_parameter("up_proj_scales")
+        down_proj_weight_fp8 = module.get_parameter("down_proj_fp8")
+        down_proj_scales = module.get_parameter("down_proj_scales")
+
+        # Get dimensions
+        m_actual_tokens = valid_tokens.shape[0]
+        intermediate_size = module.get_parameter("gate_proj_weight").shape[1]
+        hidden_size = module.get_parameter("down_proj_weight").shape[1]
+
+        # Allocate output buffers
+        gate_proj_out = torch.empty(
+            (m_actual_tokens, intermediate_size),
+            device=contig_tokens.device,
+            dtype=contig_tokens.dtype,
+        )
+        up_proj_out = torch.empty_like(gate_proj_out)
+
+        # Allocate output buffer for down projection
+        down_proj_out = torch.empty(
+            (m_actual_tokens, hidden_size),
+            device=contig_tokens.device,
+            dtype=contig_tokens.dtype,
+        )
+
+        """# Prepare or resize output buffers
+        if not hasattr(module, "_buffer_initialized") or not module._buffer_initialized:
+            module.register_buffer(
+                "gate_proj_buffer",
+                torch.empty(
+                    (m_actual_tokens, intermediate_size),
+                    device=contig_tokens.device,
+                    dtype=contig_tokens.dtype,
+                ),
+            )
+            module.register_buffer(
+                "up_proj_buffer", torch.empty_like(module.gate_proj_buffer)
+            )
+            module.register_buffer(
+                "down_proj_buffer",
+                torch.empty(
+                    (m_actual_tokens, hidden_size),
+                    device=contig_tokens.device,
+                    dtype=contig_tokens.dtype,
+                ),
+            )
+            module._buffer_initialized = True
+        else:
+            # Resize buffers if needed
+            if module.gate_proj_buffer.shape[0] < m_actual_tokens:
+                module.gate_proj_buffer = torch.empty(
+                    (m_actual_tokens, intermediate_size),
+                    device=contig_tokens.device,
+                    dtype=contig_tokens.dtype,
+                )
+                module.up_proj_buffer = torch.empty_like(module.gate_proj_buffer)
+                module.down_proj_buffer = torch.empty(
+                    (m_actual_tokens, hidden_size),
+                    device=contig_tokens.device,
+                    dtype=contig_tokens.dtype,
+                )
+        """
+        # Prepare input in FP8 format (shared by gate and up projections)
+        if module.use_triton_quant:
+            gate_up_input = dsgemm_kernels.groupwise_activation_quant(valid_tokens)
+        else:
+            gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
+
+        # Run first GEMM (gate projection)
+        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            gate_up_input,
+            (gate_proj_weight_fp8, gate_proj_scales),
+            gate_proj_out,
+            m_indices,
+        )
+
+        # Run second GEMM (up projection)
+        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            gate_up_input,
+            (up_proj_weight_fp8, up_proj_scales),
+            up_proj_out,
+            m_indices,
+        )
+
+        # Apply activation
+        hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
+
+        # Run third GEMM (down projection)
+        if module.use_triton_quant:
+            hidden_states_quantized = dsgemm_kernels.groupwise_activation_quant(
+                hidden_states
+            )
+        else:
+            hidden_states_quantized = dsgemm_utils.prepare_fp8_input(hidden_states)
+
+        deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            hidden_states_quantized,
+            (down_proj_weight_fp8, down_proj_scales),
+            down_proj_out,
+            m_indices,
+        )
+
+        # Copy results back to contig_tokens
+        contig_tokens[: m_offsets[-1]] = down_proj_out
+        return contig_tokens
+
+    @staticmethod
+    def is_available() -> bool:
+        return DEEPGEMM_AVAILABLE
+
+
+"""
+# =======
+# TODO - ds gg doesn't like the ending padding, so I currently lift only valid tokens out.
+            # This needs to be fixed as cpu sync and also breaks cuda graph by overwriting memory at the last update.
+            valid_tokens = contig_tokens[: m_offsets[-1]]
+            # this function creates the required m_indices for dsgemm while ensuring no cpu-gpu sync.
+            m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+
+            # Get expert weights for all projections
+            gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
+            gate_proj_scales = self.get_parameter("gate_proj_scales")
+            up_proj_weight_fp8 = self.get_parameter("up_proj_fp8")
+            up_proj_scales = self.get_parameter("up_proj_scales")
+            down_proj_weight_fp8 = self.get_parameter("down_proj_fp8")
+            down_proj_scales = self.get_parameter("down_proj_scales")
+
+            # Get dimensions
+            m_actual_tokens = valid_tokens.shape[0]
+            intermediate_size = self.get_parameter("gate_proj_weight").shape[1]
+            hidden_size = self.get_parameter("down_proj_weight").shape[1]
+
+            # Prepare input in FP8 format (shared by gate and up projections)
+            if self.use_triton_quant:
+                gate_up_input = dsgemm_kernels.groupwise_activation_quant(
+                    valid_tokens
+                )  # dsgemm_kernels.activation_quant_triton(valid_tokens)
+            else:
+                gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
+
+            # Allocate output buffers
+            gate_proj_out = torch.empty(
+                (m_actual_tokens, intermediate_size),
+                device=contig_tokens.device,
+                dtype=contig_tokens.dtype,
+            )
+            up_proj_out = torch.empty_like(gate_proj_out)
+
+            # Allocate output buffer for down projection
+            down_proj_out = torch.empty(
+                (m_actual_tokens, hidden_size),
+                device=contig_tokens.device,
+                dtype=contig_tokens.dtype,
+            )
+
+            # Run first GEMM (gate projection)
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                gate_up_input,
+                (gate_proj_weight_fp8, gate_proj_scales),
+                gate_proj_out,
+                m_indices,
+            )
+
+            # Run second GEMM (up projection)
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                gate_up_input,
+                (up_proj_weight_fp8, up_proj_scales),
+                up_proj_out,
+                m_indices,
+            )
+
+            # Apply activation
+            hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
+
+            # Run third GEMM (down projection)
+            if self.use_triton_quant:
+                hidden_states_quantized = dsgemm_kernels.groupwise_activation_quant(
+                    hidden_states
+                )
+            else:
+                hidden_states_quantized = dsgemm_utils.prepare_fp8_input(hidden_states)
+
+            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                hidden_states_quantized,
+                (down_proj_weight_fp8, down_proj_scales),
+                down_proj_out,
+                m_indices,
+            )
+
+            # Copy results back to contig_tokens
+            contig_tokens[: m_offsets[-1]] = down_proj_out
+            return contig_tokens
+# =======
+"""
 
 
 # Get model parallel subgroup by name:
@@ -575,12 +811,13 @@ class MoE(nn.Module):
 
         # Group Gemm
         self._initialize_group_gemm_strategies()
-        self.group_mm = "torchfp8"
+        self.group_mm = "dsgemm"  # "torchfp8"
         assert (
             self.group_mm in self.group_gemm_strategies
         ), f"selected group gemm {self.group_mm} is not avaiable!"
         # keep active gg ready
         self.group_gemm_instance = self.group_gemm_strategies[self.group_mm]
+        self._buffer_initialized = False
 
     def _initialize_group_gemm_strategies(self):
         """Initialize available group GEMM strategies"""
@@ -590,7 +827,7 @@ class MoE(nn.Module):
             "torchfp8": (
                 TorchFP8GroupGEMM() if TorchFP8GroupGEMM.is_available() else None
             ),
-            # "ds": DSGroupGEMM() if DSGroupGEMM.is_available() else None
+            "dsgemm": DSGroupGEMM() if DSGroupGEMM.is_available() else None,
         }
 
     def zero_print(self, msg):
@@ -605,12 +842,12 @@ class MoE(nn.Module):
             all_weights.append(lin.weight)
             lin.weight = None
 
-        if self.group_mm == "torchfp8":
+        if self.group_mm in ("torchfp8", "dsgemm"):
             combined_weight = self.group_gemm_instance.arrange_expert_weights(
-                all_weights
+                all_weights, submod_name, self
             )
 
-        if self.group_mm in ("torch", "ds", "torchfp8"):
+        elif self.group_mm in ("torch",):
             # combined_weight.shape=torch.Size([16, 1408, 2048])
             combined_weight = torch.stack(all_weights)
 
@@ -623,7 +860,7 @@ class MoE(nn.Module):
 
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(combined_weight))
 
-        if self.group_mm == "ds":
+        """if self.group_mm == "dsgemm":
             fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weight)
             self.register_parameter(
                 f"{submod_name}_fp8",
@@ -637,6 +874,7 @@ class MoE(nn.Module):
                     scales,
                 ),
             )
+            """
 
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
@@ -988,6 +1226,13 @@ class MoE(nn.Module):
             )
             up_proj_out = torch.empty_like(gate_proj_out)
 
+            # Allocate output buffer for down projection
+            down_proj_out = torch.empty(
+                (m_actual_tokens, hidden_size),
+                device=contig_tokens.device,
+                dtype=contig_tokens.dtype,
+            )
+
             # Run first GEMM (gate projection)
             deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
                 gate_up_input,
@@ -1006,13 +1251,6 @@ class MoE(nn.Module):
 
             # Apply activation
             hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
-
-            # Allocate output buffer for down projection
-            down_proj_out = torch.empty(
-                (m_actual_tokens, hidden_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
-            )
 
             # Run third GEMM (down projection)
             if self.use_triton_quant:
