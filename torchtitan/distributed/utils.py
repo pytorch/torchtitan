@@ -49,7 +49,9 @@ def _dist_reduce(
 
 
 def dist_max(
-    x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
+    x: torch.Tensor,
+    mesh: DeviceMesh,
+    extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
@@ -57,7 +59,9 @@ def dist_max(
 
 
 def dist_mean(
-    x: torch.Tensor, mesh: DeviceMesh, extra_pg: dist.ProcessGroup | None
+    x: torch.Tensor,
+    mesh: DeviceMesh,
+    extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
