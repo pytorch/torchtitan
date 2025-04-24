@@ -51,7 +51,93 @@ class GroupGEMMStrategy:
 
 
 # ========= Implementations ===================
-__all__ = ["TorchFP8GroupGEMM", "DSGroupGEMM"]
+__all__ = [
+    "TorchFP8GroupGEMM",
+    "DSGroupGEMM",
+    "TorchBF16GroupGEMM",
+    "TorchAOBF16GroupGEMM",
+]
+
+
+class TorchBF16GroupGEMM(GroupGEMMStrategy):
+    """Implementation for PyTorch native BF16  _grouped_mm"""
+
+    def __init__(
+        self,
+    ):
+        self.activation_function = nn.SiLU()
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """prep the expert weights for group gemm usage"""
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get weights
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Run first two GEMMs (gate and up projections)
+        gate_proj = torch._grouped_mm(
+            contig_tokens,
+            w_gate.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+        up_proj = torch._grouped_mm(
+            contig_tokens,
+            w_up.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+
+        # Apply activation
+        hidden_outputs = self.activation_function(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+        hidden_outputs = torch._grouped_mm(
+            hidden_outputs,
+            w_down.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+
+        return hidden_outputs
+
+
+class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
+    """Implementation using TorchAO's grouped_gemm_forward"""
+
+    def __init__(
+        self,
+    ):
+        self.activation_function = nn.SiLU()
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """prep the expert weights for group gemm usage"""
+        return torch.cat(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get weights
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Run first two GEMMs (gate and up projections)
+        gate_proj = grouped_gemm_forward(contig_tokens, w_gate, m_sizes)
+        up_proj = grouped_gemm_forward(contig_tokens, w_up, m_sizes)
+
+        # Apply activation
+        hidden_outputs = self.activation_function(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+        hidden_outputs = grouped_gemm_forward(hidden_outputs, w_down, m_sizes)
+
+        return hidden_outputs
+
+    @staticmethod
+    def is_available() -> bool:
+        return TORCHAO_AVAILABLE and TRITON_MG_GROUP_GEMM_AVAILABLE
 
 
 class TorchFP8GroupGEMM(GroupGEMMStrategy):
