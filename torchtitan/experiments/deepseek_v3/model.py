@@ -844,7 +844,6 @@ class MoE(nn.Module):
             w_down = self.get_parameter("down_proj_weight")
 
             # Run first two GEMMs (gate and up projections)
-            self.zero_print(f"inside scaled ggmm start")
 
             gate_proj = _scaled_grouped_mm(
                 contig_tokens,
@@ -852,7 +851,7 @@ class MoE(nn.Module):
                 m_offsets,
                 out_dtype=torch.bfloat16,
             )
-            self.zero_print(f"SUCCESS! {gate_proj[0]=}")
+
             up_proj = _scaled_grouped_mm(
                 contig_tokens,
                 w_up.transpose(-2, -1),
