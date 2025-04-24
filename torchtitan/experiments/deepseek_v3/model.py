@@ -50,8 +50,10 @@ try:
     import torchao
 
     TORCHAO_AVAILABLE = True
+    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
 except ImportError:
     TORCHAO_AVAILABLE = False
+    raise NotImplementedError("Missing TorchAO")
 
 import torch
 import torch.distributed as dist
@@ -480,7 +482,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "torchao"  # "  # [ torch, torchao, ds (ds==fp8), torchfp8 ]
+    group_mm = "torchfp8"  # "  # [ torch, torchao, ds (ds==fp8), torchfp8 ]
 
     if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
         print(
@@ -547,7 +549,7 @@ class MoE(nn.Module):
         elif self.group_mm == "torchao":
             # combined_weight.shape=torch.Size([22528, 2048])
             combined_weight = torch.cat(all_weights)
-            self.zero_print(f"\n{combined_weight.shape=}\n")
+
         else:
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
@@ -832,6 +834,43 @@ class MoE(nn.Module):
                     m_offsets,
                     out_dtype=torch.bfloat16,
                 )
+
+            return hidden_outputs
+        elif self.group_mm == "torchfp8":
+            # torch float8
+            # Get weights
+            w_gate = self.get_parameter("gate_proj_weight")
+            w_up = self.get_parameter("up_proj_weight")
+            w_down = self.get_parameter("down_proj_weight")
+
+            # Run first two GEMMs (gate and up projections)
+            self.zero_print(f"inside scaled ggmm start")
+
+            gate_proj = _scaled_grouped_mm(
+                contig_tokens,
+                w_gate.transpose(-2, -1),
+                m_offsets,
+                out_dtype=torch.bfloat16,
+            )
+            self.zero_print(f"SUCCESS! {gate_proj[0]=}")
+            up_proj = _scaled_grouped_mm(
+                contig_tokens,
+                w_up.transpose(-2, -1),
+                m_offsets,
+                out_dtype=torch.bfloat16,
+            )
+
+            # Apply activation
+            hidden_outputs = MLP.act_fn(gate_proj) * up_proj
+
+            # Run the third GEMM (down projection)
+
+            hidden_outputs = _scaled_grouped_mm(
+                hidden_outputs,
+                w_down.transpose(-2, -1),
+                m_offsets,
+                out_dtype=torch.bfloat16,
+            )
 
             return hidden_outputs
 
