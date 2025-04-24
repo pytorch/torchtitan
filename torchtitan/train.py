@@ -295,23 +295,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         device_type = utils.device_type
 
         while True:
-            try:
-                data_load_start = time.perf_counter()
-                batch = next(data_iterator)
-                input_dict, labels = batch
-                self.metrics_processor.ntokens_since_last_log += labels.numel()
-                self.metrics_processor.data_loading_times.append(
-                    time.perf_counter() - data_load_start
-                )
+            data_load_start = time.perf_counter()
+            batch = next(data_iterator)
+            input_dict, labels = batch
+            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            self.metrics_processor.data_loading_times.append(
+                time.perf_counter() - data_load_start
+            )
 
-                # Move tensors to the appropriate device
-                for k, _ in input_dict.items():
-                    input_dict[k] = input_dict[k].to(device_type)
-                labels = labels.to(device_type)
+            # Move tensors to the appropriate device
+            for k, _ in input_dict.items():
+                input_dict[k] = input_dict[k].to(device_type)
+            labels = labels.to(device_type)
 
-                yield input_dict, labels
-            except StopIteration:
-                break
+            yield input_dict, labels
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         self.optimizers.zero_grad()
