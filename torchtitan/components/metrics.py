@@ -412,16 +412,21 @@ class MetricsProcessor:
 
 
 def build_metrics_processor(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
+    job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    model_args = None,
+    tag: str | None = None,
 ) -> MetricsProcessor:
     """Create a metrics processor.
 
     Args:
         job_config (JobConfig): Job configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
-        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+        model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
+        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
 
     Returns:
         MetricsProcessor: A metrics processor.
     """
+    del model_args  # Currently unused by the default MetricsProcessor
     return MetricsProcessor(job_config, parallel_dims, tag)
