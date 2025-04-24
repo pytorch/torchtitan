@@ -49,10 +49,10 @@ if DEEPGEMM_AVAILABLE:
 try:
     import torchao
 
-    TORCHAO_AVAILABLE = True
+    TORCHAO_FP8_GG_AVAILABLE = True
     from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
 except ImportError:
-    TORCHAO_AVAILABLE = False
+    TORCHAO_FP8_GG_AVAILABLE = False
     raise NotImplementedError("Missing TorchAO")
 
 import torch
@@ -64,6 +64,8 @@ import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
+from base_groupgemm import GroupGEMMStrategy
+
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
@@ -74,6 +76,53 @@ from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
     grouped_gemm_forward,
 )
+
+
+class TorchFP8GroupGEMM(GroupGEMMStrategy):
+    """Implementation using TorchAO's _scaled_grouped_mm with FP8 rowwise precision"""
+
+    # def prep_experts(self, weights, module):
+    #    return module.
+    def arrange_expert_weights(self, all_weights):
+        """prep the expert weights for group gemm usage"""
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get weights
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Run first two GEMMs (gate and up projections)
+        gate_proj = _scaled_grouped_mm(
+            contig_tokens,
+            w_gate.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+        up_proj = _scaled_grouped_mm(
+            contig_tokens,
+            w_up.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+
+        # Apply activation
+        hidden_outputs = MLP.act_fn(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+        hidden_outputs = _scaled_grouped_mm(
+            hidden_outputs,
+            w_down.transpose(-2, -1),
+            m_offsets,
+            out_dtype=torch.bfloat16,
+        )
+
+        return hidden_outputs
+
+    @staticmethod
+    def is_available() -> bool:
+        return TORCHAO_FP8_GG_AVAILABLE
 
 
 # Get model parallel subgroup by name:
@@ -482,13 +531,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "torchfp8"  # "  # [ torch, torchao, ds (ds==fp8), torchfp8 ]
-
-    if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
-        print(
-            "DeepGemm is not available on your system.  Please install and try again."
-        )
-        raise ValueError("Missing DeepGemm install")
+    # group_mm = "torchfp8"  # "  # [ torch, torchao, ds (ds==fp8), torchfp8 ]
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
@@ -530,6 +573,26 @@ class MoE(nn.Module):
                 config=config, intermediate_size=intermediate_size
             )
 
+        # Group Gemm
+        self._initialize_group_gemm_strategies()
+        self.group_mm = "torchfp8"
+        assert (
+            self.group_mm in self.group_gemm_strategies
+        ), f"selected group gemm {self.group_mm} is not avaiable!"
+        # keep active gg ready
+        self.group_gemm_instance = self.group_gemm_strategies[self.group_mm]
+
+    def _initialize_group_gemm_strategies(self):
+        """Initialize available group GEMM strategies"""
+        self.group_gemm_strategies = {
+            # "torch": TorchGroupGEMM(),
+            # "torchao": TorchAOGroupGEMM() if TorchAOGroupGEMM.is_available() else None,
+            "torchfp8": (
+                TorchFP8GroupGEMM() if TorchFP8GroupGEMM.is_available() else None
+            ),
+            # "ds": DSGroupGEMM() if DSGroupGEMM.is_available() else None
+        }
+
     def zero_print(self, msg):
         if self.rank == 0:
             print(f"{msg}")
@@ -541,6 +604,11 @@ class MoE(nn.Module):
             lin = expert.get_submodule(submod_name)
             all_weights.append(lin.weight)
             lin.weight = None
+
+        if self.group_mm == "torchfp8":
+            combined_weight = self.group_gemm_instance.arrange_expert_weights(
+                all_weights
+            )
 
         if self.group_mm in ("torch", "ds", "torchfp8"):
             # combined_weight.shape=torch.Size([16, 1408, 2048])
@@ -791,7 +859,18 @@ class MoE(nn.Module):
     # "ds": group_mlp_ds,
     # }
 
-    def _run_group_gemm(
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets):
+        """Run the appropriate group GEMM implementation based on configuration"""
+
+        try:
+            return self.group_gemm_strategies[self.group_mm].execute(
+                contig_tokens, m_sizes, m_offsets, self
+            )
+        except Exception as e:
+            # Log the error
+            print(f"Error using {self.group_mm} strategy: {e}")
+
+    def _run_group_gemm_old(
         self,
         contig_tokens,
         m_sizes,
