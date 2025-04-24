@@ -446,7 +446,12 @@ class Transformer(nn.Module, ModelProtocol):
         Perform a forward pass through the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices.
+            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
+                If pipeline parallelism is enabled, this will be the input token indices
+                for the ranks on the first pipeline stage. This will be the activation of the
+                previous pipeline stage if the current rank is not on the first stage.
+            input_batch (torch.Tensor): The input batch read from the dataloader.
+                This will always be the input batch regardless of the pipeline stage.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
