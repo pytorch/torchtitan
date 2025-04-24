@@ -46,6 +46,13 @@ if DEEPGEMM_AVAILABLE:
     import dsgemm_kernels
     import dsgemm_utils
 
+try:
+    import torchao
+
+    TORCHAO_AVAILABLE = True
+except ImportError:
+    TORCHAO_AVAILABLE = False
+
 import torch
 import torch.distributed as dist
 
@@ -473,7 +480,7 @@ class MoE(nn.Module):
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
     # Group GEMM method
-    group_mm = "torch"  # "  # [ torch, torchao, ds (ds==fp8) ]
+    group_mm = "torchao"  # "  # [ torch, torchao, ds (ds==fp8), torchfp8 ]
 
     if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
         print(
@@ -491,6 +498,7 @@ class MoE(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.use_triton_quant = True
+        self.rank = torch.distributed.get_rank()
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -520,6 +528,10 @@ class MoE(nn.Module):
                 config=config, intermediate_size=intermediate_size
             )
 
+    def zero_print(self, msg):
+        if self.rank == 0:
+            print(f"{msg}")
+
     def combine_experts(self, submod_name: str):
         all_weights = []
         for expert in self.experts.values():
@@ -528,10 +540,14 @@ class MoE(nn.Module):
             all_weights.append(lin.weight)
             lin.weight = None
 
-        if self.group_mm in ("torch", "ds"):
+        if self.group_mm in ("torch", "ds", "torchfp8"):
+            # combined_weight.shape=torch.Size([16, 1408, 2048])
             combined_weight = torch.stack(all_weights)
+
         elif self.group_mm == "torchao":
+            # combined_weight.shape=torch.Size([22528, 2048])
             combined_weight = torch.cat(all_weights)
+            self.zero_print(f"\n{combined_weight.shape=}\n")
         else:
             raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
 
