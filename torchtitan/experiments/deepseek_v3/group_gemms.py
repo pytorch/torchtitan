@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import torch
 import torch.nn as nn
 
@@ -13,17 +19,18 @@ if DEEPGEMM_AVAILABLE:
     import dsgemm_utils
 
 try:
-    import torchao
+    # import torchao
+    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
 
     TORCHAO_FP8_GG_AVAILABLE = True
-    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
+
 except ImportError:
     TORCHAO_FP8_GG_AVAILABLE = False
     # raise NotImplementedError("Missing TorchAO")
 
 try:
     from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-        ALIGN_SIZE_M,
+        # ALIGN_SIZE_M,
         grouped_gemm_forward,
     )
 

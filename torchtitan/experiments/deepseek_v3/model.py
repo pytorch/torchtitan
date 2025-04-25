@@ -35,26 +35,6 @@ import math
 # from re import X
 from typing import Optional, Tuple
 
-try:
-    import deep_gemm
-
-    DEEPGEMM_AVAILABLE = True
-except ImportError:
-    DEEPGEMM_AVAILABLE = False
-
-if DEEPGEMM_AVAILABLE:
-    import dsgemm_kernels
-    import dsgemm_utils
-
-try:
-    import torchao
-
-    TORCHAO_FP8_GG_AVAILABLE = True
-    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
-except ImportError:
-    TORCHAO_FP8_GG_AVAILABLE = False
-    raise NotImplementedError("Missing TorchAO")
-
 import torch
 import torch.distributed as dist
 
@@ -77,10 +57,6 @@ from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
-from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-    ALIGN_SIZE_M,
-    grouped_gemm_forward,
-)
 
 
 # Get model parallel subgroup by name:
