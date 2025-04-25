@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig
@@ -347,6 +348,7 @@ class MetricsProcessor:
         step: int,
         global_avg_loss: float,
         global_max_loss: float,
+        grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
@@ -372,6 +374,7 @@ class MetricsProcessor:
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
+            "optimizer/grad_norm": grad_norm,
             "throughput(tps)": tps,
             "tflops": tflops,
             "mfu(%)": mfu,
@@ -397,8 +400,8 @@ class MetricsProcessor:
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,}  "
-            f"{color.cyan}tflops: {tflops:,.2f}  "
+            f"{color.blue}tps: {round(tps):,} tflops: {tflops:,.2f}  "
+            f"{color.cyan}grad_norm: {grad_norm:.2f}  "
             f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
         )
 

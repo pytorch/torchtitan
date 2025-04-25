@@ -15,20 +15,20 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
-    ensure_pp_loss_visible,
+    ensure_pp_loss_visible
 )
 from torchtitan.config_manager import ConfigManager, JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
+    maybe_enable_profiling
 )
 
 
@@ -357,7 +357,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 del pred
                 loss.backward()
 
-        dist_utils.clip_grad_norm_(
+        grad_norm = dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
@@ -386,7 +386,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
 
-        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
+        self.metrics_processor.log(
+            self.step,
+            global_avg_loss,
+            global_max_loss,
+            grad_norm.item(),
+        )
 
     @record
     def train(self):
