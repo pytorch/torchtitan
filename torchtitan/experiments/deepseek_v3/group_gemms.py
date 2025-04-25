@@ -21,6 +21,16 @@ except ImportError:
     TORCHAO_FP8_GG_AVAILABLE = False
     # raise NotImplementedError("Missing TorchAO")
 
+try:
+    from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
+        ALIGN_SIZE_M,
+        grouped_gemm_forward,
+    )
+
+    TRITON_MG_GROUP_GEMM_AVAILABLE = True
+except ImportError:
+    TRITON_MG_GROUP_GEMM_AVAILABLE = False
+
 
 # Strategy base class for GroupGEMM implementations
 class GroupGEMMStrategy:
@@ -51,6 +61,7 @@ class GroupGEMMStrategy:
 
 
 # ========= Implementations ===================
+
 __all__ = [
     "TorchFP8GroupGEMM",
     "DSGroupGEMM",
@@ -137,7 +148,7 @@ class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
 
     @staticmethod
     def is_available() -> bool:
-        return TORCHAO_AVAILABLE and TRITON_MG_GROUP_GEMM_AVAILABLE
+        return TRITON_MG_GROUP_GEMM_AVAILABLE
 
 
 class TorchFP8GroupGEMM(GroupGEMMStrategy):
