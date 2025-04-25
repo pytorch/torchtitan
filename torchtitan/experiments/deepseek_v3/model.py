@@ -57,10 +57,7 @@ from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
-from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-    ALIGN_SIZE_M,
-    # grouped_gemm_forward,
-)
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
 
 
 # Get model parallel subgroup by name:
@@ -473,17 +470,19 @@ class MoE(nn.Module):
     token_send_buf: Optional[torch.Tensor] = None
     token_gather_buf: Optional[torch.Tensor] = None
 
-    def __init__(self, config, custom_activation=None):
+    # Group GEMM strategies
+    group_gemm_strategies = None
+    # which group gemm to use?
+    group_mm = (
+        "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
+    )
+
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
-        self.use_triton_quant = True
-        self.rank = torch.distributed.get_rank()
-        self.activation_function = custom_activation or MLP.act_fn
-
-        # which group gemm to use?
-        self.group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
+        self.activation_function = MLP.act_fn
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -514,39 +513,38 @@ class MoE(nn.Module):
             )
 
         # Group Gemm
-        self._initialize_group_gemm_strategies()
+        # Initialize group GEMM strategies if not already loaded
+        if MoE.group_gemm_strategies is None:
+            MoE._initialize_group_gemm_strategies()
 
         assert (
-            self.group_mm in self.group_gemm_strategies
+            MoE.group_mm in MoE.group_gemm_strategies
         ), f"selected group gemm {self.group_mm} is not avaiable!"
         # keep active gg ready
-        self.group_gemm_instance = self.group_gemm_strategies[self.group_mm]
+        self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
         self._buffer_initialized = False
 
-    def _initialize_group_gemm_strategies(self):
+    @classmethod
+    def _initialize_group_gemm_strategies(cls):
         """Initialize available group GEMM strategies"""
-        self.group_gemm_strategies = {
-            "torch": TorchBF16GroupGEMM(self.activation_function),
+        cls.group_gemm_strategies = {
+            "torch": TorchBF16GroupGEMM(MLP.act_fn),
             "torchao": (
-                TorchAOBF16GroupGEMM(self.activation_function)
+                TorchAOBF16GroupGEMM(MLP.act_fn)
                 if TorchAOBF16GroupGEMM.is_available()
                 else None
             ),
             "torchfp8": (
-                TorchFP8GroupGEMM(self.activation_function)
+                TorchFP8GroupGEMM(MLP.act_fn)
                 if TorchFP8GroupGEMM.is_available()
                 else None
             ),
             "dsgemm": (
-                DSGroupGEMM(self.activation_function)
+                DSGroupGEMM(MLP.act_fn, use_triton_quant=True)
                 if DSGroupGEMM.is_available()
                 else None
             ),
         }
-
-    def zero_print(self, msg):
-        if self.rank == 0:
-            print(f"{msg}")
 
     def combine_experts(self, submod_name: str):
         all_weights = []
@@ -557,13 +555,12 @@ class MoE(nn.Module):
             lin.weight = None
 
         # let the group gemm strategy prep the final weight layout
-        combined_weight = None
         combined_weight = self.group_gemm_instance.arrange_expert_weights(
             all_weights, submod_name, self
         )
 
         if combined_weight is None:
-            raise RuntimeError("expert weights not handled by group gemmm")
+            raise NotImplementedError("expert weights not handled by group gemmm")
 
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(combined_weight))
 
@@ -773,7 +770,6 @@ class MoE(nn.Module):
             tokens_per_expert = expert_counts.sum(dim=0)
             # Token indices for each expert
             token_indices = topk_ids.view(-1).argsort()
-            # sorted_tokens_shape = token_indices.shape + x.shape[1:]
 
         sorted_tokens = x[token_indices // topk_ids.shape[1]]
         # assert sorted_tokens.shape == sorted_tokens_shape

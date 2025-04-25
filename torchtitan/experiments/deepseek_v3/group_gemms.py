@@ -43,11 +43,21 @@ except ImportError:
 class GroupGEMMStrategy:
     """Base class for group gemm strategies"""
 
-    def __init__(self, custom_activation=None):
-        self.activation_function = custom_activation or nn.SiLU()
+    def __init__(self, custom_activation):
+        self.activation_function = custom_activation
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
-        """prepare expert weights, including prescaling"""
+        """prepare expert weights, including prescaling
+
+        Args:
+            all_weights: List of weight tensors from each expert
+            submod_name: Name of the submodule (e.g., 'gate_proj', 'up_proj', 'down_proj')
+            module: The parent module that will store the arranged weights
+
+        Returns:
+            Tensor: The arranged weights in the format required by the specific strategy
+        """
+
         raise NotImplementedError("Requires arrange_expert_weights method")
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
@@ -67,7 +77,7 @@ class GroupGEMMStrategy:
     @staticmethod
     def is_available() -> bool:
         """Check if this strategy is available on the current system"""
-        return True
+        return False
 
 
 # ========= Implementations ===================
@@ -82,9 +92,6 @@ __all__ = [
 
 class TorchBF16GroupGEMM(GroupGEMMStrategy):
     """Implementation for PyTorch native BF16  _grouped_mm"""
-
-    def __init__(self, custom_activation=None):
-        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
@@ -127,9 +134,6 @@ class TorchBF16GroupGEMM(GroupGEMMStrategy):
 class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
     """Implementation using TorchAO's grouped_gemm_forward"""
 
-    def __init__(self, custom_activation=None):
-        self.activation_function = custom_activation or nn.SiLU()
-
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
         return torch.cat(all_weights)
@@ -159,9 +163,6 @@ class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
 
 class TorchFP8GroupGEMM(GroupGEMMStrategy):
     """Implementation using TorchAO's _scaled_grouped_mm with FP8 rowwise precision and weight prescaling"""
-
-    def __init__(self, custom_activation=None):
-        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage with prescaling"""
@@ -279,8 +280,9 @@ class TorchFP8GroupGEMM(GroupGEMMStrategy):
 class DSGroupGEMM(GroupGEMMStrategy):
     """Implementation using DeepGEMM with FP8 quantization"""
 
-    def __init__(self, custom_activation=None):
-        self.activation_function = custom_activation or nn.SiLU()
+    def __init__(self, custom_activation, use_triton_quant=True):
+        self.activation_function = custom_activation
+        self.use_triton_quant = use_triton_quant
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
@@ -289,6 +291,7 @@ class DSGroupGEMM(GroupGEMMStrategy):
         fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weights)
 
         # prescale weights
+        # TODO - this creates 2 sets of weights, need to resolve this for traiing aspect.
         module.register_parameter(
             f"{submod_name}_fp8",
             nn.Parameter(
@@ -340,45 +343,8 @@ class DSGroupGEMM(GroupGEMMStrategy):
             dtype=contig_tokens.dtype,
         )
 
-        """# Prepare or resize output buffers
-        if not hasattr(module, "_buffer_initialized") or not module._buffer_initialized:
-            module.register_buffer(
-                "gate_proj_buffer",
-                torch.empty(
-                    (m_actual_tokens, intermediate_size),
-                    device=contig_tokens.device,
-                    dtype=contig_tokens.dtype,
-                ),
-            )
-            module.register_buffer(
-                "up_proj_buffer", torch.empty_like(module.gate_proj_buffer)
-            )
-            module.register_buffer(
-                "down_proj_buffer",
-                torch.empty(
-                    (m_actual_tokens, hidden_size),
-                    device=contig_tokens.device,
-                    dtype=contig_tokens.dtype,
-                ),
-            )
-            module._buffer_initialized = True
-        else:
-            # Resize buffers if needed
-            if module.gate_proj_buffer.shape[0] < m_actual_tokens:
-                module.gate_proj_buffer = torch.empty(
-                    (m_actual_tokens, intermediate_size),
-                    device=contig_tokens.device,
-                    dtype=contig_tokens.dtype,
-                )
-                module.up_proj_buffer = torch.empty_like(module.gate_proj_buffer)
-                module.down_proj_buffer = torch.empty(
-                    (m_actual_tokens, hidden_size),
-                    device=contig_tokens.device,
-                    dtype=contig_tokens.dtype,
-                )
-        """
         # Prepare input in FP8 format (shared by gate and up projections)
-        if module.use_triton_quant:
+        if self.use_triton_quant:
             gate_up_input = dsgemm_kernels.groupwise_activation_quant(valid_tokens)
         else:
             gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
@@ -403,7 +369,7 @@ class DSGroupGEMM(GroupGEMMStrategy):
         hidden_states = self.activation_function(gate_proj_out) * up_proj_out
 
         # Run third GEMM (down projection)
-        if module.use_triton_quant:
+        if self.use_triton_quant:
             hidden_states_quantized = dsgemm_kernels.groupwise_activation_quant(
                 hidden_states
             )
