@@ -35,17 +35,6 @@ import math
 # from re import X
 from typing import Optional, Tuple
 
-try:
-    import deep_gemm
-
-    DEEPGEMM_AVAILABLE = True
-except ImportError:
-    DEEPGEMM_AVAILABLE = False
-
-if DEEPGEMM_AVAILABLE:
-    import dsgemm_kernels
-    import dsgemm_utils
-
 import torch
 import torch.distributed as dist
 
@@ -55,16 +44,20 @@ import torch.utils.checkpoint
 
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
+from group_gemms import (
+    DSGroupGEMM,
+    TorchAOBF16GroupGEMM,
+    TorchBF16GroupGEMM,
+    TorchFP8GroupGEMM,
+)
+
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
-from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-    ALIGN_SIZE_M,
-    grouped_gemm_forward,
-)
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
 
 
 # Get model parallel subgroup by name:
@@ -472,25 +465,24 @@ class MoE(nn.Module):
     # 1. "torch_all_to_all"
     # 2. "symm_mem" (see `setup_symm_mem` below)
     shuffle_method = "torch_all_to_all"
-    # Group GEMM method
-    group_mm = "torch"  # "  # [ torch, torchao, ds (ds==fp8) ]
-
-    if group_mm == "ds" and not DEEPGEMM_AVAILABLE:
-        print(
-            "DeepGemm is not available on your system.  Please install and try again."
-        )
-        raise ValueError("Missing DeepGemm install")
 
     # Symmetric memory buffers shared by all MoE instances across layers
     token_send_buf: Optional[torch.Tensor] = None
     token_gather_buf: Optional[torch.Tensor] = None
+
+    # Group GEMM strategies
+    group_gemm_strategies = None
+    # which group gemm to use?
+    group_mm = (
+        "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
+    )
 
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
-        self.use_triton_quant = True
+        self.activation_function = MLP.act_fn
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -504,7 +496,7 @@ class MoE(nn.Module):
         self.ep_rank = self.ep_group.rank()
         self.experts_per_rank = config.n_routed_experts // config.ep_size
 
-        # Use ModuleDict instead of ModuleList to preserve absoulte expert
+        # Use ModuleDict instead of ModuleList to preserve absolute expert
         # IDs while avoiding `None` experts. The absolute expert IDs match
         # with checkpoint FQNs.
         self.experts = nn.ModuleDict()
@@ -520,6 +512,40 @@ class MoE(nn.Module):
                 config=config, intermediate_size=intermediate_size
             )
 
+        # Group Gemm
+        # Initialize group GEMM strategies if not already loaded
+        if MoE.group_gemm_strategies is None:
+            MoE._initialize_group_gemm_strategies()
+
+        assert (
+            MoE.group_mm in MoE.group_gemm_strategies
+        ), f"selected group gemm {self.group_mm} is not avaiable!"
+        # keep active gg ready
+        self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
+        self._buffer_initialized = False
+
+    @classmethod
+    def _initialize_group_gemm_strategies(cls):
+        """Initialize available group GEMM strategies"""
+        cls.group_gemm_strategies = {
+            "torch": TorchBF16GroupGEMM(MLP.act_fn),
+            "torchao": (
+                TorchAOBF16GroupGEMM(MLP.act_fn)
+                if TorchAOBF16GroupGEMM.is_available()
+                else None
+            ),
+            "torchfp8": (
+                TorchFP8GroupGEMM(MLP.act_fn)
+                if TorchFP8GroupGEMM.is_available()
+                else None
+            ),
+            "dsgemm": (
+                DSGroupGEMM(MLP.act_fn, use_triton_quant=True)
+                if DSGroupGEMM.is_available()
+                else None
+            ),
+        }
+
     def combine_experts(self, submod_name: str):
         all_weights = []
         for expert in self.experts.values():
@@ -528,29 +554,15 @@ class MoE(nn.Module):
             all_weights.append(lin.weight)
             lin.weight = None
 
-        if self.group_mm in ("torch", "ds"):
-            combined_weight = torch.stack(all_weights)
-        elif self.group_mm == "torchao":
-            combined_weight = torch.cat(all_weights)
-        else:
-            raise RuntimeError(f"Unknown Group GEMM method: {self.group_mm}")
+        # let the group gemm strategy prep the final weight layout
+        combined_weight = self.group_gemm_instance.arrange_expert_weights(
+            all_weights, submod_name, self
+        )
+
+        if combined_weight is None:
+            raise NotImplementedError("expert weights not handled by group gemmm")
 
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(combined_weight))
-
-        if self.group_mm == "ds":
-            fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weight)
-            self.register_parameter(
-                f"{submod_name}_fp8",
-                nn.Parameter(
-                    fp8,
-                ),
-            )
-            self.register_parameter(
-                f"{submod_name}_scales",
-                nn.Parameter(
-                    scales,
-                ),
-            )
 
     # This function is used to create a symm mem buffer for MoE's. It is for
     # shuffling tokens fully "on-device", as compared to traditional torch
@@ -758,7 +770,6 @@ class MoE(nn.Module):
             tokens_per_expert = expert_counts.sum(dim=0)
             # Token indices for each expert
             token_indices = topk_ids.view(-1).argsort()
-            sorted_tokens_shape = token_indices.shape + x.shape[1:]
 
         sorted_tokens = x[token_indices // topk_ids.shape[1]]
         # assert sorted_tokens.shape == sorted_tokens_shape
@@ -766,139 +777,17 @@ class MoE(nn.Module):
         return (sorted_tokens, token_indices, tokens_per_expert)
 
     # ------- Group GEMM implementation ------
-    # TODO - let's make a dict to order these ala:
-    # group_mlp_impls: Dict[str, Callable] = {
-    # "torch": group_mlp_torch,
-    # "torchao": group_mlp_torchao,
-    # "ds": group_mlp_ds,
-    # }
 
-    def _run_group_gemm(
-        self,
-        contig_tokens,
-        m_sizes,
-        m_offsets,
-    ):
-        if self.group_mm in ["torch", "torchao"]:
-            # Get weights
-            w_gate = self.get_parameter("gate_proj_weight")
-            w_up = self.get_parameter("up_proj_weight")
-            w_down = self.get_parameter("down_proj_weight")
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets):
+        """Run the appropriate group GEMM implementation based on configuration"""
 
-            # Run first two GEMMs (gate and up projections)
-            if self.group_mm == "torchao":
-                gate_proj = grouped_gemm_forward(contig_tokens, w_gate, m_sizes)
-                up_proj = grouped_gemm_forward(contig_tokens, w_up, m_sizes)
-            else:  # "torch"
-                gate_proj = torch._grouped_mm(
-                    contig_tokens,
-                    w_gate.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
-                up_proj = torch._grouped_mm(
-                    contig_tokens,
-                    w_up.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
-
-            # Apply activation
-            hidden_outputs = MLP.act_fn(gate_proj) * up_proj
-
-            # Run the third GEMM (down projection)
-            if self.group_mm == "torchao":
-                hidden_outputs = grouped_gemm_forward(hidden_outputs, w_down, m_sizes)
-            else:  # "torch"
-                hidden_outputs = torch._grouped_mm(
-                    hidden_outputs,
-                    w_down.transpose(-2, -1),
-                    m_offsets,
-                    out_dtype=torch.bfloat16,
-                )
-
-            return hidden_outputs
-
-        elif self.group_mm == "ds":
-            # TODO - ds gg doesn't like the ending padding, so I currently lift only valid tokens out.
-            # This needs to be fixed as cpu sync and also breaks cuda graph by overwriting memory at the last update.
-            valid_tokens = contig_tokens[: m_offsets[-1]]
-            # this function creates the required m_indices for dsgemm while ensuring no cpu-gpu sync.
-            m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
-
-            # Get expert weights for all projections
-            gate_proj_weight_fp8 = self.get_parameter("gate_proj_fp8")
-            gate_proj_scales = self.get_parameter("gate_proj_scales")
-            up_proj_weight_fp8 = self.get_parameter("up_proj_fp8")
-            up_proj_scales = self.get_parameter("up_proj_scales")
-            down_proj_weight_fp8 = self.get_parameter("down_proj_fp8")
-            down_proj_scales = self.get_parameter("down_proj_scales")
-
-            # Get dimensions
-            m_actual_tokens = valid_tokens.shape[0]
-            intermediate_size = self.get_parameter("gate_proj_weight").shape[1]
-            hidden_size = self.get_parameter("down_proj_weight").shape[1]
-
-            # Prepare input in FP8 format (shared by gate and up projections)
-            if self.use_triton_quant:
-                gate_up_input = dsgemm_kernels.groupwise_activation_quant(
-                    valid_tokens
-                )  # dsgemm_kernels.activation_quant_triton(valid_tokens)
-            else:
-                gate_up_input = dsgemm_utils.prepare_fp8_input(valid_tokens)
-
-            # Allocate output buffers
-            gate_proj_out = torch.empty(
-                (m_actual_tokens, intermediate_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
+        try:
+            return self.group_gemm_strategies[self.group_mm].execute(
+                contig_tokens, m_sizes, m_offsets, self
             )
-            up_proj_out = torch.empty_like(gate_proj_out)
-
-            # Run first GEMM (gate projection)
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                gate_up_input,
-                (gate_proj_weight_fp8, gate_proj_scales),
-                gate_proj_out,
-                m_indices,
-            )
-
-            # Run second GEMM (up projection)
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                gate_up_input,
-                (up_proj_weight_fp8, up_proj_scales),
-                up_proj_out,
-                m_indices,
-            )
-
-            # Apply activation
-            hidden_states = MLP.act_fn(gate_proj_out) * up_proj_out
-
-            # Allocate output buffer for down projection
-            down_proj_out = torch.empty(
-                (m_actual_tokens, hidden_size),
-                device=contig_tokens.device,
-                dtype=contig_tokens.dtype,
-            )
-
-            # Run third GEMM (down projection)
-            if self.use_triton_quant:
-                hidden_states_quantized = dsgemm_kernels.groupwise_activation_quant(
-                    hidden_states
-                )
-            else:
-                hidden_states_quantized = dsgemm_utils.prepare_fp8_input(hidden_states)
-
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-                hidden_states_quantized,
-                (down_proj_weight_fp8, down_proj_scales),
-                down_proj_out,
-                m_indices,
-            )
-
-            # Copy results back to contig_tokens
-            contig_tokens[: m_offsets[-1]] = down_proj_out
-            return contig_tokens
+        except Exception as e:
+            # Flag the error
+            print(f"Error using {self.group_mm} strategy: {e}")
 
     def moe_on_device(self, x, topk_ids, topk_weight):
         (
@@ -952,7 +841,7 @@ class MoE(nn.Module):
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
 
-        # group gemm
+        # group gemm - handle all three group gemms (up, gate, down for all experts)
         hidden_outputs = self._run_group_gemm(
             contig_tokens,
             m_sizes,
@@ -973,7 +862,7 @@ class MoE(nn.Module):
             self.ep_group,
         )
 
-        returned_tokens = token_return_buf[: sorted_tokens.shape[0]]
+        returned_tokens = token_return_buf[:seqlen_sorted_tokens]
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[token_indices] = returned_tokens
 

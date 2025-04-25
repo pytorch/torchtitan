@@ -127,7 +127,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
+    model_args.max_seq_len = 4096  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -291,7 +291,7 @@ def generate(
 
         # Print progress indicator every 20 tokens
         if rank == 0 and tokens_generated % 20 == 0:
-            print(".", end="", flush=True)
+            print(f"{color.yellow}:{color.reset}", end="", flush=True)
 
     # Print newline after progress indicator
     if rank == 0:
