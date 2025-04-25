@@ -57,6 +57,10 @@ from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
+    ALIGN_SIZE_M,
+    grouped_gemm_forward,
+)
 
 
 # Get model parallel subgroup by name:
@@ -509,7 +513,7 @@ class MoE(nn.Module):
         self._initialize_group_gemm_strategies()
 
         # which group gemm to use?
-        self.group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
+        self.group_mm = "torchfp8"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
 
         assert (
             self.group_mm in self.group_gemm_strategies
