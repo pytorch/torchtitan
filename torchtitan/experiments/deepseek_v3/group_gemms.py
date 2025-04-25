@@ -22,14 +22,6 @@ try:
     from torchao.float8.config import ScalingGranularity
     from torchao.float8.float8_utils import tensor_to_scale, to_fp8_saturated
 
-    # import torchao
-    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
-    from torchao.prototype.scaled_grouped_mm.kernels import (
-        triton_fp8_col_major_jagged_colwise_scales,
-        triton_fp8_row_major_jagged_rowwise_scales,
-    )
-    from torchao.prototype.scaled_grouped_mm.utils import _is_column_major
-
     TORCHAO_FP8_GG_AVAILABLE = True
 
 except ImportError:
@@ -38,7 +30,7 @@ except ImportError:
 
 try:
     from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
-        ALIGN_SIZE_M,
+        # ALIGN_SIZE_M,
         grouped_gemm_forward,
     )
 
@@ -50,6 +42,9 @@ except ImportError:
 # Strategy base class for GroupGEMM implementations
 class GroupGEMMStrategy:
     """Base class for group gemm strategies"""
+
+    def __init__(self, custom_activation=None):
+        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prepare expert weights, including prescaling"""
@@ -88,10 +83,8 @@ __all__ = [
 class TorchBF16GroupGEMM(GroupGEMMStrategy):
     """Implementation for PyTorch native BF16  _grouped_mm"""
 
-    def __init__(
-        self,
-    ):
-        self.activation_function = nn.SiLU()
+    def __init__(self, custom_activation=None):
+        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
@@ -134,10 +127,8 @@ class TorchBF16GroupGEMM(GroupGEMMStrategy):
 class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
     """Implementation using TorchAO's grouped_gemm_forward"""
 
-    def __init__(
-        self,
-    ):
-        self.activation_function = nn.SiLU()
+    def __init__(self, custom_activation=None):
+        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""
@@ -169,10 +160,8 @@ class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
 class TorchFP8GroupGEMM(GroupGEMMStrategy):
     """Implementation using TorchAO's _scaled_grouped_mm with FP8 rowwise precision and weight prescaling"""
 
-    def __init__(
-        self,
-    ):
-        self.activation_function = nn.SiLU()
+    def __init__(self, custom_activation=None):
+        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage with prescaling"""
@@ -290,10 +279,8 @@ class TorchFP8GroupGEMM(GroupGEMMStrategy):
 class DSGroupGEMM(GroupGEMMStrategy):
     """Implementation using DeepGEMM with FP8 quantization"""
 
-    def __init__(self):
-        # Cache for quantized tensors to avoid repeated work
-        self.input_cache = {}
-        self.activation_function = nn.SiLU()
+    def __init__(self, custom_activation=None):
+        self.activation_function = custom_activation or nn.SiLU()
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """prep the expert weights for group gemm usage"""

@@ -59,7 +59,7 @@ from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import (
     ALIGN_SIZE_M,
-    grouped_gemm_forward,
+    # grouped_gemm_forward,
 )
 
 
@@ -473,13 +473,17 @@ class MoE(nn.Module):
     token_send_buf: Optional[torch.Tensor] = None
     token_gather_buf: Optional[torch.Tensor] = None
 
-    def __init__(self, config):
+    def __init__(self, config, custom_activation=None):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.use_triton_quant = True
         self.rank = torch.distributed.get_rank()
+        self.activation_function = custom_activation or MLP.act_fn
+
+        # which group gemm to use?
+        self.group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -512,9 +516,6 @@ class MoE(nn.Module):
         # Group Gemm
         self._initialize_group_gemm_strategies()
 
-        # which group gemm to use?
-        self.group_mm = "torchfp8"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
-
         assert (
             self.group_mm in self.group_gemm_strategies
         ), f"selected group gemm {self.group_mm} is not avaiable!"
@@ -525,14 +526,22 @@ class MoE(nn.Module):
     def _initialize_group_gemm_strategies(self):
         """Initialize available group GEMM strategies"""
         self.group_gemm_strategies = {
-            "torch": TorchBF16GroupGEMM(),
+            "torch": TorchBF16GroupGEMM(self.activation_function),
             "torchao": (
-                TorchAOBF16GroupGEMM() if TorchAOBF16GroupGEMM.is_available() else None
+                TorchAOBF16GroupGEMM(self.activation_function)
+                if TorchAOBF16GroupGEMM.is_available()
+                else None
             ),
             "torchfp8": (
-                TorchFP8GroupGEMM() if TorchFP8GroupGEMM.is_available() else None
+                TorchFP8GroupGEMM(self.activation_function)
+                if TorchFP8GroupGEMM.is_available()
+                else None
             ),
-            "dsgemm": DSGroupGEMM() if DSGroupGEMM.is_available() else None,
+            "dsgemm": (
+                DSGroupGEMM(self.activation_function)
+                if DSGroupGEMM.is_available()
+                else None
+            ),
         }
 
     def zero_print(self, msg):
