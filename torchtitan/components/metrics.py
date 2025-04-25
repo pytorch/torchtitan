@@ -432,5 +432,4 @@ def build_metrics_processor(
     Returns:
         MetricsProcessor: A metrics processor.
     """
-    del model_args  # Currently unused by the default MetricsProcessor
     return MetricsProcessor(job_config, parallel_dims, tag)
