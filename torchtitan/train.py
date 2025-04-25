@@ -153,7 +153,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if self.train_spec.build_metrics_processor_fn is None
             else self.train_spec.build_metrics_processor_fn
         )
-        self.metrics_processor = build_metrics_processor_fn(job_config, parallel_dims)
+        self.metrics_processor = build_metrics_processor_fn(
+            job_config, parallel_dims, model_args
+        )
         color = self.metrics_processor.color
 
         # calculate model size and flops per token

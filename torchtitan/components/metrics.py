@@ -8,7 +8,7 @@ import os
 import time
 from collections import namedtuple
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -19,6 +19,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.train_spec import BaseModelArgs
+
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -412,14 +416,18 @@ class MetricsProcessor:
 
 
 def build_metrics_processor(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
+    job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    model_args: "BaseModelArgs | None" = None,
+    tag: str | None = None,
 ) -> MetricsProcessor:
     """Create a metrics processor.
 
     Args:
         job_config (JobConfig): Job configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
-        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+        model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
+        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
 
     Returns:
         MetricsProcessor: A metrics processor.
