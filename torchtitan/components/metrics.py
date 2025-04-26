@@ -397,11 +397,11 @@ class MetricsProcessor:
         color = self.color
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
+            f"{color.green}loss: {global_avg_loss:7.4f} gnorm: {grad_norm:.2f} "
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,} tflops: {tflops:,.2f}  "
-            f"{color.cyan}grad_norm: {grad_norm:.2f}  "
+            f"{color.blue}tps: {round(tps):,}  "
+            f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
         )
 
