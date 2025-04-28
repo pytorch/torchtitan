@@ -92,7 +92,8 @@ class FluxTrainer(Trainer):
         # the major variables that are used in the training loop.
         model_parts = self.model_parts
         assert len(self.model_parts) == 1
-        model = self.model_parts[0]
+        # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
+        model = self.model_parts[0].to(self._dtype)
 
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
