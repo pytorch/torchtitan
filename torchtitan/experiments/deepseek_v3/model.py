@@ -474,7 +474,7 @@ class MoE(nn.Module):
     group_gemm_strategies = None
     # which group gemm to use?
     group_mm = (
-        "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
+        "dsgemm"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
     )
 
     def __init__(self, config):

@@ -13,15 +13,16 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 from checkpoint import load_weights_from_hf
 from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -352,6 +353,20 @@ def generate_with_cuda_graph(
     return x, tokens_generated
 
 
+def apply_compile(model: nn.Module):
+    """
+    Apply torch.compile to each DecoderLayer in the DeepSeek model.
+
+
+    for index, decoder_layer in enumerate(model.model.layers):
+        compiled_layer = torch.compile(decoder_layer, fullgraph=True)
+        model.model.layers[index] = compiled_layer
+    """
+    model = torch.compile(model)
+    print("Compiling DeepSeek full model with torch.compile")
+    return model
+
+
 if __name__ == "__main__":
     # Get user prompt from command line arguments
     user_prompt = "What is 2+2?"  # Default prompt
@@ -367,6 +382,7 @@ if __name__ == "__main__":
 
     dist_config = create_dist_config(mesh)
     model, pp_schedule = create_model(dist_config)
+    model = apply_compile(model)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     messages = [
