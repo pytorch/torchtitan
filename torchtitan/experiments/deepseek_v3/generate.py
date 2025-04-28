@@ -15,13 +15,13 @@ import torch
 import torch.distributed as dist
 
 from checkpoint import load_weights_from_hf
-from model import DeepseekForCausalLM
+from model import _token_tracker, DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -120,6 +120,22 @@ class DistConfig:
     ep_rank: int
     pp_rank: int
     device: torch.device
+
+
+# Add this import at the top of generate.py
+from model import _token_tracker
+
+
+# Then add this function to generate.py
+def save_token_tracking_data():
+    """Save token tracking data to CSV and print summary"""
+    rank = dist.get_rank()
+    if rank == 0:
+        print("\n=== Token Expert Assignment Report ===")
+        _token_tracker.print_summary()
+        _token_tracker.export_csv_report("expert_assignments.csv")
+        _token_tracker.export_numpy_report("trace.npy")
+        print(f"Token tracking data saved to expert_assignments.csv and trace.npy")
 
 
 def create_model(dist_config: DistConfig):
@@ -376,6 +392,8 @@ if __name__ == "__main__":
 
     generate(model, pp_schedule, tokenizer, dist_config, messages)
     # generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+
+    save_token_tracking_data()
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")

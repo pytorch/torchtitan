@@ -53,11 +53,17 @@ from group_gemms import (
 
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
+
+# token tracking
+from token_tracking import TokenExpertTracker
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
+
+# treat this like a global logger
+_token_tracker = TokenExpertTracker()
 
 
 # Get model parallel subgroup by name:
@@ -370,6 +376,7 @@ class MoEGate(nn.Module):
         self.topk_method = config.topk_method
         self.n_group = config.n_group
         self.topk_group = config.topk_group
+        self.rank = dist.get_rank()
 
         # topk selection algorithm
         self.norm_topk_prob = config.norm_topk_prob
@@ -452,6 +459,22 @@ class MoEGate(nn.Module):
             topk_weight * self.routed_scaling_factor
         )  # must multiply the scaling factor
 
+        # start expert assignment logging
+        # if self.rank == 0:
+        #    print(f"\n{topk_idx.shape=},\n{topk_idx=}\n")
+
+        """
+        topk_idx.shape=torch.Size([512, 6]),
+
+        topk_idx=tensor([[ 9, 12, 15, 18, 25,  7],
+        [ 5,  9, 26, 45, 56, 11],
+        [ 5, 28, 45, 50, 56, 18],
+        ...,
+        [17, 29, 36, 48, 49, 47],
+        [14, 47, 48, 54, 62, 16],
+        [ 9, 29, 33, 38, 46, 60]], device='cuda:0')
+        """
+
         return topk_idx, topk_weight
 
 
@@ -477,13 +500,13 @@ class MoE(nn.Module):
         "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
     )
 
-    def __init__(self, config):
+    def __init__(self, config, layer_id):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.activation_function = MLP.act_fn
-
+        self.layer_id = layer_id
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
             raise ValueError(
@@ -495,7 +518,7 @@ class MoE(nn.Module):
         self.ep_size = config.ep_size
         self.ep_rank = self.ep_group.rank()
         self.experts_per_rank = config.n_routed_experts // config.ep_size
-
+        self.rank = dist.get_rank()
         # Use ModuleDict instead of ModuleList to preserve absolute expert
         # IDs while avoiding `None` experts. The absolute expert IDs match
         # with checkpoint FQNs.
@@ -629,6 +652,8 @@ class MoE(nn.Module):
         orig_shape = hidden_states.shape
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
+        # token tracking
+        _token_tracker.record_expert_assignment(self.layer_id, topk_idx)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         if self.shuffle_method == "symm_mem":
             y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
@@ -1073,7 +1098,7 @@ class DecoderLayer(nn.Module):
         self.self_attn = Attention(config=config, layer_idx=layer_idx)
 
         self.mlp = (
-            MoE(config)
+            MoE(config, layer_id=layer_idx)
             if (
                 config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
@@ -1258,10 +1283,15 @@ class DeepseekModel(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
+        # raw tokens
+        if dist.get_rank == 0:
+            print(f"************* {tokens.shape=}, {tokens=}")
         # Embedding
         hidden_states = (
             self.embed_tokens(tokens) if self.embed_tokens is not None else tokens
         )
+        if dist.get_rank == 0:
+            print(f"************* {hidden_states.shape=}, {hidden_states=}")
 
         # decoder layers
         for decoder_layer in self.layers.values():
@@ -1286,6 +1316,8 @@ class DeepseekForCausalLM(torch.nn.Module):
             if config.stage_idx == config.num_stages - 1
             else None
         )
+
+        self.rank = dist.get_rank()
 
         # Initialize weights and apply final processing
         # self.post_init()
@@ -1313,6 +1345,9 @@ class DeepseekForCausalLM(torch.nn.Module):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        if self.rank == 0:
+            _token_tracker.record_tokens(tokens)
+        # assert False, "check"
         hidden_states = self.model(
             tokens,
             attention_mask=attention_mask,
@@ -1322,6 +1357,7 @@ class DeepseekForCausalLM(torch.nn.Module):
         logits = (
             self.lm_head(hidden_states) if self.lm_head is not None else hidden_states
         )
+
         return logits
 
     def prepare_inputs_for_generation(
