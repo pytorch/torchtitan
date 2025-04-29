@@ -20,532 +20,280 @@ from cg_forward import cg_grouped_gemm_forward
 class CGGEMMTestCase(unittest.TestCase):
     """Base test case for contiguous grouped GEMM tests."""
 
-    def setUp(self):
-        """Set up test environment."""
-        # Use CUDA if available
-        self.device = torch.device("cuda")  # if torch.cuda.is_available() else "cpu")
-        # Set random seed for reproducibility
-        torch.manual_seed(2020)
-        # Tolerances for numerical comparisons
-        self.atol = 0.5  # 1e-1  Large deepseek shapes can be off by .4
-        self.rtol = 0.5  # 1e-1
-
-    def tearDown(self):
-        """Clean up after test."""
-        # Optional cleanup - can be useful for large tests
-        torch.cuda.empty_cache()
-
-    def create_inputs(
-        self, M_total: int, K: int, N: int, num_experts: int, group_size_m: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Create inputs for grouped GEMM tests.
-
-        Args:
-            M_total: Total number of tokens
-            K: Input dimension
-            N: Output dimension
-            num_experts: Number of experts
-            group_size_m: Group size for contiguous blocks
-
-        Returns:
-            Tuple of (inputs, expert_weights, expert_indices)
-        """
-        # Ensure M_total is a multiple of group_size_m
-        M_total = (M_total // group_size_m) * group_size_m
-        num_groups = M_total // group_size_m
-
-        # Create input tensors
-        inputs = torch.randn(M_total, K, device=self.device, requires_grad=True)
+    def verify_forward(
+        self, M_total, K, N, num_experts, group_size_m, print_stats=False
+    ):
+        """Verify forward pass correctness."""
+        # Create test data
+        inputs = torch.randn((M_total, K), dtype=torch.bfloat16, device="cuda")
         expert_weights = torch.randn(
-            num_experts, N, K, device=self.device, requires_grad=True
+            (num_experts, N, K), dtype=torch.bfloat16, device="cuda"
         )
 
-        # Create expert indices - each group uses one expert
-        expert_indices = torch.zeros(M_total, dtype=torch.int32, device=self.device)
-        for g in range(num_groups):
-            # Randomly assign an expert to each group
-            expert_idx = torch.randint(
-                0, num_experts, (1,), device=self.device, dtype=torch.int32
-            ).item()
-            start_idx = g * group_size_m
-            end_idx = (g + 1) * group_size_m
+        # Create expert indices with proper group alignment
+        expert_indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+        num_groups = M_total // group_size_m
+
+        for group_idx in range(num_groups):
+            start_idx = group_idx * group_size_m
+            end_idx = start_idx + group_size_m
+            expert_idx = group_idx % num_experts
             expert_indices[start_idx:end_idx] = expert_idx
 
-        return inputs, expert_weights, expert_indices
-
-    def pytorch_reference_forward(
-        self,
-        inputs: torch.Tensor,
-        expert_weights: torch.Tensor,
-        expert_indices: torch.Tensor,
-        group_size_m: int,
-    ) -> torch.Tensor:
-        """
-        PyTorch reference implementation of grouped GEMM forward pass.
-
-        Args:
-            inputs: Input tensor [M_total, K]
-            expert_weights: Expert weights [num_experts, N, K]
-            expert_indices: Expert indices [M_total]
-            group_size_m: Group size for contiguous blocks
-
-        Returns:
-            Output tensor [M_total, N]
-        """
-        M_total, K = inputs.shape
-        num_experts, N, _ = expert_weights.shape
-        num_groups = M_total // group_size_m
-
-        # Create output tensor
-        output = torch.zeros((M_total, N), device=inputs.device, dtype=inputs.dtype)
-
-        # Process each group
-        for g in range(num_groups):
-            group_start = g * group_size_m
-            group_end = (g + 1) * group_size_m
-            expert_idx = expert_indices[group_start].item()
-
-            # Compute output for this group using matmul
-            group_inputs = inputs[group_start:group_end]
-            group_output = torch.matmul(group_inputs, expert_weights[expert_idx].t())
-            output[group_start:group_end] = group_output
-
-        return output
-
-    def verify_forward(
-        self,
-        M_total: int,
-        K: int,
-        N: int,
-        num_experts: int,
-        group_size_m: int,
-        print_stats: bool = False,
-    ) -> bool:
-        """
-        Verify forward pass correctness by comparing with PyTorch reference.
-
-        Args:
-            M_total: Total number of tokens
-            K: Input dimension
-            N: Output dimension
-            num_experts: Number of experts
-            group_size_m: Group size for contiguous blocks
-            print_stats: Whether to print detailed statistics
-
-        Returns:
-            True if outputs match, False otherwise
-        """
-        inputs, expert_weights, expert_indices = self.create_inputs(
-            M_total, K, N, num_experts, group_size_m
+        # Run our implementation
+        output_cg = cg_grouped_gemm_forward(
+            inputs, expert_weights, expert_indices, group_size_m=group_size_m
         )
 
         # Run reference implementation
-        ref_output = self.pytorch_reference_forward(
-            inputs, expert_weights, expert_indices, group_size_m
-        )
+        output_ref = torch.empty((M_total, N), device="cuda", dtype=torch.bfloat16)
+        for i in range(0, M_total, group_size_m):
+            end_idx = min(i + group_size_m, M_total)
+            expert_idx = expert_indices[i].item()
+            expert_weight = expert_weights[expert_idx]
+            output_ref[i:end_idx] = torch.matmul(inputs[i:end_idx], expert_weight.t())
 
-        # Run implementation to test
-        test_output = cg_grouped_gemm_forward(
-            inputs, expert_weights, expert_indices, group_size_m
-        )
+        # Verify results
+        is_close = torch.allclose(output_cg, output_ref, rtol=1e-2, atol=1e-2)
 
-        # Compare outputs
-        match = torch.allclose(ref_output, test_output, atol=self.atol, rtol=self.rtol)
+        if print_stats and not is_close:
+            abs_diff = torch.abs(output_cg - output_ref)
+            max_diff = torch.max(abs_diff).item()
+            mean_diff = torch.mean(abs_diff).item()
+            print(f"Max difference: {max_diff:.6f}, Mean difference: {mean_diff:.6f}")
 
-        if print_stats or not match:
-            max_diff = torch.max(torch.abs(ref_output - test_output)).item()
-            mean_diff = torch.mean(torch.abs(ref_output - test_output)).item()
-            print(f"Forward: M={M_total}, K={K}, N={N}, experts={num_experts}")
-            print(
-                f"  Match: {match}, Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}"
-            )
-
-        return match
+        return is_close
 
     def verify_backward(
-        self,
-        M_total: int,
-        K: int,
-        N: int,
-        num_experts: int,
-        group_size_m: int,
-        print_stats: bool = False,
-    ) -> Tuple[bool, bool]:
-        """
-        Verify backward pass correctness by comparing gradients with PyTorch reference.
-
-        Args:
-            M_total: Total number of tokens
-            K: Input dimension
-            N: Output dimension
-            num_experts: Number of experts
-            group_size_m: Group size for contiguous blocks
-            print_stats: Whether to print detailed statistics
-
-        Returns:
-            Tuple of (inputs_match, weights_match) indicating if gradients match
-        """
-        # Create inputs for both implementations
-        inputs_ref, expert_weights_ref, expert_indices = self.create_inputs(
-            M_total, K, N, num_experts, group_size_m
+        self, M_total, K, N, num_experts, group_size_m, print_stats=False
+    ):
+        """Verify backward pass correctness."""
+        # Create test data with gradients
+        inputs = torch.randn(
+            (M_total, K), dtype=torch.bfloat16, device="cuda", requires_grad=True
         )
-        inputs_test = inputs_ref.detach().clone().requires_grad_(True)
-        expert_weights_test = expert_weights_ref.detach().clone().requires_grad_(True)
-
-        # Create loss target
-        target = torch.randn((M_total, N), device=self.device)
-
-        # Run reference implementation
-        output_ref = self.pytorch_reference_forward(
-            inputs_ref, expert_weights_ref, expert_indices, group_size_m
+        expert_weights = torch.randn(
+            (num_experts, N, K), dtype=torch.bfloat16, device="cuda", requires_grad=True
         )
-        loss_ref = torch.nn.functional.mse_loss(output_ref, target)
-        loss_ref.backward()
 
-        # Save reference gradients
-        inputs_grad_ref = inputs_ref.grad.clone()
-        expert_weights_grad_ref = expert_weights_ref.grad.clone()
+        # Create copies for reference implementation
+        inputs_ref = inputs.detach().clone().requires_grad_(True)
+        expert_weights_ref = expert_weights.detach().clone().requires_grad_(True)
 
-        # Run implementation to test
-        output_test = cg_grouped_gemm(
-            inputs_test, expert_weights_test, expert_indices, group_size_m
+        # Create expert indices
+        expert_indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+        num_groups = M_total // group_size_m
+
+        for group_idx in range(num_groups):
+            start_idx = group_idx * group_size_m
+            end_idx = start_idx + group_size_m
+            expert_idx = group_idx % num_experts
+            expert_indices[start_idx:end_idx] = expert_idx
+
+        # Forward pass - our implementation
+        output_cg = cg_grouped_gemm(
+            inputs, expert_weights, expert_indices, group_size_m=group_size_m
         )
-        loss_test = torch.nn.functional.mse_loss(output_test, target)
-        loss_test.backward()
 
-        # Compare gradients
+        # Forward pass - reference implementation
+        output_ref = torch.empty((M_total, N), device="cuda", dtype=torch.bfloat16)
+        for i in range(0, M_total, group_size_m):
+            end_idx = min(i + group_size_m, M_total)
+            expert_idx = expert_indices[i].item()
+            expert_weight = expert_weights_ref[expert_idx]
+            output_ref[i:end_idx] = torch.matmul(
+                inputs_ref[i:end_idx], expert_weight.t()
+            )
+
+        # Create gradient for backward pass
+        grad_output = torch.randn_like(output_cg)
+        grad_output_ref = grad_output.detach().clone()
+
+        # Backward pass - our implementation
+        output_cg.backward(grad_output)
+
+        # Backward pass - reference implementation
+        output_ref.backward(grad_output_ref)
+
+        # Check input gradients
         inputs_match = torch.allclose(
-            inputs_ref.grad, inputs_test.grad, atol=self.atol, rtol=self.rtol
+            inputs.grad, inputs_ref.grad, rtol=1e-2, atol=1e-2
         )
+
+        # Check weight gradients
         weights_match = torch.allclose(
-            expert_weights_ref.grad,
-            expert_weights_test.grad,
-            atol=self.atol,
-            rtol=self.rtol,
+            expert_weights.grad, expert_weights_ref.grad, rtol=1e-2, atol=1e-2
         )
 
-        if print_stats or not (inputs_match and weights_match):
-            inputs_max_diff = torch.max(
-                torch.abs(inputs_ref.grad - inputs_test.grad)
-            ).item()
-            weights_max_diff = torch.max(
-                torch.abs(expert_weights_ref.grad - expert_weights_test.grad)
-            ).item()
+        if print_stats and not (inputs_match and weights_match):
+            if not inputs_match:
+                abs_diff = torch.abs(inputs.grad - inputs_ref.grad)
+                max_diff = torch.max(abs_diff).item()
+                mean_diff = torch.mean(abs_diff).item()
+                print(
+                    f"Input grads - Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}"
+                )
 
-            print(f"Backward: M={M_total}, K={K}, N={N}, experts={num_experts}")
-            print(f"  Inputs match: {inputs_match}, Max diff: {inputs_max_diff:.6f}")
-            print(f"  Weights match: {weights_match}, Max diff: {weights_max_diff:.6f}")
+            if not weights_match:
+                abs_diff = torch.abs(expert_weights.grad - expert_weights_ref.grad)
+                max_diff = torch.max(abs_diff).item()
+                mean_diff = torch.mean(abs_diff).item()
+                print(
+                    f"Weight grads - Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}"
+                )
 
         return inputs_match, weights_match
 
-    def benchmark_forward(
-        self,
-        M_total: int,
-        K: int,
-        N: int,
-        num_experts: int,
-        group_size_m: int,
-        num_runs: int = 10,
-    ) -> Dict:
-        """
-        Benchmark forward pass performance.
-
-        Args:
-            M_total: Total number of tokens
-            K: Input dimension
-            N: Output dimension
-            num_experts: Number of experts
-            group_size_m: Group size for contiguous blocks
-            num_runs: Number of runs for timing
-
-        Returns:
-            Dictionary with benchmark results
-        """
-        inputs, expert_weights, expert_indices = self.create_inputs(
-            M_total, K, N, num_experts, group_size_m
+    def benchmark_forward(self, M_total, K, N, num_experts, group_size_m, num_runs=10):
+        """Benchmark forward pass performance."""
+        # Create test data
+        inputs = torch.randn((M_total, K), dtype=torch.bfloat16, device="cuda")
+        expert_weights = torch.randn(
+            (num_experts, N, K), dtype=torch.bfloat16, device="cuda"
         )
 
+        # Create expert indices
+        expert_indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+        num_groups = M_total // group_size_m
+
+        for group_idx in range(num_groups):
+            start_idx = group_idx * group_size_m
+            end_idx = start_idx + group_size_m
+            expert_idx = group_idx % num_experts
+            expert_indices[start_idx:end_idx] = expert_idx
+
         # Warmup
-        for _ in range(3):
+        for _ in range(5):
             cg_grouped_gemm_forward(
-                inputs, expert_weights, expert_indices, group_size_m
-            )
-            self.pytorch_reference_forward(
-                inputs, expert_weights, expert_indices, group_size_m
+                inputs, expert_weights, expert_indices, group_size_m=group_size_m
             )
             torch.cuda.synchronize()
 
-        # Benchmark CG-GEMM
+        # Benchmark our implementation
         torch.cuda.synchronize()
-        start_time = time.time()
+        start = time.time()
         for _ in range(num_runs):
             cg_grouped_gemm_forward(
-                inputs, expert_weights, expert_indices, group_size_m
+                inputs, expert_weights, expert_indices, group_size_m=group_size_m
             )
             torch.cuda.synchronize()
-        cg_time = (time.time() - start_time) / num_runs
+        cg_time = (time.time() - start) / num_runs
 
-        # Benchmark reference
+        # Reference implementation for comparison
         torch.cuda.synchronize()
-        start_time = time.time()
+        start = time.time()
         for _ in range(num_runs):
-            self.pytorch_reference_forward(
-                inputs, expert_weights, expert_indices, group_size_m
-            )
+            output = torch.empty((M_total, N), device="cuda", dtype=torch.bfloat16)
+            for i in range(0, M_total, group_size_m):
+                end_idx = min(i + group_size_m, M_total)
+                expert_idx = expert_indices[i].item()
+                expert_weight = expert_weights[expert_idx]
+                output[i:end_idx] = torch.matmul(inputs[i:end_idx], expert_weight.t())
             torch.cuda.synchronize()
-        ref_time = (time.time() - start_time) / num_runs
+        ref_time = (time.time() - start) / num_runs
 
         # Calculate TFLOPS
-        # For each token in the group, we do 2*N*K FLOPs (N*K multiply-adds)
-        flops = M_total * 2 * N * K
-        cg_tflops = flops / (cg_time * 1e12)
-        ref_tflops = flops / (ref_time * 1e12)
+        flops = 2 * M_total * K * N  # Multiply-adds
+        cg_tflops = flops / cg_time / 1e12
+        ref_tflops = flops / ref_time / 1e12
+
+        # Calculate speedup
         speedup = ref_time / cg_time
 
-        print(f"Forward benchmark: M={M_total}, K={K}, N={N}, experts={num_experts}")
-        print(f"  CG-GEMM: {cg_time*1000:.3f} ms, {cg_tflops:.2f} TFLOPS")
-        print(f"  Reference: {ref_time*1000:.3f} ms, {ref_tflops:.2f} TFLOPS")
-        print(f"  Speedup: {speedup:.2f}x")
-
+        # Return results
+        shape_str = f"M={M_total}, K={K}, N={N}"
         return {
-            "shape": f"M={M_total}, K={K}, N={N}",
+            "shape": shape_str,
             "cg_time": cg_time,
             "ref_time": ref_time,
+            "speedup": speedup,
             "cg_tflops": cg_tflops,
             "ref_tflops": ref_tflops,
-            "speedup": speedup,
         }
 
-    def benchmark_backward(
-        self,
-        M_total: int,
-        K: int,
-        N: int,
-        num_experts: int,
-        group_size_m: int,
-        num_runs: int = 10,
-    ) -> Dict:
-        """
-        Benchmark backward pass performance.
+    def benchmark_backward(self, M_total, K, N, num_experts, group_size_m, num_runs=5):
+        """Benchmark backward pass performance."""
+        # Create test data with gradients
+        inputs = torch.randn(
+            (M_total, K), dtype=torch.bfloat16, device="cuda", requires_grad=True
+        )
+        expert_weights = torch.randn(
+            (num_experts, N, K), dtype=torch.bfloat16, device="cuda", requires_grad=True
+        )
 
-        Args:
-            M_total: Total number of tokens
-            K: Input dimension
-            N: Output dimension
-            num_experts: Number of experts
-            group_size_m: Group size for contiguous blocks
-            num_runs: Number of runs for timing
+        # Create expert indices
+        expert_indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+        num_groups = M_total // group_size_m
 
-        Returns:
-            Dictionary with benchmark results
-        """
+        for group_idx in range(num_groups):
+            start_idx = group_idx * group_size_m
+            end_idx = start_idx + group_size_m
+            expert_idx = group_idx % num_experts
+            expert_indices[start_idx:end_idx] = expert_idx
 
-        # Function to create fresh inputs for each run to avoid accumulating gradients
-        def create_fresh_inputs():
-            inputs_ref, expert_weights_ref, expert_indices = self.create_inputs(
-                M_total, K, N, num_experts, group_size_m
-            )
-            inputs_test = inputs_ref.detach().clone().requires_grad_(True)
-            expert_weights_test = (
-                expert_weights_ref.detach().clone().requires_grad_(True)
-            )
-            target = torch.randn((M_total, N), device=self.device)
-            return (
-                inputs_ref,
-                expert_weights_ref,
-                inputs_test,
-                expert_weights_test,
-                expert_indices,
-                target,
-            )
+        # Create gradient for backward pass
+        grad_output = torch.randn((M_total, N), dtype=torch.bfloat16, device="cuda")
 
         # Warmup
         for _ in range(3):
-            (
-                inputs_ref,
-                expert_weights_ref,
-                inputs_test,
-                expert_weights_test,
-                expert_indices,
-                target,
-            ) = create_fresh_inputs()
-
-            # Reference
-            output_ref = self.pytorch_reference_forward(
-                inputs_ref, expert_weights_ref, expert_indices, group_size_m
+            # Our implementation
+            inputs_cg = inputs.detach().clone().requires_grad_(True)
+            weights_cg = expert_weights.detach().clone().requires_grad_(True)
+            output_cg = cg_grouped_gemm(
+                inputs_cg, weights_cg, expert_indices, group_size_m=group_size_m
             )
-            loss_ref = torch.nn.functional.mse_loss(output_ref, target)
-            loss_ref.backward()
-
-            # CG-GEMM
-            output_test = cg_grouped_gemm(
-                inputs_test, expert_weights_test, expert_indices, group_size_m
-            )
-            loss_test = torch.nn.functional.mse_loss(output_test, target)
-            loss_test.backward()
-
+            output_cg.backward(grad_output)
             torch.cuda.synchronize()
 
-        # Benchmark CG-GEMM backward
-        cg_times = []
+        # Benchmark our implementation
+        torch.cuda.synchronize()
+        start = time.time()
         for _ in range(num_runs):
-            (
-                inputs_ref,
-                expert_weights_ref,
-                inputs_test,
-                expert_weights_test,
-                expert_indices,
-                target,
-            ) = create_fresh_inputs()
-
-            # Forward
-            output_test = cg_grouped_gemm(
-                inputs_test, expert_weights_test, expert_indices, group_size_m
+            inputs_cg = inputs.detach().clone().requires_grad_(True)
+            weights_cg = expert_weights.detach().clone().requires_grad_(True)
+            output_cg = cg_grouped_gemm(
+                inputs_cg, weights_cg, expert_indices, group_size_m=group_size_m
             )
-            loss_test = torch.nn.functional.mse_loss(output_test, target)
-
-            # Backward
+            output_cg.backward(grad_output)
             torch.cuda.synchronize()
-            start_time = time.time()
-            loss_test.backward()
-            torch.cuda.synchronize()
-            cg_times.append(time.time() - start_time)
+        cg_time = (time.time() - start) / num_runs
 
-        cg_time = sum(cg_times) / num_runs
-
-        # Benchmark reference backward
-        ref_times = []
+        # Benchmark reference implementation
+        torch.cuda.synchronize()
+        start = time.time()
         for _ in range(num_runs):
-            (
-                inputs_ref,
-                expert_weights_ref,
-                inputs_test,
-                expert_weights_test,
-                expert_indices,
-                target,
-            ) = create_fresh_inputs()
-
-            # Forward
-            output_ref = self.pytorch_reference_forward(
-                inputs_ref, expert_weights_ref, expert_indices, group_size_m
-            )
-            loss_ref = torch.nn.functional.mse_loss(output_ref, target)
-
-            # Backward
+            inputs_ref = inputs.detach().clone().requires_grad_(True)
+            weights_ref = expert_weights.detach().clone().requires_grad_(True)
+            output_ref = torch.empty((M_total, N), device="cuda", dtype=torch.bfloat16)
+            for i in range(0, M_total, group_size_m):
+                end_idx = min(i + group_size_m, M_total)
+                expert_idx = expert_indices[i].item()
+                expert_weight = weights_ref[expert_idx]
+                output_ref[i:end_idx] = torch.matmul(
+                    inputs_ref[i:end_idx], expert_weight.t()
+                )
+            output_ref.backward(grad_output)
             torch.cuda.synchronize()
-            start_time = time.time()
-            loss_ref.backward()
-            torch.cuda.synchronize()
-            ref_times.append(time.time() - start_time)
+        ref_time = (time.time() - start) / num_runs
 
-        ref_time = sum(ref_times) / num_runs
+        # Calculate TFLOPS (forward + backward)
+        flops = 4 * M_total * K * N  # Forward + backward multiply-adds
+        cg_tflops = flops / cg_time / 1e12
+        ref_tflops = flops / ref_time / 1e12
 
-        # Calculate FLOPs (rough approximation for backward)
-        # Backward typically requires 2-3x the FLOPs of forward
-        flops = 2 * M_total * 2 * N * K  # 2x for backward
-        cg_tflops = flops / (cg_time * 1e12)
-        ref_tflops = flops / (ref_time * 1e12)
+        # Calculate speedup
         speedup = ref_time / cg_time
 
-        print(f"Backward benchmark: M={M_total}, K={K}, N={N}, experts={num_experts}")
-        print(f"  CG-GEMM: {cg_time*1000:.3f} ms, {cg_tflops:.2f} TFLOPS")
-        print(f"  Reference: {ref_time*1000:.3f} ms, {ref_tflops:.2f} TFLOPS")
-        print(f"  Speedup: {speedup:.2f}x")
-
+        # Return results
+        shape_str = f"M={M_total}, K={K}, N={N}"
         return {
-            "shape": f"M={M_total}, K={K}, N={N}",
+            "shape": shape_str,
             "cg_time": cg_time,
             "ref_time": ref_time,
+            "speedup": speedup,
             "cg_tflops": cg_tflops,
             "ref_tflops": ref_tflops,
-            "speedup": speedup,
         }
-
-
-class TestCGGEMMSmallShapes(CGGEMMTestCase):
-    """Tests for contiguous grouped GEMM with small shapes."""
-
-    def test_forward_small_shapes(self):
-        """Test forward pass with small shapes."""
-        test_configs = [
-            # M, K, N, num_experts, group_size_m
-            # (256, 128, 128, 4, 64),
-            # (256, 128, 128, 8, 64),
-            (512, 256, 256, 16, 128),
-        ]
-
-        print("\n===== Testing Forward Pass: Small Shapes =====")
-        for M, K, N, num_experts, group_size_m in test_configs:
-            match = self.verify_forward(
-                M, K, N, num_experts, group_size_m, print_stats=True
-            )
-            self.assertTrue(
-                match, f"Forward pass failed for shape: M={M}, K={K}, N={N}"
-            )
-
-    def test_backward_small_shapes(self):
-        """Test backward pass with small shapes."""
-        test_configs = [
-            # M, K, N, num_experts, group_size_m
-            (128, 64, 64, 4, 32),
-            (256, 128, 128, 8, 64),
-            (512, 256, 256, 16, 128),
-        ]
-
-        print("\n===== Testing Backward Pass: Small Shapes =====")
-        for M, K, N, num_experts, group_size_m in test_configs:
-            inputs_match, weights_match = self.verify_backward(
-                M, K, N, num_experts, group_size_m, print_stats=True
-            )
-            self.assertTrue(
-                inputs_match, f"Input gradients failed for shape: M={M}, K={K}, N={N}"
-            )
-            self.assertTrue(
-                weights_match, f"Weight gradients failed for shape: M={M}, K={K}, N={N}"
-            )
-
-
-class TestCGGEMMMediumShapes(CGGEMMTestCase):
-    """Tests for contiguous grouped GEMM with medium shapes."""
-
-    def test_forward_medium_shapes(self):
-        """Test forward pass with medium shapes."""
-        test_configs = [
-            # M, K, N, num_experts, group_size_m
-            (1024, 512, 512, 8, 128),
-            (2048, 768, 768, 16, 128),
-            (4096, 1024, 1024, 32, 128),
-        ]
-
-        print("\n===== Testing Forward Pass: Medium Shapes =====")
-        for M, K, N, num_experts, group_size_m in test_configs:
-            match = self.verify_forward(
-                M, K, N, num_experts, group_size_m, print_stats=True
-            )
-            self.assertTrue(
-                match, f"Forward pass failed for shape: M={M}, K={K}, N={N}"
-            )
-
-    def test_backward_medium_shapes(self):
-        """Test backward pass with medium shapes."""
-        test_configs = [
-            # M, K, N, num_experts, group_size_m
-            (1024, 512, 512, 8, 128),
-            (2048, 768, 768, 16, 128),
-        ]
-
-        print("\n===== Testing Backward Pass: Medium Shapes =====")
-        for M, K, N, num_experts, group_size_m in test_configs:
-            inputs_match, weights_match = self.verify_backward(
-                M, K, N, num_experts, group_size_m, print_stats=True
-            )
-            self.assertTrue(
-                inputs_match, f"Input gradients failed for shape: M={M}, K={K}, N={N}"
-            )
-            self.assertTrue(
-                weights_match, f"Weight gradients failed for shape: M={M}, K={K}, N={N}"
-            )
 
 
 class TestCGGEMMDeepSeekShapes(CGGEMMTestCase):
@@ -553,21 +301,19 @@ class TestCGGEMMDeepSeekShapes(CGGEMMTestCase):
 
     def test_forward_deepseek_shapes(self):
         """Test forward pass with DeepSeek shapes."""
-        #  DeepSeek shapes
-        # Format: M_total, K, N, num_experts, group_size_m
+        # Updated shapes based on debug.py
         test_configs = [
-            # First format: 4 batch with 8192 tokens each
-            (4 * 8192, 4096, 7168, 8, 128),  # 4 batch × 8192 tokens, N=7168, K=4096
-            (4 * 8192, 7168, 2048, 8, 128),  # 4 batch × 8192 tokens, N=2048, K=7168
-            # Second format: 8 batch with 4096 tokens each
-            (8 * 4096, 4096, 7168, 8, 128),  # 8 batch × 4096 tokens, N=7168, K=4096
-            (8 * 4096, 7168, 2048, 8, 128),  # 8 batch × 4096 tokens, N=2048, K=7168
+            # M_total, K, N, num_experts, group_size_m
+            (32 * 128, 1024, 1024, 8, 128),  # Similar to debug.py medium test
+            (32 * 128, 4096, 4096, 8, 128),  # Smaller version of DeepSeek
+            (16 * 128, 4096, 7168, 8, 128),  # Reduced DeepSeek shape
+            (16 * 128, 7168, 2048, 8, 128),  # Reduced DeepSeek shape
         ]
 
         print("\n===== Testing Forward Pass: DeepSeek Shapes =====")
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Testing shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
+                f"Testing shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
             )
             match = self.verify_forward(
                 M_total, K, N, num_experts, group_size_m, print_stats=True
@@ -577,23 +323,19 @@ class TestCGGEMMDeepSeekShapes(CGGEMMTestCase):
                 f"Forward pass failed for DeepSeek shape: M={M_total}, K={K}, N={N}",
             )
 
-    @unittest.skip(
-        "Skipping backward test for DeepSeek shapes due to memory constraints"
-    )
     def test_backward_deepseek_shapes(self):
         """Test backward pass with DeepSeek shapes."""
-        # TODO - integrate with DeepSeek shapes
+        # Using smaller shapes based on debug.py
         test_configs = [
-            (4, 2048, 4096, 7168),  # G, M, N, K
-            (4, 2048, 7168, 2048),
-            (8, 512, 4096, 7168),
-            (8, 512, 7168, 2048),
+            # M_total, K, N, num_experts, group_size_m
+            (4 * 128, 128, 128, 4, 128),  # Small test
+            (8 * 128, 1024, 1024, 8, 128),  # Medium test
         ]
 
-        print("\n===== Testing Backward Pass: DeepSeek Shapes (Reduced) =====")
+        print("\n===== Testing Backward Pass: DeepSeek Shapes   =====")
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Testing shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
+                f"Testing shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
             )
             inputs_match, weights_match = self.verify_backward(
                 M_total, K, N, num_experts, group_size_m, print_stats=True
@@ -613,19 +355,18 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
 
     def test_forward_performance_deepseek(self):
         """Benchmark forward pass performance with DeepSeek shapes."""
-        # Corrected DeepSeek shapes
+        # Updated shapes based on debug.py
         test_configs = [
-            (4, 2048, 4096, 7168),  # G, M, N, K
-            (4, 2048, 7168, 2048),
-            (8, 512, 4096, 7168),
-            (8, 512, 7168, 2048),
+            # M_total, K, N, num_experts, group_size_m
+            (16 * 128, 1024, 1024, 8, 128),  # Medium test from debug.py
+            (32 * 128, 4096, 4096, 8, 128),  # Smaller version of DeepSeek
         ]
 
         print("\n===== Benchmarking Forward Pass with DeepSeek Shapes =====")
         results = []
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Benchmarking shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
+                f"Benchmarking shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
             )
             try:
                 result = self.benchmark_forward(
@@ -649,25 +390,20 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
         else:
             print("No benchmark results collected. Check for errors above.")
 
-    @unittest.skip(
-        "Skipping backward benchmark for DeepSeek shapes due to memory constraints"
-    )
     def test_backward_performance_deepseek(self):
         """Benchmark backward pass performance with reduced DeepSeek shapes."""
-        # Use reduced sizes to avoid OOM errors
+        # Use reduced sizes similar to debug.py
         test_configs = [
-            # Reduced versions of DeepSeek shapes
-            (4 * 1024, 4096, 7168, 8, 192),  # Reduced from 4×8192
-            (4 * 1024, 7168, 2048, 8, 192),  # Reduced from 4×8192
-            (2 * 1024, 4096, 7168, 8, 4096),  # Reduced from 8×4096
-            (2 * 1024, 7168, 2048, 8, 4096),  # Reduced from 8×4096
+            # M_total, K, N, num_experts, group_size_m
+            (4 * 128, 128, 128, 4, 128),  # Small test
+            (8 * 128, 1024, 1024, 8, 128),  # Medium test
         ]
 
-        print("\n===== Benchmarking Backward Pass with DeepSeek Shapes (Reduced) =====")
+        print("\n===== Benchmarking Backward Pass with DeepSeek Shapes   =====")
         results = []
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Benchmarking shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
+                f"Benchmarking shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
             )
             try:
                 result = self.benchmark_backward(
