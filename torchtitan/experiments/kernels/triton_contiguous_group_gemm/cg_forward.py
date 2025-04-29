@@ -13,7 +13,11 @@ import torch
 import triton
 import triton.language as tl
 
-from tma_cuda_autotune import CudaUtils, early_config_prune, STANDARD_CONFIGS
+from torchtitan.experiments.kernels.triton_contiguous_group_gemm.tma_cuda_autotune import (
+    CudaUtils,
+    early_config_prune,
+    STANDARD_CONFIGS,
+)
 
 from triton import Config
 from triton.runtime import driver  # @manual
@@ -25,6 +29,8 @@ from triton.runtime import driver  # @manual
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+GROUP_SIZE_M = 128
 
 # ============ Triton kernel for contiguous grouped GEMM ============
 
@@ -301,7 +307,7 @@ def cg_grouped_gemm_forward(
     ), "Expert indices length must match M_total"
 
     # Create output tensor
-    output = torch.empty((M_total, N), device=inputs.device, dtype=torch.float16)
+    output = torch.empty((M_total, N), device=inputs.device, dtype=torch.bfloat16)
 
     # Calculate grid size for the kernel
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
