@@ -55,8 +55,8 @@ save_img_folder = "img"
 eval_freq = 1000
 
 [parallelism]
-data_parallel_replicate_degree = 1
-data_parallel_shard_degree = -1
+data_parallel_replicate_degree = 4
+data_parallel_shard_degree = 1
 
 [experimental]
 custom_args_module = "torchtitan.experiments.flux.flux_argparser"

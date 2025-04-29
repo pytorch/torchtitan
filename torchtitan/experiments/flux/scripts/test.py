@@ -1,7 +1,13 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import logging
 import os
 import tarfile
-from multiprocessing import cpu_count, Pool
+from multiprocessing import Pool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")

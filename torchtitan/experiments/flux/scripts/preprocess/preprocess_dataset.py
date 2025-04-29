@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import json
 import os
 from typing import Optional
@@ -5,14 +11,9 @@ from typing import Optional
 import torch
 
 from torchtitan.config_manager import ConfigManager, JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.flux import flux_configs
-from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
-from torchtitan.experiments.flux.model.autoencoder import load_ae
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
+
 from torchtitan.experiments.flux.train import FluxTrainer
 from torchtitan.experiments.flux.utils import preprocess_data
-from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 
 
@@ -44,11 +45,12 @@ def save_preprocessed_data(output_path: str, data_dict: dict[str, torch.Tensor])
 
 
 class FluxPreprocessor(FluxTrainer):
+    """
+    Reuse the FluxTrainer class to preprocess the dataset, as the preprocessing is part of the
+    training process. Reuse the
+    """
+
     def __init__(self, job_config: JobConfig):
-        """
-        Reuse the FluxTrainer class to preprocess the dataset, as the preprocessing is part of the
-        training process. Reuse the
-        """
         super().__init__(job_config)
 
         if self.parallel_dims.dp_enabled:
@@ -65,9 +67,9 @@ class FluxPreprocessor(FluxTrainer):
             job_config=job_config,
             infinite=False,
         )
-        # load componnents
+        # load componnents, offload the Flux model to save GPU memory
         self.autoencoder.eval().requires_grad_(False)
-        self.model_parts[0].to_device("cpu")
+        del self.model_parts[0]
 
         self.preprocess_fn = preprocess_data
         self.job_config = job_config
@@ -92,8 +94,6 @@ class FluxPreprocessor(FluxTrainer):
                     t5_encoder=self.t5_encoder,
                     batch=input_dict,
                 )
-
-                print(input_dict["img_encodings"].shape)
 
                 bsz = save_preprocessed_data(
                     self.job_config.job.dump_folder, input_dict
