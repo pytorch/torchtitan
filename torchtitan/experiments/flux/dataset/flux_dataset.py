@@ -118,7 +118,7 @@ def _flux_data_processor_from_encodings(
         output_size: The output image size
 
     """
-    print(sample)
+    print(sample.keys())
     return sample
 
 
@@ -136,7 +136,7 @@ DATASETS = {
         data_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
-        path="assets/preprocess",
+        path="outputs/preprocess",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_flux_data_processor_from_encodings,
     ),
