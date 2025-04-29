@@ -22,6 +22,27 @@ from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 # Use DeepSeek-V2-Lite as a proxy
 model_id = "deepseek-ai/DeepSeek-V2-Lite"
 
+# parallize model
+
+
+def apply_parallel_sharding(model, fsdp_mesh, hsdp_mesh):
+    """Apply FSDP sharding to model components"""
+    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
+    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
+    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
+    # it will be ineconomical re-gather the weights.
+    for layer in model.model.layers.values():
+        # Apply FSDP to experts
+        if hasattr(layer.mlp, "experts"):
+            for expert in layer.mlp.experts.values():
+                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
+        # Apply HSDP to other parts such as attention, layernorm, because they
+        # are doing DDP on EP dimension
+        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
+
+    # Apply HSDP on root model (lm_head, embeddings, etc)
+    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
+
 
 # Run full model
 def run_full_model(
@@ -65,21 +86,8 @@ def run_full_model(
     hsdp_mesh = mesh["ep", "fsdp"]
     print(f"{rank=}, fsdp_mesh: {fsdp_mesh}")
     print(f"{rank=}, hsdp_mesh: {hsdp_mesh}")
-    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
-    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
-    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
-    # it will be ineconomical re-gather the weights.
-    for layer in model.model.layers.values():
-        # Apply FSDP to experts
-        if hasattr(layer.mlp, "experts"):
-            for expert in layer.mlp.experts.values():
-                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
-        # Apply HSDP to other parts such as attention, layernorm, because they
-        # are doing DDP on EP dimension
-        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
 
-    # Apply HSDP on root model (lm_head, embeddings, etc)
-    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
+    apply_parallel_sharding(model, fsdp_mesh, hsdp_mesh)
 
     # Synthetic setting
     microbatches = pp_size * 2
@@ -95,6 +103,7 @@ def run_full_model(
     bs = 4
     seqlen = 128
     x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
+
     label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
