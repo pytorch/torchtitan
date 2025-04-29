@@ -38,7 +38,7 @@ seq_len = 512
 max_norm = 2.0  # grad norm clipping
 steps = 10
 compile = false
-dataset = "cc12m-wds"
+dataset = "cc12m-preprocessed"
 classifer_free_guidance_prob = 0.1
 img_size = 256
 
@@ -56,8 +56,8 @@ save_img_folder = "img"
 eval_freq = 5
 
 [parallelism]
-data_parallel_replicate_degree = 4
-data_parallel_shard_degree = 1
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
 
 [experimental]
 custom_args_module = "torchtitan.experiments.flux.flux_argparser"
