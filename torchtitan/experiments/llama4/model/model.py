@@ -441,7 +441,7 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, input_batch: Optional[torch.Tensor] = None):
+    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
         """
         Perform a forward pass through the Transformer model.
 
