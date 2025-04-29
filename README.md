@@ -1,6 +1,6 @@
 <div align="center">
 
-# torchtitan
+# torchtitan 
 
 #### A PyTorch native platform for training generative AI models
 
