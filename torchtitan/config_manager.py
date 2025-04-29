@@ -499,6 +499,19 @@ class FaultTolerance:
     min_replica_size: int = 1
     """The minimum number of FT replica for each step."""
 
+    semi_sync_method: str | None = None
+    """
+    The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
+    torchft are supported
+    (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
+    """
+
+    sync_steps: int = 5
+    """
+    Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
+    is set.
+    """
+
 
 @dataclass
 class Experimental:

@@ -401,7 +401,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config, global_step=self.step
         ) as torch_profiler, maybe_enable_memory_snapshot(
             job_config, global_step=self.step
-        ) as memory_profiler:
+        ) as memory_profiler, ft.maybe_semi_sync_training(
+            job_config,
+            ft_manager=self.ft_manager,
+            model=self.model_parts[0],
+            optimizer=self.optimizers,
+            sync_every=job_config.fault_tolerance.sync_steps,
+        ):
             data_iterator = iter(self.dataloader)
             while self.step < job_config.training.steps:
                 self.step += 1
