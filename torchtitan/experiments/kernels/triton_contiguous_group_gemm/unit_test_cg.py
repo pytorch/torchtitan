@@ -7,9 +7,7 @@
 
 import time
 import unittest
-from typing import Dict, List, Tuple
 
-import numpy as np
 import torch
 from cg_backward import cg_grouped_gemm
 
@@ -30,7 +28,7 @@ def run_tests(run_benchmarks=False):
 
     # Only add benchmarks if requested
     if run_benchmarks:
-        print(f"running benchmarks...")
+        print("running benchmarks...")
         suite.addTest(loader.loadTestsFromTestCase(TestCGGEMMPerformanceDeepSeek))
 
     # Run the tests
@@ -334,7 +332,7 @@ class TestCGGEMMDeepSeekShapes(CGGEMMTestCase):
         print("\n===== Testing Forward Pass: DeepSeek Shapes =====")
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Testing shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
+                f"Testing shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
             )
             match = self.verify_forward(
                 M_total, K, N, num_experts, group_size_m, print_stats=True
@@ -387,7 +385,7 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
         results = []
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Benchmarking shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
+                f"Benchmarking shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
             )
             try:
                 result = self.benchmark_forward(
@@ -406,7 +404,8 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
             print("-" * 80)
             for result in results:
                 print(
-                    f"{result['shape']:<30} {result['cg_time']*1000:<15.3f} {result['ref_time']*1000:<15.3f} {result['speedup']:<10.2f} {result['cg_tflops']:<10.2f}"
+                    f"{result['shape']:<30} {result['cg_time'] * 1000:<15.3f} {result['ref_time'] * 1000:<15.3f} "
+                    f"{result['speedup']:<10.2f} {result['cg_tflops']:<10.2f}"
                 )
         else:
             print("No benchmark results collected. Check for errors above.")
@@ -424,7 +423,7 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
         results = []
         for M_total, K, N, num_experts, group_size_m in test_configs:
             print(
-                f"Benchmarking shape: M={M_total:,}, K={K:,}, N={N:,}, group_size={group_size_m}"
+                f"Benchmarking shape: M={M_total}, K={K}, N={N}, group_size={group_size_m}"
             )
             try:
                 result = self.benchmark_backward(
@@ -443,7 +442,8 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
             print("-" * 80)
             for result in results:
                 print(
-                    f"{result['shape']:<30} {result['cg_time']*1000:<15.3f} {result['ref_time']*1000:<15.3f} {result['speedup']:<10.2f} {result['cg_tflops']:<10.2f}"
+                    f"{result['shape']:<30} {result['cg_time'] * 1000:<15.3f} {result['ref_time'] * 1000:<15.3f} "
+                    f"{result['speedup']:<10.2f} {result['cg_tflops']:<10.2f}"
                 )
         else:
             print("No benchmark results collected. Check for errors above.")

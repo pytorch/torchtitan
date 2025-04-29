@@ -9,17 +9,8 @@ import time
 from typing import Tuple
 
 import torch
-import triton
 
-from cg_forward import cg_grouped_gemm, cg_grouped_gemm_forward
-
-# from flatcg import
-#     cg_grouped_gemm_flat as cg_grouped_gemm,
-#    cg_grouped_gemm_forward_flat as cg_grouped_gemm_forward,
-
-
-# from sms_kernel import cg_grouped_gemm, cg_grouped_gemm_forward
-#
+from cg_forward import cg_grouped_gemm_forward
 
 
 def create_aligned_test_data(
@@ -136,7 +127,7 @@ def verify_results(
         row = flat_idx // output_triton.shape[1]
         col = flat_idx % output_triton.shape[1]
 
-        print(f"Results do not match!")
+        print("Results do not match!")
         print(f"Max difference: {max_diff:.6f}")
         print(f"Mean difference: {mean_diff:.6f}")
         print(f"Max difference at [{row}, {col}]")
@@ -319,7 +310,7 @@ def benchmark_performance():
 
     speedup = pytorch_time / triton_time
 
-    print(f"\nPerformance Results:")
+    print("\nPerformance Results:")
     print(f"  Dimensions: {batch_size}x{seq_len}x{hidden_dim} -> {output_dim}")
     print(f"  Triton: {triton_time:.2f} ms ({triton_tflops:.2f} TFLOPS)")
     print(f"  PyTorch: {pytorch_time:.2f} ms ({pytorch_tflops:.2f} TFLOPS)")
@@ -328,9 +319,10 @@ def benchmark_performance():
     # Format for paper table
     num_groups = M // group_size_m
     m_per_group = M / num_groups
-    print(f"\nPaper table format:")
+    print("\ntable format:")
     print(
-        f"{num_experts}\t{num_groups}\t{int(m_per_group)}\t{hidden_dim}\t{output_dim}\t{int(triton_tflops)} TFLOPS\t{int(triton_time)} ms\t{speedup:.1f}x"
+        f"{num_experts}\t{num_groups}\t{int(m_per_group)}\t{hidden_dim}\t{output_dim}"
+        f"\t{int(triton_tflops)} TFLOPS\t{int(triton_time)} ms\t{speedup:.1f}x"
     )
 
     return (

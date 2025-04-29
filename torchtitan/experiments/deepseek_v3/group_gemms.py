@@ -41,7 +41,6 @@ except ImportError:
 try:
     from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_forward import (
         cg_grouped_gemm_forward,
-        GROUP_SIZE_M,
     )
 
     TRITON_CONTIGUOUS_GROUP_GEMM_AVAILABLE = True

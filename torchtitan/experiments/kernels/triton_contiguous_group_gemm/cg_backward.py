@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Tuple
 
 import torch
 import triton
@@ -12,7 +11,7 @@ import triton.language as tl
 
 # Import configs and utilities from cg_forward
 
-from tma_cuda_autotune import CudaUtils, early_config_prune, STANDARD_CONFIGS
+from tma_cuda_autotune import early_config_prune, STANDARD_CONFIGS
 
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
 

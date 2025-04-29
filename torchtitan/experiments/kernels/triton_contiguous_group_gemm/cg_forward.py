@@ -7,20 +7,15 @@
 # credit - Persistent rewrite of forward kernel with L2 caching optimization from @AdnanHoque, IBM Research.
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
 from torchtitan.experiments.kernels.triton_contiguous_group_gemm.tma_cuda_autotune import (
-    CudaUtils,
     early_config_prune,
     STANDARD_CONFIGS,
 )
-
-from triton import Config
-from triton.runtime import driver  # @manual
 
 
 # Configuration for autotuning

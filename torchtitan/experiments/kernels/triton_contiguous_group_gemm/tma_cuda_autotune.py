@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Tuple
 
 import torch
 import triton
@@ -53,11 +52,7 @@ class TmaDescriptorHelper:
             return self.desc.data_ptr()
 
     def __init__(self, tma_size: int = 128):
-        """Initialize the TMA descriptor helper.
 
-        Args:
-            tma_size: Size of the TMA descriptor in bytes
-        """
         if not CudaUtils.verify_tma():
             raise RuntimeError(
                 "TMA not supported on this device (requires Hopper or newer)"
