@@ -4,75 +4,53 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
+from dataclasses import dataclass, field
 
 
-def extend_parser(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--training.classifer_free_guidance_prob",
-        type=float,
-        default=0.0,
-        help="Classifier-free guidance with probability p to dropout the text conditioning",
+@dataclass
+class Training:
+    classifer_free_guidance_prob: float = 0.0
+    """Classifier-free guidance with probability p to dropout the text conditioning"""
+    img_size: int = 256
+    """Image width to sample"""
+
+
+@dataclass
+class Encoder:
+    t5_encoder: str = "google/t5-v1_1-small"
+    """T5 encoder to use, HuggingFace model name. This field could be either a local folder path,
+        or a Huggingface repo name."""
+    clip_encoder: str = "openai/clip-vit-large-patch14"
+    """Clip encoder to use, HuggingFace model name. This field could be either a local folder path,
+        or a Huggingface repo name."""
+    autoencoder_path: str = (
+        "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )
-    parser.add_argument(
-        "--training.img_size",
-        type=int,
-        default=256,
-        help="Image width to sample",
-    )
-    parser.add_argument(
-        "--encoder.t5_encoder",
-        type=str,
-        default="google/t5-v1_1-small",
-        help="T5 encoder to use, HuggingFace model name. This field could be either a local folder path, \
-        or a Huggingface repo name.",
-    )
-    parser.add_argument(
-        "--encoder.clip_encoder",
-        type=str,
-        default="openai/clip-vit-large-patch14",
-        help="Clip encoder to use, HuggingFace model name. This field could be either a local folder path, \
-        or a Huggingface repo name.",
-    )
-    parser.add_argument(
-        "--encoder.autoencoder_path",
-        type=str,
-        default="torchtitan/experiments/flux/assets/autoencoder/ae.safetensors",
-        help="Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file.",
-    )
-    parser.add_argument(
-        "--encoder.max_t5_encoding_len",
-        type=int,
-        default=512,
-        help="Maximum length of the T5 encoding.",
-    )
-    # eval configs
-    parser.add_argument(
-        "--eval.enable_classifer_free_guidance",
-        action="store_true",
-        help="Whether to use classifier-free guidance during sampling",
-    )
-    parser.add_argument(
-        "--eval.classifier_free_guidance_scale",
-        type=float,
-        default=5.0,
-        help="Classifier-free guidance scale when sampling",
-    )
-    parser.add_argument(
-        "--eval.denoising_steps",
-        type=int,
-        default=50,
-        help="How many denoising steps to sample when generating an image",
-    )
-    parser.add_argument(
-        "--eval.eval_freq",
-        type=int,
-        default=100,
-        help="Frequency of evaluation/sampling during training",
-    )
-    parser.add_argument(
-        "--eval.save_img_folder",
-        type=str,
-        default="img",
-        help="Directory to save image generated/sampled from the model",
-    )
+    """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
+    max_t5_encoding_len: int = 512
+    """Maximum length of the T5 encoding."""
+
+
+@dataclass
+class Eval:
+    enable_classifer_free_guidance: bool = False
+    """Whether to use classifier-free guidance during sampling"""
+    classifier_free_guidance_scale: float = 5.0
+    """Classifier-free guidance scale when sampling"""
+    denoising_steps: int = 50
+    """How many denoising steps to sample when generating an image"""
+    eval_freq: int = 100
+    """Frequency of evaluation/sampling during training"""
+    save_img_folder: str = "img"
+    """Directory to save image generated/sampled from the model"""
+
+
+@dataclass
+class JobConfig:
+    """
+    Extend the tyro parser with custom config classe for Flux model.
+    """
+
+    training: Training = field(default_factory=Training)
+    encoder: Encoder = field(default_factory=Encoder)
+    eval: Eval = field(default_factory=Eval)
