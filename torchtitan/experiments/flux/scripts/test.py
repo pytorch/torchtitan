@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -8,6 +9,12 @@ import logging
 import os
 import tarfile
 from multiprocessing import Pool
+=======
+import logging
+import os
+import tarfile
+from multiprocessing import cpu_count, Pool
+>>>>>>> ef9eba2 (preprocess)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")

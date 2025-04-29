@@ -127,16 +127,6 @@ class FluxPreprocessor(FluxTrainer):
                 input_dict[k] = input_dict[k].to(self.device)
             labels = labels.to(self.device)
 
-            input_dict["image"] = labels
-            input_dict = self.preprocess_fn(
-                device=self.device,
-                dtype=self._dtype,
-                autoencoder=self.autoencoder,
-                clip_encoder=self.clip_encoder,
-                t5_encoder=self.t5_encoder,
-                batch=input_dict,
-            )
-
             bsz = save_preprocessed_data(
                 output_path=os.path.join(
                     self.job_config.job.dump_folder, "preprocessed"
