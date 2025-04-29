@@ -441,7 +441,7 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_batch: Optional[torch.Tensor] = None):
         """
         Perform a forward pass through the Transformer model.
 
@@ -452,13 +452,17 @@ class Transformer(nn.Module, ModelProtocol):
                 previous pipeline stage if the current rank is not on the first stage.
             input_batch (torch.Tensor): The input batch read from the dataloader.
                 This will always be the input batch regardless of the pipeline stage.
+                This field is required for non-first PP stages to perform document
+                masking attention (to analyze the boundary of the document).
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         if self.model_args.use_flex_attn:
-            init_attention_mask(input_batch, eos_id=self.eos_id)
+            init_attention_mask(
+                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
+            )
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
