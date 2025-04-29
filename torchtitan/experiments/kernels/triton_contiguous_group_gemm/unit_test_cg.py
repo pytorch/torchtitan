@@ -17,6 +17,27 @@ from cg_backward import cg_grouped_gemm
 from cg_forward import cg_grouped_gemm_forward
 
 
+def run_tests(run_benchmarks=False):
+    """Run unit tests with optional benchmarks"""
+    # Create a test loader
+    loader = unittest.TestLoader()
+
+    # Create a test suite
+    suite = unittest.TestSuite()
+
+    # Add the test classes
+    suite.addTest(loader.loadTestsFromTestCase(TestCGGEMMDeepSeekShapes))
+
+    # Only add benchmarks if requested
+    if run_benchmarks:
+        print(f"running benchmarks...")
+        suite.addTest(loader.loadTestsFromTestCase(TestCGGEMMPerformanceDeepSeek))
+
+    # Run the tests
+    runner = unittest.TextTestRunner(verbosity=2)
+    return runner.run(suite).wasSuccessful()
+
+
 class CGGEMMTestCase(unittest.TestCase):
     """Base test case for contiguous grouped GEMM tests."""
 
@@ -430,4 +451,6 @@ class TestCGGEMMPerformanceDeepSeek(CGGEMMTestCase):
 
 if __name__ == "__main__":
     # Run tests
-    unittest.main()
+    run_benchmarks = False
+
+    success = run_tests(run_benchmarks)
