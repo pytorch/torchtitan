@@ -31,7 +31,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
-os.environ['TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER'] = False
+torch._inductor.config.use_static_cuda_launcher = False
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
