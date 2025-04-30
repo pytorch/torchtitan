@@ -691,7 +691,15 @@ class ConfigManager:
             if name not in b_map:
                 result.append((name, f.type, field(default_factory=f.type)))
 
-        return make_dataclass(f"Merged{base.__name__}", result, bases=(object,))
+        merged_cls = make_dataclass(f"Merged{base.__name__}", result, bases=(object,))
+
+        # Add to_dict method to the merged class
+        def to_dict(self) -> dict[str, Any]:
+            return asdict(self)
+
+        merged_cls.to_dict = to_dict
+
+        return merged_cls
 
     def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
         """Convert dictionary to dataclass, handling nested structures."""
