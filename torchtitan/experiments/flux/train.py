@@ -57,29 +57,28 @@ class FluxTrainer(Trainer):
         self.is_dataset_preprocessed = "preprocess" in job_config.training.dataset
 
         # load components for pre-processing is the dataset is not preprocessed
-        if not self.is_dataset_preprocessed:
-            self.autoencoder = load_ae(
-                job_config.encoder.autoencoder_path,
-                model_config.autoencoder_params,
-                device=self.device,
-                dtype=self._dtype,
-            )
+        self.autoencoder = load_ae(
+            job_config.encoder.autoencoder_path,
+            model_config.autoencoder_params,
+            device=self.device,
+            dtype=self._dtype,
+        )
 
-            self.clip_encoder = FluxEmbedder(
-                version=job_config.encoder.clip_encoder,
-            ).to(device=self.device, dtype=self._dtype)
-            self.t5_encoder = FluxEmbedder(
-                version=job_config.encoder.t5_encoder,
-            ).to(device=self.device, dtype=self._dtype)
+        self.clip_encoder = FluxEmbedder(
+            version=job_config.encoder.clip_encoder,
+        ).to(device=self.device, dtype=self._dtype)
+        self.t5_encoder = FluxEmbedder(
+            version=job_config.encoder.t5_encoder,
+        ).to(device=self.device, dtype=self._dtype)
 
-            # Apply FSDP to the T5 model / CLIP model
-            self.t5_encoder, self.clip_encoder = parallelize_encoders(
-                t5_model=self.t5_encoder,
-                clip_model=self.clip_encoder,
-                world_mesh=self.world_mesh,
-                parallel_dims=self.parallel_dims,
-                job_config=job_config,
-            )
+        # Apply FSDP to the T5 model / CLIP model
+        self.t5_encoder, self.clip_encoder = parallelize_encoders(
+            t5_model=self.t5_encoder,
+            clip_model=self.clip_encoder,
+            world_mesh=self.world_mesh,
+            parallel_dims=self.parallel_dims,
+            job_config=job_config,
+        )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         # generate t5 and clip embeddings

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -108,17 +109,8 @@ def _flux_data_processor_from_encodings(
     clip_tokenizer: FluxTokenizer,
     output_size: int = 256,
 ) -> dict[str, Any]:
-    """
-    Preprocess CC12M dataset sample image and text for Flux model.
-
-    Args:
-        sample: A sample from dataset
-        t5_encoder: T5 encoder
-        clip_encoder: CLIP encoder
-        output_size: The output image size
-
-    """
-    print(sample.keys())
+    for k, v in sample.items():
+        sample[k] = torch.tensor(v)
     return sample
 
 
@@ -137,7 +129,14 @@ DATASETS = {
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
         path="outputs/preprocess",
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        loader=lambda path: load_dataset(
+            path,
+            data_files={
+                "train": "*_cc12m.json"
+            },  # only load files match the grep pattern
+            split="train",
+            streaming=True,
+        ),
         data_processor=_flux_data_processor_from_encodings,
     ),
 }
@@ -192,6 +191,19 @@ class FluxDataset(IterableDataset, Stateful):
         ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
+        self.preprocessed = "preprocess" in dataset_name
+        # load empty encodings for preprocessed dataset
+        if self.preprocessed:
+            # Check if dataset_path is not None before using it
+            dataset_path = DATASETS[dataset_name].path or dataset_path
+            assert (
+                dataset_path is not None
+            ), "dataset_path is None, using default empty encodings"
+            with open(os.path.join(dataset_path, "empty_encodings.json"), "r") as file:
+                empty_encodings = json.load(file)  # TODO: make this path configurable
+            self._t5_empty_encoding = torch.tensor(empty_encodings["t5_encodings"])
+            self._clip_empty_encoding = torch.tensor(empty_encodings["clip_encodings"])
+
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._t5_tokenizer = t5_tokenizer
