@@ -171,11 +171,12 @@ def apply_tp(
         from torchao.float8.float8_tensor_parallel_rowwise_scales import (
             Float8ColwiseParallel,
             Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
         )
         rowwise_parallel, colwise_parallel, prepare_module_input = (
             Float8RowwiseParallel,
             Float8ColwiseParallel,
-            PrepareModuleInput,
+            PrepareFloat8ModuleInput,
         )
         logger.info("Using float8 rowwise all-gather")
     else:

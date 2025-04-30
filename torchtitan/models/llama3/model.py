@@ -233,9 +233,13 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-
-        bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        if isinstance(x, tuple):
+            x_fp8_rowwise, x_fp8_colwise = x
+            bs, seqlen, _ = x_fp8_rowwise.shape 
+            xq, xk, xv = self.wq(x_fp8_rowwise, x_fp8_colwise), self.wk(x_fp8_rowwise, x_fp8_colwise), self.wv(x_fp8_rowwise, x_fp8_colwise)
+        else:
+            bs, seqlen, _ = x.shape
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
