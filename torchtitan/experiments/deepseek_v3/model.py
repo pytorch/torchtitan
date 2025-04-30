@@ -464,6 +464,7 @@ class MoE(nn.Module):
     # Two shuffle method supported:
     # 1. "torch_all_to_all"
     # 2. "symm_mem" (see `setup_symm_mem` below)
+    # note this is directly overrriden by the generate script...
     shuffle_method = "torch_all_to_all"
 
     # Symmetric memory buffers shared by all MoE instances across layers
@@ -480,6 +481,7 @@ class MoE(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.activation_function = MLP.act_fn
@@ -523,6 +525,7 @@ class MoE(nn.Module):
         # keep active gg ready
         self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
         self._buffer_initialized = False
+        print(f"MoE group gemm strategy: {MoE.group_mm}")
 
     @classmethod
     def _initialize_group_gemm_strategies(cls):
@@ -572,6 +575,7 @@ class MoE(nn.Module):
     def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
+        print(f"Using symm mem for MoE shuffle...{self.shuffle_method=}")
 
         # Combine expert weights
         self.combine_experts("gate_proj")
@@ -685,6 +689,7 @@ class MoE(nn.Module):
             # TODO: don't use `received`
             gathered_tokens = token_gather_buf[:received]
         else:  # "torch_all_to_all"
+            print(f"Using torch all to all...{self.shuffle_method=}")
             # Prepare input ans output splits
             with torch.no_grad():
                 output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
@@ -696,6 +701,9 @@ class MoE(nn.Module):
                 input_splits.tolist(),
                 self.ep_group,
             )
+            print(f"{gathered_tokens.shape=}")
+            print(f"{output_splits=}")
+            print(f"{input_splits=}")
 
         # This part prepares a 1D tensor with the same length as
         # `gathered_tokens`. The 1D tensor is filled with local expert IDs which
@@ -721,11 +729,13 @@ class MoE(nn.Module):
 
         # This part processes the tokens routed to the local experts.
         # TODO: can we use group GEMM here?
+        assert False, "stop"
         for i, expert in enumerate(self.experts.values()):
+            print(f"Processing expert {i}...{expert=}")
             processed_tokens[gatherd_idxs == i] = expert(
                 gathered_tokens[gatherd_idxs == i]
             )
-
+        assert False, "stop"
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":

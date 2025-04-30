@@ -19,9 +19,9 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -133,6 +133,7 @@ def create_model(dist_config: DistConfig):
         model = DeepseekForCausalLM(model_args)
     load_weights_from_hf(model, model_id, dist_config.device)
     model.eval()
+    # this overrides the models MoE setting from torch_all_to_all
     model.setup_symm_mem(torch.bfloat16, dist_config.device)
 
     stage = PipelineStage(
