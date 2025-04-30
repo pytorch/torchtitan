@@ -1,6 +1,6 @@
 
 [job]
-dump_folder = "./outputs/preprocess"
+dump_folder = "./outputs"
 description = "Flux-schnell model"
 print_args = false
 

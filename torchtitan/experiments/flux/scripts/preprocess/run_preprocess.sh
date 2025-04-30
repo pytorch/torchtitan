@@ -22,7 +22,7 @@ fi
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
---local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
+--role rank --tee 3 \
 -m torchtitan.experiments.flux.scripts.preprocess.preprocess_dataset --job.config_file ${CONFIG_FILE} \
 --parallelism.data_parallel_replicate_degree ${NGPU} --parallelism.data_parallel_shard_degree 1 \
 $overrides
