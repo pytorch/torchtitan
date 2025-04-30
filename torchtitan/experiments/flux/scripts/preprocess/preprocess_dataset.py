@@ -104,10 +104,10 @@ class FluxPreprocessor(FluxTrainer):
             t5_encoder=self.t5_encoder,
             batch=empty_batch,
         )
-        print("Jiani: ", empty_encodings)
+
         # Save the empty encodings
         save_preprocessed_data(
-            output_path=self.job_config.job.dump_folder,
+            output_path=os.path.join(self.job_config.job.dump_folder, "preprocessed"),
             file_name="empty_encodings.json",
             data_dict=empty_encodings,
         )
@@ -138,7 +138,9 @@ class FluxPreprocessor(FluxTrainer):
             )
 
             bsz = save_preprocessed_data(
-                output_path=self.job_config.job.dump_folder,
+                output_path=os.path.join(
+                    self.job_config.job.dump_folder, "preprocessed"
+                ),
                 file_name=f"rank_{torch.distributed.get_rank()}_preprocessed_cc12m.json",
                 data_dict=input_dict,
             )
@@ -149,9 +151,6 @@ class FluxPreprocessor(FluxTrainer):
                 f"Preprocessed {preprocessed_sample_cnt} samples, "
                 f"current batch size: {input_dict['img_encodings'].shape[0]}"
             )
-
-            if preprocessed_sample_cnt >= 20:
-                break
 
 
 if __name__ == "__main__":
