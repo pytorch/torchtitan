@@ -15,7 +15,7 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 
@@ -31,17 +31,29 @@ def apply_parallel_sharding(model, fsdp_mesh, hsdp_mesh):
     # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
     # Reason: the MoE is "sparsely activated" compared to the dense model, thus
     # it will be ineconomical re-gather the weights.
+    # we need to implement mixed precision
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16
+    )
+    # fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     for layer in model.model.layers.values():
         # Apply FSDP to experts
         if hasattr(layer.mlp, "experts"):
             for expert in layer.mlp.experts.values():
-                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
+                fully_shard(
+                    expert,
+                    mesh=fsdp_mesh,
+                    mp_policy=mp_policy,
+                    reshard_after_forward=False,
+                )
         # Apply HSDP to other parts such as attention, layernorm, because they
         # are doing DDP on EP dimension
-        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
+        fully_shard(
+            layer, mesh=hsdp_mesh, mp_policy=mp_policy, reshard_after_forward=False
+        )
 
     # Apply HSDP on root model (lm_head, embeddings, etc)
-    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
+    fully_shard(model, mesh=hsdp_mesh, mp_policy=mp_policy, reshard_after_forward=False)
 
 
 # Run full model
@@ -86,6 +98,8 @@ def run_full_model(
     hsdp_mesh = mesh["ep", "fsdp"]
     print(f"{rank=}, fsdp_mesh: {fsdp_mesh}")
     print(f"{rank=}, hsdp_mesh: {hsdp_mesh}")
+
+    model.setup_combine_expert_weights()
 
     apply_parallel_sharding(model, fsdp_mesh, hsdp_mesh)
 

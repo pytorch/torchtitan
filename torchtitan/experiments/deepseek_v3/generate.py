@@ -135,6 +135,7 @@ def create_model(dist_config: DistConfig):
     model.eval()
     # this overrides the models MoE setting from torch_all_to_all
     model.setup_symm_mem(torch.bfloat16, dist_config.device)
+    model.setup_combine_expert_weights()
 
     stage = PipelineStage(
         model,

@@ -99,34 +99,46 @@ class TorchBF16GroupGEMM(GroupGEMMStrategy):
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         # Get weights
+        out_dtype = torch.bfloat16
+
         w_gate = module.get_parameter("gate_proj_weight")
         w_up = module.get_parameter("up_proj_weight")
         w_down = module.get_parameter("down_proj_weight")
+
+        # print("w_gate", w_gate.shape, w_gate.dtype)
+        # print("w_up", w_up.shape, w_up.dtype)
+        # print("w_down", w_down.shape, w_down.dtype)
+        # print("contig_tokens", contig_tokens.shape, contig_tokens.dtype)
 
         # Run first two GEMMs (gate and up projections)
         gate_proj = torch._grouped_mm(
             contig_tokens,
             w_gate.transpose(-2, -1),
             m_offsets,
-            out_dtype=torch.bfloat16,
+            out_dtype=out_dtype,
         )
+        print("gate_proj", gate_proj.shape, gate_proj.dtype)
+
         up_proj = torch._grouped_mm(
             contig_tokens,
             w_up.transpose(-2, -1),
             m_offsets,
-            out_dtype=torch.bfloat16,
+            out_dtype=out_dtype,
         )
+        print("up_proj", up_proj.shape, up_proj.dtype)
 
         # Apply activation
         hidden_outputs = self.activation_function(gate_proj) * up_proj
+        print("hidden_outputs", hidden_outputs.shape, hidden_outputs.dtype)
 
         # Run the third GEMM (down projection)
         hidden_outputs = torch._grouped_mm(
             hidden_outputs,
             w_down.transpose(-2, -1),
             m_offsets,
-            out_dtype=torch.bfloat16,
+            out_dtype=out_dtype,
         )
+        print("hidden_outputs", hidden_outputs.shape, hidden_outputs.dtype)
 
         return hidden_outputs
 

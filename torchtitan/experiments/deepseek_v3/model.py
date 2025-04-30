@@ -481,6 +481,61 @@ class MoE(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.num_experts_per_tok = config.num_experts_per_tok
+        # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
+        self.activation_function = MLP.act_fn
+
+        # ep_size is the number of ranks in expert dimension
+        if config.ep_size <= 1:
+            raise ValueError(
+                "For code simplicity, this model only supports distributed experts, "
+                "thus EP size must be > 1, please modify your model config"
+            )
+        self.ep_group = get_group("ep")
+        assert config.ep_size == self.ep_group.size()
+        self.ep_size = config.ep_size
+        self.ep_rank = self.ep_group.rank()
+        self.experts_per_rank = config.n_routed_experts // config.ep_size
+
+        # Use ModuleDict instead of ModuleList to preserve absolute expert
+        # IDs while avoiding `None` experts. The absolute expert IDs match
+        # with checkpoint FQNs.
+        self.experts = nn.ModuleDict()
+        for i in range(self.experts_per_rank):
+            abs_expert_id = self.ep_rank * self.experts_per_rank + i
+            self.experts[str(abs_expert_id)] = MLP(
+                config, intermediate_size=config.moe_intermediate_size
+            )
+        self.gate = MoEGate(config)
+        if config.n_shared_experts is not None:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.shared_experts = MLP(
+                config=config, intermediate_size=intermediate_size
+            )
+
+        # Group Gemm
+        # Initialize group GEMM strategies if not already loaded
+        if MoE.group_gemm_strategies is None:
+            MoE._initialize_group_gemm_strategies()
+
+        assert (
+            MoE.group_mm in MoE.group_gemm_strategies
+        ), f"selected group gemm {self.group_mm} is not avaiable!"
+        # keep active gg ready
+        self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
+        self._buffer_initialized = False
+
+        # Combine expert weights for group gemm regardless of shuffle method
+
+    def combine_all_expert_weights(self):
+        """Combine expert weights for use with group gemm operations"""
+        self.combine_experts("gate_proj")
+        self.combine_experts("up_proj")
+        self.combine_experts("down_proj")
+
+    def __init__old(self, config):
+        super().__init__()
+        self.config = config
 
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
@@ -578,9 +633,9 @@ class MoE(nn.Module):
         print(f"Using symm mem for MoE shuffle...{self.shuffle_method=}")
 
         # Combine expert weights
-        self.combine_experts("gate_proj")
-        self.combine_experts("up_proj")
-        self.combine_experts("down_proj")
+        # self.combine_experts("gate_proj")
+        # self.combine_experts("up_proj")
+        # self.combine_experts("down_proj")
 
         # Assuming worst case, 2x tokens are routed to one EP rank
         overflow = 2
@@ -689,6 +744,131 @@ class MoE(nn.Module):
             # TODO: don't use `received`
             gathered_tokens = token_gather_buf[:received]
         else:  # "torch_all_to_all"
+            # Prepare input and output splits
+            with torch.no_grad():
+                output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
+                    dim=1
+                )
+            gathered_tokens = all_to_all_single_autograd(
+                sorted_tokens,
+                output_splits.tolist(),
+                input_splits.tolist(),
+                self.ep_group,
+            )
+
+        # This part prepares a 1D tensor with the same length as
+        # `gathered_tokens`. The 1D tensor is filled with local expert IDs which
+        # the tokens in `gathered_tokens` are headed for. This part doesn't need
+        # gradient.
+        with torch.no_grad():
+            gatherd_idxs = (
+                torch.arange(
+                    tokens_per_expert_group.numel(),
+                    device=tokens_per_expert_group.device,
+                )
+                % self.experts_per_rank
+            )
+            gatherd_idxs = gatherd_idxs.repeat_interleave(tokens_per_expert_group)
+
+        # Now we need to generate permute indices for group gemm, similar to moe_on_device
+        with torch.no_grad():
+            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
+                tokens_per_expert_group,
+                self.experts_per_rank,
+                self.ep_size,
+                gathered_tokens.shape[0],
+                ALIGN_SIZE_M,
+            )
+
+        # Permute the received tokens so that tokens for the same expert are contiguous
+        contig_tokens = gathered_tokens[permuted_indices]
+
+        # Group gemm - handle all three group gemms (up, gate, down for all experts)
+        hidden_outputs = self._run_group_gemm(
+            contig_tokens,
+            m_sizes,
+            m_offsets,
+        )
+
+        # Prepare buffer for tokens processed by experts
+        processed_tokens = torch.empty_like(gathered_tokens)
+
+        # Move the outputs back to the original order
+        processed_tokens[permuted_indices] = hidden_outputs
+
+        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
+        # The input/output splits are just a reverse of the previous shuffle.
+        if self.shuffle_method == "symm_mem":
+            token_return_buf, _ = OnDeviceAllToAllV.apply(
+                processed_tokens,
+                output_splits,
+                self.ep_group,
+            )
+            returned_tokens = token_return_buf[:seqlen_sorted_tokens]
+        else:  # "torch_all_to_all"
+            returned_tokens = all_to_all_single_autograd(
+                processed_tokens,
+                input_splits.tolist(),
+                output_splits.tolist(),
+                self.ep_group,
+            )
+
+        output_tokens = torch.empty_like(returned_tokens)
+        output_tokens[token_indices] = returned_tokens
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(returned_tokens.dtype)
+        )
+        return final_out
+
+    def moe_forward_orig(self, x, topk_ids, topk_weight):
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
+
+        # keep the seqlen dimension for later use without holding onto the sorted tokens
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
+
+        # all to all
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+
+        # Sum the tokens over local experts, then we get tokens per EP rank,
+        # which is the input splits
+        with torch.no_grad():
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+
+        # DP to EP token shuffle. This part needs gradient.
+        if self.shuffle_method == "symm_mem":
+            # Move input to the `token_send_buf` symm mem
+            token_send_buf = self.get_send_buf()
+            token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
+            # Note: `out=` avoids copy, but it is not differentiable
+            # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
+            token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
+                token_send_buf,
+                input_splits,
+                self.ep_group,
+            )
+            with torch.no_grad():
+                # Received tokens from all other ranks. TODO: use mask instead
+                received = output_splits.sum()
+            # TODO: don't use `received`
+            gathered_tokens = token_gather_buf[:received]
+        else:  # "torch_all_to_all"
             print(f"Using torch all to all...{self.shuffle_method=}")
             # Prepare input ans output splits
             with torch.no_grad():
@@ -729,13 +909,13 @@ class MoE(nn.Module):
 
         # This part processes the tokens routed to the local experts.
         # TODO: can we use group GEMM here?
-        assert False, "stop"
+
         for i, expert in enumerate(self.experts.values()):
             print(f"Processing expert {i}...{expert=}")
             processed_tokens[gatherd_idxs == i] = expert(
                 gathered_tokens[gatherd_idxs == i]
             )
-        assert False, "stop"
+
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
         if self.shuffle_method == "symm_mem":
@@ -1409,3 +1589,15 @@ class DeepseekForCausalLM(torch.nn.Module):
             if not isinstance(layer.mlp, MoE):
                 continue
             layer.mlp.setup_symm_mem(dtype, device)
+
+    def setup_combine_expert_weights(
+        self,
+    ):
+        """combine all expert weights into one weight matrix for group gemm.
+        Has to be done after model is loaded."""
+        for layer in self.model.layers.values():
+            if not isinstance(layer.mlp, MoE):
+                continue
+            # print(f"Pre-combine all expert weights for layer {layer=}")
+            layer.mlp.combine_all_expert_weights()
+            # print(f"Post Combined all expert weights for layer {layer=}")
