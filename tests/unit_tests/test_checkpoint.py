@@ -300,7 +300,7 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_async_save_calls_async_wait(self, *_):
+    def test_ft_async_save_calls_async_wait(self, *_):
         """
         Test that in async mode (AsyncMode.ASYNC), calling save() twice correctly waits
         on the previous async future via _async_wait().
