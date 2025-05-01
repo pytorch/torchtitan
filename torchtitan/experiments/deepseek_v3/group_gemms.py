@@ -38,6 +38,15 @@ try:
 except ImportError:
     TRITON_MG_GROUP_GEMM_AVAILABLE = False
 
+try:
+    from torchtitan.experiments.kernels.triton_contiguous_group_gemm.cg_forward import (
+        cg_grouped_gemm_forward,
+    )
+
+    TRITON_CONTIGUOUS_GROUP_GEMM_AVAILABLE = True
+except ImportError:
+    TRITON_CONTIGUOUS_GROUP_GEMM_AVAILABLE = False
+
 
 # Strategy base class for GroupGEMM implementations
 class GroupGEMMStrategy:
@@ -87,7 +96,49 @@ __all__ = [
     "DSGroupGEMM",
     "TorchBF16GroupGEMM",
     "TorchAOBF16GroupGEMM",
+    "TritonCGBF16GroupGEMM",
 ]
+
+
+class TritonCGBF16GroupGEMM(GroupGEMMStrategy):
+    """Implementation of Triton Contiguous group Gemm"""
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """prep the expert weights for group gemm usage"""
+
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get weights
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Run first two GEMMs (gate and up projections)
+        # Get only valid tokens
+        valid_tokens = contig_tokens[: m_offsets[-1]]
+
+        # Create indices from offsets without CPU-GPU sync
+        m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+
+        gate_proj = cg_grouped_gemm_forward(valid_tokens, w_gate, m_indices)
+
+        up_proj = cg_grouped_gemm_forward(valid_tokens, w_up, m_indices)
+
+        # Apply activation
+        hidden_outputs = self.activation_function(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+
+        down_proj_out = cg_grouped_gemm_forward(hidden_outputs, w_down, m_indices)
+
+        # Copy results back to contig_tokens
+        contig_tokens[: m_offsets[-1]] = down_proj_out
+        return contig_tokens
+
+    @staticmethod
+    def is_available() -> bool:
+        return TRITON_CONTIGUOUS_GROUP_GEMM_AVAILABLE
 
 
 class TorchBF16GroupGEMM(GroupGEMMStrategy):
