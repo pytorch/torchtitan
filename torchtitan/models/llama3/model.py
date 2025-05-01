@@ -152,6 +152,11 @@ def apply_rotary_emb(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
+    # fp8 rowwise all-gather produces 2 outputs (row major and col major). 
+    # It doesn't operate on freqs_cis buffer, but to return a consistent number of outputs, it returns
+    # a tuple of (freqs_cis, None).
+    if isinstance(freqs_cis, tuple):
+        freqs_cis = freqs_cis[0]
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
@@ -233,6 +238,7 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+        # float8 rowwise all-gather produces 2 outputs (row major and col major). 
         if isinstance(x, tuple):
             x_fp8_rowwise, x_fp8_colwise = x
             bs, seqlen, _ = x_fp8_rowwise.shape 
@@ -303,6 +309,9 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
+        # fp8 rowwise all-gather produces 2 outputs (row major and col major), so it needs special handling.
+        if isinstance(x, tuple):
+            return self.w2(F.silu(self.w1(*x)) * self.w3(*x))
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
