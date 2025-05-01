@@ -242,6 +242,8 @@ class TestJobConfig(unittest.TestCase):
         )
         assert config.custom_args.how_is_your_day == "bad"
         assert config.model.converters == ["float8", "mxfp"]
+        result = config.to_dict()
+        assert isinstance(result, dict)
 
         # There will be a SystemExit raised by ArgumentParser with exist status 2.
         with self.assertRaisesRegex(SystemExit, "2"):
@@ -280,6 +282,8 @@ class TestJobConfig(unittest.TestCase):
             )
             assert config.custom_args.how_is_your_day == "bad"
             assert config.model.converters == ["float8", "mxfp"]
+            result = config.to_dict()
+            assert isinstance(result, dict)
 
         with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
             tomli_w.dump(
@@ -303,6 +307,8 @@ class TestJobConfig(unittest.TestCase):
 
             assert config.custom_args.how_is_your_day == "really good"
             assert config.model.converters == ["float8", "mxfp"]
+            result = config.to_dict()
+            assert isinstance(result, dict)
 
 
 if __name__ == "__main__":
