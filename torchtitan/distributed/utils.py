@@ -9,6 +9,7 @@ import math
 import os
 from collections.abc import Generator, Iterable
 from datetime import timedelta
+from typing import Optional
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -16,6 +17,8 @@ import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental._attention import FlexAttentionSharder
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -154,10 +157,16 @@ def create_context_parallel_ctx(
     cp_seq_dims: list[int],
     cp_no_restore_buffers: set[torch.Tensor],
     cp_rotate_method: str,
+    block_mask: Optional[BlockMask] = None,
+    sharder: Optional[FlexAttentionSharder] = None,
 ):
     try:
         from torch.distributed.tensor.experimental import context_parallel
-        from torch.distributed.tensor.experimental._attention import set_rotate_method
+        from torch.distributed.tensor.experimental._attention import (
+            _dispatch_mode,
+            _DispatchMode,
+            set_rotate_method,
+        )
     except ImportError:
         print(
             f"PyTorch version {torch.__version__} does not include the experimental "
@@ -165,11 +174,14 @@ def create_context_parallel_ctx(
         )
 
     set_rotate_method(cp_rotate_method)
+    _dispatch_mode = _DispatchMode.TORCH_DISPATCH
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
         buffer_seq_dims=cp_seq_dims,
         no_restore_buffers=cp_no_restore_buffers,
+        block_mask=block_mask,
+        sharder=sharder,
     )
 
 

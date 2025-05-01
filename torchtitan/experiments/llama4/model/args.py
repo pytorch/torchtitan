@@ -74,12 +74,13 @@ class TransformerModelArgs(BaseModelArgs):
                 "FlexAttention is not compatible with selective AC yet. "
                 "See https://github.com/pytorch/pytorch/issues/147879"
             )
-
+        """
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise ValueError(
                 "FlexAttention is not compatible with CP yet. "
                 "We are still working on this."
             )
+        """
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int

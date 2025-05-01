@@ -11,10 +11,13 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor.experimental._attention import (
+    FlexAttentionContiguousSharder,
+)
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
@@ -133,7 +136,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build model (using meta init)
         model_cls = self.train_spec.cls
+        # NOTE (xilunwu): need to store model_args.use_flex_attn for train_step
         model_args = self.train_spec.config[job_config.model.flavor]
+        self.model_args = model_args
         # set the model args from training job configs
         model_args.update_from_config(job_config, tokenizer)
 
@@ -319,6 +324,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
+
+        # TODO: move this into `create_context_parallel_ctx`
+        # init block_mask for flex_attention
+        block_mask = None
+        if self.model_args.use_flex_attn:
+            from torchtitan.models.attention import FlexAttention
+
+            mask_mod = FlexAttention._get_causal_mask_mod()
+            batch_dimension = 1
+            seq_len = inputs.shape[1]
+            block_mask = FlexAttention.compiled_create_block_mask(
+                mask_mod, batch_dimension, None, seq_len, seq_len
+            )
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=world_mesh["cp"],
@@ -326,6 +345,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                block_mask=block_mask,
+                sharder=FlexAttentionContiguousSharder(),
             )
             if parallel_dims.cp_enabled
             else None
