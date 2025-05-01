@@ -118,7 +118,6 @@ class TritonCGBF16GroupGEMM(GroupGEMMStrategy):
         # Get only valid tokens
         valid_tokens = contig_tokens[: m_offsets[-1]]
 
-        # print(f"{len(valid_tokens)=}")
         # Create indices from offsets without CPU-GPU sync
         m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
 
@@ -128,30 +127,17 @@ class TritonCGBF16GroupGEMM(GroupGEMMStrategy):
 
         # Apply activation
         hidden_outputs = self.activation_function(gate_proj) * up_proj
-        # print(f"{hidden_outputs=}")
 
         # Run the third GEMM (down projection)
-        # print(f"valid_tokens.shape={valid_tokens.shape}, dtype={valid_tokens.dtype}")
-        # print(f"w_gate.shape={w_down.shape}, dtype={w_down.dtype}")
-
-        # Create indices from offsets without CPU-GPU sync
-        # m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
-        # print(f"m_indices.shape={hidden_outputs.shape}, m_indices={m_indices[:10]}")
 
         down_proj_out = cg_grouped_gemm_forward(hidden_outputs, w_down, m_indices)
-        # print(f"{down_proj_out.shape=}, {down_proj_out=}")
 
         # Copy results back to contig_tokens
         contig_tokens[: m_offsets[-1]] = down_proj_out
         return contig_tokens
 
-        # assert hidden_outputs, "no hidden outputs"
-
-        # return hidden_outputs
-
     @staticmethod
     def is_available() -> bool:
-
         return TRITON_CONTIGUOUS_GROUP_GEMM_AVAILABLE
 
 
@@ -169,7 +155,6 @@ class TorchBF16GroupGEMM(GroupGEMMStrategy):
         w_down = module.get_parameter("down_proj_weight")
 
         # Run first two GEMMs (gate and up projections)
-
         gate_proj = torch._grouped_mm(
             contig_tokens,
             w_gate.transpose(-2, -1),
