@@ -21,6 +21,7 @@ if DEEPGEMM_AVAILABLE:
 try:
     from torchao.float8.config import ScalingGranularity
     from torchao.float8.float8_utils import tensor_to_scale, to_fp8_saturated
+    from torchao.prototype.scaled_grouped_mm import _scaled_grouped_mm
 
     TORCHAO_FP8_GG_AVAILABLE = True
 
@@ -173,7 +174,7 @@ class TorchAOBF16GroupGEMM(GroupGEMMStrategy):
         return TRITON_MG_GROUP_GEMM_AVAILABLE
 
 
-class TorchFP8GroupGEMM(GroupGEMMStrategy):
+class TorchFP8GroupGEMM_inference(GroupGEMMStrategy):
     """Implementation using TorchAO's _scaled_grouped_mm with FP8 rowwise precision and weight prescaling"""
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
@@ -282,6 +283,81 @@ class TorchFP8GroupGEMM(GroupGEMMStrategy):
             use_fast_accum=True,
         )
 
+        return result
+
+    @staticmethod
+    def is_available() -> bool:
+        return TORCHAO_FP8_GG_AVAILABLE
+
+
+class TorchFP8GroupGEMM(GroupGEMMStrategy):
+    """Implementation using TorchAO's _scaled_grouped_mm with FP8 rowwise precision and weight prescaling"""
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """prep the expert weights for group gemm usage with prescaling"""
+        # Stack weights as in the original implementation
+        combined_weights = torch.stack(all_weights)
+
+        # Transpose weights for column-major format
+        # transposed_weights = combined_weights.transpose(-2, -1)
+
+        return combined_weights
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        # Get prescaled transposed weights and scales
+        # Get weights
+        # TODO - this is only temporary.  We can't pre-transpose b/c FSDP will complain about non-contiguous weights.
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_gate = w_gate.transpose(-2, -1)
+        w_up = module.get_parameter("up_proj_weight")
+        w_up = w_up.transpose(-2, -1)
+        w_down = module.get_parameter("down_proj_weight")
+        w_down = w_down.transpose(-2, -1)
+
+        # _scaled_grouped_mm(x, w, offs=offss)
+        # Run first two GEMMs (gate and up projections) using prescaled weights
+        # print(f"running gate_proj with {w_gate.shape}")
+        gate_proj = _scaled_grouped_mm(
+            contig_tokens,
+            w_gate,
+            m_offsets,
+            out_dtype=torch.bfloat16,
+            # use_fast_accum=True,
+        )
+
+        up_proj = _scaled_grouped_mm(
+            contig_tokens,
+            w_up,
+            m_offsets,
+            out_dtype=torch.bfloat16,
+            # use_fast_accum=True,
+        )
+
+        # Apply activation
+        hidden_outputs = self.activation_function(gate_proj) * up_proj
+
+        # Convert hidden_outputs to FP8 for the third GEMM
+        """hidden_scales = tensor_to_scale(
+            hidden_outputs,
+            torch.float8_e4m3fn,
+            scaling_granularity=ScalingGranularity.AXISWISE,
+            axiswise_dim=-1,
+            round_scales_to_power_of_2=True,
+        )
+        scaled_hidden = hidden_outputs.to(torch.float32) * hidden_scales
+        fp8_hidden = to_fp8_saturated(scaled_hidden, torch.float8_e4m3fn)
+        """
+
+        # Run the third GEMM (down projection)
+        result = _scaled_grouped_mm(
+            hidden_outputs,
+            w_down,
+            m_offsets,
+            out_dtype=torch.bfloat16,
+            # use_fast_accum=True,
+        )
+
+        # print(f"result shape {result.shape}, result dtype {result.dtype}")
         return result
 
     @staticmethod

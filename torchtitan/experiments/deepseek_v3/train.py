@@ -123,6 +123,8 @@ def run_full_model(
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
 
+    # model = torch.compile(model)
+
     # Run forward and backward
     steps = 2
     for _ in range(steps):
@@ -142,6 +144,7 @@ def run_full_model(
 
             if pp_rank == 0:
                 y = pp_schedule.step(x)
+
             elif pp_rank == pp_size - 1:
                 y = pp_schedule.step(target=label, losses=losses)
                 loss = torch.mean(torch.stack(losses))
