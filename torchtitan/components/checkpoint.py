@@ -292,11 +292,11 @@ class CheckpointManager:
         self.exclude_from_loading = ckpt_config.exclude_from_loading
 
         self.mp = None
+        self.async_future = None
         if async_mode == AsyncMode.DISABLED:
             self.async_mode = AsyncMode.DISABLED
         elif async_mode == AsyncMode.ASYNC:
             self.async_mode = AsyncMode.ASYNC
-            self.async_future = None
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
             ctx = mp.get_context("spawn")
@@ -598,9 +598,15 @@ class CheckpointManager:
             if not self.mp.is_alive():
                 raise RuntimeError("The checkpoint background process is dead.")
             _ = self.mp_queue_recv.get()
-        elif self.async_mode == AsyncMode.ASYNC:
+        elif self.async_mode == AsyncMode.ASYNC or self.ft_manager is not None:
             if self.async_future is not None:
                 self.async_future.result()
+                self.async_future = None
+        elif self.async_future is not None:
+            raise RuntimeError(
+                "self.async_future is not None, but self.async_mode is not enabled "
+                "and fault tolerance is not active."
+            )
 
     def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
         self._cpu_staging(checkpoint_id)
