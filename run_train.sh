@@ -13,6 +13,9 @@ set -ex
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
+# Turn off the static cuda launcher used by inductor.
+# It currently does not play well with the torchtitan compile + SAC tests.
+export TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER=0
 
 overrides=""
 if [ $# -ne 0 ]; then
