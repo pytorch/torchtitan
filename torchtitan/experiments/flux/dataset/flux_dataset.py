@@ -96,22 +96,30 @@ def _cc12m_wds_data_processor(
     t5_tokens = t5_tokenizer.encode(sample["txt"])
     clip_tokens = clip_tokenizer.encode(sample["txt"])
 
-    return {
+    # Include the sample ID if available
+    result = {
+        "id": sample["__key__"],
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
     }
 
+    return result
+
 
 def _flux_data_processor_from_encodings(
     sample: dict[str, Any],
-    t5_tokenizer: FluxTokenizer,
-    clip_tokenizer: FluxTokenizer,
-    output_size: int = 256,
+    t5_tokenizer: FluxTokenizer,  # Required for API compatibility
+    clip_tokenizer: FluxTokenizer,  # Required for API compatibility
+    output_size: int = 256,  # Required for API compatibility
 ) -> dict[str, Any]:
+    result = {}
     for k, v in sample.items():
-        sample[k] = torch.tensor(v)
-    return sample
+        if k == "id":
+            continue
+        result[k] = torch.tensor(v)
+
+    return result
 
 
 @dataclass
