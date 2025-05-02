@@ -9,6 +9,7 @@ description = "Llama 3 70B training"
 enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 100
+enable_memory_snapshot = true
 
 [metrics]
 log_freq = 10
@@ -34,12 +35,16 @@ steps = 1000
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 8  # 8-way TP
-compile = false
+compile = true
 dataset = "c4"
 
 [experimental]
 context_parallel_degree = 1
 pipeline_parallel_degree = 1
+torch_spmd = true
+reorder_for_compute_comm_overlap = true
+reorder_prefetch_limit = 20
+reorder_for_compute_comm_overlap_passes = "sink_waits,reorder_comms_preserving_peak_memory"
 
 [checkpoint]
 enable_checkpoint = false

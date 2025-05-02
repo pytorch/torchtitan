@@ -320,7 +320,7 @@ class JobConfig:
             nargs="+",
             default=[
                 "sink_waits",
-                "reorder_comms_preserving_peak_memory",
+                "reorder_communication_preserving_peak_memory",
             ],
             help="sequence of passes (names of functions inside _inductor.comms) to call",
         )
