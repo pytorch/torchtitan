@@ -105,24 +105,33 @@ class FluxPreprocessor(FluxTrainer):
             batch=empty_batch,
         )
 
-        # Save the empty encodings
-        save_preprocessed_data(
-            output_path=os.path.join(self.job_config.job.dump_folder, "preprocessed"),
-            file_name="empty_encodings.json",
-            data_dict=empty_encodings,
-        )
+        if torch.distributed.get_rank() == 0:
+            # Save the empty encodings
+            save_preprocessed_data(
+                output_path=os.path.join(
+                    self.job_config.job.dump_folder, "preprocessed"
+                ),
+                file_name="empty_encodings.json",
+                data_dict=empty_encodings,
+            )
         logger.info("Preprocessed empty encodings for classifier-free guidance")
 
     def preprocess(self):
-        if torch.distributed.get_rank() == 0:
-            self.generate_empty_encoding()
+        self.generate_empty_encoding()
 
         # Then, calculate and save the encodings for the dataset
         data_iterator = iter(self.dataloader)
         preprocessed_sample_cnt = 0
 
         while True:
-            input_dict, labels = self.next_batch(data_iterator)
+            try:
+                input_dict, labels = self.next_batch(data_iterator)
+            except StopIteration:  # If the data iterator run out of data
+                break
+            except Exception as e:
+                logger.warning(f"Error processing batch: {e}, skipped...")
+                continue
+
             for k, _ in input_dict.items():
                 input_dict[k] = input_dict[k].to(self.device)
             labels = labels.to(self.device)
@@ -136,6 +145,8 @@ class FluxPreprocessor(FluxTrainer):
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
             )
+            for k, v in input_dict.items():
+                print(k, v.shape)
 
             bsz = save_preprocessed_data(
                 output_path=os.path.join(
@@ -151,6 +162,9 @@ class FluxPreprocessor(FluxTrainer):
                 f"Preprocessed {preprocessed_sample_cnt} samples, "
                 f"current batch size: {input_dict['img_encodings'].shape[0]}"
             )
+
+            if preprocessed_sample_cnt >= 20:
+                break
 
 
 if __name__ == "__main__":
