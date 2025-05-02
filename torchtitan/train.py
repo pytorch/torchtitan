@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
@@ -293,9 +293,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def next_batch(
         self, data_iterator: Iterable
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        rank = torch.distributed.get_global_rank()
+        if rank == 39 and self.step >= 500:
+            logger.info("In next_batch, Before the data_iterator")
         data_load_start = time.perf_counter()
         batch = next(data_iterator)
         input_dict, labels = batch
+        if rank == 39 and self.step >= 500:
+            logger.info(
+                "In next_batch, after the data_iterator, batch_size: ", labels.shape
+            )
         self.metrics_processor.ntokens_since_last_log += labels.numel()
         self.metrics_processor.data_loading_times.append(
             time.perf_counter() - data_load_start
