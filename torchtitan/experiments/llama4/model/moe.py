@@ -285,6 +285,7 @@ class MoE(nn.Module):
             )
 
             ALIGN_SIZE_M = 16
+            # print(f"Aligning to {ALIGN_SIZE_M}=")
 
             with torch.no_grad():
                 (
@@ -309,6 +310,12 @@ class MoE(nn.Module):
             num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
 
         # shape (bs*slen*top_k, dim)
+        print(f"routed_input shape: {routed_input.shape}")
+        print(f"{num_local_tokens_per_expert=}")
+        has_zeros = (num_local_tokens_per_expert == 0).any()
+        if has_zeros:
+            print("has_zeros!!!!!!!!!!!!")
+
         routed_output = self.experts(routed_input, num_local_tokens_per_expert)
 
         # shared expert

@@ -26,15 +26,24 @@ def fill_indices_cpu(
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
+    zero_replacement: int = 8,  # Add zero_replacement parameter
 ):
     """CPU implementation for reference."""
     # We need to preallocate the output
     device = tokens_per_expert_group.device
     permuted_indices = torch.full((max_len,), -1, dtype=torch.int32, device=device)
+
+    # Replace zeros in write_offsets with zero_replacement
+    write_offsets_replaced = torch.where(
+        write_offsets == 0,
+        torch.tensor(zero_replacement, dtype=write_offsets.dtype, device=device),
+        write_offsets,
+    )
+
     # Fill the permuted indices
     # For each local expert
     for e in range(experts_per_rank):
-        write_start = write_offsets[e].item()
+        write_start = write_offsets_replaced[e].item()
         # For each remote rank
         for r in range(num_ranks):
             i = r * experts_per_rank + e
@@ -45,12 +54,25 @@ def fill_indices_cpu(
                 end_idx = min(write_start + length, max_len)
                 # Add this check to prevent empty ranges
                 if write_start < end_idx:
-                    permuted_indices[write_start:end_idx] = torch.arange(
+                    indices = torch.arange(
                         start_index,
                         start_index + (end_idx - write_start),
                         dtype=torch.int32,
                         device=device,
                     )
+                    # Replace zeros in indices with zero_replacement
+                    indices = torch.where(
+                        indices == 0,
+                        torch.tensor(
+                            zero_replacement, dtype=indices.dtype, device=device
+                        ),
+                        indices,
+                    )
+                    permuted_indices[write_start:end_idx] = indices
+            # Special case: if length is 0, insert a zero_replacement value
+            elif length == 0:
+                if write_start < max_len:
+                    permuted_indices[write_start] = zero_replacement
             write_start += length
     return permuted_indices
 
@@ -158,6 +180,7 @@ class TestOptimizedKernel(unittest.TestCase):
                     num_ranks,
                     max_len,
                     block_size=128,
+                    zero_replacement=8,
                 )
 
                 # Verify results match
