@@ -24,7 +24,6 @@ def save_preprocessed_data(
     data_dict: dict[str, torch.Tensor],
     mean: Optional[torch.Tensor] = None,
     logvar: Optional[torch.Tensor] = None,
-    encoded: Optional[torch.Tensor] = None,
 ) -> int:
     """
     Save the preprocessed data to a json file. Each rank will save its own data to a different file.
@@ -36,7 +35,6 @@ def save_preprocessed_data(
         data_dict: Dictionary containing the preprocessed data tensors
         mean: Optional mean tensor from the autoencoder
         logvar: Optional logvar tensor from the autoencoder
-        encoded: Optional encoded tensor from the autoencoder
 
     Returns: the number of samples in the current batch
     """
@@ -53,12 +51,14 @@ def save_preprocessed_data(
 
             # Add regular preprocessed data
             for key in data_dict.keys():
+                if key == "id":
+                    continue
                 # convert from bFloat16 to float32, since json.dumps didn't support bFloat16
                 sample_data[key] = (
                     data_dict[key][sample_id].detach().to(torch.float32).cpu().tolist()
                 )
 
-            # Add mean, logvar, and encoded if provided
+            # Add mean, logvar if provided
             if mean is not None:
                 sample_data["mean"] = (
                     mean[sample_id].detach().to(torch.float32).cpu().tolist()
@@ -67,11 +67,6 @@ def save_preprocessed_data(
             if logvar is not None:
                 sample_data["logvar"] = (
                     logvar[sample_id].detach().to(torch.float32).cpu().tolist()
-                )
-
-            if encoded is not None:
-                sample_data["encoded"] = (
-                    encoded[sample_id].detach().to(torch.float32).cpu().tolist()
                 )
 
             f.write(json.dumps(sample_data) + "\n")
@@ -100,6 +95,7 @@ class FluxPreprocessor(FluxTrainer):
             tokenizer=None,
             job_config=job_config,
             infinite=False,
+            include_sample_id=True,
         )
         # load componnents, offload the Flux model to save GPU memory
         self.autoencoder.eval().requires_grad_(False)
@@ -139,11 +135,12 @@ class FluxPreprocessor(FluxTrainer):
         )
 
         if torch.distributed.get_rank() == 0:
+            output_path = os.path.join(self.job_config.job.dump_folder, "preprocessed")
+            if os.path.exists(output_path):
+                os.remove(output_path)
             # Save the empty encodings
             save_preprocessed_data(
-                output_path=os.path.join(
-                    self.job_config.job.dump_folder, "preprocessed"
-                ),
+                output_path=output_path,
                 file_name="empty_encodings.json",
                 data_dict=empty_encodings,
             )
@@ -157,20 +154,24 @@ class FluxPreprocessor(FluxTrainer):
         preprocessed_sample_cnt = 0
 
         while True:
-            try:
-                input_dict, labels = self.next_batch(data_iterator)
-            except StopIteration:  # If the data iterator run out of data
-                break
-            except Exception as e:
-                logger.warning(f"Error processing batch: {e}, skipped...")
-                continue
+            # try:
+            #     input_dict, labels = self.next_batch(data_iterator)
+            # except StopIteration:  # If the data iterator run out of data
+            #     break
+            # except Exception as e:
+            #     logger.warning(f"Error processing batch: {e}, skipped...")
+            #     continue
+
+            input_dict, labels = self.next_batch(data_iterator)
 
             for k, _ in input_dict.items():
+                if k == "id":
+                    continue
                 input_dict[k] = input_dict[k].to(self.device)
             labels = labels.to(self.device)
 
-            # Extract mean, logvar, and encoded values
-            mean, logvar, encoded = encode_with_mean_logvar(self.autoencoder, labels)
+            # Extract mean and logvar values
+            mean, logvar = encode_with_mean_logvar(self.autoencoder, labels)
 
             # Save the sample IDs if present in the input_dict
             sample_ids = None
@@ -187,9 +188,6 @@ class FluxPreprocessor(FluxTrainer):
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
             )
-            for k, v in input_dict.items():
-                print(k, v.shape)
-
             # Add back the sample IDs if they were present
             if sample_ids is not None:
                 processed_dict["id"] = sample_ids
@@ -209,14 +207,13 @@ class FluxPreprocessor(FluxTrainer):
                 data_dict=processed_dict,
                 mean=mean,
                 logvar=logvar,
-                encoded=encoded,
             )
 
             # log the process of the preprocessor
             preprocessed_sample_cnt += bsz
             logger.info(
                 f"Preprocessed {preprocessed_sample_cnt} samples, "
-                f"current batch size: {processed_dict['img_encodings'].shape[0]}"
+                f"current batch size: {processed_dict['t5_encodings'].shape[0]}"
             )
 
             if preprocessed_sample_cnt >= 20:

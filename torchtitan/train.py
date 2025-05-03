@@ -303,6 +303,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         device_type = utils.device_type
         for k, _ in input_dict.items():
+            if k == "id":
+                continue
             input_dict[k] = input_dict[k].to(device_type)
         labels = labels.to(device_type)
         return input_dict, labels

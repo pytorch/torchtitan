@@ -23,6 +23,10 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
+from torchtitan.experiments.flux.model.autoencoder import AutoEncoder, load_ae
+from torchtitan.experiments.flux.model.autoencoder_utils import (
+    generate_latent_from_mean_logvar,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -81,6 +85,8 @@ def _cc12m_wds_data_processor(
     t5_tokenizer: FluxTokenizer,
     clip_tokenizer: FluxTokenizer,
     output_size: int = 256,
+    include_sample_id: bool = False,
+    autoencoder: Optional[AutoEncoder] = None,
 ) -> dict[str, Any]:
     """
     Preprocess CC12M dataset sample image and text for Flux model.
@@ -98,11 +104,12 @@ def _cc12m_wds_data_processor(
 
     # Include the sample ID if available
     result = {
-        "id": sample["__key__"],
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
     }
+    if include_sample_id:
+        result["id"] = sample["__key__"]
 
     return result
 
@@ -112,12 +119,44 @@ def _flux_data_processor_from_encodings(
     t5_tokenizer: FluxTokenizer,  # Required for API compatibility
     clip_tokenizer: FluxTokenizer,  # Required for API compatibility
     output_size: int = 256,  # Required for API compatibility
+    include_sample_id: bool = False,  # Used to determine whether to include sample ID
+    autoencoder: Optional[AutoEncoder] = None,
 ) -> dict[str, Any]:
+    """
+    Process data from preprocessed encodings.
+
+    Args:
+        sample: A sample from dataset containing encodings
+        t5_tokenizer: T5 tokenizer (kept for API compatibility)
+        clip_tokenizer: CLIP tokenizer (kept for API compatibility)
+        output_size: Output image size (kept for API compatibility)
+        include_sample_id: Whether to include sample ID in the result
+        job_config: Job configuration
+        autoencoder: Optional autoencoder model. If provided, will be used to reconstruct images
+                    from mean and logvar. If not provided, no reconstruction will be performed.
+
+    Returns:
+        Processed sample with tensors and optionally reconstructed image
+    """
     result = {}
+
+    # Convert all values to tensors
     for k, v in sample.items():
-        if k == "id":
-            continue
-        result[k] = torch.tensor(v)
+        if k not in ["metadata", "id"]:
+            result[k] = torch.tensor(v)
+
+    # Handle special fields
+    if "id" in sample:
+        result["id"] = sample["id"]
+
+    # Reconstruct image from mean and logvar if autoencoder is provided
+    if autoencoder is not None and "mean" in sample and "logvar" in sample:
+        mean = torch.tensor(sample["mean"])
+        logvar = torch.tensor(sample["logvar"])
+
+        # Generate latent encoding from mean and logvar
+        encoded = generate_latent_from_mean_logvar(autoencoder, mean, logvar)
+        result["img_encodings"] = encoded
 
     return result
 
@@ -136,7 +175,7 @@ DATASETS = {
         data_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
-        path="outputs/preprocess",
+        path="outputs/preprocessed",
         loader=lambda path: load_dataset(
             path,
             data_files={
@@ -188,6 +227,7 @@ class FluxDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        include_sample_id: bool = False,
     ) -> None:
 
         # Force lowercase for consistent comparison
@@ -200,6 +240,8 @@ class FluxDataset(IterableDataset, Stateful):
 
         self.dataset_name = dataset_name
         self.preprocessed = "preprocess" in dataset_name
+        self.autoencoder = None
+
         # load empty encodings for preprocessed dataset
         if self.preprocessed:
             # Check if dataset_path is not None before using it
@@ -212,6 +254,23 @@ class FluxDataset(IterableDataset, Stateful):
             self._t5_empty_encoding = torch.tensor(empty_encodings["t5_encodings"])
             self._clip_empty_encoding = torch.tensor(empty_encodings["clip_encodings"])
 
+            # Load autoencoder if job_config is provided and we're using a preprocessed dataset
+            try:
+                logger.info(
+                    f"Loading autoencoder from {job_config.encoder.autoencoder_path}"
+                )
+                model_config = job_config.train_spec.config[job_config.model.flavor]
+                self.autoencoder = load_ae(
+                    job_config.encoder.autoencoder_path,
+                    model_config.autoencoder_params,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    dtype=torch.float32,
+                )
+                logger.info("Autoencoder loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load autoencoder: {e}")
+                self.autoencoder = None
+
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._t5_tokenizer = t5_tokenizer
@@ -222,6 +281,7 @@ class FluxDataset(IterableDataset, Stateful):
         self.job_config = job_config
 
         self.infinite = infinite
+        self.include_sample_id = include_sample_id
 
         # Variables for checkpointing
         self._sample_idx = 0
@@ -306,6 +366,7 @@ def build_flux_dataloader(
     # This parameter is not used, keep it for compatibility
     tokenizer: FluxTokenizer | None,
     infinite: bool = True,
+    include_sample_id: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
@@ -331,6 +392,7 @@ def build_flux_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
+        include_sample_id=include_sample_id,
     )
 
     return ParallelAwareDataloader(
