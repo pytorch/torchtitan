@@ -19,7 +19,7 @@ def _fill_indices_kernel(
     start_index_values_ptr,
     write_offsets_ptr,
     output_ptr,
-    chunk_size_per_expert_ptr,  # Added to check for zero tokens
+    total_tokens_per_expert_ptr,  # Added to check for zero tokens
     experts_per_rank: tl.constexpr,
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,  # Number of threads per block
@@ -33,9 +33,9 @@ def _fill_indices_kernel(
         write_offset = tl.load(write_offsets_ptr + expert_id)
 
         # get total tokens for this expert across all ranks
-        total_expert_tokens = tl.load(chunk_size_per_expert_ptr + expert_id)
+        total_expert_tokens = tl.load(total_tokens_per_expert_ptr + expert_id)
 
-        # loop over all ranks
+        # loop over all ranks, skip if no tokens
         if total_expert_tokens > 0:
             for r in range(num_ranks):
                 # index into tokens_per_expert_group array
@@ -78,11 +78,10 @@ def fill_indices_wrapper(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
     write_offsets: torch.Tensor,
-    chunk_size_per_expert: torch.Tensor,
+    total_tokens_per_expert: torch.Tensor,
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
-    min_slots_per_expert: int = 8,  # this is the auto-padding value
     block_size: int = 128,
     max_blocks: int = 1024,  # cap on total number of blocks to launch
 ):
@@ -102,10 +101,9 @@ def fill_indices_wrapper(
         start_index_values,
         write_offsets,
         permuted_indices,
-        chunk_size_per_expert,  # Pass the tensor to check for zero tokens
+        total_tokens_per_expert,  # skip logic check for zero tokens
         experts_per_rank,
         num_ranks,
-        min_slots_per_expert,  # Pass the minimum padding parameter
         BLOCK_SIZE=block_size,
     )
     return permuted_indices
@@ -116,7 +114,7 @@ def fill_indices_cpu(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
     write_offsets: torch.Tensor,
-    chunk_size_per_expert: torch.Tensor,
+    total_tokens_per_expert: torch.Tensor,
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
@@ -133,7 +131,7 @@ def fill_indices_cpu(
     # For each local expert
     for e in range(experts_per_rank):
         write_start = write_offsets[e].item()
-        total_tokens = chunk_size_per_expert[e].item()
+        total_tokens = total_tokens_per_expert[e].item()
 
         # For each remote rank
         # we can skip this expert if it has no tokens, already filled with -1
@@ -173,9 +171,9 @@ def generate_permute_indices(
         num_ranks: number of ranks.
         max_len: maximum length of the output index vector.
         alignment: alignment for each returned element in `m_sizes`.
+        min_slots_per_expert: minimum number of slots to allocate for an expert, even if it has 0 tokens
         use_cpu: whether to use CPU implementation.
-        use_optimized: whether to use optimized Triton implementation.
-        block_size: block size for optimized implementation.
+
 
     Returns:
         permuted_indices: Tensor of indices that map original token order to the expert-grouped order.
@@ -188,24 +186,25 @@ def generate_permute_indices(
         To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
               |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
     """
+
     # prefix sum to get start index of each expert (parallel scan kernel in future?)
     start_index_values = (
         torch.cumsum(tokens_per_expert_group, 0) - tokens_per_expert_group
     )
 
-    # chunk sizes for each expert
-    chunk_size_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
+    # total tokens for each expert (sum over ranks)
+    total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
 
     # apply minimum slots per expert - ensure at least min_slots_per_expert
     # even for experts with zero tokens
-    padded_chunk_size_per_expert = torch.maximum(
-        chunk_size_per_expert,
-        torch.full_like(chunk_size_per_expert, min_slots_per_expert),
+    padded_total_tokens_per_expert = torch.maximum(
+        total_tokens_per_expert,
+        torch.full_like(total_tokens_per_expert, min_slots_per_expert),
     )
 
     # align the chunk sizes (cdiv)
     m_sizes = (
-        (padded_chunk_size_per_expert + alignment - 1) // alignment * alignment
+        (padded_total_tokens_per_expert + alignment - 1) // alignment * alignment
     ).to(torch.int32)
 
     # additional prefix sum to get write offset of each expert in permuted_indices
@@ -219,7 +218,7 @@ def generate_permute_indices(
             tokens_per_expert_group,
             start_index_values,
             write_offsets,
-            chunk_size_per_expert,  # Pass to check for zero tokens
+            total_tokens_per_expert,  # Pass to check for zero tokens
             experts_per_rank,
             num_ranks,
             max_len,
@@ -230,7 +229,7 @@ def generate_permute_indices(
             tokens_per_expert_group,
             start_index_values,
             write_offsets,
-            chunk_size_per_expert,  # Pass to check for zero tokens
+            total_tokens_per_expert,  # Pass to check for zero tokens
             experts_per_rank,
             num_ranks,
             max_len,
@@ -321,8 +320,8 @@ def test_with_zero_tokens():
     assert torch.equal(m_sizes, m_sizes_cpu)
 
     # Verify that experts with zero tokens have at least min_slots_per_expert
-    chunk_size_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
-    zero_token_experts = chunk_size_per_expert == 0
+    total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
+    zero_token_experts = total_tokens_per_expert == 0
     if zero_token_experts.any():
         assert (m_sizes[zero_token_experts] >= min_slots_per_expert).all()
 
@@ -334,7 +333,7 @@ def test_with_zero_tokens():
 
     # Print the results
     print(f"tokens_per_expert_group = {tokens_per_expert_group}")
-    print(f"chunk_size_per_expert = {chunk_size_per_expert}")
+    print(f"total_tokens_per_expert = {total_tokens_per_expert}")
     print(f"m_sizes = {m_sizes}")
     print(f"m_offsets = {m_offsets}")
     print(f"permuted_indices = {permuted_indices_gpu[:sum(m_sizes).item()]}")
@@ -344,7 +343,7 @@ def test_with_zero_tokens():
         start = (m_offsets[e] - m_sizes[e]).item()
         end = m_offsets[e].item()
         expert_indices = permuted_indices_gpu[start:end]
-        if chunk_size_per_expert[e] == 0:
+        if total_tokens_per_expert[e] == 0:
             assert (
                 expert_indices == -1
             ).all(), f"Expert {e} with zero tokens should have all -1 indices"
