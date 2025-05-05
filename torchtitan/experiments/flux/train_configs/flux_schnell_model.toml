@@ -52,7 +52,7 @@ enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
 denoising_steps = 50
 save_img_folder = "img"
-eval_freq = 1000
+eval_freq = 300_000
 
 [parallelism]
 data_parallel_replicate_degree = 1

@@ -176,7 +176,7 @@ class FluxTrainer(Trainer):
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
-        # Evaluate the model during training
+        # Evaluate the model during training.
         if (
             self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
