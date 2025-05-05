@@ -217,7 +217,6 @@ class FluxDataset(IterableDataset, Stateful):
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token
 
-                self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
 
                 labels = sample_dict.pop("image")
@@ -233,11 +232,9 @@ class FluxDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
-        self._all_samples = state_dict["all_samples"]
 
     def state_dict(self):
         return {
-            "all_samples": self._all_samples,
             "sample_idx": self._sample_idx,
         }
 
