@@ -795,6 +795,109 @@ class MoE(nn.Module):
             # Flag the error
             print(f"Error using {self.group_mm} strategy: {e}")
 
+    def moe_on_device_old(self, x, topk_ids, topk_weight):
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
+
+        # keep the seqlen dimension for later use without holding onto the sorted tokens
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
+
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+
+        # Sum the tokens over local experts, then we get tokens per EP rank,
+        # which is the input splits
+        with torch.no_grad():
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+
+        # Move input to the `token_send_buf` symm mem
+        token_send_buf = self.get_send_buf()
+        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
+        # Note: `out=` avoids copy, but it is not differentiable
+        # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
+        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
+            token_send_buf,
+            input_splits,
+            self.ep_group,
+        )
+
+        # We need to permute the received tokens so that tokens for the same expert are contiguous.
+        # This part prepares a 1D tensor `permuted_indices` for such permutation.
+        # This part doesn't need gradient.
+        with torch.no_grad():
+            # Check if any expert has zero tokens
+            has_zeros = (tokens_per_expert_group == 0).any().item()
+
+            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
+                tokens_per_expert_group,
+                self.experts_per_rank,
+                self.ep_size,
+                token_gather_buf.shape[0],
+                ALIGN_SIZE_M,
+            )
+
+        # Permute the received tokens so that tokens for the same expert are contiguous.
+        contig_tokens = token_gather_buf[permuted_indices]
+
+        # group gemm - handle all three group gemms (up, gate, down for all experts)
+        hidden_outputs = self._run_group_gemm(
+            contig_tokens,
+            m_sizes,
+            m_offsets,
+        )
+        print(f"group gemm successful! ")
+        # Prepare buffer for tokens processed by experts
+        processed_tokens = self.get_gather_buf()
+
+        # Prepare buffer for tokens processed by experts
+
+        processed_tokens = self.get_gather_buf()
+
+        # If we padded the input for zero-token experts, we need to handle that here
+
+        # In moe_on_device method, replace lines 915-927 with:
+        # If we padded the input for zero-token experts, we need to handle that here
+        # In moe_on_device method, replace lines 915-927 with:
+
+        # Move into Symmetric Memory for the return shuffle
+        processed_tokens[permuted_indices] = hidden_outputs
+
+        # Move into Symmetric Memory for the return shuffle
+        # processed_tokens[permuted_indices] = hidden_outputs
+
+        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
+        # The input/output splits are just a reverse of the previous shuffle.
+        token_return_buf, _ = OnDeviceAllToAllV.apply(
+            processed_tokens,
+            output_splits,
+            self.ep_group,
+        )
+
+        returned_tokens = token_return_buf[:seqlen_sorted_tokens]
+        output_tokens = torch.empty_like(returned_tokens)
+        output_tokens[token_indices] = returned_tokens
+
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(returned_tokens.dtype)
+        )
+
+        return final_out
+
     def moe_on_device(self, x, topk_ids, topk_weight):
         (
             sorted_tokens,

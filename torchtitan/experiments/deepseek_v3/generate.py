@@ -19,9 +19,9 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -375,7 +375,7 @@ if __name__ == "__main__":
     ]
 
     generate(model, pp_schedule, tokenizer, dist_config, messages)
-    generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+    # generate_with_cuda_graph(model, tokenizer, dist_config, messages)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")

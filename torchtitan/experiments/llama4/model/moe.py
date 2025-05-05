@@ -260,7 +260,7 @@ class MoE(nn.Module):
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
         # will be used to update the expert bias for load balancing
-        self.tokens_per_expert += num_local_tokens_per_expert
+        # self.tokens_per_expert += num_local_tokens_per_expert
 
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
@@ -284,7 +284,7 @@ class MoE(nn.Module):
                 generate_permute_indices,
             )
 
-            ALIGN_SIZE_M = 16
+            ALIGN_SIZE_M = 8
             # print(f"Aligning to {ALIGN_SIZE_M}=")
 
             with torch.no_grad():
@@ -314,7 +314,9 @@ class MoE(nn.Module):
         print(f"{num_local_tokens_per_expert=}")
         has_zeros = (num_local_tokens_per_expert == 0).any()
         if has_zeros:
-            print("has_zeros!!!!!!!!!!!!")
+            print(
+                "**********************************************************    has_zeros!!!!!!!!!!!!"
+            )
 
         routed_output = self.experts(routed_input, num_local_tokens_per_expert)
 
