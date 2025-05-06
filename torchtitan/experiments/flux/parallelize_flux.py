@@ -92,10 +92,8 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
-    # apply FSDP to last layer.
-    # Currently we set reshard_after_forward=True for last layer, this is for checkpointing after evaluation
-    # TODO: use set_reshard_after_forward after new PyTorch relase
-    fully_shard(model.final_layer, **fsdp_config)
+    # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
+    fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
 
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
