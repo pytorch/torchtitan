@@ -101,7 +101,7 @@ def fill_indices_wrapper(
         start_index_values,
         write_offsets,
         permuted_indices,
-        total_tokens_per_expert,  # skip logic check for zero tokens
+        total_tokens_per_expert,  # 'skip logic' check for zero tokens
         experts_per_rank,
         num_ranks,
         BLOCK_SIZE=block_size,
@@ -118,7 +118,6 @@ def fill_indices_cpu(
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
-    min_slots_per_expert: int = 8,  # empty experts are padded to this size
 ):
     # We need to preallocate the output - we ignore device and force it on cpu
     # device = tokens_per_expert_group.device
@@ -159,7 +158,6 @@ def generate_permute_indices(
     num_ranks: int,
     max_len: int,
     alignment: int,
-    min_slots_per_expert: int = 8,
     use_cpu: bool = False,
 ):
     """
@@ -195,11 +193,9 @@ def generate_permute_indices(
     # total tokens for each expert (sum over ranks)
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
 
-    # apply minimum slots per expert - ensure at least min_slots_per_expert
-    # even for experts with zero tokens
-    padded_total_tokens_per_expert = torch.maximum(
-        total_tokens_per_expert,
-        torch.full_like(total_tokens_per_expert, min_slots_per_expert),
+    # pad out empty experts to alignment requirement
+    padded_total_tokens_per_expert = torch.where(
+        total_tokens_per_expert == 0, alignment, total_tokens_per_expert
     )
 
     # align the chunk sizes (cdiv)
@@ -222,7 +218,6 @@ def generate_permute_indices(
             experts_per_rank,
             num_ranks,
             max_len,
-            min_slots_per_expert,
         )
     else:
         permuted_indices = fill_indices_wrapper(
@@ -290,8 +285,7 @@ def test_with_zero_tokens():
     )
 
     max_len = 128
-    alignment = 32
-    min_slots_per_expert = 8  # Ensure at least 8 slots for experts with zero tokens
+    alignment = 8
 
     # Use the GPU kernel
     permuted_indices_gpu, m_sizes, m_offsets = generate_permute_indices(
@@ -300,7 +294,6 @@ def test_with_zero_tokens():
         num_ranks,
         max_len,
         alignment,
-        min_slots_per_expert,
     )
 
     # Use the CPU method
@@ -310,7 +303,6 @@ def test_with_zero_tokens():
         num_ranks,
         max_len,
         alignment,
-        min_slots_per_expert,
         use_cpu=True,
     )
 
@@ -322,7 +314,7 @@ def test_with_zero_tokens():
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
     zero_token_experts = total_tokens_per_expert == 0
     if zero_token_experts.any():
-        assert (m_sizes[zero_token_experts] >= min_slots_per_expert).all()
+        assert (m_sizes[zero_token_experts] >= alignment).all()
 
     # Check alignment
     assert torch.equal(
@@ -347,8 +339,8 @@ def test_with_zero_tokens():
                 expert_indices == -1
             ).all(), f"Expert {e} with zero tokens should have all -1 indices"
             assert (
-                expert_indices.size(0) >= min_slots_per_expert
-            ), f"Expert {e} with zero tokens should have at least {min_slots_per_expert} slots"
+                expert_indices.size(0) >= alignment
+            ), f"Expert {e} with zero tokens should have at least {alignment} slots"
             print(
                 f"Expert {e} has zero tokens and {expert_indices.size(0)} slots with all -1"
             )
