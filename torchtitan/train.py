@@ -293,16 +293,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def next_batch(
         self, data_iterator: Iterable
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        rank = torch.distributed.get_rank()
-        if rank == 39 and self.step >= 500:
-            logger.info("In next_batch, Before the data_iterator")
         data_load_start = time.perf_counter()
         batch = next(data_iterator)
         input_dict, labels = batch
-        if rank == 39 and self.step >= 500:
-            logger.info(
-                "In next_batch, after the data_iterator, batch_size: ", labels.shape
-            )
         self.metrics_processor.ntokens_since_last_log += labels.numel()
         self.metrics_processor.data_loading_times.append(
             time.perf_counter() - data_load_start

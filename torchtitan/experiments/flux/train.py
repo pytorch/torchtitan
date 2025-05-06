@@ -154,9 +154,9 @@ class FluxTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+        self.lr_schedulers.step()
 
         # log metrics
-        # TODO(jiani): logging every step after 500 step
         if not self.metrics_processor.should_log(self.step):
             return
 
@@ -181,8 +181,10 @@ class FluxTrainer(Trainer):
             self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
+            model.eval()
             with torch.no_grad():
                 self.eval_step()
+            model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
         """
