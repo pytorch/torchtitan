@@ -63,3 +63,11 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 
 [activation_checkpoint]
 mode = "full"
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval = 10_000
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
