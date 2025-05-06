@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import ContextManager, Optional, TYPE_CHECKING, Union
 
 import torch
-import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
@@ -59,7 +58,7 @@ class FTManager:
 
     def set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
         def all_reduce_hook(output):
-            dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
+            self.replicate_pg.allreduce(output, opts=ReduceOp.AVG)
 
         def apply_set_all_reduce_hook(m):
             if isinstance(m, FSDPModule):
