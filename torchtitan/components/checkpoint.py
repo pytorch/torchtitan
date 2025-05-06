@@ -322,11 +322,15 @@ class CheckpointManager:
         self.close()
 
     def close(self):
-        if self.enable_checkpoint:
-            if self.mp and self.mp.is_alive():
+        if hasattr(self, "enable_checkpoint") and self.enable_checkpoint:
+            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
-            if self.purge_thread and self.purge_thread.is_alive():
+            if (
+                hasattr(self, "purge_thread")
+                and self.purge_thread
+                and self.purge_thread.is_alive()
+            ):
                 self.purge_queue.put(Terminate())
                 self.purge_thread.join()
 

@@ -292,6 +292,7 @@ class TestCheckpointManager(unittest.TestCase):
         f = manager.async_future
         f.result.assert_not_called()
 
+    @mock.patch("torch.cuda.Stream")
     @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
         "torchtitan.components.checkpoint.get_model_state_dict",
