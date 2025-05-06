@@ -168,8 +168,7 @@ def generate_permute_indices(
         experts_per_rank: number of experts per rank.
         num_ranks: number of ranks.
         max_len: maximum length of the output index vector.
-        alignment: alignment for each returned element in `m_sizes`.
-        min_slots_per_expert: minimum number of slots to allocate for an expert, even if it has 0 tokens
+        alignment: alignment for each returned element in `m_sizes` and padding min for zero token experts.
         use_cpu: whether to use CPU implementation.
 
 
