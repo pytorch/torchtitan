@@ -205,6 +205,7 @@ class FluxDataset(IterableDataset, Stateful):
                     self._sample_idx = 0
                     logger.warning(f"Dataset {self.dataset_name} is being re-looped")
                     dataset_iterator = self._get_data_iter()
+                    continue
             except Exception as e:
                 # Handle other exception, eg, dataset corruption
                 logger.warning(
