@@ -233,7 +233,6 @@ def generate_permute_indices(
             experts_per_rank,
             num_ranks,
             max_len,
-            min_slots_per_expert,
         )
 
     return permuted_indices, m_sizes, m_offsets.to(torch.int32)
