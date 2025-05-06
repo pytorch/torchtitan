@@ -79,11 +79,6 @@ class FluxTrainer(Trainer):
         )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-
-        rank = torch.distributed.get_rank()
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, Before preprocessing")
-
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
@@ -96,13 +91,7 @@ class FluxTrainer(Trainer):
         )
         labels = input_dict["img_encodings"]
 
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After preprocessing")
-
         self.optimizers.zero_grad()
-
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After Optimizer")
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -148,9 +137,6 @@ class FluxTrainer(Trainer):
             timesteps=timesteps.to(latents),
         )
 
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After Model forward")
-
         # Convert sequence of patches to latent shape
         pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
         target = noise - labels
@@ -159,9 +145,6 @@ class FluxTrainer(Trainer):
         # need to free to before bwd to avoid peaking memory
         del (pred, noise, target)
         loss.backward()
-
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After Model backward")
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
@@ -172,16 +155,9 @@ class FluxTrainer(Trainer):
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
 
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After optimizer step")
-
-        self.lr_schedulers.step()
-        if rank == 39 and self.step >= 500:
-            logger.info("In train_step, After schedular step")
-
         # log metrics
         # TODO(jiani): logging every step after 500 step
-        if not self.metrics_processor.should_log(self.step) and self.step <= 500:
+        if not self.metrics_processor.should_log(self.step):
             return
 
         if (
@@ -205,9 +181,8 @@ class FluxTrainer(Trainer):
             self.step % self.job_config.eval.eval_freq == 0
             or self.step == self.job_config.training.steps
         ):
-            model.eval()
-            self.eval_step()
-            model.train()
+            with torch.no_grad():
+                self.eval_step()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
         """
