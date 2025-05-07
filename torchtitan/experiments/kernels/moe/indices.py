@@ -39,28 +39,26 @@ def _fill_indices_kernel(
             start_index = tl.load(start_index_values_ptr + i)
             length = tl.load(tokens_per_expert_group_ptr + i)
 
-            # we can skip this rank-expert pair if there are no tokens
-            if length > 0:
-                # each thread in block processes tokens in parallel
-                offsets = tl.arange(0, BLOCK_SIZE)
+            # each thread in block processes tokens in parallel
+            offsets = tl.arange(0, BLOCK_SIZE)
 
-                # tokens are processed in chunks of BLOCK_SIZE
-                for chunk_start in range(0, length, BLOCK_SIZE):
-                    chunk_offsets = chunk_start + offsets
+            # tokens are processed in chunks of BLOCK_SIZE
+            for chunk_start in range(0, length, BLOCK_SIZE):
+                chunk_offsets = chunk_start + offsets
 
-                    # mask valid indices
-                    mask = chunk_offsets < length
+                # mask valid indices
+                mask = chunk_offsets < length
 
-                    values = start_index + chunk_offsets
+                values = start_index + chunk_offsets
 
-                    # destination
-                    dest_indices = write_offset + chunk_offsets
+                # destination
+                dest_indices = write_offset + chunk_offsets
 
-                    # store
-                    tl.store(output_ptr + dest_indices, values, mask=mask)
+                # store
+                tl.store(output_ptr + dest_indices, values, mask=mask)
 
-                # update write offset for next rank
-                write_offset += length
+            # update write offset for next rank
+            write_offset += length
 
 
 # ==============
