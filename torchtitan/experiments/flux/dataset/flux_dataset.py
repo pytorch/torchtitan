@@ -198,7 +198,8 @@ class FluxDataset(IterableDataset, Stateful):
             except StopIteration:
                 if not self.infinite:
                     logger.warning(
-                        f"Dataset {self.dataset_name} has run out of data. This might cuase NCCL timeout because of data starvation on some ranks."
+                        f"Dataset {self.dataset_name} has run out of data. \
+                        This might cuase NCCL timeout because of data starvation on some ranks."
                     )
                     break
                 else:
