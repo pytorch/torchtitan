@@ -19,7 +19,6 @@ def _fill_indices_kernel(
     start_index_values_ptr,
     write_offsets_ptr,
     output_ptr,
-    total_tokens_per_expert_ptr,  # Added to check for zero tokens
     experts_per_rank: tl.constexpr,
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,  # Number of threads per block
@@ -32,41 +31,36 @@ def _fill_indices_kernel(
         # read this experts write offset
         write_offset = tl.load(write_offsets_ptr + expert_id)
 
-        # get total tokens for this expert across all ranks
-        total_expert_tokens = tl.load(total_tokens_per_expert_ptr + expert_id)
+        for r in range(num_ranks):
+            # index into tokens_per_expert_group array
+            i = r * experts_per_rank + expert_id
 
-        # loop over all ranks, skip if no tokens
-        if total_expert_tokens > 0:
-            for r in range(num_ranks):
-                # index into tokens_per_expert_group array
-                i = r * experts_per_rank + expert_id
+            # load start index and number of tokens for this expert-rank pair
+            start_index = tl.load(start_index_values_ptr + i)
+            length = tl.load(tokens_per_expert_group_ptr + i)
 
-                # load start index and number of tokens for this expert-rank pair
-                start_index = tl.load(start_index_values_ptr + i)
-                length = tl.load(tokens_per_expert_group_ptr + i)
+            # we can skip this rank-expert pair if there are no tokens
+            if length > 0:
+                # each thread in block processes tokens in parallel
+                offsets = tl.arange(0, BLOCK_SIZE)
 
-                # we can skip this rank-expert pair if there are no tokens
-                if length > 0:
-                    # each thread in block processes tokens in parallel
-                    offsets = tl.arange(0, BLOCK_SIZE)
+                # tokens are processed in chunks of BLOCK_SIZE
+                for chunk_start in range(0, length, BLOCK_SIZE):
+                    chunk_offsets = chunk_start + offsets
 
-                    # tokens are processed in chunks of BLOCK_SIZE
-                    for chunk_start in range(0, length, BLOCK_SIZE):
-                        chunk_offsets = chunk_start + offsets
+                    # mask valid indices
+                    mask = chunk_offsets < length
 
-                        # mask valid indices
-                        mask = chunk_offsets < length
+                    values = start_index + chunk_offsets
 
-                        values = start_index + chunk_offsets
+                    # destination
+                    dest_indices = write_offset + chunk_offsets
 
-                        # destination
-                        dest_indices = write_offset + chunk_offsets
+                    # store
+                    tl.store(output_ptr + dest_indices, values, mask=mask)
 
-                        # store
-                        tl.store(output_ptr + dest_indices, values, mask=mask)
-
-                    # update write offset for next rank
-                    write_offset += length
+                # update write offset for next rank
+                write_offset += length
 
 
 # ==============
@@ -78,7 +72,6 @@ def fill_indices_wrapper(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
     write_offsets: torch.Tensor,
-    total_tokens_per_expert: torch.Tensor,
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
@@ -101,7 +94,6 @@ def fill_indices_wrapper(
         start_index_values,
         write_offsets,
         permuted_indices,
-        total_tokens_per_expert,  # 'skip logic' check for zero tokens
         experts_per_rank,
         num_ranks,
         BLOCK_SIZE=block_size,
@@ -114,7 +106,6 @@ def fill_indices_cpu(
     tokens_per_expert_group: torch.Tensor,
     start_index_values: torch.Tensor,
     write_offsets: torch.Tensor,
-    total_tokens_per_expert: torch.Tensor,
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
@@ -130,25 +121,23 @@ def fill_indices_cpu(
     # For each local expert
     for e in range(experts_per_rank):
         write_start = write_offsets[e].item()
-        total_tokens = total_tokens_per_expert[e].item()
 
         # For each remote rank
-        # we can skip this expert if it has no tokens, already filled with -1
-        if total_tokens > 0:
-            for r in range(num_ranks):
-                i = r * experts_per_rank + e
-                start_index = start_index_values[i].item()
-                length = tokens_per_expert_group[i].item()
-                # Fill in the indices
-                if length > 0:
-                    end_idx = min(write_start + length, max_len)
-                    permuted_indices[write_start:end_idx] = torch.arange(
-                        start_index,
-                        start_index + (end_idx - write_start),
-                        dtype=torch.int32,
-                        # device=device,
-                    )
-                write_start += length
+
+        for r in range(num_ranks):
+            i = r * experts_per_rank + e
+            start_index = start_index_values[i].item()
+            length = tokens_per_expert_group[i].item()
+            # Fill in the indices
+            if length > 0:
+                end_idx = min(write_start + length, max_len)
+                permuted_indices[write_start:end_idx] = torch.arange(
+                    start_index,
+                    start_index + (end_idx - write_start),
+                    dtype=torch.int32,
+                    # device=device,
+                )
+            write_start += length
     return permuted_indices
 
 
@@ -193,12 +182,12 @@ def generate_permute_indices(
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
 
     # pad out empty experts to alignment requirement
-    padded_total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
+    total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
 
     # align the chunk sizes (cdiv)
-    m_sizes = (
-        (padded_total_tokens_per_expert + alignment - 1) // alignment * alignment
-    ).to(torch.int32)
+    m_sizes = ((total_tokens_per_expert + alignment - 1) // alignment * alignment).to(
+        torch.int32
+    )
 
     # additional prefix sum to get write offset of each expert in permuted_indices
     # write offsets is per local expert, not global
@@ -211,7 +200,6 @@ def generate_permute_indices(
             tokens_per_expert_group,
             start_index_values,
             write_offsets,
-            total_tokens_per_expert,  # Pass to check for zero tokens
             experts_per_rank,
             num_ranks,
             max_len,
@@ -221,7 +209,6 @@ def generate_permute_indices(
             tokens_per_expert_group,
             start_index_values,
             write_offsets,
-            total_tokens_per_expert,  # Pass to check for zero tokens
             experts_per_rank,
             num_ranks,
             max_len,
