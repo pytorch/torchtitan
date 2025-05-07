@@ -12,10 +12,10 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 100
+log_freq = 1
 disable_color_printing = false
-enable_tensorboard = false
-save_tb_folder = "tb"
+enable_tensorboard = true
+save_tb_folder = "tb_200"
 enable_wandb = false
 
 [model]
@@ -28,18 +28,19 @@ lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 30_000  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 20  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
 batch_size = 4
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
-steps = 300_000
+steps = 200
 compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
 img_size = 256
+deterministic = true
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -65,9 +66,10 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 mode = "full"
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
-interval = 10_000
-model_weights_only = false
+enable_checkpoint = true
+folder = "checkpoint_weights_only"
+interval = 100
+model_weights_only = true
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+load_step = 100

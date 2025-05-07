@@ -79,6 +79,15 @@ class FluxTrainer(Trainer):
         )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+        # Calculate hash of input_dict for debugging
+        hash_value = 0
+        for key, value in input_dict.items():
+            if isinstance(value, torch.Tensor):
+                # Use sum of tensor values for hashing
+                hash_value += value.sum().item()
+
+        logger.info(f"Step: {self.step}, Input dict hash: {hash_value}")
+
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
