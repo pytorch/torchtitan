@@ -111,7 +111,7 @@ class TextToImageDatasetConfig:
 
 DATASETS = {
     "cc12m-wds": TextToImageDatasetConfig(
-        path="pixparse/cc12m-wds",
+        path="torchtitan/experiments/flux/dataset/cc12m_wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
