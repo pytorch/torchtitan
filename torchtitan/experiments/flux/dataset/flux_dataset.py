@@ -197,15 +197,17 @@ class FluxDataset(IterableDataset, Stateful):
                 sample = next(dataset_iterator)
             except StopIteration:
                 if not self.infinite:
-                    logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                    logger.warning(
+                        f"Dataset {self.dataset_name} has run out of data. This might cuase NCCL timeout because of data starvation on some ranks."
+                    )
                     break
                 else:
                     # Reset offset for the next iteration if infinite
                     self._sample_idx = 0
-                    logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                    logger.info(f"Dataset {self.dataset_name} is being re-looped")
                     dataset_iterator = self._get_data_iter()
                     continue
-            except Exception as e:
+            except (UnicodeDecodeError, SyntaxError, OSError) as e:
                 # Handle other exception, eg, dataset corruption
                 logger.warning(
                     f"Dataset {self.dataset_name} has error while loading batch data. Error: {e}"
