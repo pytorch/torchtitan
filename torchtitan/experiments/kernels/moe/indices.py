@@ -121,9 +121,7 @@ def fill_indices_cpu(
     # For each local expert
     for e in range(experts_per_rank):
         write_start = write_offsets[e].item()
-
         # For each remote rank
-
         for r in range(num_ranks):
             i = r * experts_per_rank + e
             start_index = start_index_values[i].item()
