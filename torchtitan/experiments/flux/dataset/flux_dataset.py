@@ -91,7 +91,6 @@ def _cc12m_wds_data_processor(
         output_size: The output image size
 
     """
-    print(sample)
     img = _process_cc12m_image(sample["jpg"], output_size=output_size)
     t5_tokens = t5_tokenizer.encode(sample["txt"])
     clip_tokens = clip_tokenizer.encode(sample["txt"])
@@ -117,7 +116,7 @@ DATASETS = {
         data_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-test": TextToImageDatasetConfig(
-        path="torchtitan/experiments/flux/assets",
+        path="tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
         ),
