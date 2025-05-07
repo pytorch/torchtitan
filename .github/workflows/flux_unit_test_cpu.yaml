@@ -4,10 +4,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'experiments/flux/**'
+      - 'torchtitan/experiments/flux/**'
   pull_request:
     paths:
-      - 'experiments/flux/**'
+      - 'torchtitan/experiments/flux/**'
 
 
 concurrency:
