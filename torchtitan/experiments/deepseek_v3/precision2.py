@@ -591,60 +591,48 @@ def test_act_quantization(
     return results
 
 
-def test_act_quantization_old(
-    matrix: torch.Tensor, dtype: torch.dtype = torch.float32, block_size: int = 128
+def test_blockwise_fp8_quantization_64x64(
+    matrix: torch.Tensor, dtype: torch.dtype = torch.float32
 ) -> Dict:
     """
-    Test act quantization (groupwise 1×128 1D) from kernel.py.
+    Test blockwise FP8 quantization with 64x64 blocks.
 
     Args:
         matrix: Input tensor to quantize and dequantize
         dtype: Data type of the matrix
-        block_size: Block size for the act quantization (default: 128)
 
     Returns:
         Dict: Dictionary containing error metrics and timing results
     """
     matrix = matrix.to(dtype)
-
-    # Ensure the last dimension is divisible by block_size
-    if matrix.size(-1) % block_size != 0:
-        # Pad the matrix to make it divisible by block_size
-        pad_size = block_size - (matrix.size(-1) % block_size)
-        matrix_padded = torch.nn.functional.pad(matrix, (0, pad_size))
-    else:
-        matrix_padded = matrix
+    block_size = 64  # Using 64x64 blocks
 
     # Time the quantization process
     start_time = time.time()
-    quantized, scales = act_quant(matrix_padded, block_size=block_size)
+
+    # Modified per_block_cast_to_fp8 for 64x64 blocks
+    m, n = matrix.shape
+    x_padded = torch.zeros(
+        (ceil_div(m, block_size) * block_size, ceil_div(n, block_size) * block_size),
+        dtype=matrix.dtype,
+        device=matrix.device,
+    )
+    x_padded[:m, :n] = matrix
+    x_view = x_padded.view(-1, block_size, x_padded.size(1) // block_size, block_size)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    quantized = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+
     quant_time = time.time() - start_time
 
     # Time the dequantization process
-    # If matrix is 2D, we can use weight_dequant, otherwise reshape
-    if matrix_padded.dim() == 2:
-        start_time = time.time()
-        dequantized = dequantize_vectorized(quantized, scales, block_size=block_size)
-        dequant_time = time.time() - start_time
-    else:
-        # For higher dimensions, we need to reshape
-        orig_shape = matrix_padded.shape
-        reshaped = matrix_padded.reshape(-1, matrix_padded.size(-1))
+    start_time = time.time()
 
-        start_time = time.time()
-        # Reshape scales as well if needed
-        scales_reshaped = scales.reshape(-1, scales.size(-1))
-        dequantized = dequantize_vectorized(
-            quantized.reshape(-1, quantized.size(-1)),
-            scales_reshaped,
-            block_size=block_size,
-        )
-        dequantized = dequantized.reshape(orig_shape)
-        dequant_time = time.time() - start_time
+    # Dequantize with 64x64 blocks
+    dequantized = dequantize_vectorized(quantized, scales, block_size=block_size)
 
-    # Truncate back to original size if padding was applied
-    if matrix_padded.size(-1) != matrix.size(-1):
-        dequantized = dequantized[..., : matrix.size(-1)]
+    dequant_time = time.time() - start_time
 
     # Calculate error metrics
     abs_error = torch.abs(matrix - dequantized)
@@ -674,6 +662,121 @@ def test_act_quantization_old(
 
 
 def compare_quantization_methods(
+    test_cases: List[str] = [
+        "normal",
+        "uniform_small",
+        "uniform_large",
+        "sparse",
+        "extreme_range",
+        "bipolar",
+        "ill_conditioned",
+    ],
+    size: Tuple[int, int] = (1024, 1024),
+    dtypes: List[torch.dtype] = [torch.float32, torch.float16],
+    device: str = "cuda",
+    visualize: bool = True,
+) -> Dict:
+    """
+    Compare quantization methods across different test cases.
+
+    Args:
+        test_cases: List of test case types to evaluate
+        size: Size of test matrices
+        dtypes: Data types to test
+        device: Device to run tests on
+        visualize: Whether to visualize results
+
+    Returns:
+        Dict: Test results comparing all methods
+    """
+
+    results = {
+        "rowwise": {},
+        "blockwise_128": {},
+        "blockwise_64": {},
+        "groupwise_128": {},
+        "groupwise_32": {},
+    }
+
+    # Make sure last dimension is divisible by 128 for act quantization
+    act_size_128 = list(size)
+    if act_size_128[-1] % 128 != 0:
+        act_size_128[-1] = ((act_size_128[-1] // 128) + 1) * 128
+    act_size_128 = tuple(act_size_128)
+
+    # Make sure last dimension is divisible by 32 for act quantization with block_size=32
+    act_size_32 = list(size)
+    if act_size_32[-1] % 32 != 0:
+        act_size_32[-1] = ((act_size_32[-1] // 32) + 1) * 32
+    act_size_32 = tuple(act_size_32)
+
+    for dtype in dtypes:
+        dtype_str = dtype.__str__().split(".")[-1]
+
+        for case in test_cases:
+            key = f"{case}_{dtype_str}"
+            print(f"\nTesting {key}...")
+
+            # Generate test matrices
+            matrix = generate_test_case(case, size, dtype, device)
+            matrix_act_128 = generate_test_case(case, act_size_128, dtype, device)
+            matrix_act_32 = generate_test_case(case, act_size_32, dtype, device)
+
+            # Test rowwise quantization
+            print("Testing rowwise quantization...")
+            rowwise_results = test_rowwise_fp8_quantization(matrix, dtype)
+            results["rowwise"][key] = rowwise_results
+
+            # Test blockwise quantization (128x128)
+            print("Testing blockwise quantization (128x128)...")
+            blockwise_results = test_blockwise_fp8_quantization(matrix, dtype)
+            results["blockwise_128"][key] = blockwise_results
+
+            # Test blockwise quantization (64x64)
+            print("Testing blockwise quantization (64x64)...")
+            blockwise_64x64_results = test_blockwise_fp8_quantization_64x64(
+                matrix, dtype
+            )
+            results["blockwise_64"][key] = blockwise_64x64_results
+
+            # Test act quantization with block_size=128
+            print("Testing act quantization (1x128)...")
+            act_results_128 = test_act_quantization(
+                matrix_act_128, dtype, block_size=128
+            )
+            results["groupwise_128"][key] = act_results_128
+
+            # Test act quantization with block_size=32
+            print("Testing act quantization (1x32)...")
+            act_results_32 = test_act_quantization(matrix_act_32, dtype, block_size=32)
+            results["groupwise_32"][key] = act_results_32
+
+            # Print summary comparison
+            print(
+                f"Rowwise RMSE: {rowwise_results['rmse']:.6f}, PSNR: {rowwise_results['psnr']:.2f} dB"
+            )
+            print(
+                f"Blockwise 128x128 RMSE: {blockwise_results['rmse']:.6f}, PSNR: {blockwise_results['psnr']:.2f} dB"
+            )
+            print(
+                f"Blockwise 64x64 RMSE: {blockwise_64x64_results['rmse']:.6f}, PSNR: {blockwise_64x64_results['psnr']:.2f} dB"
+            )
+            print(
+                f"Act Quant 1x128 RMSE: {act_results_128['rmse']:.6f}, PSNR: {act_results_128['psnr']:.2f} dB"
+            )
+            print(
+                f"Act Quant 1x32 RMSE: {act_results_32['rmse']:.6f}, PSNR: {act_results_32['psnr']:.2f} dB"
+            )
+            print(f"Rowwise time: {rowwise_results['total_time']:.6f}s")
+            print(f"Blockwise 128x128 time: {blockwise_results['total_time']:.6f}s")
+            print(f"Blockwise 64x64 time: {blockwise_64x64_results['total_time']:.6f}s")
+            print(f"Act Quant 1x128 time: {act_results_128['total_time']:.6f}s")
+            print(f"Act Quant 1x32 time: {act_results_32['total_time']:.6f}s")
+
+    return results
+
+
+def compare_quantization_methods_old(
     test_cases: List[str] = [
         "normal",
         "uniform_small",
@@ -730,8 +833,8 @@ def compare_quantization_methods(
 
             # Generate test matrices
             matrix = generate_test_case(case, size, dtype, device)
-            matrix_act_128 = generate_test_case(case, act_size_128, dtype, device)
-            matrix_act_32 = generate_test_case(case, act_size_32, dtype, device)
+            matrix_act_128 = generate_test_case(case, groupwise_128, dtype, device)
+            matrix_act_32 = generate_test_case(case, groupwise_32, dtype, device)
 
             # Test rowwise quantization
             print("Testing rowwise quantization...")
@@ -748,12 +851,12 @@ def compare_quantization_methods(
             act_results_128 = test_act_quantization(
                 matrix_act_128, dtype, block_size=128
             )
-            results["act_quant_128"][key] = act_results_128
+            results["groupwise_128"][key] = act_results_128
 
             # Test act quantization with block_size=32
             print("Testing act quantization (1x32)...")
             act_results_32 = test_act_quantization(matrix_act_32, dtype, block_size=32)
-            results["act_quant_32"][key] = act_results_32
+            results["groupwise_32"][key] = act_results_32
 
             # Print summary comparison
             print(
@@ -776,94 +879,6 @@ def compare_quantization_methods(
     # Visualize results if requested
     # if visualize:
     #    visualize_comparison_results(results, test_cases, dtypes)
-
-    return results
-
-
-def compare_quantization_methods_old(
-    test_cases: List[str] = [
-        "normal",
-        "uniform_small",
-        "uniform_large",
-        "sparse",
-        "extreme_range",
-        "bipolar",
-        "ill_conditioned",
-    ],
-    size: Tuple[int, int] = (1024, 1024),
-    dtypes: List[torch.dtype] = [torch.float32, torch.float16],
-    device: str = "cuda",
-    visualize: bool = True,
-) -> Dict:
-    """
-    Compare three quantization methods across different test cases.
-
-    Args:
-        test_cases: List of test case types to evaluate
-        size: Size of test matrices
-        dtypes: Data types to test
-        device: Device to run tests on
-        visualize: Whether to visualize results
-
-    Returns:
-        Dict: Test results comparing all methods
-    """
-
-    results = {
-        "rowwise": {},
-        "blockwise": {},
-        "act_quant": {},
-    }
-
-    # Make sure last dimension is divisible by 128 for act quantization
-    act_size = list(size)
-    if act_size[-1] % 128 != 0:
-        act_size[-1] = ((act_size[-1] // 128) + 1) * 128
-    act_size = tuple(act_size)
-
-    for dtype in dtypes:
-        dtype_str = dtype.__str__().split(".")[-1]
-
-        for case in test_cases:
-            key = f"{case}_{dtype_str}"
-            print(f"\nTesting {key}...")
-
-            # Generate test matrices
-            matrix = generate_test_case(case, size, dtype, device)
-            matrix_act = generate_test_case(case, act_size, dtype, device)
-
-            # Test rowwise quantization
-            print("Testing rowwise quantization...")
-            rowwise_results = test_rowwise_fp8_quantization(matrix, dtype)
-            results["rowwise"][key] = rowwise_results
-
-            # Test blockwise quantization
-            print("Testing blockwise quantization...")
-            blockwise_results = test_blockwise_fp8_quantization(matrix, dtype)
-            results["blockwise"][key] = blockwise_results
-
-            # Test act quantization
-            print("Testing act quantization...")
-            act_results = test_act_quantization(matrix_act, dtype)
-            results["act_quant"][key] = act_results
-
-            # Print summary comparison
-            print(
-                f"Rowwise RMSE: {rowwise_results['rmse']:.6f}, PSNR: {rowwise_results['psnr']:.2f} dB"
-            )
-            print(
-                f"Blockwise RMSE: {blockwise_results['rmse']:.6f}, PSNR: {blockwise_results['psnr']:.2f} dB"
-            )
-            print(
-                f"Act Quant RMSE: {act_results['rmse']:.6f}, PSNR: {act_results['psnr']:.2f} dB"
-            )
-            print(f"Rowwise time: {rowwise_results['total_time']:.6f}s")
-            print(f"Blockwise time: {blockwise_results['total_time']:.6f}s")
-            print(f"Act Quant time: {act_results['total_time']:.6f}s")
-
-    # Visualize results if requested
-    if visualize:
-        visualize_comparison_results(results, test_cases, dtypes)
 
     return results
 
@@ -1032,238 +1047,6 @@ def visualize_comparison_results(
         plt.show()
 
 
-def visualize_comparison_results_old(
-    results: Dict, test_cases: List[str], dtypes: List[torch.dtype]
-) -> None:
-    """
-    Visualize the comparison results between quantization methods.
-
-    Args:
-        results: Dictionary containing test results
-        test_cases: List of test case types evaluated
-        dtypes: Data types tested
-    """
-    import matplotlib.pyplot as plt
-
-    # Prepare data for plotting
-    metrics = ["rmse", "psnr", "mean_rel_error", "total_time"]
-    metric_titles = {
-        "rmse": "Root Mean Square Error (lower is better)",
-        "psnr": "Peak Signal-to-Noise Ratio in dB (higher is better)",
-        "mean_rel_error": "Mean Relative Error (lower is better)",
-        "total_time": "Total Execution Time in seconds (lower is better)",
-    }
-
-    for metric in metrics:
-        plt.figure(figsize=(15, 6))
-
-        # Prepare data
-        x_labels = []
-        rowwise_values = []
-        blockwise_values = []
-        act_values = []
-
-        for dtype in dtypes:
-            dtype_str = dtype.__str__().split(".")[-1]
-            for case in test_cases:
-                key = f"{case}_{dtype_str}"
-                if (
-                    key in results["rowwise"]
-                    and key in results["blockwise"]
-                    and key in results["act_quant"]
-                ):
-                    x_labels.append(f"{case}\n({dtype_str})")
-                    rowwise_values.append(results["rowwise"][key][metric])
-                    blockwise_values.append(results["blockwise"][key][metric])
-                    act_values.append(results["act_quant"][key][metric])
-
-        # Plot
-        x = np.arange(len(x_labels))
-        width = 0.25
-
-        plt.bar(x - width, rowwise_values, width, label="Rowwise")
-        plt.bar(x, blockwise_values, width, label="Blockwise")
-        plt.bar(x + width, act_values, width, label="Act Quant")
-
-        plt.xticks(x, x_labels, rotation=45)
-        plt.ylabel(metric_titles[metric])
-        plt.title(f"Comparison of {metric_titles[metric]} between Quantization Methods")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-
-    # Plot relative improvement/difference between methods
-    for ref_method in ["blockwise"]:
-        plt.figure(figsize=(15, 8))
-
-        # Calculate relative improvement for RMSE
-        x_labels = []
-        rowwise_rmse_improvement = []
-        act_rmse_improvement = []
-        rowwise_time_improvement = []
-        act_time_improvement = []
-
-        for dtype in dtypes:
-            dtype_str = dtype.__str__().split(".")[-1]
-            for case in test_cases:
-                key = f"{case}_{dtype_str}"
-                if (
-                    key in results["rowwise"]
-                    and key in results["blockwise"]
-                    and key in results["act_quant"]
-                ):
-                    x_labels.append(f"{case}\n({dtype_str})")
-
-                    # For RMSE, lower is better so (ref-method)/ref
-                    rowwise_rel_imp = (
-                        (
-                            results[ref_method][key]["rmse"]
-                            - results["rowwise"][key]["rmse"]
-                        )
-                        / results[ref_method][key]["rmse"]
-                        * 100
-                    )
-                    rowwise_rmse_improvement.append(rowwise_rel_imp)
-
-                    act_rel_imp = (
-                        (
-                            results[ref_method][key]["rmse"]
-                            - results["act_quant"][key]["rmse"]
-                        )
-                        / results[ref_method][key]["rmse"]
-                        * 100
-                    )
-                    act_rmse_improvement.append(act_rel_imp)
-
-                    # For time, lower is better so (ref-method)/ref
-                    rowwise_time_imp = (
-                        (
-                            results[ref_method][key]["total_time"]
-                            - results["rowwise"][key]["total_time"]
-                        )
-                        / results[ref_method][key]["total_time"]
-                        * 100
-                    )
-                    rowwise_time_improvement.append(rowwise_time_imp)
-
-                    act_time_imp = (
-                        (
-                            results[ref_method][key]["total_time"]
-                            - results["act_quant"][key]["total_time"]
-                        )
-                        / results[ref_method][key]["total_time"]
-                        * 100
-                    )
-                    act_time_improvement.append(act_time_imp)
-
-        # Plot
-        plt.subplot(2, 1, 1)
-        x = np.arange(len(x_labels))
-        width = 0.35
-
-        plt.bar(
-            x - width / 2, rowwise_rmse_improvement, width, label="Rowwise vs Blockwise"
-        )
-        plt.bar(
-            x + width / 2, act_rmse_improvement, width, label="Act Quant vs Blockwise"
-        )
-
-        plt.axhline(y=0, color="r", linestyle="-")
-        plt.xticks(x, x_labels, rotation=45)
-        plt.ylabel("RMSE Improvement (%)")
-        plt.title(
-            f"Relative RMSE Improvement Compared to {ref_method.capitalize()} Method"
-        )
-        plt.legend()
-
-        plt.subplot(2, 1, 2)
-        plt.bar(
-            x - width / 2, rowwise_time_improvement, width, label="Rowwise vs Blockwise"
-        )
-        plt.bar(
-            x + width / 2, act_time_improvement, width, label="Act Quant vs Blockwise"
-        )
-
-        plt.axhline(y=0, color="r", linestyle="-")
-        plt.xticks(x, x_labels, rotation=45)
-        plt.ylabel("Time Improvement (%)")
-        plt.title(
-            f"Relative Time Improvement Compared to {ref_method.capitalize()} Method"
-        )
-        plt.legend()
-
-        plt.tight_layout()
-        plt.show()
-
-    # Add a detailed view of quantization vs dequantization time
-    plt.figure(figsize=(15, 12))
-
-    # Prepare data
-    x_labels = []
-    rowwise_quant_times = []
-    rowwise_dequant_times = []
-    blockwise_quant_times = []
-    blockwise_dequant_times = []
-    act_quant_times = []
-    act_dequant_times = []
-
-    for dtype in dtypes:
-        dtype_str = dtype.__str__().split(".")[-1]
-        for case in test_cases:
-            key = f"{case}_{dtype_str}"
-            if (
-                key in results["rowwise"]
-                and key in results["blockwise"]
-                and key in results["act_quant"]
-            ):
-                x_labels.append(f"{case}\n({dtype_str})")
-
-                rowwise_quant_times.append(results["rowwise"][key]["quantization_time"])
-                rowwise_dequant_times.append(
-                    results["rowwise"][key]["dequantization_time"]
-                )
-
-                blockwise_quant_times.append(
-                    results["blockwise"][key]["quantization_time"]
-                )
-                blockwise_dequant_times.append(
-                    results["blockwise"][key]["dequantization_time"]
-                )
-
-                act_quant_times.append(results["act_quant"][key]["quantization_time"])
-                act_dequant_times.append(
-                    results["act_quant"][key]["dequantization_time"]
-                )
-
-    # Plot quantization times
-    plt.subplot(2, 1, 1)
-    x = np.arange(len(x_labels))
-    width = 0.25
-
-    plt.bar(x - width, rowwise_quant_times, width, label="Rowwise")
-    plt.bar(x, blockwise_quant_times, width, label="Blockwise")
-    plt.bar(x + width, act_quant_times, width, label="Act Quant")
-
-    plt.xticks(x, x_labels, rotation=45)
-    plt.ylabel("Time (seconds)")
-    plt.title("Quantization Time Comparison")
-    plt.legend()
-
-    # Plot dequantization times
-    plt.subplot(2, 1, 2)
-    plt.bar(x - width, rowwise_dequant_times, width, label="Rowwise")
-    plt.bar(x, blockwise_dequant_times, width, label="Blockwise")
-    plt.bar(x + width, act_dequant_times, width, label="Act Quant")
-
-    plt.xticks(x, x_labels, rotation=45)
-    plt.ylabel("Time (seconds)")
-    plt.title("Dequantization Time Comparison")
-    plt.legend()
-
-    plt.tight_layout()
-    plt.show()
-
-
 def run_extended_precision_tests():
     """
     Run the extended precision tests including all three quantization methods.
@@ -1315,11 +1098,18 @@ def run_extended_precision_tests():
                 key = f"{case}_{dtype_str}"
                 print(f"\nTest Case: {case}")
                 print(
-                    "Method    | RMSE      | PSNR (dB) | Mean Rel Error | Total Time (s)"
+                    "Method        |   RMSE     |  PSNR (dB)| Mean Rel Error | Total Time (s)"
                 )
                 print("-" * 75)
 
-                for method in ["rowwise", "blockwise", "act_quant_128", "act_quant_32"]:
+                # --- Main testing loop ------
+                for method in [
+                    "rowwise",
+                    "blockwise_128",
+                    "blockwise_64",
+                    "groupwise_128",
+                    "groupwise_32",
+                ]:
                     if key in results[method]:
                         rmse = results[method][key]["rmse"]
                         psnr = results[method][key]["psnr"]
@@ -1327,7 +1117,7 @@ def run_extended_precision_tests():
                         total_time = results[method][key]["total_time"]
 
                         print(
-                            f"{method:<10}| {rmse:<10.6f}| {psnr:<10.2f}| {mean_rel:<15.6f}| {total_time:<12.6f}"
+                            f"{method:<15}| {rmse:<10.6f}| {psnr:<10.2f}| {mean_rel:<15.6f}| {total_time:<12.6f}"
                         )
 
 
