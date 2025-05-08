@@ -40,7 +40,7 @@ def _process_cc12m_image(
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = torch.randint(0, new_width - output_size, (1,)).item()
+        left = torch.randint(0, new_width - output_size + 1, (1,)).item()
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -49,7 +49,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = torch.randint(0, new_height - output_size, (1,)).item()
+        lower = torch.randint(0, new_height - output_size + 1, (1,)).item()
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
@@ -199,19 +199,20 @@ class FluxDataset(IterableDataset, Stateful):
                 if not self.infinite:
                     logger.warning(
                         f"Dataset {self.dataset_name} has run out of data. \
-                        This might cuase NCCL timeout because of data starvation on some ranks."
+                         This might cause NCCL timeout if data parallelism is enabled."
                     )
                     break
                 else:
                     # Reset offset for the next iteration if infinite
                     self._sample_idx = 0
-                    logger.info(f"Dataset {self.dataset_name} is being re-looped")
+                    logger.info(f"Dataset {self.dataset_name} is being re-looped.")
                     dataset_iterator = self._get_data_iter()
                     continue
             except (UnicodeDecodeError, SyntaxError, OSError) as e:
                 # Handle other exception, eg, dataset corruption
                 logger.warning(
-                    f"Dataset {self.dataset_name} has error while loading batch data. Error: {e}"
+                    f"Dataset {self.dataset_name} has error while loading batch data. \
+                    Error {type(e).__name__}: {e}. The error could be the result of a streaming glitch."
                 )
                 continue
 
@@ -226,7 +227,7 @@ class FluxDataset(IterableDataset, Stateful):
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
                 logger.warning(
-                    f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
+                    f"Low quality image {sample['__key__']} is skipped in Flux Dataloader."
                 )
                 continue
 
@@ -234,7 +235,7 @@ class FluxDataset(IterableDataset, Stateful):
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
             dropout_prob = self.job_config.training.classifer_free_guidance_prob
             if dropout_prob > 0.0:
-                if random.random() < dropout_prob:
+                if torch.rand(1).item() < dropout_prob:
                     sample_dict["t5_tokens"] = self._t5_empty_token
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
