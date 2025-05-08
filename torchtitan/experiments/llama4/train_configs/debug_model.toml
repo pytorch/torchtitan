@@ -26,14 +26,12 @@ tokenizer_path = "./tests/assets/test_tiktoken.model"
 # converters = ["float8"]
 
 [optimizer]
-# TODO: currently grouped mm in MoE doesn't work with AdamW, need to investigate
-# name = "AdamW"
-name = "Adam"
+name = "AdamW"
 lr = 4e-3
 eps = 1e-15
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 lr_min = 0.1
@@ -42,7 +40,7 @@ lr_min = 0.1
 batch_size = 8
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 1000
 compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
