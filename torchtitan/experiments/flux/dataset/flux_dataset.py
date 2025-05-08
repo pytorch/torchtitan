@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -41,7 +40,7 @@ def _process_cc12m_image(
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = random.randint(0, new_width - output_size)
+        left = torch.randint(0, new_width - output_size, (1,)).item()
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -50,7 +49,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = random.randint(0, new_width - output_size)
+        lower = torch.randint(0, new_height - output_size, (1,)).item()
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
@@ -213,7 +212,7 @@ class FluxDataset(IterableDataset, Stateful):
                 # Distinct random seed is initialized at the beginning of training for each FSDP rank.
                 dropout_prob = self.job_config.training.classifer_free_guidance_prob
                 if dropout_prob > 0.0:
-                    if random.random() < dropout_prob:
+                    if torch.rand(1).item() < dropout_prob:
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token
 
