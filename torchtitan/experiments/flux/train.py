@@ -79,6 +79,15 @@ class FluxTrainer(Trainer):
         )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+        # Calculate hash of input_dict for debugging
+        hash_value = 0
+        for key, value in input_dict.items():
+            if isinstance(value, torch.Tensor):
+                # Use sum of tensor values for hashing
+                hash_value += value.sum().item()
+
+        logger.info(f"Step: {self.step}, Input dict hash: {hash_value}")
+
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
@@ -176,14 +185,17 @@ class FluxTrainer(Trainer):
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
-        # Evaluate the model during training
-        if (
-            self.step % self.job_config.eval.eval_freq == 0
-            or self.step == self.job_config.training.steps
-        ):
-            model.eval()
-            self.eval_step()
-            model.train()
+        # # Evaluate the model during training
+        # if (
+        #     self.step % self.job_config.eval.eval_freq == 0
+        #     or self.step == self.job_config.training.steps
+        # ):
+        #     model.eval()
+        #     model.final_layer.set_reshard_after_forward(True)
+        #     with torch.no_grad():
+        #         self.eval_step()
+        #     model.final_layer.set_reshard_after_forward(False)
+        #     model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
         """

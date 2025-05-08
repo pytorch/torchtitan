@@ -110,7 +110,7 @@ class TextToImageDatasetConfig:
 
 DATASETS = {
     "cc12m-wds": TextToImageDatasetConfig(
-        path="pixparse/cc12m-wds",
+        path="torchtitan/experiments/flux/dataset/cc12m_wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
@@ -216,7 +216,6 @@ class FluxDataset(IterableDataset, Stateful):
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token
 
-                self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
 
                 labels = sample_dict.pop("image")
@@ -232,11 +231,9 @@ class FluxDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
-        self._all_samples = state_dict["all_samples"]
 
     def state_dict(self):
         return {
-            "all_samples": self._all_samples,
             "sample_idx": self._sample_idx,
         }
 
