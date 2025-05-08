@@ -47,7 +47,7 @@ DATASETS = {
     "c4_test": DatasetConfig(
         path="tests/assets/c4_test",
         loader=lambda path: load_dataset(path, split="train"),
-        text_processor=lambda sample: sample["text"],
+        text_processor=_process_c4_text,
     ),
 }
 
@@ -99,6 +99,8 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self._token_buffer: list[int] = []
 
     def _get_data_iter(self):
+        # For map-style datasets, resume by skipping to the correct index
+        # For iterable-style datasets, the underlying iterator already points to the correct index
         if isinstance(self._data, Dataset):
             if self._sample_idx == len(self._data):
                 return iter([])
