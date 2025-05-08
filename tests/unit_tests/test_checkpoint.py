@@ -292,6 +292,47 @@ class TestCheckpointManager(unittest.TestCase):
         f = manager.async_future
         f.result.assert_not_called()
 
+    @mock.patch("torch.cuda.Stream")
+    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
+    @mock.patch(
+        "torchtitan.components.checkpoint.get_model_state_dict",
+        side_effect=fake_get_model_state_dict,
+    )
+    @mock.patch(
+        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+    )
+    def test_ft_async_save_calls_async_wait(self, *_):
+        """
+        Test that in async mode (AsyncMode.ASYNC), calling save() twice correctly waits
+        on the previous async future via _async_wait().
+        """
+        # Set async_mode to "async" in the job configuration.
+        job_config = DummyJobConfig(job=self.dummy_job)
+        job_config.checkpoint.async_mode = "disabled"
+        ft_manager = mock.Mock()
+        ft_manager.enabled = True
+        manager = CheckpointManager(
+            dummy_dataloader,
+            dummy_model_parts,
+            dummy_optimizers,
+            dummy_lr_schedulers,
+            {"trainer": self.trainer_state},
+            job_config,
+            ft_manager,
+        )
+        # First save: should schedule an async save.
+        self.assertTrue(manager.async_future is None)
+        manager.save(curr_step=5, force=False)
+        self.assertTrue(manager.async_future is not None)
+        manager.async_future.result.assert_not_called()
+
+        # Keep the previous future as it will be waited and replaced.
+        async_future = manager.async_future
+        manager.save(curr_step=6, force=False)
+        async_future.result.assert_called_once()
+        self.assertTrue(manager.async_future is not None)
+        manager.async_future.result.assert_not_called()
+
     def _checkpoint_id(self, step):
         checkpoint_id = os.path.join(self.checkpoint_folder, f"step-{step}")
         state_file = os.path.join(checkpoint_id, "state.pt")

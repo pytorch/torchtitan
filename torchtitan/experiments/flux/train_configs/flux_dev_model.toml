@@ -44,7 +44,7 @@ img_size = 256
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
-max_t5_encoding_len = 4096
+max_t5_encoding_len = 512
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [eval]

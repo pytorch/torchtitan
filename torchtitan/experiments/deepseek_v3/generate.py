@@ -19,8 +19,9 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
+
+from torchtitan.tools.utils import Color
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -126,7 +127,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
+    model_args.max_seq_len = 4096  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -181,6 +182,41 @@ def decode(tokenizer, x):
     return colored_output
 
 
+def time_generation(func):
+    """Decorator to time generation functions and display timing and token per second results."""
+
+    def wrapper(*args, **kwargs):
+        rank = dist.get_rank()
+
+        # Setup timer
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
+        # Call the original function
+        result, tokens_generated = func(*args, **kwargs)
+
+        # Record end time and calculate elapsed time
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time = start_event.elapsed_time(end_event)
+
+        if rank == 0:
+            print(
+                f"\nGeneration time: {color.yellow}{elapsed_time / 1000:.2f} seconds{color.reset}"
+            )
+            print(f"Tokens generated: {color.blue}{tokens_generated}{color.reset}")
+            print(
+                f"Tokens per second: {color.green}{tokens_generated / (elapsed_time / 1000):.2f}\n{color.reset}"
+            )
+
+        return result
+
+    return wrapper
+
+
+@time_generation
 @torch.inference_mode()
 def generate(
     model,
@@ -188,7 +224,7 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 50,
+    n_tokens: int = 200,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -200,6 +236,15 @@ def generate(
     next_idx = x.shape[-1]
     x = torch.cat([x, torch.zeros(x.shape[0], n_tokens, dtype=torch.int64)], dim=-1)
     x = x.to(device)
+
+    tokens_generated = 0
+    eos_token_id = tokenizer.eos_token_id
+    # Create tensor on device for comparison
+    eos_tensor = torch.tensor([eos_token_id], device=device)
+
+    # Print initial progress indicator
+    if rank == 0:
+        print("Generating: ", end="", flush=True)
 
     for _ in range(n_tokens):
         if dist_config.pp_size > 1:
@@ -219,6 +264,10 @@ def generate(
                     group=dist_config.pp_mesh.get_group(),
                     group_src=dist_config.pp_size - 1,
                 )
+                # Break if EOS token is generated (without .item())
+                if torch.equal(next_token, eos_tensor):
+                    tokens_generated += 1
+                    break
             else:
                 pp_schedule.step()
                 torch.distributed.broadcast(
@@ -233,19 +282,34 @@ def generate(
             next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
             x[:, next_idx] = next_token
             next_idx += 1
+            # Break if EOS token is generated (without .item())
+            if torch.equal(next_token, eos_tensor):
+                tokens_generated += 1
+                break
 
+        tokens_generated += 1
+
+        # Print progress indicator every 20 tokens
+        if rank == 0 and tokens_generated % 20 == 0:
+            print(f"{color.yellow}:{color.reset}", end="", flush=True)
+
+    # Print newline after progress indicator
     if rank == 0:
+        print()
         colored_output = decode(tokenizer, x)
         print(f"Without CUDA Graph:\n{colored_output}")
 
+    return x, tokens_generated
 
+
+@time_generation
 @torch.inference_mode()
 def generate_with_cuda_graph(
     model,
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 10,
+    n_tokens: int = 100,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -259,6 +323,9 @@ def generate_with_cuda_graph(
     x = x.to(device)
 
     torch.cuda.synchronize()
+    eos_token_id = tokenizer.eos_token_id
+    # Create tensor on device for comparison
+    eos_tensor = torch.tensor([eos_token_id], device=device)
 
     # Create CUDA graph
     g = torch.cuda.CUDAGraph()
@@ -266,15 +333,23 @@ def generate_with_cuda_graph(
         preds = model(x)
 
     # Run CUDA graph
+    tokens_generated = 0
     for _ in range(n_tokens):
         g.replay()
         next_token = torch.argmax(preds[:, next_idx - 1], dim=-1)
         x[:, next_idx] = next_token
         next_idx += 1
+        tokens_generated += 1
+
+        # Break if EOS token is generated (without .item())
+        if torch.equal(next_token, eos_tensor):
+            break
 
     if rank == 0:
         colored_output = decode(tokenizer, x)
         print(f"With CUDA Graph:\n{colored_output}")
+
+    return x, tokens_generated
 
 
 if __name__ == "__main__":

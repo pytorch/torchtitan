@@ -153,7 +153,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if self.train_spec.build_metrics_processor_fn is None
             else self.train_spec.build_metrics_processor_fn
         )
-        self.metrics_processor = build_metrics_processor_fn(job_config, parallel_dims)
+        self.metrics_processor = build_metrics_processor_fn(
+            job_config, parallel_dims, model_args
+        )
         color = self.metrics_processor.color
 
         # calculate model size and flops per token
@@ -336,9 +338,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
                 if self.pp_has_first_stage:
-                    self.pp_schedule.step(inputs, target=targets, losses=losses)
+                    self.pp_schedule.step(
+                        inputs, target=targets, losses=losses, input_batch=inputs
+                    )
                 else:
-                    self.pp_schedule.step(target=targets, losses=losses)
+                    self.pp_schedule.step(
+                        target=targets, losses=losses, input_batch=inputs
+                    )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -399,7 +405,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config, global_step=self.step
         ) as torch_profiler, maybe_enable_memory_snapshot(
             job_config, global_step=self.step
-        ) as memory_profiler:
+        ) as memory_profiler, ft.maybe_semi_sync_training(
+            job_config,
+            ft_manager=self.ft_manager,
+            model=self.model_parts[0],
+            optimizer=self.optimizers,
+            sync_every=job_config.fault_tolerance.sync_steps,
+        ):
             data_iterator = iter(self.dataloader)
             while self.step < job_config.training.steps:
                 self.step += 1

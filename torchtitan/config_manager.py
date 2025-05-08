@@ -100,9 +100,6 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    norm_type: Literal["layernorm", "np_layernorm", "rmsnorm"] = "rmsnorm"
-    """Type of layer normalization to use [layernorm, np_layernorm, rmsnorm]"""
-
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
     """Tokenizer path"""
 
@@ -502,6 +499,19 @@ class FaultTolerance:
     min_replica_size: int = 1
     """The minimum number of FT replica for each step."""
 
+    semi_sync_method: str | None = None
+    """
+    The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
+    torchft are supported
+    (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
+    """
+
+    sync_steps: int = 5
+    """
+    Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
+    is set.
+    """
+
 
 @dataclass
 class Experimental:
@@ -681,7 +691,7 @@ class ConfigManager:
             if name not in b_map:
                 result.append((name, f.type, field(default_factory=f.type)))
 
-        return make_dataclass(f"Merged{base.__name__}", result, bases=(object,))
+        return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))
 
     def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
         """Convert dictionary to dataclass, handling nested structures."""
