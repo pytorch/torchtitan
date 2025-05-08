@@ -44,6 +44,11 @@ DATASETS = {
         loader=_load_c4_dataset,
         text_processor=_process_c4_text,
     ),
+    "c4_test": DatasetConfig(
+        path="tests/assets/c4_test",
+        loader=lambda path: load_dataset(path, split="train"),
+        text_processor=lambda sample: sample["text"],
+    ),
 }
 
 
@@ -128,9 +133,11 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 # Reset offset for the next iteration
                 self._sample_idx = 0
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-                # Ensures re-looping a dataset loaded from a checkpoint works correctly 
+                # Ensures re-looping a dataset loaded from a checkpoint works correctly
                 if not isinstance(self._data, Dataset):
-                    if hasattr(self._data, "set_epoch") and hasattr(self._data, "epoch"):
+                    if hasattr(self._data, "set_epoch") and hasattr(
+                        self._data, "epoch"
+                    ):
                         self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
