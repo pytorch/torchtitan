@@ -40,7 +40,7 @@ def _process_cc12m_image(
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = torch.randint(0, new_width - output_size, (1,)).item()
+        left = torch.randint(0, new_width - output_size + 1, (1,)).item()
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -49,7 +49,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = torch.randint(0, new_height - output_size, (1,)).item()
+        lower = torch.randint(0, new_height - output_size + 1, (1,)).item()
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
@@ -110,7 +110,7 @@ class TextToImageDatasetConfig:
 
 DATASETS = {
     "cc12m-wds": TextToImageDatasetConfig(
-        path="torchtitan/experiments/flux/dataset/cc12m_wds",
+        path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
@@ -216,6 +216,7 @@ class FluxDataset(IterableDataset, Stateful):
                         sample_dict["t5_tokens"] = self._t5_empty_token
                         sample_dict["clip_tokens"] = self._clip_empty_token
 
+                self._all_samples.extend(sample_dict)
                 self._sample_idx += 1
 
                 labels = sample_dict.pop("image")
@@ -231,9 +232,11 @@ class FluxDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
+        self._all_samples = state_dict["all_samples"]
 
     def state_dict(self):
         return {
+            "all_samples": self._all_samples,
             "sample_idx": self._sample_idx,
         }
 

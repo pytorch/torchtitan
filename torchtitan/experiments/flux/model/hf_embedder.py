@@ -9,7 +9,7 @@ from transformers import CLIPTextModel, T5EncoderModel
 
 
 class FluxEmbedder(nn.Module):
-    def __init__(self, version: str, **hf_kwargs):
+    def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
         self.is_clip = "clip" in version.lower()
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"

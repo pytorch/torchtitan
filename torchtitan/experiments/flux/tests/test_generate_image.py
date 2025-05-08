@@ -70,7 +70,7 @@ class TestGenerateImage:
 
         torch_device = torch.device(device)
 
-        # Init all components
+        # Init all components. For CI convenience, we randomly initialize weights for following components.
         ae = load_ae(
             ckpt_path="torchtitan/experiments/flux/assets/autoencoder/ae.safetensors",
             autoencoder_params=AutoEncoderParams(),
