@@ -49,6 +49,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train"),
         text_processor=_process_c4_text,
     ),
+    "slimpajama": DatasetConfig(
+        path="/nfs/dataset/SlimPajama-200B",
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        text_processor=_process_c4_text,
+    )
 }
 
 
