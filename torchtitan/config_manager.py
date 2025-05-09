@@ -739,3 +739,25 @@ class ConfigManager:
                 is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
             )
+
+
+if __name__ == "__main__":
+    # -----------------------------------------------------------------------------
+    # Run this module directly to debug or inspect configuration parsing.
+    #
+    # Examples:
+    #   Show help message:
+    #     > python -m torchtitan.config_manager --help
+    #
+    #   Parse and print a config with CLI arguments:
+    #     > python -m torchtitan.config_manager --profiling.enable_memory_snapshot
+    #
+    # -----------------------------------------------------------------------------
+
+    from rich import print as rprint
+    from rich.pretty import Pretty
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+
+    rprint(Pretty(config))

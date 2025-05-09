@@ -12,6 +12,40 @@ CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --profiling.enable
 You cab find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
 
+## Overriding Boolean Flags from `.toml` via CLI
+
+If a boolean is set to `true` in a `.toml` config file and you want to override it from the command line, use the following syntax:
+
+```bash
+--profiling.no_enable_memory_snapshot
+--profiling.no-enable-memory-snapshot  # Equivalent
+```
+
+Boolean flags are treated as **actions**; to disable them, use the `--no` prefix.
+
+> Note: `--enable_memory_snapshot=False` will **not** work. Use `--no_enable_memory_snapshot` instead.
+
+## Debugging Config Values
+
+To inspect how configuration values are interpreted—including those from `.toml` files and CLI overrides—run the config manager directly:
+
+```bash
+python -m torchtitan.config_manager [your cli args...]
+```
+
+For example,
+
+```bash
+python -m torchtitan.config_manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
+```
+
+To list all available CLI flags and usage:
+
+```bash
+python -m torchtitan.config_manager --help
+```
+
+This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
 
 ## Troubleshooting jobs that timeout
 
