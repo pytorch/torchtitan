@@ -6,7 +6,7 @@
 
 # torchrun --standalone --nproc-per-node 4 generate.py
 
-# use inference.sh "Your Question Here?" to run inference with a single prompt.
+# use bash inference.sh "Your Question Here?" to run inference with a single prompt.
 
 import sys
 from dataclasses import dataclass
@@ -15,13 +15,15 @@ import torch
 import torch.distributed as dist
 
 from checkpoint import load_weights_from_hf
-from model import DeepseekForCausalLM
-from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
+from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
+from torchtitan.experiments.deepseek_v3.models.model_config import (
+    deepseek_config_registry,
+)
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)

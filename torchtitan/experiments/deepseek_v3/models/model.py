@@ -51,11 +51,11 @@ from group_gemms import (
     TorchFP8GroupGEMM,
     TritonCGBF16GroupGEMM,
 )
-
-from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
+
+from torchtitan.experiments.deepseek_v3.models.model_config import ModelArgs
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
