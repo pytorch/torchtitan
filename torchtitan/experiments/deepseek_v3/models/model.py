@@ -42,8 +42,6 @@ import torch.distributed._symmetric_memory as symm_mem
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from attn_mask_utils import _prepare_4d_causal_attention_mask
-
 from group_gemms import (
     DSGroupGEMM,
     TorchAOBF16GroupGEMM,
@@ -55,10 +53,12 @@ from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
-from torchtitan.experiments.deepseek_v3.models.model_config import ModelArgs
-
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
+
+from .attn_mask_utils import _prepare_4d_causal_attention_mask
+
+from .model_config import ModelArgs
 
 
 # Get model parallel subgroup by name:
