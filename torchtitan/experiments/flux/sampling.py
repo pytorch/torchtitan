@@ -220,7 +220,7 @@ def save_image(
 ):
     print(f"Saving {output_dir}/{name}")
     if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.join(output_dir, name)
     # bring into PIL format and save
     x = x.clamp(-1, 1)
