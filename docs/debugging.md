@@ -14,14 +14,21 @@ To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/m
 
 ## Overriding Boolean Flags from `.toml` via CLI
 
-If a boolean is set to `true` in a `.toml` config file and you want to override it from the command line, use the following syntax:
+Boolean flags are treated as **actions**. To disable a flag from the command line, use the `--no` prefix.
+
+For example, given the following in your `.toml` file:
+
+```toml
+[profiling]
+enable_memory_snapshot = true
+
+```
+You can override it at runtime via CLI with:
 
 ```bash
 --profiling.no_enable_memory_snapshot
 --profiling.no-enable-memory-snapshot  # Equivalent
 ```
-
-Boolean flags are treated as **actions**; to disable them, use the `--no` prefix.
 
 > Note: `--enable_memory_snapshot=False` will **not** work. Use `--no_enable_memory_snapshot` instead.
 
