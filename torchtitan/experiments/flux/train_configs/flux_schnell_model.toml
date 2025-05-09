@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 log_freq = 1
 disable_color_printing = false
 enable_tensorboard = true
-save_tb_folder = "tb_200"
+save_tb_folder = "tb_local"
 enable_wandb = false
 
 [model]
@@ -41,6 +41,7 @@ dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.0
 img_size = 256
 deterministic = true
+seed  = 0
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -67,7 +68,7 @@ mode = "full"
 
 [checkpoint]
 enable_checkpoint = true
-folder = "checkpoint_dl"
+folder = "checkpoint_new_2"
 interval = 100
 model_weights_only = false
 export_dtype = "float32"
