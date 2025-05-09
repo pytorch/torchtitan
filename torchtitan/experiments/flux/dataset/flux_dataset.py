@@ -114,6 +114,13 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
+    "cc12m-test": TextToImageDatasetConfig(
+        path="tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        data_processor=_cc12m_wds_data_processor,
+    ),
 }
 
 
