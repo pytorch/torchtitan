@@ -15,8 +15,8 @@ except ImportError:
     DEEPGEMM_AVAILABLE = False
 
 if DEEPGEMM_AVAILABLE:
-    import dsgemm_kernels
-    import dsgemm_utils
+    import torchtitan.experiments.kernels.deepseek_gemm.dsgemm_kernels
+    import torchtitan.experiments.kernels.deepseek_gemm.dsgemm_utils
 
 try:
     from torchao.float8.config import ScalingGranularity

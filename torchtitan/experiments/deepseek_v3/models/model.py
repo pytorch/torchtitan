@@ -41,17 +41,17 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from symm_mem_recipes import OnDeviceAllToAllV
+from torch import nn
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 
-from group_gemms import (
+from torchtitan.experiments.kernels.group_gemms.group_gemms import (
     DSGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
     TritonCGBF16GroupGEMM,
 )
-from symm_mem_recipes import OnDeviceAllToAllV
-from torch import nn
-from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
