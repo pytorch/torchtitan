@@ -140,13 +140,25 @@ def parallelize_encoders(
         }
         if job_config.training.enable_cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        # Make parameters contiguous before applying FSDP
+        def make_contiguous(module):
+            for param in module.parameters():
+                if not param.is_contiguous():
+                    param.data = param.data.contiguous()
+            return module
+
         # FSDP for encoder blocks
         for block in clip_model.hf_module.text_model.encoder.layers:
+            block = make_contiguous(block)
             fully_shard(block, **fsdp_config)
+        clip_model = make_contiguous(clip_model)
         fully_shard(clip_model, **fsdp_config)
 
         for block in t5_model.hf_module.encoder.block:
+            block = make_contiguous(block)
             fully_shard(block, **fsdp_config)
+        t5_model.hf_module = make_contiguous(t5_model.hf_module)
         fully_shard(t5_model.hf_module, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
