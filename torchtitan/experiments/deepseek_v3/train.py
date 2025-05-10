@@ -10,13 +10,13 @@
 import torch
 import torch.distributed as dist
 
-# from checkpoint import load_weights_from_hf
-from model import DeepseekForCausalLM
-from model_config import deepseek_config_registry
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+
+# from checkpoint import load_weights_from_hf
+from .models.model import DeepseekForCausalLM
+from .models.model_config import deepseek_config_registry
 
 
 # Use DeepSeek-V2-Lite as a proxy

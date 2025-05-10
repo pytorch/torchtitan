@@ -11,11 +11,46 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 
-# from torchtitan.models.llama3 import pipeline_llama
+# ToDO - this is not suitable for deepseek but using for now...
+from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize_llama import parallelize_llama
-
-from .model.model_args import TransformerModelArgs
+from .infra.parallelize_deepseek import parallelize_deepseek
 
 from .models.model import DeepseekForCausalLM
+
+from .models.model_args import TransformerModelArgs
+
+
+__all__ = [
+    "TransformerModelArgs",
+    "DeepseekForCausalLM",
+    "deepseek_configs",
+]
+
+
+deepseek_configs = {
+    "debugmodel": TransformerModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=16,
+        rope_theta=500000,
+    ),
+}
+
+
+"""register_train_spec(
+    TrainSpec(
+        name="deepseek3",
+        cls=DeepseekForCausalLM,
+        config=deepseek_configs,
+        parallelize_fn=parallelize_llama,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_hf_dataloader,
+        build_tokenizer_fn=build_tiktoken_tokenizer,
+        build_loss_fn=build_cross_entropy_loss,
+    )
+)
+"""
