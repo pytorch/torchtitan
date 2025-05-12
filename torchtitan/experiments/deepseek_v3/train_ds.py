@@ -49,8 +49,18 @@ tokenizer = (
 
 # Run full model
 def run_full_model(
-    world_mesh: DeviceMesh,
+    config: JobConfig,
 ):
+
+    # setup mesh
+    pp_dim = config.parallelism.pipeline_parallel_degree
+    ep_dim = config.parallelism.expert_parallel_degree
+    dp_dim = config.parallelism.data_parallel_shard_degree
+    logger.info(f"{pp_dim=}, {ep_dim=}, {dp_dim=}")
+
+    world_mesh = dist.init_device_mesh(
+        "cuda", (pp_dim, ep_dim, dp_dim), mesh_dim_names=("pp", "ep", "fsdp")
+    )
 
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
@@ -163,15 +173,7 @@ if __name__ == "__main__":
             torch.distributed.destroy_process_group()
             logger.info("Process group destroyed.")
     """
-    pp_dim = config.parallelism.pipeline_parallel_degree
-    ep_dim = config.parallelism.expert_parallel_degree
-    dp_dim = config.parallelism.data_parallel_shard_degree
-    logger.info(f"{pp_dim=}, {ep_dim=}, {dp_dim=}")
 
-    mesh = dist.init_device_mesh(
-        "cuda", (pp_dim, ep_dim, dp_dim), mesh_dim_names=("pp", "ep", "fsdp")
-    )
-
-    run_full_model(mesh)
+    run_full_model(config)
 
     dist.destroy_process_group()
