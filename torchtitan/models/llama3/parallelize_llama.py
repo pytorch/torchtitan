@@ -312,7 +312,7 @@ def apply_compile(model: nn.Module):
         # will minimize the risk of this being a problem.
         # If it is a problem in practice, we can also try to tweak torchtitan
         # So that we compile the MoE layer and the rest of the transformer block separately.
-        if hasattr(transformer_block, 'moe'):
+        if hasattr(transformer_block, "moe"):
             transformer_block = torch.compile(transformer_block, fullgraph=False)
         else:
             transformer_block = torch.compile(transformer_block, fullgraph=True)
