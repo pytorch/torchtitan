@@ -55,7 +55,7 @@ class TransformerModelArgs(BaseModelArgs):
     interleave_moe_layer_step: int = 2
     # token-choice
     top_k: int = 1
-    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
+    use_grouped_mm: bool = False  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
