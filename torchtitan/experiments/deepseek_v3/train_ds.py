@@ -27,6 +27,23 @@ from torchtitan.experiments.deepseek_v3.models.model_config import (
 # Use DeepSeek-V2-Lite as a proxy
 model_id = "deepseek-ai/DeepSeek-V2-Lite"
 
+# dataloader
+
+"""
+tokenizer = (
+            self.train_spec.build_tokenizer_fn(job_config)
+            if self.train_spec.build_tokenizer_fn is not None
+            else None
+        )
+
+        self.dataloader = self.train_spec.build_dataloader_fn(
+            dp_world_size=dp_degree,
+            dp_rank=dp_rank,
+            tokenizer=tokenizer,
+            job_config=job_config,
+        )
+"""
+
 
 # Run full model
 def run_full_model(
