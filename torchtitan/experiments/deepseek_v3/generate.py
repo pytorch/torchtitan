@@ -17,13 +17,13 @@ import torch.distributed as dist
 from checkpoint import load_weights_from_hf
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
 from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
 from torchtitan.experiments.deepseek_v3.models.model_config import (
     deepseek_config_registry,
 )
 
 from torchtitan.tools.utils import Color
-from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -369,7 +369,7 @@ if __name__ == "__main__":
 
     dist_config = create_dist_config(mesh)
     model, pp_schedule = create_model(dist_config)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = get_hf_tokenizer(model_id)
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},

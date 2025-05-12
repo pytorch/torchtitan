@@ -14,6 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
     parallelize_deepseek,
 )
@@ -82,6 +83,17 @@ def run_full_model(
         ep_rank,
     ) = parallelize_deepseek(world_mesh, device, model_args, rank)
 
+    # build tokenizer
+    tokenizer = get_hf_tokenizer(model_id)
+
+    from torchtitan.datasets.hf_datasets import build_hf_dataloader
+
+    # TODO - ep is not the same as dp really...just a temp shim atm.
+    dataloader = build_hf_dataloader(
+        dp_world_size=ep_size, dp_rank=ep_rank, tokenizer=tokenizer, job_config=config
+    )
+    logger.info(f"Success! {dataloader=}")
+
     # Synthetic setting
     microbatches = pp_size * 2
 
@@ -91,7 +103,7 @@ def run_full_model(
     # model.setup_symm_mem(torch.bfloat16, device)
 
     # Example inputs
-    logger.info(f"**** {rank=}, {ep_rank=}")
+
     torch.manual_seed(ep_rank)
     bs = config.training.batch_size  # 4
     seqlen = config.training.seq_len  # 128

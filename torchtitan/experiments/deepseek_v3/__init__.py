@@ -9,7 +9,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
+from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
 
 # ToDO - this is not suitable for deepseek but using for now...
 from torchtitan.models.llama3 import pipeline_llama
@@ -49,7 +49,7 @@ register_train_spec(
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
-        build_tokenizer_fn=build_tiktoken_tokenizer,
+        build_tokenizer_fn=get_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )
 )
