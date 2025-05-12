@@ -55,11 +55,11 @@ def run_full_model(
     # setup mesh
     pp_dim = config.parallelism.pipeline_parallel_degree
     ep_dim = config.parallelism.expert_parallel_degree
-    dp_dim = config.parallelism.data_parallel_shard_degree
-    logger.info(f"{pp_dim=}, {ep_dim=}, {dp_dim=}")
+    fsdp_dim = config.parallelism.data_parallel_shard_degree
+    logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}")
 
     world_mesh = dist.init_device_mesh(
-        "cuda", (pp_dim, ep_dim, dp_dim), mesh_dim_names=("pp", "ep", "fsdp")
+        "cuda", (pp_dim, ep_dim, fsdp_dim), mesh_dim_names=("pp", "ep", "fsdp")
     )
 
     rank = dist.get_rank()
@@ -71,7 +71,7 @@ def run_full_model(
         raise ValueError(f"Model {model_id} not found in registry.")
 
     # TODO - remove this for full model
-    model_args.num_hidden_layers = 16
+    # model_args.num_hidden_layers = 16
 
     (
         model,

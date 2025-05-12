@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from typing import Optional
 
 import torch
@@ -63,6 +64,7 @@ def parallelize_deepseek(
     the model must fit on GPU or CPU memory.
     """
     logger.info("Applying parallelism to the model...")
+    world_size = int(os.environ["WORLD_SIZE"])
 
     pp_mesh = world_mesh["pp"]
     ep_mesh = world_mesh["ep"]
@@ -70,6 +72,12 @@ def parallelize_deepseek(
     ep_rank = ep_mesh.get_local_rank()
     pp_size = pp_mesh.size()
     ep_size = ep_mesh.size()
+
+    # Apply data parallelism
+    fsdp_mesh = world_mesh["fsdp"]
+    hsdp_mesh = world_mesh["ep", "fsdp"]
+
+    hsdp_size = hsdp_mesh.size()
 
     # Apply model parallelism
     model_args.ep_size = ep_size
@@ -79,6 +87,12 @@ def parallelize_deepseek(
         f"Parallelism: {rank=}, {ep_size=}, {pp_size=}, {model_args.ep_size=}, {model_args.num_stages=}, {model_args.stage_idx=}"
     )
     # print(model_args)
+    # verify world size matches parallelized total
+    parallelized_world_size = pp_size * hsdp_size
+    logger.info(f"Total Parallelized World size {parallelized_world_size}")
+    assert (
+        world_size == parallelized_world_size
+    ), f"mismatch between total world size {world_size=} and parallelized total {parallelized_world_size}"
 
     # Instantiate model
     with device, world_mesh:
@@ -87,11 +101,6 @@ def parallelize_deepseek(
     # load_weights_from_hf(model, model_id, device)
     model.train()
 
-    # Apply data parallelism
-    fsdp_mesh = world_mesh["fsdp"]
-    hsdp_mesh = world_mesh["ep", "fsdp"]
-    logger.info(f"{rank=}, fsdp_mesh: {fsdp_mesh}")
-    logger.info(f"{rank=}, hsdp_mesh: {hsdp_mesh}")
     # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
     # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
     # Reason: the MoE is "sparsely activated" compared to the dense model, thus
