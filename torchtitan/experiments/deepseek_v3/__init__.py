@@ -39,12 +39,12 @@ deepseek_configs = {
 }
 
 
-"""register_train_spec(
+register_train_spec(
     TrainSpec(
         name="deepseek3",
         cls=DeepseekForCausalLM,
         config=deepseek_configs,
-        parallelize_fn=parallelize_llama,
+        parallelize_fn=parallelize_deepseek,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
@@ -53,4 +53,3 @@ deepseek_configs = {
         build_loss_fn=build_cross_entropy_loss,
     )
 )
-"""
