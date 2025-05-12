@@ -13,10 +13,15 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
+    parallelize_deepseek,
+)
 
 # from checkpoint import load_weights_from_hf
-from .models.model import DeepseekForCausalLM
-from .models.model_config import deepseek_config_registry
+from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
+from torchtitan.experiments.deepseek_v3.models.model_config import (
+    deepseek_config_registry,
+)
 
 
 # Use DeepSeek-V2-Lite as a proxy
@@ -25,62 +30,28 @@ model_id = "deepseek-ai/DeepSeek-V2-Lite"
 
 # Run full model
 def run_full_model(
-    mesh: DeviceMesh,
+    world_mesh: DeviceMesh,
 ):
+
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
     device = torch.device("cuda", rank % device_count)
-    pp_mesh = mesh["pp"]
-    ep_mesh = mesh["ep"]
-    pp_rank = pp_mesh.get_local_rank()
-    ep_rank = ep_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
-    ep_size = ep_mesh.size()
 
-    # Get model configs
-    model_args = deepseek_config_registry[model_id]
-    # [Note]: I am making the model smaller for testing / avoiding OOM. If you
-    # have sufficient GPUs for model parallelism, you can remove this line.
+    model_args = deepseek_config_registry.get(model_id, None)
+    if model_args is None:
+        raise ValueError(f"Model {model_id} not found in registry.")
+
+    # TODO - remove this for full model
     model_args.num_hidden_layers = 16
 
-    # Apply model parallelism
-    model_args.ep_size = ep_size
-    model_args.num_stages = pp_size
-    model_args.stage_idx = pp_rank
-    print(
-        f"Parallelism: {rank=}, {ep_size=}, {pp_size=}, {model_args.ep_size=}, {model_args.num_stages=}, {model_args.stage_idx=}"
-    )
-    # print(model_args)
-
-    # Instantiate model
-    with device, mesh:
-        model = DeepseekForCausalLM(model_args)
-
-    # Load weights
-    # load_weights_from_hf(model, model_id, device)
-    model.train()
-
-    # Apply data parallelism
-    fsdp_mesh = mesh["fsdp"]
-    hsdp_mesh = mesh["ep", "fsdp"]
-    print(f"{rank=}, fsdp_mesh: {fsdp_mesh}")
-    print(f"{rank=}, hsdp_mesh: {hsdp_mesh}")
-    # Using `reshard_after_forward=False` to implement Zero-2, i.e. sharding the
-    # optimizer (Zero-1) and gradients (Zero-2), but not the model weights.
-    # Reason: the MoE is "sparsely activated" compared to the dense model, thus
-    # it will be ineconomical re-gather the weights.
-    for layer in model.model.layers.values():
-        # Apply FSDP to experts
-        if hasattr(layer.mlp, "experts"):
-            for expert in layer.mlp.experts.values():
-                fully_shard(expert, mesh=fsdp_mesh, reshard_after_forward=False)
-        # Apply HSDP to other parts such as attention, layernorm, because they
-        # are doing DDP on EP dimension
-        fully_shard(layer, mesh=hsdp_mesh, reshard_after_forward=False)
-
-    # Apply HSDP on root model (lm_head, embeddings, etc)
-    fully_shard(model, mesh=hsdp_mesh, reshard_after_forward=False)
-
+    (
+        model,
+        pp_size,
+        pp_rank,
+        pp_mesh,
+        ep_size,
+        ep_rank,
+    ) = parallelize_deepseek(world_mesh, device, model_args, rank)
     # Synthetic setting
     microbatches = pp_size * 2
 
@@ -102,6 +73,7 @@ def run_full_model(
 
     # Run forward and backward
     steps = 2
+    loss = float("inf")
     for _ in range(steps):
         if pp_size > 1:
             # Create pipeline stage
