@@ -303,7 +303,6 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    torch.distributed.breakpoint()
     for layer_id, transformer_block in model.layers.named_children():
         # We need to use fullgraph=False here because llama4 uses FSDP2
         # to wrap the MoE layer in each transformer block.
@@ -313,9 +312,9 @@ def apply_compile(model: nn.Module):
         # will minimize the risk of this being a problem.
         # If it is a problem in practice, we can also try to tweak torchtitan
         # So that we compile the MoE layer and the rest of the transformer block separately.
-        if hasattr(transformer_block, 'moe':
+        if hasattr(transformer_block, 'moe'):
             transformer_block = torch.compile(transformer_block, fullgraph=False)
-       else:
+        else:
             transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
