@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
     parallelize_deepseek,
 )
@@ -22,6 +23,7 @@ from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
 from torchtitan.experiments.deepseek_v3.models.model_config import (
     deepseek_config_registry,
 )
+from torchtitan.tools.logging import init_logger, logger
 
 
 # Use DeepSeek-V2-Lite as a proxy
@@ -78,7 +80,7 @@ def run_full_model(
     # model.setup_symm_mem(torch.bfloat16, device)
 
     # Example inputs
-    print(f"**** {rank=}, {ep_rank=}")
+    logger.info(f"**** {rank=}, {ep_rank=}")
     torch.manual_seed(ep_rank)
     bs = 4
     seqlen = 128
@@ -119,19 +121,49 @@ def run_full_model(
             loss.backward()
 
         if pp_rank == pp_size - 1:
-            print(f"logits: {y.shape}")
-            print(f"{loss=}")
+            logger.info(f"logits: {y.shape}")
+            logger.info(f"{loss=}")
 
         if pp_rank == 0:
             param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
-            print(f"{torch.linalg.norm(param.grad)=}")
+            logger.info(f"{torch.linalg.norm(param.grad)=}")
 
         model.zero_grad()
 
-    print("Backward done")
+    logger.info("Backward done")
 
 
 if __name__ == "__main__":
+
+    init_logger()
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+
+    """trainer: Optional[Trainer] = None
+
+    try:
+        trainer = Trainer(config)
+
+        if config.checkpoint.create_seed_checkpoint:
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable_checkpoint
+            ), "Must enable checkpointing when creating a seed checkpoint."
+            trainer.checkpointer.save(curr_step=0, force=True)
+            logger.info("Created seed checkpoint")
+        else:
+            trainer.train()
+    finally:
+        if trainer:
+            trainer.close()
+
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+            logger.info("Process group destroyed.")
+    """
+
     mesh = dist.init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
 
     run_full_model(mesh)

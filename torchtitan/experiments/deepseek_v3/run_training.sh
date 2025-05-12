@@ -5,19 +5,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-NGPU=${NGPU:-"8"}
-
-
-# Run the model with basic training loop
-torchrun --standalone --nproc-per-node ${NGPU} train_ds.py
-
-#!/usr/bin/bash
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 set -ex
 
 # use envs as local overrides for convenience
@@ -38,6 +25,7 @@ TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
-torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+
+torchrun --nproc-per-node ${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 -m train_ds --job.config_file ${CONFIG_FILE} $overrides
