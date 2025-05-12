@@ -13,7 +13,7 @@ set -ex
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 # CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
-CONFIG_FILE=${CONFIG_FILE:-"./train_configs/debug_model.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./train_configs/deepseek_v2.toml"}
 
 
 overrides=""

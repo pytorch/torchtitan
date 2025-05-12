@@ -341,6 +341,9 @@ class Parallelism:
     The default value is 'allgather'.
     """
 
+    expert_parallel_degree: int = 1
+    """Expert parallelism degree. 1 means disabled."""
+
 
 @dataclass
 class Checkpoint:
