@@ -40,6 +40,8 @@ llama4_configs = {
         rope_theta=500000,
         num_experts=16,
         interleave_moe_layer_step=1,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "17bx128e": TransformerModelArgs(
         dim=5120,
