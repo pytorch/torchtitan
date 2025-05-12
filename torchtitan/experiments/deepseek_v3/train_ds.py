@@ -81,6 +81,7 @@ def run_full_model(
         ep_size,
         ep_rank,
     ) = parallelize_deepseek(world_mesh, device, model_args, rank)
+
     # Synthetic setting
     microbatches = pp_size * 2
 
@@ -92,8 +93,9 @@ def run_full_model(
     # Example inputs
     logger.info(f"**** {rank=}, {ep_rank=}")
     torch.manual_seed(ep_rank)
-    bs = 4
-    seqlen = 128
+    bs = config.training.batch_size  # 4
+    seqlen = config.training.seq_len  # 128
+
     x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
     label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
 
