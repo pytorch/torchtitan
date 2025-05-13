@@ -94,6 +94,19 @@ def build_test_list():
             "2D compile",
             "2d_compile",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.tensor_parallel_degree 4",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "2D compile with selective op AC",
+            "2d_compile_sac_op",
+            ngpu=8,
+        ),
         # TODO: re-enable this test once the async TP issue is fixed
         # OverrideDefinitions(
         #     [
