@@ -12,6 +12,7 @@ import re
 import shutil
 import threading
 import time
+from math import lgamma
 from typing import Any
 
 import torch
@@ -357,6 +358,9 @@ class CheckpointManager:
         if not self._should_save(curr_step, force):
             return
 
+        # # update the rng state
+        # self.states[TRAIN_STATE].rng_states = torch.get_rng_state()
+
         def compute_state_hash(state: dict[str, Any]) -> float:
             """Compute a hash for the given state dictionary."""
             state_sum = 0
@@ -378,7 +382,25 @@ class CheckpointManager:
             if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
                 res = compute_state_hash(v.state_dict())
                 logger.info(f"State hash before saving for {k}: {res}")
-        logger.info("")
+
+        # logger.info(f"State hash for train states: {self.states[TRAIN_STATE]}")  # It's a FluxTrainer Objects
+        cpu_rng_state = int.from_bytes(
+            self.states[TRAIN_STATE]
+            .state_dict()["cpu_rng_states"]
+            .cpu()
+            .numpy()
+            .tobytes()[0:32]
+        )
+        device_rng_state = int.from_bytes(
+            self.states[TRAIN_STATE]
+            .state_dict()["device_rng_states"]
+            .cpu()
+            .numpy()
+            .tobytes()[0:32]
+        )
+        logger.info(
+            f"Saving rng state for {curr_step} is: CPU {cpu_rng_state}, GPU {device_rng_state}"
+        )
 
         begin = time.monotonic()
         if not self.ft_manager or self.ft_manager.participating_rank() == 0:
@@ -446,7 +468,18 @@ class CheckpointManager:
         logger.info(f"Loading the checkpoint at step {step}.")
         begin = time.monotonic()
         states = self._states_to_load(step)
+
+        def compute_rng_hash(state: torch.ByteTensor) -> float:
+            """Compute a hash for the given state dictionary."""
+            return int.from_bytes(state.cpu().numpy().tobytes()[0:32])
+
+        logger.info(
+            f"Before dcp.load() call!!! for {step} is: CPU {compute_rng_hash(states[TRAIN_STATE].state_dict()["cpu_rng_states"])}, GPU {compute_rng_hash(states[TRAIN_STATE].state_dict()["device_rng_states"])}"
+        )
+
         dcp.load(states, checkpoint_id=checkpoint_id)
+
+        logger.info("After dcp.load() call!!!")
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
@@ -473,6 +506,16 @@ class CheckpointManager:
             if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
                 res = compute_state_hash(v.state_dict())
                 logger.info(f"State hash after loading for {k}: {res}")
+
+        # NOTE(jiani): dcp.load() should already load the rng state and saved to state_dict() of trainer
+        logger.info(f"State hash for train states: {states[TRAIN_STATE]}")
+
+        logger.info(
+            f"State hash after loading for {step} is: CPU {compute_rng_hash(states[TRAIN_STATE].state_dict()["cpu_rng_states"])}, GPU {compute_rng_hash(states[TRAIN_STATE].state_dict()["device_rng_states"])}"
+        )
+        logger.info(
+            f"State hash after loading for {step} is: CPU {compute_rng_hash(states[TRAIN_STATE].cpu_rng_state)}, GPU {compute_rng_hash(states[TRAIN_STATE].device_rng_state)}"
+        )
 
         return True
 
@@ -584,6 +627,7 @@ class CheckpointManager:
         states_to_load = {
             k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
+        logger.info(f"Loading states: {states_to_load.keys()}")
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")

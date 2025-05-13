@@ -42,6 +42,9 @@ class FluxTrainer(Trainer):
             distinct_seed_mesh_dim="dp_shard",
         )
 
+        logger.info("After set_determinism")
+        self.state_dict()
+
         self.preprocess_fn = preprocess_data
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
         # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
@@ -78,6 +81,23 @@ class FluxTrainer(Trainer):
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
+
+        logger.info("After __init__ ")
+        self.state_dict()
+
+        # Set random seed, and maybe enable deterministic mode
+        # (mainly for debugging, expect perf loss).
+        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        dist_utils.set_determinism(
+            self.world_mesh,
+            self.device,
+            job_config.training.seed,
+            job_config.training.deterministic,
+            distinct_seed_mesh_dim="dp_shard",
+        )
+
+        logger.info("After reset_determinism ")
+        self.state_dict()
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         # Calculate hash of input_dict for debugging
@@ -172,6 +192,10 @@ class FluxTrainer(Trainer):
             for key, value in state.items():
                 if isinstance(value, dict):
                     state_sum += compute_state_hash(value)
+                elif isinstance(value, torch.ByteTensor):
+                    state_sum += int.from_bytes(
+                        value.cpu().numpy().tobytes()[0:32]
+                    )  # TODO(jiani): cut first 32 bytes for convenience
                 elif isinstance(value, torch.Tensor):
                     state_sum += float(value.sum().item())
                 elif isinstance(value, (int, float)):
@@ -183,13 +207,21 @@ class FluxTrainer(Trainer):
         self.lr_schedulers.step()
 
         logger.info(
-            f"self.optimizers status: {compute_state_hash(self.optimizers.state_dict())}"
+            f"self.optimizers status at step {self.step}: {compute_state_hash(self.optimizers.state_dict())}"
         )
         logger.info(
-            f"self.lr_scheduler status: {compute_state_hash(self.lr_schedulers.state_dict())}"
+            f"self.lr_scheduler status at step {self.step}: {compute_state_hash(self.lr_schedulers.state_dict())}"
+        )
+        from torchtitan.components.checkpoint import ModelWrapper
+
+        logger.info(
+            f"Model status at step {self.step}:{compute_state_hash(ModelWrapper(model_parts[0]).state_dict())}"
         )
         logger.info(
-            f"Model status:{compute_state_hash(ModelWrapper(model).state_dict())}"
+            f"All rng status at step {self.step}: {compute_state_hash(self.state_dict())}"
+        )
+        logger.info(
+            f"GPU rng status at step {self.step}: {int.from_bytes(self.device_rng_state.cpu().numpy().tobytes()[0:32])}"
         )
 
         # log metrics

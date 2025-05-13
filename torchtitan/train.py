@@ -57,6 +57,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     # states
     step: int
+    device_rng_state: torch.ByteTensor
+    cpu_rng_state: torch.ByteTensor
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -394,15 +396,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.lr_schedulers.step()
 
         logger.info(
-            f"self.optimizers status: {compute_state_hash(self.optimizers.state_dict())}"
+            f"self.optimizers status at step {self.step}: {compute_state_hash(self.optimizers.state_dict())}"
         )
         logger.info(
-            f"self.lr_scheduler status: {compute_state_hash(self.lr_schedulers.state_dict())}"
+            f"self.lr_scheduler status at step {self.step}: {compute_state_hash(self.lr_schedulers.state_dict())}"
         )
         from torchtitan.components.checkpoint import ModelWrapper
 
         logger.info(
-            f"Model status:{compute_state_hash(ModelWrapper(model_parts[0]).state_dict())}"
+            f"Model status at step {self.step}:{compute_state_hash(ModelWrapper(model_parts[0]).state_dict())}"
+        )
+        logger.info(
+            f"rng status at step {self.step}: {hash(torch.get_rng_state().cpu().numpy().tobytes())}"
         )
 
         # log metrics
@@ -479,26 +484,42 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def state_dict(self) -> dict[str, Any]:
         # Save training step and RNG states for reproducibility
-        rng_states = {
-            "torch_rng_state": torch.get_rng_state(),
-        }
-        
+
+        device_module = utils.device_module
+        self.device_rng_state = device_module.get_rng_state()
+        self.cpu_rng_state = torch.get_rng_state()
+
+        def comput_rng_hash(state: torch.ByteTensor) -> float:
+            """Compute a hash for the given state dictionary."""
+            return int.from_bytes(state.cpu().numpy().tobytes()[0:32])
+
+        logger.info(
+            f"In trainer.state_dict(), Read State dict RNG states at step {self.step}: CPU {comput_rng_hash(self.cpu_rng_state)} device {comput_rng_hash(self.device_rng_state)}"
+        )
+
         return {
             "step": self.step,
-            "rng_states": rng_states
+            "device_rng_states": self.device_rng_state,
+            "cpu_rng_states": self.cpu_rng_state,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
-        
+        self.device_rng_state = state_dict["device_rng_states"]
+        self.cpu_rng_state = state_dict["cpu_rng_states"]
+
         # Restore RNG states if they exist in the state_dict
-        if "rng_states" in state_dict:
-            rng_states = state_dict["rng_states"]
-            
-            # Restore torch RNG states
-            if "torch_rng_state" in rng_states:
-                torch.set_rng_state(rng_states["torch_rng_state"])
-            
+        device_module = utils.device_module
+        device_module.set_rng_state(self.device_rng_state)
+        torch.set_rng_state(self.cpu_rng_state)
+
+        def comput_rng_hash(state: torch.ByteTensor) -> float:
+            """Compute a hash for the given state dictionary."""
+            return int.from_bytes(state.cpu().numpy().tobytes()[0:32])
+
+        logger.info(
+            f"Loaded State dict RNG states at step {self.step}: CPU {comput_rng_hash(self.cpu_rng_state)} device {comput_rng_hash(self.device_rng_state)}"
+        )
 
     def close(self) -> None:
         if self.checkpointer:
