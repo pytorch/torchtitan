@@ -120,11 +120,12 @@ def run_full_model(
     # Example inputs
 
     torch.manual_seed(ep_rank)
-    bs = config.training.batch_size  # 4
+    bs = config.training.batch_size  # * microbatches  # 4
     seqlen = config.training.seq_len  # 128
 
-    x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
-    label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
+    # x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
+    # label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
+    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
     loss_fn = torch.nn.functional.cross_entropy
@@ -135,8 +136,10 @@ def run_full_model(
     data_iterator = iter(dataloader)
 
     for _ in range(steps):
-        inputs, labels = next_batch(data_iterator)
-        logger.info(f"{inputs=}")
+        inputs, label_real = next_batch(data_iterator)
+        x = inputs["input"]
+        logger.info(f"{x.shape=}")
+
         if pp_size > 1:
             # Create pipeline stage
             stage = PipelineStage(
