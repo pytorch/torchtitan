@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 
+from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
@@ -118,6 +119,7 @@ class FluxTrainer(Trainer):
 
         bsz = labels.shape[0]
 
+        # TODO: noise is different
         with torch.no_grad():
             noise = torch.randn_like(labels)
             timesteps = torch.rand((bsz,)).to(labels)
@@ -161,9 +163,34 @@ class FluxTrainer(Trainer):
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
         )
+
+        from typing import Any
+
+        def compute_state_hash(state: dict[str, Any]) -> float:
+            """Compute a hash for the given state dictionary."""
+            state_sum = 0
+            for key, value in state.items():
+                if isinstance(value, dict):
+                    state_sum += compute_state_hash(value)
+                elif isinstance(value, torch.Tensor):
+                    state_sum += float(value.sum().item())
+                elif isinstance(value, (int, float)):
+                    state_sum += float(value)
+            return state_sum
+
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+
+        logger.info(
+            f"self.optimizers status: {compute_state_hash(self.optimizers.state_dict())}"
+        )
+        logger.info(
+            f"self.lr_scheduler status: {compute_state_hash(self.lr_schedulers.state_dict())}"
+        )
+        logger.info(
+            f"Model status:{compute_state_hash(ModelWrapper(model).state_dict())}"
+        )
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):

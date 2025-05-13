@@ -228,7 +228,7 @@ class CheckpointManager:
                         MODEL,
                         OPTIMIZER,
                         LR_SCHEDULER,
-                        TRAIN_STATE,
+                        TRAIN_STATE,  # TODO: train_state can store the steps etc, save rng state here
                     }:
                         ret[k] = v.state_dict()
                 return ret
@@ -357,6 +357,29 @@ class CheckpointManager:
         if not self._should_save(curr_step, force):
             return
 
+        def compute_state_hash(state: dict[str, Any]) -> float:
+            """Compute a hash for the given state dictionary."""
+            state_sum = 0
+            for key, value in state.items():
+                if isinstance(value, dict):
+                    state_sum += compute_state_hash(value)
+                elif isinstance(value, torch.Tensor):
+                    # Handle complex numbers by taking their absolute value
+                    item_value = value.sum().item()
+                    if isinstance(item_value, complex):
+                        state_sum += float(abs(item_value))
+                    else:
+                        state_sum += float(item_value)
+                elif isinstance(value, (int, float)):
+                    state_sum += float(value)
+            return state_sum
+
+        for k, v in self.states.items():
+            if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
+                res = compute_state_hash(v.state_dict())
+                logger.info(f"State hash before saving for {k}: {res}")
+        logger.info("")
+
         begin = time.monotonic()
         if not self.ft_manager or self.ft_manager.participating_rank() == 0:
             logger.info("Saving the checkpoint (or staging if async is enabled).")
@@ -428,6 +451,29 @@ class CheckpointManager:
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
+
+        def compute_state_hash(state: dict[str, Any]) -> float:
+            """Compute a hash for the given state dictionary."""
+            state_sum = 0
+            for key, value in state.items():
+                if isinstance(value, dict):
+                    state_sum += compute_state_hash(value)
+                elif isinstance(value, torch.Tensor):
+                    # Handle complex numbers by taking their absolute value
+                    item_value = value.sum().item()
+                    if isinstance(item_value, complex):
+                        state_sum += float(abs(item_value))
+                    else:
+                        state_sum += float(item_value)
+                elif isinstance(value, (int, float)):
+                    state_sum += float(value)
+            return state_sum
+
+        for k, v in states.items():
+            if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
+                res = compute_state_hash(v.state_dict())
+                logger.info(f"State hash after loading for {k}: {res}")
+
         return True
 
     def maybe_wait_for_staging(self) -> None:

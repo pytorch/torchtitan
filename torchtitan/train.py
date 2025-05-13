@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
@@ -369,9 +369,41 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
         )
+
+        from typing import Any
+
+        def compute_state_hash(state: dict[str, Any]) -> float:
+            """Compute a hash for the given state dictionary."""
+            state_sum = 0
+            for key, value in state.items():
+                if isinstance(value, dict):
+                    state_sum += compute_state_hash(value)
+                elif isinstance(value, torch.Tensor):
+                    # Handle complex numbers by taking their absolute value
+                    item_value = value.sum().item()
+                    if isinstance(item_value, complex):
+                        state_sum += float(abs(item_value))
+                    else:
+                        state_sum += float(item_value)
+                elif isinstance(value, (int, float)):
+                    state_sum += float(value)
+            return state_sum
+
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+
+        logger.info(
+            f"self.optimizers status: {compute_state_hash(self.optimizers.state_dict())}"
+        )
+        logger.info(
+            f"self.lr_scheduler status: {compute_state_hash(self.lr_schedulers.state_dict())}"
+        )
+        from torchtitan.components.checkpoint import ModelWrapper
+
+        logger.info(
+            f"Model status:{compute_state_hash(ModelWrapper(model_parts[0]).state_dict())}"
+        )
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):

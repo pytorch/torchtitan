@@ -15,8 +15,8 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 disable_color_printing = false
-enable_tensorboard = false
-save_tb_folder = "tb"
+enable_tensorboard = true
+save_tb_folder = "tb_debug"
 enable_wandb = false
 
 [model]
