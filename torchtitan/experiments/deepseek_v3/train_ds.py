@@ -7,6 +7,8 @@
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
 
+from typing import Iterable
+
 import torch
 import torch.distributed as dist
 
@@ -25,7 +27,7 @@ from torchtitan.experiments.deepseek_v3.models.model_config import (
     deepseek_config_registry,
 )
 from torchtitan.tools.logging import init_logger, logger
-
+from torchtitan.tools.utils import get_device_info
 
 # Use DeepSeek-V2-Lite as a proxy
 model_id = "deepseek-ai/DeepSeek-V2-Lite"
@@ -46,6 +48,20 @@ tokenizer = (
             job_config=job_config,
         )
 """
+# temp global
+_device_type, _device_info = get_device_info()
+
+
+def next_batch(data_iterator: Iterable) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+
+    batch = next(data_iterator)
+    input_dict, labels = batch
+
+    for k, _ in input_dict.items():
+        input_dict[k] = input_dict[k].to(_device_type)
+    labels = labels.to(_device_type)
+    logger.info(f"{labels=}")
+    return input_dict, labels
 
 
 # Run full model
@@ -57,7 +73,7 @@ def run_full_model(
     pp_dim = config.parallelism.pipeline_parallel_degree
     ep_dim = config.parallelism.expert_parallel_degree
     fsdp_dim = config.parallelism.data_parallel_shard_degree
-    logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}")
+    logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}, {_device_info=}")
 
     world_mesh = dist.init_device_mesh(
         "cuda", (pp_dim, ep_dim, fsdp_dim), mesh_dim_names=("pp", "ep", "fsdp")
@@ -92,7 +108,6 @@ def run_full_model(
     dataloader = build_hf_dataloader(
         dp_world_size=ep_size, dp_rank=ep_rank, tokenizer=tokenizer, job_config=config
     )
-    logger.info(f"Success! {dataloader=}")
 
     # Synthetic setting
     microbatches = pp_size * 2
@@ -117,7 +132,11 @@ def run_full_model(
     # Run forward and backward
     steps = 2
     loss = float("inf")
+    data_iterator = iter(dataloader)
+
     for _ in range(steps):
+        inputs, labels = next_batch(data_iterator)
+        logger.info(f"{inputs=}")
         if pp_size > 1:
             # Create pipeline stage
             stage = PipelineStage(
