@@ -59,4 +59,5 @@ selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac ba
 [float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
+recipe_name = "mxfp8"
 filter_fqns = ["output"]
