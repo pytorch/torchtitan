@@ -41,6 +41,8 @@ compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
 img_size = 256
+deterministic = true
+seed = 0
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -66,9 +68,10 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 mode = "full"
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+folder = "checkpoint_debug"
 interval = 5
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+load_step = 5

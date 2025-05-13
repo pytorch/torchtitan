@@ -446,10 +446,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info("Training completed")
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step}
+        # Save training step and RNG states for reproducibility
+        rng_states = {
+            "torch_rng_state": torch.get_rng_state(),
+        }
+        
+        return {
+            "step": self.step,
+            "rng_states": rng_states
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
+        
+        # Restore RNG states if they exist in the state_dict
+        if "rng_states" in state_dict:
+            rng_states = state_dict["rng_states"]
+            
+            # Restore torch RNG states
+            if "torch_rng_state" in rng_states:
+                torch.set_rng_state(rng_states["torch_rng_state"])
+            
 
     def close(self) -> None:
         if self.checkpointer:
