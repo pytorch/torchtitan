@@ -36,5 +36,4 @@ docker build \
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
   --shm-size=1g \
   -f "${OS}"/Dockerfile \
-  "$@" \
   .
