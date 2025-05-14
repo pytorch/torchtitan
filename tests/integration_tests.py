@@ -99,12 +99,13 @@ def build_test_list():
             [
                 [
                     "--training.compile",
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 4",
                     "--parallelism.enable_async_tensor_parallel",
                 ],
             ],
             "2D async TP compile",
             "2d_asynctp_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
