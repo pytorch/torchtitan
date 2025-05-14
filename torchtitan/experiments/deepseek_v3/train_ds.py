@@ -7,15 +7,24 @@
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
 
-from typing import Iterable
+from collections.abc import Callable
+from typing import Iterable, Optional, TypeAlias
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
+import torchtitan.components.ft as ft
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.components.lr_scheduler import (
+    build_lr_schedulers,
+    LRSchedulersContainer,
+)
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
@@ -43,6 +52,14 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
 
 # temp global
 _device_type, _device_info = get_device_info()
+
+
+class Trainer:
+    job_config: JobConfig
+    device: torch.device
+
+    # states
+    step: int
 
 
 def next_batch(data_iterator: Iterable) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
@@ -81,7 +98,7 @@ def run_full_model(
         raise ValueError(f"Model {model_id} not found in registry.")
 
     # TODO - remove this for full model
-    # model_args.num_hidden_layers = 16
+    model_args.num_hidden_layers = 16
 
     (
         model,
@@ -110,8 +127,6 @@ def run_full_model(
     # currently supported for forward only. See `generate.py`.
     # model.setup_symm_mem(torch.bfloat16, device)
 
-    # Example inputs
-
     torch.manual_seed(ep_rank)
     bs = config.training.batch_size  # * microbatches  # 4
     seqlen = config.training.seq_len  # 128
@@ -123,12 +138,20 @@ def run_full_model(
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
+    ft_manager = ft.init_ft_manager(config)
+    optimizer = build_optimizers([model], config, ft_manager)
+    print(f"Success! {optimizer=}")
+    lr_scheduler = build_lr_schedulers(optimizer, config)
+    print(f"Success! {lr_scheduler=}")
+
     # Run forward and backward
-    steps = 2
+    steps = 30
     loss = float("inf")
     data_iterator = iter(dataloader)
 
     for _ in range(steps):
+        optimizer.zero_grad()
+
         inputs, label_real = next_batch(data_iterator)
         x = inputs["input"]
         logger.info(f"{label_real.shape=}, {label.shape=}, {x.shape=}")
@@ -162,13 +185,16 @@ def run_full_model(
             loss.backward()
 
         if pp_rank == pp_size - 1:
-            logger.info(f"logits: {y.shape}")
-            logger.info(f"{loss=}")
+            # logger.info(f"logits: {y.shape}")
+            logger.info(f"***** {loss=}")
 
-        if pp_rank == 0:
-            param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
-            logger.info(f"{torch.linalg.norm(param.grad)=}")
+        # if pp_rank == 0:
+        # param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
+        # logger.info(f"{torch.linalg.norm(param.grad)=}")
 
+        optimizer.step()
+        logger.info(f"Optimizer step done!")
+        lr_scheduler.step()
         model.zero_grad()
 
     logger.info("Backward done")
