@@ -115,10 +115,6 @@ class FluxTrainer(Trainer):
             sigmas = timesteps.view(-1, 1, 1, 1)
             latents = (1 - sigmas) * labels + sigmas * noise
 
-        logger.info(
-            f"Generated info for step {self.step} is : {noise.sum().item()}, timestep: {timesteps.sum().item()}, labels: {labels.sum().item()}"
-        )
-
         bsz, _, latent_height, latent_width = latents.shape
 
         POSITION_DIM = 3  # constant for Flux flow model

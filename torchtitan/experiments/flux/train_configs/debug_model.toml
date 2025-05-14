@@ -15,7 +15,7 @@ save_memory_snapshot_folder = "memory_snapshot"
 [metrics]
 log_freq = 1
 disable_color_printing = false
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
 
@@ -41,8 +41,6 @@ compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
 img_size = 256
-deterministic = true
-seed = 0
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
