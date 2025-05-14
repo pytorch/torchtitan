@@ -79,6 +79,15 @@ class FluxTrainer(Trainer):
         )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+        if self.step == 6:
+            dist_utils.set_determinism(
+                self.world_mesh,
+                self.device,
+                self.job_config.training.seed,
+                self.job_config.training.deterministic,
+                distinct_seed_mesh_dim="dp_shard",
+            )
+
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
@@ -182,7 +191,11 @@ class FluxTrainer(Trainer):
             or self.step == self.job_config.training.steps
         ):
             model.eval()
+            # We need to set reshard_after_forward before last forward pass.
+            # So the model wieghts are sharded the same way for checkpoint saving.
+            model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
+            model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
