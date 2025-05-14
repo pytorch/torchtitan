@@ -20,3 +20,14 @@ It also uses the same directory structure as PyTorch.
 # Build a specific image
 ./build.sh torchtitan-ubuntu-20.04-clang12 -t myimage:latest
 ```
+
+### Flux Docker Image
+
+For flux model development, a dedicated Docker image is available that includes the necessary dependencies (transformers, einops, sentencepiece). This image is built automatically when changes are made to the flux code.
+
+To build the flux Docker image manually:
+
+```bash
+cd .ci/docker
+docker build -f ubuntu/Dockerfile.flux -t torchtitan-flux-ubuntu-20.04-clang12 .
+```
