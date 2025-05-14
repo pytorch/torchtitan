@@ -16,7 +16,7 @@
 import torch
 import torch.nn as nn
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config_manager import Float8, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,
@@ -30,7 +30,7 @@ class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
-        float8_config = job_config.float8
+        float8_config: Float8 = job_config.float8
         if not has_cuda_capability(8, 9):
             logger.warning(
                 "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
