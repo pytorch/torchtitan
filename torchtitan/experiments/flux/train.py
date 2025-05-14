@@ -79,16 +79,6 @@ class FluxTrainer(Trainer):
         )
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        if self.step == 6:
-            logger.info("Set deterministic mode for debugging at step 6")
-            dist_utils.set_determinism(
-                self.world_mesh,
-                self.device,
-                self.job_config.training.seed,
-                self.job_config.training.deterministic,
-                distinct_seed_mesh_dim="dp_shard",
-            )
-
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = self.preprocess_fn(
