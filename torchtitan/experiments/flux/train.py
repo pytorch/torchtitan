@@ -80,6 +80,7 @@ class FluxTrainer(Trainer):
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         if self.step == 6:
+            logger.info("Set deterministic mode for debugging at step 6")
             dist_utils.set_determinism(
                 self.world_mesh,
                 self.device,
@@ -123,6 +124,10 @@ class FluxTrainer(Trainer):
             timesteps = torch.rand((bsz,)).to(labels)
             sigmas = timesteps.view(-1, 1, 1, 1)
             latents = (1 - sigmas) * labels + sigmas * noise
+
+        logger.info(
+            f"Generated info for step {self.step} is : {noise.sum().item()}, timestep: {timesteps.sum().item()}, labels: {labels.sum().item()}"
+        )
 
         bsz, _, latent_height, latent_width = latents.shape
 
