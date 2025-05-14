@@ -3,6 +3,12 @@
 ## Overview
 This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. In torchtitan, we showcase the pre-training process of text-to-image part of the FLUX model.
 
+## Prerequisites
+Install the required dependencies:
+```bash
+pip install -r flux-requirements.txt
+```
+
 ## Usage
 First, download the autoencoder model from HuggingFace with your own access token:
 ```bash
