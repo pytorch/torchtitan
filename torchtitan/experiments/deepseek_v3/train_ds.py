@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B
+from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
@@ -32,22 +33,14 @@ from torchtitan.tools.utils import get_device_info
 # Use DeepSeek-V2-Lite as a proxy
 model_id = "deepseek-ai/DeepSeek-V2-Lite"
 
-# dataloader
 
-"""
-tokenizer = (
-            self.train_spec.build_tokenizer_fn(job_config)
-            if self.train_spec.build_tokenizer_fn is not None
-            else None
-        )
+def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Common cross-entropy loss function for Transformer models training."""
+    return torch.nn.functional.cross_entropy(
+        pred.flatten(0, 1).float(), labels.flatten(0, 1)
+    )
 
-        self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=dp_degree,
-            dp_rank=dp_rank,
-            tokenizer=tokenizer,
-            job_config=job_config,
-        )
-"""
+
 # temp global
 _device_type, _device_info = get_device_info()
 
@@ -60,7 +53,7 @@ def next_batch(data_iterator: Iterable) -> tuple[dict[str, torch.Tensor], torch.
     for k, _ in input_dict.items():
         input_dict[k] = input_dict[k].to(_device_type)
     labels = labels.to(_device_type)
-    logger.info(f"{labels=}")
+    logger.info(f"{labels.shape=}")
     return input_dict, labels
 
 
@@ -128,7 +121,7 @@ def run_full_model(
     label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
-    loss_fn = torch.nn.functional.cross_entropy
+    loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
     # Run forward and backward
     steps = 2
@@ -138,7 +131,7 @@ def run_full_model(
     for _ in range(steps):
         inputs, label_real = next_batch(data_iterator)
         x = inputs["input"]
-        logger.info(f"{x.shape=}")
+        logger.info(f"{label_real.shape=}, {label.shape=}, {x.shape=}")
 
         if pp_size > 1:
             # Create pipeline stage
@@ -157,12 +150,14 @@ def run_full_model(
             if pp_rank == 0:
                 y = pp_schedule.step(x)
             elif pp_rank == pp_size - 1:
-                y = pp_schedule.step(target=label, losses=losses)
+                # last rank...run loss function
+                y = pp_schedule.step(target=label_real, losses=losses)
                 loss = torch.mean(torch.stack(losses))
             else:
                 pp_schedule.step()
         else:
             y = model(x)
+            logger.info(f"{y.shape=},  {label.shape=}")
             loss = loss_fn(y, label)
             loss.backward()
 
