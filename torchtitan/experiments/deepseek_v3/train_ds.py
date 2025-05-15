@@ -237,6 +237,7 @@ def run_full_model(
     logger.info("Dumping token tracking...")
     if rank == 0:
         model.model.token_tracker.print_summary()
+        model.model.token_tracker.export_csv_report()
 
 
 if __name__ == "__main__":

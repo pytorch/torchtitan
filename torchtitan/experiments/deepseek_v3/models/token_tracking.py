@@ -17,7 +17,7 @@ class TokenExpertTracker:
             if token_id not in self.token_values:
                 self.token_values[i] = token_id
 
-        print(f"Stored tokens = {self.token_values=}")
+        # print(f"Stored tokens = {self.token_values=}")
         # assert False, "check"
 
     def record_expert_assignment(self, layer_id, topk_idx):
@@ -129,8 +129,6 @@ class TokenExpertTracker:
         """
         import csv
 
-        import numpy as np
-
         # Get all tokens and layers
         tokens = sorted(self.token_history.keys())
         layers = sorted(
@@ -143,12 +141,14 @@ class TokenExpertTracker:
 
             # Write header row with layer IDs
             writer.writerow(
-                ["token_pos"] + [f"layer_{layer_id}" for layer_id in layers]
+                ["token_pos", "token_value"]
+                + [f"layer_{layer_id}" for layer_id in layers]
             )
 
             # Write data rows
             for token_pos in tokens:
-                row = [token_pos]
+                token_val = self.token_values.get(token_pos, "unknown")
+                row = [token_pos, token_val]
                 for layer_id in layers:
                     if layer_id in self.token_history[token_pos]:
                         # Use the first expert assigned to this token in this layer
