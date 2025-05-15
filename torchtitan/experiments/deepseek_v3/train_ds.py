@@ -7,6 +7,7 @@
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
 
+import time
 from collections.abc import Callable
 from typing import Iterable, Optional, TypeAlias
 
@@ -68,10 +69,15 @@ class Trainer:
     step: int
 
 
-def next_batch(data_iterator: Iterable) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+def next_batch(
+    data_iterator: Iterable, metrics_processor
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
 
+    data_load_start = time.perf_counter()
     batch = next(data_iterator)
     input_dict, labels = batch
+    metrics_processor.ntokens_since_last_log += labels.numel()
+    metrics_processor.data_loading_times.append(time.perf_counter() - data_load_start)
 
     for k, _ in input_dict.items():
         input_dict[k] = input_dict[k].to(_device_type)
@@ -151,6 +157,7 @@ def run_full_model(
     metrics_processor = build_metrics_processor(
         config, proxy_parallel_dims, model_args=None
     )
+    metrics_processor.num_flops_per_token = 100
 
     color = metrics_processor.color
     device_memory_monitor = metrics_processor.device_memory_monitor
@@ -163,7 +170,7 @@ def run_full_model(
         f"{color.blue}{device_mem_stats.max_reserved_gib:.2f}GiB {color.reset}"
         f"{color.green}({device_mem_stats.max_reserved_pct:.2f}%){color.reset}"
     )
-    assert False, "check stats"
+
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
@@ -182,7 +189,7 @@ def run_full_model(
     for step in range(steps):
         optimizer.zero_grad()
 
-        inputs, label = next_batch(data_iterator)
+        inputs, label = next_batch(data_iterator, metrics_processor)
         x = inputs["input"]
 
         if pp_size > 1:
@@ -214,12 +221,16 @@ def run_full_model(
             loss.backward()
 
         if pp_rank == pp_size - 1:
-            logger.info(f"***** {loss=}")
+
+            global_avg_loss = global_max_loss = loss  # .detach().item()
+
+            metrics_processor.log(step, global_avg_loss, global_max_loss)
 
         optimizer.step()
         lr_scheduler.step()
 
-    logger.info("Training complete")
+    metrics_processor.close()
+    logger.info("Training completed")
 
 
 if __name__ == "__main__":
