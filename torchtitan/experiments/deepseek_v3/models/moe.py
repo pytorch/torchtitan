@@ -34,6 +34,7 @@ from torchtitan.experiments.kernels.group_gemms.group_gemms import (
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
+from torchtitan.tools.logging import logger
 
 from .mlp import MLP
 
@@ -162,12 +163,14 @@ class MoE(nn.Module):
     # which group gemm to use?
     group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx, token_tracker):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.activation_function = MLP.act_fn
+        self.layer_idx = layer_idx
+        self.layer_token_tracker = token_tracker
 
         # ep_size is the number of ranks in expert dimension
         if config.ep_size <= 1:
@@ -321,6 +324,10 @@ class MoE(nn.Module):
         orig_shape = hidden_states.shape
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
+        # token tracking
+        logger.info(f"MoE layer {self.layer_idx} topk_idx: {topk_idx}")
+        self.layer_token_tracker.record_expert_assignment(self.layer_idx, topk_idx)
+
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         if self.shuffle_method == "symm_mem":
             y = self.moe_on_device(hidden_states, topk_idx, topk_weight)

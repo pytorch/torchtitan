@@ -22,17 +22,21 @@ from .mlp import MLP
 from .model_config import ModelArgs
 from .moe import MoE
 from .normalization import RMSNorm
+from .token_tracking import TokenExpertTracker
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: ModelArgs, layer_idx: int):
+    def __init__(
+        self, config: ModelArgs, layer_idx: int, token_tracker: TokenExpertTracker
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         self.self_attn = Attention(config=config, layer_idx=layer_idx)
+        self.layer_token_tracker = token_tracker
 
         self.mlp = (
-            MoE(config)
+            MoE(config, layer_idx, token_tracker)
             if (
                 config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
@@ -93,6 +97,9 @@ class DeepseekModel(torch.nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
+        # token tracking
+        self.token_tracker = TokenExpertTracker()
+
         # Creating model parts related to my stage
         assert (
             config.stage_idx < config.num_stages
@@ -119,7 +126,9 @@ class DeepseekModel(torch.nn.Module):
         layer_id_start = sum(layers_per_stage[: config.stage_idx])
         layer_id_end = layer_id_start + layers_per_stage[config.stage_idx]
         for layer_id in range(layer_id_start, layer_id_end):
-            self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
+            self.layers[str(layer_id)] = DecoderLayer(
+                config, layer_id, self.token_tracker
+            )
 
         self.norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -169,6 +178,7 @@ class DeepseekModel(torch.nn.Module):
 class DeepseekForCausalLM(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
+
         self.model = DeepseekModel(config)
         self.lm_head = (
             nn.Linear(config.hidden_size, config.vocab_size, bias=False)
