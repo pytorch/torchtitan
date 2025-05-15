@@ -17,7 +17,7 @@ class TokenExpertTracker:
             if token_id not in self.token_values:
                 self.token_values[i] = token_id
 
-        # print(f"Stored tokens = {self.token_values=}")
+        print(f"Stored tokens = {self.token_values=}")
         # assert False, "check"
 
     def record_expert_assignment(self, layer_id, topk_idx):

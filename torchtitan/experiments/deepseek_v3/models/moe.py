@@ -325,7 +325,6 @@ class MoE(nn.Module):
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         # token tracking
-        logger.info(f"MoE layer {self.layer_idx} topk_idx: {topk_idx}")
         self.layer_token_tracker.record_expert_assignment(self.layer_idx, topk_idx)
 
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])

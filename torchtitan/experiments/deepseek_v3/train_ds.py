@@ -191,6 +191,9 @@ def run_full_model(
 
         inputs, label = next_batch(data_iterator, metrics_processor)
         x = inputs["input"]
+        if rank == 0:
+            model.model.token_tracker.record_tokens(x)
+            logger.info(f"Recording batch, tokens = {x.shape=}, {x=}")
 
         if pp_size > 1:
 
@@ -231,6 +234,9 @@ def run_full_model(
 
     metrics_processor.close()
     logger.info("Training completed")
+    logger.info("Dumping token tracking...")
+    if rank == 0:
+        model.model.token_tracker.print_summary()
 
 
 if __name__ == "__main__":
