@@ -41,6 +41,7 @@ from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
 from torchtitan.experiments.deepseek_v3.models.model_config import (
     deepseek_config_registry,
 )
+from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import get_device_info
 
@@ -150,10 +151,19 @@ def run_full_model(
     metrics_processor = build_metrics_processor(
         config, proxy_parallel_dims, model_args=None
     )
-    logger.info(f"{metrics_processor=}")
+
     color = metrics_processor.color
     device_memory_monitor = metrics_processor.device_memory_monitor
 
+    # logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
+    device_module, device_type = utils.device_module, utils.device_type
+    device_mem_stats = device_memory_monitor.get_peak_stats()
+    logger.info(
+        f"{color.yellow}{device_type.upper()} memory usage for model:  {color.reset}"
+        f"{color.blue}{device_mem_stats.max_reserved_gib:.2f}GiB {color.reset}"
+        f"{color.green}({device_mem_stats.max_reserved_pct:.2f}%){color.reset}"
+    )
+    assert False, "check stats"
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
@@ -169,7 +179,7 @@ def run_full_model(
     loss = float("inf")
     data_iterator = iter(dataloader)
 
-    for _ in range(steps):
+    for step in range(steps):
         optimizer.zero_grad()
 
         inputs, label = next_batch(data_iterator)
