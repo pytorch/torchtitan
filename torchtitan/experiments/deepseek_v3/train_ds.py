@@ -23,10 +23,15 @@ from torchtitan.components.lr_scheduler import (
     build_lr_schedulers,
     LRSchedulersContainer,
 )
-from torchtitan.components.metrics import MetricsProcessor
+
+from torchtitan.components.metrics import (
+    build_metrics_processor,
+    ensure_pp_loss_visible,
+)
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
     parallelize_deepseek,
 )
@@ -87,6 +92,7 @@ def run_full_model(
     world_mesh = dist.init_device_mesh(
         "cuda", (pp_dim, ep_dim, fsdp_dim), mesh_dim_names=("pp", "ep", "fsdp")
     )
+    logger.info(f"{world_mesh.size()=}")
 
     rank = dist.get_rank()
     device_count = torch.cuda.device_count()
@@ -129,6 +135,24 @@ def run_full_model(
     torch.manual_seed(ep_rank)
     bs = config.training.batch_size  # * microbatches  # 4
     seqlen = config.training.seq_len  # 128
+
+    # metrics manager
+    proxy_parallel_dims = ParallelDims(
+        dp_replicate=ep_size,
+        dp_shard=fsdp_dim,
+        pp=pp_size,
+        cp=1,
+        tp=1,
+        world_size=world_mesh.size(),
+        enable_loss_parallel=False,
+    )
+
+    metrics_processor = build_metrics_processor(
+        config, proxy_parallel_dims, model_args=None
+    )
+    logger.info(f"{metrics_processor=}")
+    color = metrics_processor.color
+    device_memory_monitor = metrics_processor.device_memory_monitor
 
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
