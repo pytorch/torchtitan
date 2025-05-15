@@ -227,7 +227,10 @@ def save_image(
     x = x.clamp(-1, 1)
     x = rearrange(x[0], "c h w -> h w c")
 
-    img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
+    x_np = (127.5 * (x + 1.0)).cpu().byte().numpy()
+    x_min, x_max = x_np.min(), x_np.max()
+    x_normalized = ((x_np - x_min) / (x_max - x_min) * 255).astype("uint8")
+    img = Image.fromarray(x_normalized)
 
     exif_data = Image.Exif()
     exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"

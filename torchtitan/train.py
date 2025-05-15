@@ -14,11 +14,8 @@ import torch
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-<<<<<<< HEAD
-=======
 from torch.distributed.elastic.multiprocessing.errors import record
 
->>>>>>> 7c92b2a (test)
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -438,6 +435,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.step += 1
                 self.gc_handler.run(self.step)
                 self.train_step(inputs, labels)
+                if torch.distributed.get_rank() == 184:
+                    logger.info(f"After train_step for rank 184")
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
                 )
