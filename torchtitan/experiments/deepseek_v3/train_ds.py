@@ -70,7 +70,6 @@ def next_batch(data_iterator: Iterable) -> tuple[dict[str, torch.Tensor], torch.
     for k, _ in input_dict.items():
         input_dict[k] = input_dict[k].to(_device_type)
     labels = labels.to(_device_type)
-    logger.info(f"{labels.shape=}")
     return input_dict, labels
 
 
@@ -131,21 +130,18 @@ def run_full_model(
     bs = config.training.batch_size  # * microbatches  # 4
     seqlen = config.training.seq_len  # 128
 
-    # x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
-    # label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
-    # label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
-
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
     ft_manager = ft.init_ft_manager(config)
     optimizer = build_optimizers([model], config, ft_manager)
-    print(f"Success! {optimizer=}")
+    # print(f"Success! {optimizer=}")
     lr_scheduler = build_lr_schedulers(optimizer, config)
-    print(f"Success! {lr_scheduler=}")
+    # print(f"Success! {lr_scheduler=}")
 
     # Run forward and backward
-    steps = 30
+    steps = config.training.steps
+
     loss = float("inf")
     data_iterator = iter(dataloader)
 
@@ -154,9 +150,9 @@ def run_full_model(
 
         inputs, label = next_batch(data_iterator)
         x = inputs["input"]
-        # logger.info(f"{label_real.shape=}, {label.shape=}, {x.shape=}")
 
         if pp_size > 1:
+
             # Create pipeline stage
             stage = PipelineStage(
                 model,
@@ -180,24 +176,16 @@ def run_full_model(
                 pp_schedule.step()
         else:
             y = model(x)
-            logger.info(f"{y.shape=},  {label.shape=}")
             loss = loss_fn(y, label)
             loss.backward()
 
         if pp_rank == pp_size - 1:
-            # logger.info(f"logits: {y.shape}")
             logger.info(f"***** {loss=}")
 
-        # if pp_rank == 0:
-        # param = model.get_parameter("model.layers.0.self_attn.q_proj.weight")
-        # logger.info(f"{torch.linalg.norm(param.grad)=}")
-
         optimizer.step()
-        logger.info(f"Optimizer step done!")
         lr_scheduler.step()
-        model.zero_grad()
 
-    logger.info("Backward done")
+    logger.info("Training complete")
 
 
 if __name__ == "__main__":
