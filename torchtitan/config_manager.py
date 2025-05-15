@@ -129,7 +129,7 @@ class Optimizer:
     eps: float = 1e-8
     """Epsilon value to use"""
 
-    implementation: Literal["for-loop", "foreach", "fused"] = "for-loop"
+    implementation: Literal["for-loop", "foreach", "fused"] = "foreach"
     """
     Specify which optimizer implementation to use:
     - 'fused': Use fused implementation (CUDA only) for best performance.

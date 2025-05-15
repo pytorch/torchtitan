@@ -133,7 +133,7 @@ def run_full_model(
 
     # x = torch.randint(model_args.vocab_size, (microbatches * bs, seqlen), device=device)
     # label = torch.rand(microbatches * bs, seqlen, model_args.vocab_size, device=device)
-    label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
+    # label = torch.rand(bs, seqlen, model_args.vocab_size, device=device)
 
     # Create loss function
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
@@ -152,9 +152,9 @@ def run_full_model(
     for _ in range(steps):
         optimizer.zero_grad()
 
-        inputs, label_real = next_batch(data_iterator)
+        inputs, label = next_batch(data_iterator)
         x = inputs["input"]
-        logger.info(f"{label_real.shape=}, {label.shape=}, {x.shape=}")
+        # logger.info(f"{label_real.shape=}, {label.shape=}, {x.shape=}")
 
         if pp_size > 1:
             # Create pipeline stage
@@ -174,7 +174,7 @@ def run_full_model(
                 y = pp_schedule.step(x)
             elif pp_rank == pp_size - 1:
                 # last rank...run loss function
-                y = pp_schedule.step(target=label_real, losses=losses)
+                y = pp_schedule.step(target=label, losses=losses)
                 loss = torch.mean(torch.stack(losses))
             else:
                 pp_schedule.step()
