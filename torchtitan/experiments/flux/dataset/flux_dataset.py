@@ -58,8 +58,9 @@ def _process_cc12m_image(
     if resized_img.mode != "RGB":
         resized_img = resized_img.convert("RGB")
 
+    # Normalize the image to [-1, 1]
     np_img = np.array(resized_img).transpose((2, 0, 1))
-    tensor_img = torch.tensor(np_img).float() / 255.0
+    tensor_img = torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
 
     # NOTE: The following commented code is an alternative way
     # img_transform = transforms.Compose(
