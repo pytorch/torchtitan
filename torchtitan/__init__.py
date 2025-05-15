@@ -8,6 +8,7 @@
 
 # Import to register Float8Converter.
 import torchtitan.components.float8  # noqa: F401
+import torchtitan.components.mx  # noqa: F401
 
 # Import the built-in models here so that the corresponding register_model_spec()
 # will be called.
