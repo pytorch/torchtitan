@@ -294,7 +294,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self, data_iterator: Iterable
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         data_load_start = time.perf_counter()
-        batch = next(data_iterator)
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In next_batch, before calling next() for rank 184")
+        try:
+            batch = next(data_iterator)
+        except Exception as e:
+            logger.error(f"Error in next_batch when calling next(data_iterator): {e}")
+            raise  # Re-raise the exception after logging it
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In next_batch, after calling next() for rank 184")
         input_dict, labels = batch
         self.metrics_processor.ntokens_since_last_log += labels.numel()
         self.metrics_processor.data_loading_times.append(
@@ -305,6 +313,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for k, _ in input_dict.items():
             input_dict[k] = input_dict[k].to(device_type)
         labels = labels.to(device_type)
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In next_batch, before returning from rank 184")
         return input_dict, labels
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
@@ -414,13 +424,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             data_iterator = iter(self.dataloader)
             while self.step < job_config.training.steps:
-                # save dummy checkpoint at step0
-                self.checkpointer.save(self.step, force=True)
                 self.step += 1
                 self.gc_handler.run(self.step)
 
+                if torch.distributed.get_rank() == 184:
+                    logger.info(f"Before dataloader, Training step {self.step}")
                 inputs, labels = self.next_batch(data_iterator)
+                if torch.distributed.get_rank() == 184:
+                    logger.info(f"After dataloader, Labels {labels.sum().item()}")
                 self.train_step(inputs, labels)
+                if torch.distributed.get_rank() == 184:
+                    logger.info(f"After train_step for rank 184")
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
                 )

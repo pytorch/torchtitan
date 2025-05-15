@@ -90,6 +90,8 @@ class FluxTrainer(Trainer):
             batch=input_dict,
         )
         labels = input_dict["img_encodings"]
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In train step, input_dict: {input_dict}")
 
         self.optimizers.zero_grad()
 
@@ -137,6 +139,9 @@ class FluxTrainer(Trainer):
             timesteps=timesteps.to(latents),
         )
 
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In train step, after model forward")
+
         # Convert sequence of patches to latent shape
         pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
         target = noise - labels
@@ -146,6 +151,9 @@ class FluxTrainer(Trainer):
         del (pred, noise, target)
         loss.backward()
 
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In train step, after loss backward")
+
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -154,7 +162,12 @@ class FluxTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In train step, after optimizer step")
         self.lr_schedulers.step()
+        if torch.distributed.get_rank() == 184:
+            logger.info(f"In train step, after lr schedulers step")
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):
@@ -184,9 +197,9 @@ class FluxTrainer(Trainer):
             model.eval()
             # We need to set reshard_after_forward before last forward pass.
             # So the model wieghts are sharded the same way for checkpoint saving.
-            model.final_layer.set_reshard_after_forward(True)
+            # model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
-            model.final_layer.set_reshard_after_forward(False)
+            # model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
