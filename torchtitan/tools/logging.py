@@ -12,6 +12,9 @@ logger = logging.getLogger()
 
 
 def init_logger():
+    # Clear any existing handlers to prevent duplicates
+    if logger.handlers:
+        logger.handlers.clear()
     logger.setLevel(logging.INFO)
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
