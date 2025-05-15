@@ -4,15 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# [Note] Getting the 'torchao' package:
-# This script requires the 'torchao' package to function correctly.
-# Please ensure you have this package installed from the appropriate repository.
-# You can obtain it from https://github.com/pytorch/ao by following the
-# installation instructions.
-
-# Note: Performance
-# The MX component is intended to be run under `torch.compile`` for competitive performance
-
+from functools import partial
 from importlib.metadata import version
 from importlib.util import find_spec
 from typing import Any, List
@@ -28,6 +20,8 @@ from torchtitan.protocols.model_converter import (
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
+from .utils import module_filter_fn
+
 # Maps titan recipe names to torchao mx recipe names
 NAME_MAP = {"mxfp8": "mxfp8_cublas"}
 
@@ -36,13 +30,12 @@ class MXConverter(ModelConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
     enabled: bool
-    filter_fqns: List[str] | str
+    filter_fqns: List[str]
     mx_config: Any  # MXLinearConfig type when imported
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         # Ensure minimum torchao versions
-        torchao_spec = find_spec("torchao")
-        if torchao_spec is None:
+        if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use MXFP8 linear layers."
             )
@@ -86,7 +79,11 @@ class MXConverter(ModelConverter):
         from torchao.quantization import quantize_
 
         assert isinstance(self.config, MXLinearConfig)
-        quantize_(model, config=self.config, filter_fn=self._module_filter_fn)
+        quantize_(
+            model,
+            config=self.config,
+            filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+        )
         logger.info("Swapped to MXLinear layers")
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -94,25 +91,6 @@ class MXConverter(ModelConverter):
         MXFP8 doesn't require any post-optimizer hooks at the moment
         """
         return
-
-    def _module_filter_fn(self, mod: nn.Module, fqn: str) -> bool:
-        """
-        Filter function to determine which modules should be converted.
-        For MXFP8, we only convert Linear modules with dimensions divisible by 16
-        and not matching any filtered FQNs.
-        """
-        if not isinstance(mod, nn.Linear):
-            return False
-
-        # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
-        dims_multiples_of_16 = (
-            mod.weight.shape[0] % 16 == 0 and mod.weight.shape[1] % 16 == 0
-        )
-
-        # If the fqn matches any filtered fqn, then we should not convert this module.
-        is_filtered_fqn = any(filtered_fqn in fqn for filtered_fqn in self.filter_fqns)
-
-        return dims_multiples_of_16 and not is_filtered_fqn
 
 
 register_model_converter(MXConverter, "mx")

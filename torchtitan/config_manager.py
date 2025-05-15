@@ -440,12 +440,10 @@ class Float8:
     for backward computation.
     """
 
-    recipe_name: Literal[
-        "tensorwise", "rowwise", "rowwise_with_gw_hp", "mxfp8"
-    ] | None = None
+    recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
     """If specified, creates float8 config from recipe name"""
 
-    filter_fqns: list[str] | str = field(default_factory=list)
+    filter_fqns: list[str] = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
@@ -461,7 +459,7 @@ class MX:
     recipe_name: Literal["mxfp8"] = "mxfp8"
     """If specified, creates float8 config from recipe name"""
 
-    filter_fqns: list[str] | str = field(default_factory=list)
+    filter_fqns: list[str] = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
