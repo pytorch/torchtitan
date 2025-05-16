@@ -72,6 +72,9 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--training.steps 20",
                 ],
             ],
@@ -99,28 +102,30 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Weights Only bf16",
             "model_weights_only_bf16",
         ),
+        # Parallelism tests. Note: Run DDP only will cause OOM
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--parallelism.data_parallel_shard_degree=8",
+                    "--parallelism.data_parallel_replicate_degree=1",
                 ]
             ],
-            "DDP",
-            "ddp",
-            ngpu=4,
+            "FSDP",
+            "fsdp",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_shard_degree=4",
                     "--parallelism.data_parallel_replicate_degree=2",
                 ]
             ],
             "HSDP",
             "hsdp",
-            ngpu=4,
+            ngpu=8,
         ),
+        # Inference tests
         # OverrideDefinitions(
         #     [
         #         [
@@ -169,7 +174,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
             #     "PROMPT='What is the meaning of life?' "
             #     f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             # )
-            # TODO: migrate the generate image script
+            # TODO: Add the generate image script
             cmd = None
 
         result = _run_cmd(cmd)
