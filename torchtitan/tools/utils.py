@@ -64,9 +64,9 @@ def get_peak_flops(device_name: str) -> int:
     # Tuple of tuples mapping device names to their BF16 peak flops and source URL
     device_flops = (
         ("A100", 312e12, "https://www.nvidia.com/en-us/data-center/a100/"),
-        ("H100", 989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
         ("H100 NVL", 835e12, "https://www.nvidia.com/en-us/data-center/h100/"),
         ("H100 PCIe", 756e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        ("H100", 989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
         ("H200", 989e12, "https://www.nvidia.com/en-us/data-center/h200/"),
         (
             "B200",
