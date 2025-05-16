@@ -103,6 +103,8 @@ def get_peak_flops(device_name: str) -> int:
 
     # Check for Intel PVC
     if "Data Center GPU Max 1550" in device_name:
+        # Full EU mode (i.e. 512 max compute units): 340.8 TFLOPS (BF16)
+        # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
 
