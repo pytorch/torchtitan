@@ -107,9 +107,8 @@ def get_peak_flops(device_name: str) -> int:
         return 512 * max_comp_units * 1300 * 10**6
 
     # Return the peak flops for the known device or log a warning and assume A100
-    for key, (flops, url) in device_flops.items():
+    for key, (flops, _) in device_flops.items():
         if key in device_name:
-            logger.info(f"Using peak flops from {url}")
             return flops
 
     logger.warning(f"Peak flops undefined for: {device_name}, falling back to A100")
