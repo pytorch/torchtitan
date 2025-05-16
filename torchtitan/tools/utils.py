@@ -53,8 +53,40 @@ class GarbageCollection:
         logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
 def get_peak_flops(device_name: str) -> int:
+    """returns peak flops for BF16 (non-sparse) dtype for:
+
+    NVIDIA: A100, H100, H200, B200
+    AMD: MI250, MI300X, MI325X
+    Intel PVC GPU
+    """
+
+    # Dictionary mapping device names to their BF16 peak flops and source URL for where the data was obtained
+    device_flops = {
+        "A100": (312e12, "https://www.nvidia.com/en-us/data-center/a100/"),
+        "H100 NVL": (835e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        "H100 PCIe": (756e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        "H100": (989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        "H200": (989e12, "https://www.nvidia.com/en-us/data-center/h200/"),
+        "B200": (
+            4.5e15,
+            "https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703",
+        ),
+        "MI300X": (
+            1300e12,
+            "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html",
+        ),
+        "MI325X": (
+            1300e12,
+            "https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html",
+        ),
+        "MI250X": (
+            191.5e12,
+            "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
+        ),
+    }
+
+    # Attempt to determine the device name using lspci
     try:
         # Run the lspci command and capture the output
         result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
@@ -68,44 +100,20 @@ def get_peak_flops(device_name: str) -> int:
         device_name = " ".join(filtered_lines) or device_name
     except FileNotFoundError as e:
         logger.warning(f"Error running lspci: {e}, fallback to use device_name")
-    if "A100" in device_name:
-        # data from https://www.nvidia.com/en-us/data-center/a100/
-        return 312e12
-    elif "H100" in device_name:
-        # data from https://www.nvidia.com/en-us/data-center/h100/
-        # NOTE: Specifications are one-half lower without sparsity.
-        if "NVL" in device_name:
-            return 835e12
-        elif "PCIe" in device_name:
-            return 756e12
-        else:  # for H100 SXM and other variants
-            return 989e12
-    elif "H200" in device_name:
-        # data from https://www.nvidia.com/en-us/data-center/h200/
-        return 989e12
-    elif "B200" in device_name:
-        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
-        return 4.5e15
-    elif "MI300X" in device_name or "MI325X" in device_name:
-        # MI300X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
-        # MI325X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html
-        return 1300e12
-    elif "MI250X" in device_name:
-        # data from https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html (per GCD)
-        return 191.5e12
-    elif "Data Center GPU Max 1550" in device_name:
-        # Also known as Ponte Vecchio (PVC).
-        # data from https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2025-0/intel-xe-gpu-architecture.html
-        # Dot Product Accumulate Systolic (DPAS):
-        # - Freq: 1300MHz
-        # - #ops: 512
-        # Full EU mode (i.e. 512 max compute units): 340.8 TFLOPS (BF16)
-        # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
+
+    # Check for Intel PVC
+    if "Data Center GPU Max 1550" in device_name:
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
-    else:  # for other GPU types, assume A100
-        logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
-        return 312e12
+
+    # Return the peak flops for the known device or log a warning and assume A100
+    for key, (flops, url) in device_flops.items():
+        if key in device_name:
+            logger.info(f"Using peak flops from {url}")
+            return flops
+
+    logger.warning(f"Peak flops undefined for: {device_name}, falling back to A100")
+    return device_flops["A100"][0]
 
 
 @dataclass(frozen=True)
