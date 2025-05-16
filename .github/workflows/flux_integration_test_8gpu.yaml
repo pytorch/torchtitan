@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test
+name: Flux 8 GPU Integration Test
 
 on:
   push:
