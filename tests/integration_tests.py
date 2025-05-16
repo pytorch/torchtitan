@@ -558,7 +558,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/experiments/flux/train_configs"
+        "--config_dir", default="./torchtitan/models/llama3/train_configs"
     )
     parser.add_argument(
         "--test",
