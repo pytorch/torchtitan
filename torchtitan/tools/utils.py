@@ -53,7 +53,7 @@ class GarbageCollection:
         logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
+# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
 def get_peak_flops(device_name: str) -> int:
     try:
         # Run the lspci command and capture the output
@@ -83,6 +83,9 @@ def get_peak_flops(device_name: str) -> int:
     elif "H200" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/h200/
         return 989e12
+    elif "B200" in device_name:
+        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        return 4.5e15
     elif "MI300X" in device_name or "MI325X" in device_name:
         # MI300X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
         # MI325X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html
