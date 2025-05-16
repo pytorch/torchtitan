@@ -125,20 +125,6 @@ def build_test_list():
             "hsdp",
             ngpu=8,
         ),
-        # Inference tests
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #         ],
-        #         [
-        #             # placeholder for the generation script's generate step
-        #         ],
-        #     ],
-        #     "Generation script test",
-        #     "test_generate",
-        #     ngpu=2,
-        # ),
     ]
     return integration_tests_flavors
 
@@ -165,17 +151,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         logger.info(
             f"=====Flux Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-
-        # save checkpoint (idx == 0) and load it for generation (idx == 1)
-        if test_name == "test_generate_image" and idx == 1:
-            # cmd = (
-            #     f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-            #     f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
-            #     "PROMPT='What is the meaning of life?' "
-            #     f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
-            # )
-            # TODO: Add the generate image script
-            cmd = None
 
         result = _run_cmd(cmd)
         logger.info(result.stdout)
