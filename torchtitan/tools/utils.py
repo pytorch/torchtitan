@@ -61,30 +61,39 @@ def get_peak_flops(device_name: str) -> int:
     Intel PVC GPU
     """
 
-    # Dictionary mapping device names to their BF16 peak flops and source URL for where the data was obtained
-    device_flops = {
-        "A100": (312e12, "https://www.nvidia.com/en-us/data-center/a100/"),
-        "H100 NVL": (835e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        "H100 PCIe": (756e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        "H100": (989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        "H200": (989e12, "https://www.nvidia.com/en-us/data-center/h200/"),
-        "B200": (
+    # Tuple of tuples mapping device names to their BF16 peak flops and source URL
+    device_flops = (
+        ("A100", 312e12, "https://www.nvidia.com/en-us/data-center/a100/"),
+        ("H100", 989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        ("H100 NVL", 835e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        ("H100 PCIe", 756e12, "https://www.nvidia.com/en-us/data-center/h100/"),
+        ("H200", 989e12, "https://www.nvidia.com/en-us/data-center/h200/"),
+        (
+            "B200",
             4.5e15,
             "https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703",
         ),
-        "MI300X": (
+        (
+            "L40S",
+            362e12,
+            "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413",
+        ),
+        (
+            "MI300X",
             1300e12,
             "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html",
         ),
-        "MI325X": (
+        (
+            "MI325X",
             1300e12,
             "https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html",
         ),
-        "MI250X": (
+        (
+            "MI250X",
             191.5e12,
             "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
         ),
-    }
+    )
 
     # Attempt to determine the device name using lspci
     try:
@@ -103,19 +112,16 @@ def get_peak_flops(device_name: str) -> int:
 
     # Check for Intel PVC
     if "Data Center GPU Max 1550" in device_name:
-        # data from https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2025-0/intel-xe-gpu-architecture.html
-        # Full EU mode (i.e. 512 max compute units): 340.8 TFLOPS (BF16)
-        # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
 
     # Return the peak flops for the known device or log a warning and assume A100
-    for key, (flops, _) in device_flops.items():
+    for key, flops, _ in device_flops:
         if key in device_name:
             return flops
 
     logger.warning(f"Peak flops undefined for: {device_name}, falling back to A100")
-    return device_flops["A100"][0]
+    return device_flops[0][1]
 
 
 @dataclass(frozen=True)
