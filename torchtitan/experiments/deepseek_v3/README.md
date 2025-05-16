@@ -9,7 +9,8 @@ and scripts needed to run it.
 
 You will need to download a DeepSeek model's weights if you want to run a
 pre-trained checkpoint.  We provided a script to download the weights from
-HuggingFace Model Hub:
+HuggingFace Model Hub in /model/download.py.
+You can run it with the following:
 ```bash
 python download.py [vX]
 ```
@@ -23,6 +24,7 @@ command:
 ```bash
 torchrun --standalone --nproc-per-node 4 generate.py
 ```
+
 This will run inference on the `DeepSeek-V2-Lite-Chat` model using 4 GPUs by
 default.
 
@@ -31,10 +33,12 @@ followed by your prompt.
 
 ## Training
 
-The training script is in `train.py`. You can run it by the following command:
+The training script is in `train.py`. You can run it with the following command:
 ```bash
 torchrun --standalone --nproc-per-node 8 train.py
 ```
 
 This will run training on the `DeepSeek-V2-Lite-Chat` model using 8 GPUs by
 default, with pipeline parallel, expert parallel, and data parallel enabled.
+
+Alternatively, you can run training by using `bash run_traaining.sh`, and modifyh the script to your needs.

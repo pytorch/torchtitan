@@ -114,7 +114,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
-                sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
+                sample_tokens = self._tokenizer.encode(
+                    sample_text,
+                )  # TODO - this is temp override for ds....bos=True, eos=True)
                 self._all_tokens.extend(sample_tokens)
                 self._sample_idx += 1
 

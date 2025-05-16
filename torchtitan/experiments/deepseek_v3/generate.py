@@ -6,7 +6,7 @@
 
 # torchrun --standalone --nproc-per-node 4 generate.py
 
-# use inference.sh "Your Question Here?" to run inference with a single prompt.
+# use bash inference.sh "Your Question Here?" to run inference with a single prompt.
 
 import sys
 from dataclasses import dataclass
@@ -15,11 +15,13 @@ import torch
 import torch.distributed as dist
 
 from checkpoint import load_weights_from_hf
-from model import DeepseekForCausalLM
-from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
+from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
+from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
+from torchtitan.experiments.deepseek_v3.models.model_config import (
+    deepseek_config_registry,
+)
 
 from torchtitan.tools.utils import Color
 
@@ -367,7 +369,7 @@ if __name__ == "__main__":
 
     dist_config = create_dist_config(mesh)
     model, pp_schedule = create_model(dist_config)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = get_hf_tokenizer(model_id)
 
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},

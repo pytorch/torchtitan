@@ -129,7 +129,7 @@ class Optimizer:
     eps: float = 1e-8
     """Epsilon value to use"""
 
-    implementation: Literal["for-loop", "foreach", "fused"] = "fused"
+    implementation: Literal["for-loop", "foreach", "fused"] = "foreach"
     """
     Specify which optimizer implementation to use:
     - 'fused': Use fused implementation (CUDA only) for best performance.
@@ -340,6 +340,9 @@ class Parallelism:
     - 'alltoall' means to all-to-all shuffle the kv shards.
     The default value is 'allgather'.
     """
+
+    expert_parallel_degree: int = 1
+    """Expert parallelism degree. 1 means disabled."""
 
 
 @dataclass
