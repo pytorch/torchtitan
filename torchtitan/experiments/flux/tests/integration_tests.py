@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
+from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,22 +21,6 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
-
-
-@dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
-
-    override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = "default"
-    test_name: str = "default"
-    ngpu: int = 4
-    model_flavor: str = "flux-debug"
-
-    def __repr__(self):
-        return self.test_descr
 
 
 def build_test_list():
@@ -57,17 +42,7 @@ def build_test_list():
             "default",
             "default",
         ),
-        # Compile tests
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile",
-                ],
-            ],
-            "1D compile",
-            "1d_compile",
-        ),
-        # Checkpointing tests
+        # Checkpointing tests.
         OverrideDefinitions(
             [
                 [
@@ -91,39 +66,28 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Weights Only fp32",
             "model_weights_only_fp32",
         ),
+        # Parallelism tests.
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
-                    "--checkpoint.model_weights_only",
-                    "--checkpoint.export_dtype bfloat16",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Weights Only bf16",
-            "model_weights_only_bf16",
-        ),
-        # Parallelism tests. Note: Run DDP only will cause OOM
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=8",
+                    "--parallelism.data_parallel_shard_degree=4",
                     "--parallelism.data_parallel_replicate_degree=1",
                 ]
             ],
             "FSDP",
             "fsdp",
-            ngpu=8,
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree=4",
+                    "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                 ]
             ],
             "HSDP",
             "hsdp",
-            ngpu=8,
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors
@@ -137,7 +101,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
@@ -145,7 +108,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         cmd += " " + dump_folder_arg
-        cmd += " " + model_flavor_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(

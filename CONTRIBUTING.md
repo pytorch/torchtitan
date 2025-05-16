@@ -4,7 +4,7 @@ possible. Contributions should follow the [Contributing Guidelines](#contributin
 
 ### Setup
 ```
-pip install -r dev-requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 ### Pull Requests
