@@ -220,7 +220,7 @@ class FluxDataset(IterableDataset, Stateful):
                     logger.info(f"Dataset {self.dataset_name} is being re-looped.")
                     dataset_iterator = self._get_data_iter()
                     continue
-            except (UnicodeDecodeError, SyntaxError, OSError) as e:
+            except Exception as e:
                 # Handle other exception, eg, dataset corruption
                 logger.warning(
                     f"Dataset {self.dataset_name} has error while loading batch data. \
