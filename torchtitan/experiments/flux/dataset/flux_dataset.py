@@ -47,7 +47,7 @@ def _process_cc12m_image(
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = random.randint(0, new_width - output_size)
+        left = torch.randint(0, new_width - output_size + 1, (1,)).item()
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -56,7 +56,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = random.randint(0, new_width - output_size)
+        lower = torch.randint(0, new_height - output_size + 1, (1,)).item()
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
@@ -65,8 +65,9 @@ def _process_cc12m_image(
     if resized_img.mode != "RGB":
         resized_img = resized_img.convert("RGB")
 
+    # Normalize the image to [-1, 1]
     np_img = np.array(resized_img).transpose((2, 0, 1))
-    tensor_img = torch.tensor(np_img).float() / 255.0
+    tensor_img = torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
 
     # NOTE: The following commented code is an alternative way
     # img_transform = transforms.Compose(
@@ -231,6 +232,7 @@ class FluxDataset(IterableDataset, Stateful):
         infinite: bool = False,
         include_sample_id: bool = False,
     ) -> None:
+
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 

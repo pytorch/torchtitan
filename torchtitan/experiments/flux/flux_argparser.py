@@ -43,6 +43,12 @@ class Eval:
     """Frequency of evaluation/sampling during training"""
     save_img_folder: str = "img"
     """Directory to save image generated/sampled from the model"""
+    dataset: str | None = None
+    """Dataset to use for validation."""
+    dataset_path: str | None = None
+    """
+    Path to the dataset in the file system.
+    """
 
 
 @dataclass

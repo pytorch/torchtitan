@@ -67,9 +67,17 @@ class FluxTrainer(Trainer):
 
         model_config = self.train_spec.config[job_config.model.flavor]
 
+        # load components for pre-processing is the dataset is not preprocessed
         self.is_dataset_preprocessed = "preprocess" in job_config.training.dataset
 
-        # load components for pre-processing is the dataset is not preprocessed
+        self.val_dataloader = self.train_spec.build_val_dataloader_fn(
+            dp_world_size=self.dataloader.dp_world_size,
+            dp_rank=self.dataloader.dp_rank,
+            tokenizer=None,
+            job_config=job_config,
+            infinite=False,
+        )
+        
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
             model_config.autoencoder_params,
