@@ -291,14 +291,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
     def batch_generator(
-        self, data_iterator: Iterable
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
 
-        while True:
+        for batch in iter(data_iterable):
             data_load_start = time.perf_counter()
-            batch = next(data_iterator)
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
             self.metrics_processor.data_loading_times.append(
@@ -419,7 +418,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             sync_every=job_config.fault_tolerance.sync_steps,
             )
         ):
-            for inputs, labels in self.batch_generator(iter(self.dataloader)):
+            for inputs, labels in self.batch_generator(self.dataloader):
                 if self.step >= job_config.training.steps:
                     break
                 self.step += 1
