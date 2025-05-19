@@ -6,6 +6,7 @@
 
 import json
 import math
+import os
 import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -116,6 +117,40 @@ def _cc12m_wds_data_processor(
 
     return result
 
+def _coco2014_data_processor(
+    sample: dict[str, Any],
+    t5_tokenizer: FluxTokenizer,
+    clip_tokenizer: FluxTokenizer,
+    output_size: int = 256,
+    include_sample_id: bool = False,
+    autoencoder: Optional[AutoEncoder] = None,
+) -> dict[str, Any]:
+    """
+    Preprocess COCO2014 dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        t5_encoder: T5 encoder
+        clip_encoder: CLIP encoder
+        output_size: The output image size
+
+    """
+    img = _process_cc12m_image(sample["image"], output_size=output_size)
+    t5_tokens = t5_tokenizer.encode(sample["txt"])
+    clip_tokens = clip_tokenizer.encode(sample["txt"])
+
+    # Include the sample ID if available
+    result = {
+        "image": img,
+        "clip_tokens": clip_tokens,  # type: List[int]
+        "t5_tokens": t5_tokens,  # type: List[int],
+        "txt": sample["txt"],
+    }
+    if include_sample_id:
+        result["id"] = sample["__key__"]
+
+    return result
+
 
 def _flux_data_processor_from_encodings(
     sample: dict[str, Any],
@@ -177,6 +212,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
+    "cc12m-wds-30k": TextToImageDatasetConfig(
+        path="pixparse/cc12m-wds",
+        loader=lambda path: load_dataset(path, split="train", streaming=True).take(30_000),
+        data_processor=_cc12m_wds_data_processor,
+    ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
         path="outputs/preprocessed",
         loader=lambda path: load_dataset(
@@ -188,11 +228,6 @@ DATASETS = {
             streaming=True,
         ),
         data_processor=_flux_data_processor_from_encodings,
-    ),
-    "coco2014_30k": TextToImageDatasetConfig(
-        path="detection-datasets/coco",
-        loader=lambda path: concatenate_datasets([load_dataset(path, split=s, streaming=True) for s in ["train", "val"]]).take(30_000),
-        data_processor=_cc12m_wds_data_processor,
     ),
 }
 

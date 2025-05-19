@@ -417,6 +417,19 @@ class FluxTrainer(Trainer):
             )
         return images
     
+    def generate_val_timesteps(self, cur_val_timestep, samples):
+        # generate timesteps for validation set
+        # first offset is the timesteps that have already been generated
+        # cycle through timesteps 0-7, repeating as necessary
+        first_offset = torch.arange(cur_val_timestep, 8, device=self.device)
+        samples_left = samples - first_offset.numel()
+        val_timesteps = torch.arange(
+            0, 8, dtype=torch.int8, device=self.device
+        ).repeat_interleave(math.ceil(samples_left / 8))[:samples_left]
+        val_timesteps = torch.cat([first_offset, val_timesteps])
+        cur_val_timestep = (val_timesteps[-1].item() + 1) % 8
+        return val_timesteps, cur_val_timestep
+
     @record
     def train(self):
         job_config = self.job_config
@@ -450,10 +463,7 @@ class FluxTrainer(Trainer):
                     logger.info("Starting validation...")
                     # Follow procedure set out in Flux paper of stratified timestep sampling
                     val_data_iterator = self.batch_generator(self.val_dataloader)
-                    val_data_size = len(self.val_dataloader.dataset._data)
-                    val_timesteps = torch.arange(
-                        0, 8, dtype=torch.int8, device=self.device
-                    ).repeat_interleave(math.ceil(val_data_size / 8))[:val_data_size]
+                    cur_val_timestep = 0
                     eval_step = 0
                     eval_samples = 0
                     sum_loss_per_timestep = torch.zeros(8, device=self.device)
@@ -463,6 +473,7 @@ class FluxTrainer(Trainer):
                     for val_inputs, val_labels in val_data_iterator:
                         eval_step += 1
                         samples = len(val_labels)
+                        val_timesteps, cur_val_timestep = self.generate_val_timesteps(cur_val_timestep, samples)
                         loss, counts = self.eval_step(
                             val_inputs,
                             val_labels,
