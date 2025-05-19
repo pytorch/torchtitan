@@ -305,8 +305,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
             # Move tensors to the appropriate device
-            for k, _ in input_dict.items():
-                input_dict[k] = input_dict[k].to(device_type)
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(device_type)
             labels = labels.to(device_type)
 
             yield input_dict, labels
