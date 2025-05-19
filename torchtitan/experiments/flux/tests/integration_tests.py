@@ -9,8 +9,6 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Sequence
 
 from tests.integration_tests import OverrideDefinitions
 
