@@ -56,44 +56,56 @@ class GarbageCollection:
 def get_peak_flops(device_name: str) -> int:
     """returns peak flops for BF16 (non-sparse) dtype for:
 
-    NVIDIA: A100, H100, H200, B200
+    NVIDIA: A100, H100, H100 NVL, H100 PCIe, H200, B200
     AMD: MI250, MI300X, MI325X
     Intel PVC GPU
     """
+    # Convert device_name to lowercase for more robust (case-insensitive) matching
+    device_name_lower = device_name.lower()
 
-    # Tuple of tuples mapping device names to their BF16 peak flops and source URL
-    device_flops = (
-        ("A100", 312e12, "https://www.nvidia.com/en-us/data-center/a100/"),
-        ("H100 NVL", 835e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        ("H100 PCIe", 756e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        ("H100", 989e12, "https://www.nvidia.com/en-us/data-center/h100/"),
-        ("H200", 989e12, "https://www.nvidia.com/en-us/data-center/h200/"),
-        (
-            "B200",
-            4.5e15,
-            "https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703",
-        ),
-        (
-            "L40S",
-            362e12,
-            "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413",
-        ),
-        (
-            "MI300X",
-            1300e12,
-            "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html",
-        ),
-        (
-            "MI325X",
-            1300e12,
-            "https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html",
-        ),
-        (
-            "MI250X",
-            191.5e12,
-            "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
-        ),
-    )
+    # Dictionary mapping device names to their BF16 peak flops and source URL
+    device_info = {
+        "a100": {
+            "flops": 312e12,
+            "source": "https://www.nvidia.com/en-us/data-center/a100/",
+        },
+        "h100": {
+            "flops": 989e12,
+            "source": "https://www.nvidia.com/en-us/data-center/h100/",
+        },
+        "h100 nvl": {
+            "flops": 835e12,
+            "source": "https://www.nvidia.com/en-us/data-center/h100/",
+        },
+        "h100 pcie": {
+            "flops": 756e12,
+            "source": "https://www.nvidia.com/en-us/data-center/h100/",
+        },
+        "h200": {
+            "flops": 989e12,
+            "source": "https://www.nvidia.com/en-us/data-center/h200/",
+        },
+        "b200": {
+            "flops": 4.5e15,
+            "source": "https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703",
+        },
+        "l40s": {
+            "flops": 362e12,
+            "source": "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413",
+        },
+        "mi300x": {
+            "flops": 1300e12,
+            "source": "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html",
+        },
+        "mi325x": {
+            "flops": 1300e12,
+            "source": "https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html",
+        },
+        "mi250x": {
+            "flops": 191.5e12,
+            "source": "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
+        },
+    }
 
     # Attempt to determine the device name using lspci
     try:
@@ -107,6 +119,7 @@ def get_peak_flops(device_name: str) -> int:
         ]
         # Join all filtered lines into a single string
         device_name = " ".join(filtered_lines) or device_name
+        device_name_lower = device_name.lower()
     except FileNotFoundError as e:
         logger.warning(f"Error running lspci: {e}, fallback to use device_name")
 
@@ -115,13 +128,23 @@ def get_peak_flops(device_name: str) -> int:
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
 
-    # Return the peak flops for the known device or log a warning and assume A100
-    for key, flops, _ in device_flops:
-        if key in device_name:
-            return flops
+    # Handle H100 variants with specific names
+    if "h100" in device_name_lower:
+        if "nvl" in device_name_lower:
+            return device_info["h100 nvl"]["flops"]
+        elif "pcie" in device_name_lower:
+            return device_info["h100 pcie"]["flops"]
+        else:
+            return device_info["h100"]["flops"]
 
+    # Check for exact matches with other devices
+    for key, info in device_info.items():
+        if key in device_name_lower:
+            return info["flops"]
+
+    # If no match found, log a warning and return A100 flops as fallback
     logger.warning(f"Peak flops undefined for: {device_name}, falling back to A100")
-    return device_flops[0][1]
+    return device_info["a100"]["flops"]
 
 
 @dataclass(frozen=True)
