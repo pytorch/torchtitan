@@ -76,8 +76,8 @@ class FluxTrainer(Trainer):
             tokenizer=None,
             job_config=job_config,
             infinite=False,
-        )
-        
+        ) if job_config.eval.dataset else None
+
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
             model_config.autoencoder_params,
@@ -446,7 +446,7 @@ class FluxTrainer(Trainer):
                     self.step, force=(self.step == job_config.training.steps)
                 )
 
-                if self.step % job_config.eval.eval_freq == 0:
+                if self.step % job_config.eval.eval_freq == 0 and job_config.eval.dataset:
                     logger.info("Starting validation...")
                     # Follow procedure set out in Flux paper of stratified timestep sampling
                     val_data_iterator = self.batch_generator(self.val_dataloader)
