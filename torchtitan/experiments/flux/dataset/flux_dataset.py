@@ -6,6 +6,7 @@
 
 import json
 import math
+import random
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -33,19 +34,20 @@ from torchtitan.tools.logging import logger
 def _process_cc12m_image(
     img: PIL.Image.Image,
     output_size: int = 256,
+    skip_low_resolution: bool = True,
 ) -> Optional[torch.Tensor]:
     """Process CC12M image to the desired size."""
 
     width, height = img.size
     # Skip low resolution images
-    if width < output_size or height < output_size:
+    if skip_low_resolution and (width < output_size or height < output_size):
         return None
 
     if width >= height:
         # resize height to be equal to output_size, then crop
         new_width, new_height = math.ceil(output_size / height * width), output_size
         img = img.resize((new_width, new_height))
-        left = torch.randint(0, new_width - output_size + 1, (1,)).item()
+        left = random.randint(0, new_width - output_size)
         resized_img = img.crop((left, 0, left + output_size, output_size))
     else:
         # resize width to be equal to output_size, the crop
@@ -54,7 +56,7 @@ def _process_cc12m_image(
             math.ceil(output_size / width * height),
         )
         img = img.resize((new_width, new_height))
-        lower = torch.randint(0, new_height - output_size + 1, (1,)).item()
+        lower = random.randint(0, new_width - output_size)
         resized_img = img.crop((0, lower, output_size, lower + output_size))
 
     assert resized_img.size[0] == resized_img.size[1] == output_size
@@ -63,9 +65,8 @@ def _process_cc12m_image(
     if resized_img.mode != "RGB":
         resized_img = resized_img.convert("RGB")
 
-    # Normalize the image to [-1, 1]
     np_img = np.array(resized_img).transpose((2, 0, 1))
-    tensor_img = torch.tensor(np_img).float() / 255.0 * 2.0 - 1.0
+    tensor_img = torch.tensor(np_img).float() / 255.0
 
     # NOTE: The following commented code is an alternative way
     # img_transform = transforms.Compose(
@@ -106,7 +107,8 @@ def _cc12m_wds_data_processor(
     result = {
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
-        "t5_tokens": t5_tokens,  # type: List[int]
+        "t5_tokens": t5_tokens,  # type: List[int],
+        "txt": sample["txt"],
     }
     if include_sample_id:
         result["id"] = sample["__key__"]
@@ -229,7 +231,6 @@ class FluxDataset(IterableDataset, Stateful):
         infinite: bool = False,
         include_sample_id: bool = False,
     ) -> None:
-
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
@@ -285,73 +286,75 @@ class FluxDataset(IterableDataset, Stateful):
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_samples: list[dict[str, Any]] = []
+        self._epoch = 0
+        self._restored_checkpoint = False
+
+    def reset(self):
+        self._sample_idx = 0
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
             return iter([])
 
-        it = iter(self._data)
-        for _ in range(self._sample_idx):
-            next(it)
-        return it
+        return iter(self._data)
 
     def __iter__(self):
-        dataset_iterator = self._get_data_iter()
+        # Initialize the dataset iterator
+        iterator = self._get_data_iter()
+        
+        # Skip samples if we're resuming from a checkpoint
+        if self._restored_checkpoint:
+            logger.info(f"Restoring dataset state: skipping {self._sample_idx} samples")
+            for _ in range(self._sample_idx):
+                next(iterator)
+            self._restored_checkpoint = False
+        
         while True:
             try:
-                sample = next(dataset_iterator)
-            except StopIteration:
-                if not self.infinite:
+                sample = next(iterator)
+                
+                # Use the dataset-specific preprocessor
+                sample_dict = self._data_processor(
+                    sample,
+                    self._t5_tokenizer,
+                    self._clip_tokenizer,
+                    output_size=self.job_config.training.img_size,
+                )
+
+                # skip low quality image or image with color channel = 1
+                if sample_dict["image"] is None:
                     logger.warning(
-                        f"Dataset {self.dataset_name} has run out of data. \
-                         This might cause NCCL timeout if data parallelism is enabled."
+                        f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
                     )
-                    break
-                else:
-                    # Reset offset for the next iteration if infinite
-                    self._sample_idx = 0
-                    logger.info(f"Dataset {self.dataset_name} is being re-looped.")
-                    dataset_iterator = self._get_data_iter()
                     continue
-            except (UnicodeDecodeError, SyntaxError, OSError) as e:
-                # Handle other exception, eg, dataset corruption
-                logger.warning(
-                    f"Dataset {self.dataset_name} has error while loading batch data. \
-                    Error {type(e).__name__}: {e}. The error could be the result of a streaming glitch."
-                )
-                continue
 
-            # Use the dataset-specific preprocessor
-            sample_dict = self._data_processor(
-                sample,
-                self._t5_tokenizer,
-                self._clip_tokenizer,
-                output_size=self.job_config.training.img_size,
-            )
-
-            # skip low quality image or image with color channel = 1
-            if sample_dict["image"] is None:
-                logger.warning(
-                    f"Low quality image {sample['__key__']} is skipped in Flux Dataloader."
-                )
-                continue
-
-            # Classifier-free guidance: Replace some of the strings with empty strings.
-            # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-            dropout_prob = self.job_config.training.classifer_free_guidance_prob
-            if dropout_prob > 0.0:
-                if torch.rand(1).item() < dropout_prob:
+                # Classifier-free guidance: Replace some of the strings with empty strings.
+                # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+                dropout_prob = self.job_config.training.classifer_free_guidance_prob
+                if dropout_prob > 0.0 and random.random() < dropout_prob:
                     sample_dict["t5_tokens"] = self._t5_empty_token
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
-            self._sample_idx += 1
+                self._sample_idx += 1
 
-            labels = sample_dict.pop("image")
-            yield sample_dict, labels
+                labels = sample_dict.pop("image")
+                yield sample_dict, labels
+                
+            except StopIteration:
+                # Handle the end of the iterator
+                self.reset()
+                if not self.infinite:
+                    logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                    break
+                    
+                # Reset for next epoch if infinite
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                iterator = self._get_data_iter()
+                
 
     def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
+        self._sample_idx = state_dict.get("sample_idx", 0)
+        self._restored_checkpoint = True  # Mark that we've loaded from a checkpoint
 
     def state_dict(self):
         return {
@@ -359,7 +362,49 @@ class FluxDataset(IterableDataset, Stateful):
         }
 
 
-def build_flux_dataloader(
+def build_flux_train_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    job_config: JobConfig,
+    tokenizer: FluxTokenizer | None,
+    infinite: bool = True,
+) -> ParallelAwareDataloader:
+    return _build_flux_dataloader(
+        dataset_name=job_config.training.dataset,
+        dataset_path=job_config.training.dataset_path,
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
+        job_config=job_config,
+        tokenizer=tokenizer,
+        infinite=infinite,
+        batch_size=job_config.training.batch_size,
+    )
+
+
+def build_flux_val_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    job_config: JobConfig,
+    tokenizer: FluxTokenizer | None,
+    infinite: bool = False,
+) -> ParallelAwareDataloader:
+    print(job_config.eval.dataset_path)
+    
+    return _build_flux_dataloader(
+        dataset_name=job_config.eval.dataset,
+        dataset_path=job_config.eval.dataset_path,
+        dp_world_size=dp_world_size,
+        dp_rank=dp_rank,
+        job_config=job_config,
+        tokenizer=tokenizer,
+        infinite=infinite,
+        batch_size=job_config.eval.batch_size,
+    )
+
+
+def _build_flux_dataloader(
+    dataset_name: str,
+    dataset_path: str,
     dp_world_size: int,
     dp_rank: int,
     job_config: JobConfig,
@@ -367,12 +412,9 @@ def build_flux_dataloader(
     tokenizer: FluxTokenizer | None,
     infinite: bool = True,
     include_sample_id: bool = False,
+    batch_size: int = 4,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.batch_size
-
     t5_encoder_name = job_config.encoder.t5_encoder
     clip_encoder_name = job_config.encoder.clip_encoder
     max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
@@ -401,3 +443,4 @@ def build_flux_dataloader(
         dp_world_size=dp_world_size,
         batch_size=batch_size,
     )
+
