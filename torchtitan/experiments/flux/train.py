@@ -477,7 +477,7 @@ class FluxTrainer(Trainer):
                         loss, counts = self.eval_step(
                             val_inputs,
                             val_labels,
-                            val_timesteps[eval_samples : eval_samples + samples],
+                            val_timesteps,
                         )
                         eval_samples += samples
                         sum_loss_per_timestep += loss
