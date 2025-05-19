@@ -49,6 +49,8 @@ class Eval:
     """
     Path to the dataset in the file system.
     """
+    batch_size: int = 16
+    """Batch size for validation."""
 
 
 @dataclass
