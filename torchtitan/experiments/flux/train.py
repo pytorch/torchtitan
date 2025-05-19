@@ -421,7 +421,7 @@ class FluxTrainer(Trainer):
         # generate timesteps for validation set
         # first offset is the timesteps that have already been generated
         # cycle through timesteps 0-7, repeating as necessary
-        first_offset = torch.arange(cur_val_timestep, 8, device=self.device)
+        first_offset = torch.arange(cur_val_timestep, 8, device=self.device)[:samples]
         samples_left = samples - first_offset.numel()
         val_timesteps = torch.arange(
             0, 8, dtype=torch.int8, device=self.device
