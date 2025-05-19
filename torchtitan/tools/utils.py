@@ -69,16 +69,16 @@ def get_peak_flops(device_name: str) -> int:
             "flops": 312e12,
             "source": "https://www.nvidia.com/en-us/data-center/a100/",
         },
-        "h100": {
-            "flops": 989e12,
-            "source": "https://www.nvidia.com/en-us/data-center/h100/",
-        },
         "h100 nvl": {
             "flops": 835e12,
             "source": "https://www.nvidia.com/en-us/data-center/h100/",
         },
         "h100 pcie": {
             "flops": 756e12,
+            "source": "https://www.nvidia.com/en-us/data-center/h100/",
+        },
+        "h100": {
+            "flops": 989e12,
             "source": "https://www.nvidia.com/en-us/data-center/h100/",
         },
         "h200": {
