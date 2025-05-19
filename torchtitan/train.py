@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
@@ -414,8 +414,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             data_iterator = iter(self.dataloader)
             while self.step < job_config.training.steps:
+                # save dummy checkpoint at step0
+                self.checkpointer.save(self.step, force=True)
                 self.step += 1
                 self.gc_handler.run(self.step)
+
                 inputs, labels = self.next_batch(data_iterator)
                 self.train_step(inputs, labels)
                 self.checkpointer.save(
