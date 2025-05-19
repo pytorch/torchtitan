@@ -28,14 +28,14 @@ lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 30_000  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
 batch_size = 4
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
-steps = 300_000
+steps = 30_000
 compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1
@@ -44,7 +44,7 @@ img_size = 256
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
-max_t5_encoding_len = 4096
+max_t5_encoding_len = 512
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [eval]
@@ -63,3 +63,11 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 
 [activation_checkpoint]
 mode = "full"
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval = 1_000
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]

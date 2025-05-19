@@ -12,6 +12,7 @@ class Tokenizer(ABC):
     # basic tokenizer interface, for typing purpose mainly
     def __init__(self):
         self._n_words = 8
+        self.eos_id = 0
 
     @abstractmethod
     def encode(self, *args, **kwargs) -> list[int]:

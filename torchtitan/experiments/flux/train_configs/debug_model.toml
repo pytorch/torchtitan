@@ -45,7 +45,7 @@ img_size = 256
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
-max_t5_encoding_len = 4096
+max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [eval]
@@ -64,3 +64,11 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 
 [activation_checkpoint]
 mode = "full"
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval = 5
+model_weights_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]

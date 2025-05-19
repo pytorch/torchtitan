@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
@@ -43,9 +43,14 @@ class FluxTrainer(Trainer):
 
         self.preprocess_fn = preprocess_data
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
-        # We cast the encoders and it's input/output to this dtype.
-        # For Flux model, we use FSDP with mixed precision training.
-        self._dtype = torch.bfloat16
+        # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
+        # the dtype for encoders is torch.float32 (default dtype for Flux Model).
+        # Otherwise, we use the same dtype as mixed precision training process.
+        self._dtype = (
+            TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
+            if self.parallel_dims.dp_shard_enabled
+            else torch.float32
+        )
 
         # load components
         model_config = self.train_spec.config[job_config.model.flavor]
@@ -92,6 +97,7 @@ class FluxTrainer(Trainer):
         # the major variables that are used in the training loop.
         model_parts = self.model_parts
         assert len(self.model_parts) == 1
+        # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
         model = self.model_parts[0]
 
         world_mesh = self.world_mesh
@@ -176,7 +182,11 @@ class FluxTrainer(Trainer):
             or self.step == self.job_config.training.steps
         ):
             model.eval()
+            # We need to set reshard_after_forward before last forward pass.
+            # So the model wieghts are sharded the same way for checkpoint saving.
+            model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
+            model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):

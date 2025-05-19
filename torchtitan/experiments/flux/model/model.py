@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 import torch
 
 from torch import nn, Tensor
-from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.config_manager import JobConfig
 
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.model.layers import (
@@ -41,10 +39,6 @@ class FluxModelArgs(BaseModelArgs):
     theta: int = 10_000
     qkv_bias: bool = True
     autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
-
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        # context_in_dim is the same as the T5 embedding dimension
-        self.context_in_dim = job_config.encoder.max_t5_encoding_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder

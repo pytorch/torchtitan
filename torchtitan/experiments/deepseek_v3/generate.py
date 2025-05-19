@@ -19,8 +19,9 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from torchtitan.tools.utils import Color
 from transformers import AutoTokenizer
+
+from torchtitan.tools.utils import Color
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -126,7 +127,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 16384
+    model_args.max_seq_len = 4096  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -203,7 +204,7 @@ def time_generation(func):
 
         if rank == 0:
             print(
-                f"\nGeneration time: {color.yellow}{elapsed_time/1000:.2f} seconds{color.reset}"
+                f"\nGeneration time: {color.yellow}{elapsed_time / 1000:.2f} seconds{color.reset}"
             )
             print(f"Tokens generated: {color.blue}{tokens_generated}{color.reset}")
             print(
@@ -223,7 +224,7 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 100,
+    n_tokens: int = 200,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -240,6 +241,10 @@ def generate(
     eos_token_id = tokenizer.eos_token_id
     # Create tensor on device for comparison
     eos_tensor = torch.tensor([eos_token_id], device=device)
+
+    # Print initial progress indicator
+    if rank == 0:
+        print("Generating: ", end="", flush=True)
 
     for _ in range(n_tokens):
         if dist_config.pp_size > 1:
@@ -284,7 +289,13 @@ def generate(
 
         tokens_generated += 1
 
+        # Print progress indicator every 20 tokens
+        if rank == 0 and tokens_generated % 20 == 0:
+            print(f"{color.yellow}:{color.reset}", end="", flush=True)
+
+    # Print newline after progress indicator
     if rank == 0:
+        print()
         colored_output = decode(tokenizer, x)
         print(f"Without CUDA Graph:\n{colored_output}")
 

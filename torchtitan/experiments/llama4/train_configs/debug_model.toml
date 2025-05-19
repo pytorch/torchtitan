@@ -26,9 +26,7 @@ tokenizer_path = "./tests/assets/test_tiktoken.model"
 # converters = ["float8"]
 
 [optimizer]
-# TODO: currently grouped mm in MoE doesn't work with AdamW, need to investigate
-# name = "AdamW"
-name = "Adam"
+name = "AdamW"
 lr = 4e-3
 eps = 1e-15
 

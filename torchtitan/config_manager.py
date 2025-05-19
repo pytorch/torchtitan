@@ -100,9 +100,6 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    norm_type: Literal["layernorm", "np_layernorm", "rmsnorm"] = "rmsnorm"
-    """Type of layer normalization to use [layernorm, np_layernorm, rmsnorm]"""
-
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
     """Tokenizer path"""
 
@@ -446,11 +443,27 @@ class Float8:
     recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
     """If specified, creates float8 config from recipe name"""
 
-    filter_fqns: list[str] | str = field(default_factory=list)
+    filter_fqns: list[str] = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
     Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    """
+
+
+@dataclass
+class MX:
+    use_fp8_dim1_cast_triton_kernel: bool = True
+    """Temp work around for inductor performance gap"""
+
+    recipe_name: Literal["mxfp8"] = "mxfp8"
+    """If specified, creates float8 config from recipe name"""
+
+    filter_fqns: list[str] = field(default_factory=list)
+    """
+    Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
+    nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
+    Example: --MXFloat8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
 
@@ -502,6 +515,19 @@ class FaultTolerance:
     min_replica_size: int = 1
     """The minimum number of FT replica for each step."""
 
+    semi_sync_method: str | None = None
+    """
+    The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
+    torchft are supported
+    (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
+    """
+
+    sync_steps: int = 5
+    """
+    Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
+    is set.
+    """
+
 
 @dataclass
 class Experimental:
@@ -542,6 +568,7 @@ class JobConfig:
         default_factory=ActivationCheckpoint
     )
     float8: Float8 = field(default_factory=Float8)
+    mx: MX = field(default_factory=MX)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
@@ -681,7 +708,7 @@ class ConfigManager:
             if name not in b_map:
                 result.append((name, f.type, field(default_factory=f.type)))
 
-        return make_dataclass(f"Merged{base.__name__}", result, bases=(object,))
+        return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))
 
     def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
         """Convert dictionary to dataclass, handling nested structures."""
@@ -729,3 +756,25 @@ class ConfigManager:
                 is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
             )
+
+
+if __name__ == "__main__":
+    # -----------------------------------------------------------------------------
+    # Run this module directly to debug or inspect configuration parsing.
+    #
+    # Examples:
+    #   Show help message:
+    #     > python -m torchtitan.config_manager --help
+    #
+    #   Parse and print a config with CLI arguments:
+    #     > python -m torchtitan.config_manager --profiling.enable_memory_snapshot
+    #
+    # -----------------------------------------------------------------------------
+
+    from rich import print as rprint
+    from rich.pretty import Pretty
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+
+    rprint(Pretty(config))

@@ -8,7 +8,7 @@ import os
 import time
 from collections import namedtuple
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -19,6 +19,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.train_spec import BaseModelArgs
+
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -129,7 +133,7 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, tag: str | None = None):
+    def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
         # Import wandb here to avoid startup import
         import wandb
 
@@ -142,6 +146,7 @@ class WandBLogger(BaseLogger):
         self.wandb.init(
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             dir=log_dir,
+            config=job_config.to_dict(),
         )
         logger.info("WandB logging enabled")
 
@@ -265,7 +270,7 @@ def _build_metric_logger(
     if metrics_config.enable_wandb:
         logger.debug("Attempting to create WandB logger")
         try:
-            return WandBLogger(base_log_dir, tag)
+            return WandBLogger(base_log_dir, job_config, tag)
         except Exception as e:
             if "No module named 'wandb'" in str(e):
                 logger.error(
@@ -412,14 +417,18 @@ class MetricsProcessor:
 
 
 def build_metrics_processor(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
+    job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    model_args: "BaseModelArgs | None" = None,
+    tag: str | None = None,
 ) -> MetricsProcessor:
     """Create a metrics processor.
 
     Args:
         job_config (JobConfig): Job configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
-        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+        model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
+        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
 
     Returns:
         MetricsProcessor: A metrics processor.

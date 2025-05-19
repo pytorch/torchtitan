@@ -61,6 +61,8 @@ class TransformerModelArgs(BaseModelArgs):
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
+        self.eos_id = tokenizer.eos_id
+
         if self.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",

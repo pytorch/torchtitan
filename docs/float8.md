@@ -1,4 +1,8 @@
-## Enable Float8 Training on H100s
+## Float8 Training on H100s
+
+Float8 training can provide substantial training speedups for models where the majority of GEMMs are sufficiently large enough that the speedup from using float8 tensorcores outweighs the overhead of dynamic quantization. See [here](https://github.com/pytorch/ao/tree/main/torchao/float8#performance) for microbenchmarks detailing the observed speedups for the forward + backward pass of a simple "layer norm => linear => sigmoid" model for different M,N,K sizes, which can help you determine if your model can benefit from float8 training. Note you can also use float8 training for only the subset of layers which will benefit from it by using the [filter_fqns](https://github.com/pytorch/torchtitan/blob/3b85aa31fffc46ecbf785a57ee314a01614f572f/torchtitan/config_manager.py#L448) argument.
+
+### Usage steps
 
 Please install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/float8) to support float8 dtype
 ```
