@@ -89,9 +89,9 @@ def get_peak_flops(device_name: str) -> int:
             "flops": 4.5e15,
             "source": "https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703",
         },
-        "l40s": {
-            "flops": 362e12,
-            "source": "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413",
+        "mi250x": {
+            "flops": 191.5e12,
+            "source": "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
         },
         "mi300x": {
             "flops": 1300e12,
@@ -100,10 +100,6 @@ def get_peak_flops(device_name: str) -> int:
         "mi325x": {
             "flops": 1300e12,
             "source": "https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html",
-        },
-        "mi250x": {
-            "flops": 191.5e12,
-            "source": "https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html",
         },
     }
 
