@@ -446,7 +446,7 @@ class FluxTrainer(Trainer):
 
         logger.info("Starting validation...")
         # Follow procedure set out in Flux paper of stratified timestep sampling
-        val_data_iterator = self.batch_generator(self.val_dataloader)
+        val_data_iterator = iter(self.val_dataloader)
         cur_val_timestep = 0
         eval_step = 0
         eval_samples = 0
@@ -454,7 +454,11 @@ class FluxTrainer(Trainer):
         sum_timestep_counts = torch.zeros(8, device=self.device)
         # Iterate through all validation batches
         # TODO: not sure how to handle profiling with validation
-        for val_inputs, val_labels in val_data_iterator:
+        while True:
+            try:
+                val_inputs, val_labels = self.next_batch(val_data_iterator)
+            except StopIteration:
+                break
             eval_step += 1
             samples = len(val_labels)
             val_timesteps, cur_val_timestep = generate_val_timesteps(
