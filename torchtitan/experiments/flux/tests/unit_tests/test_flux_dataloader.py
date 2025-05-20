@@ -24,7 +24,7 @@ class TestFluxDataLoader:
 
         num_steps = 10
 
-        path = "torchtitan.experiments.flux.flux_argparser"
+        path = "torchtitan.experiments.flux.job_config"
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
