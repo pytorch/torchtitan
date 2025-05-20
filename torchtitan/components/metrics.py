@@ -38,6 +38,19 @@ DeviceMemStats = namedtuple(
 )
 
 
+def get_device_info():
+    device_type = _get_available_device_type()
+    if device_type is None:
+        device_type = "cuda"  # default device_type: cuda
+    device_module = _get_device_module(device_type)  # default device_module:torch.cuda
+    return device_type, device_module
+
+
+device_type, device_module = get_device_info()
+curr_device = f"{device_type}:0"
+device_name = device_module.get_device_name(curr_device)
+
+
 class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
         self.device = torch.device(device)  # device object
