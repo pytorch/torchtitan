@@ -1,4 +1,5 @@
 import torch
+from torchtitan.tools.logging import logger
 
 
 class TokenExpertTracker:
@@ -6,19 +7,33 @@ class TokenExpertTracker:
         self.layer_assignments = {}  # {layer_id: {token_id: [expert_ids]}}
         self.token_history = {}  # {token_id: {layer_id: [expert_ids]}}
         self.token_values = {}  # Store actual token values
+        self.counter = 0
 
     def record_tokens(self, tokens, layer_id=None):
-        """Record the input tokens at the starting layer"""
+        """Record the input tokens at the starting layer, limited to first 10 tokens"""
         if tokens.dim() > 1:
             # Handle batched input - flatten for simplicity
             tokens = tokens.view(-1)
 
+        logger.info(f"Starting toknn recording, tokens = {tokens.shape=}, {tokens=}")
+
+        logger.info(f"token_values = {self.token_values=}")
+        # logger.info(f"token_history = {self.token_history=}")
+        logger.info(f"layer_assignments = {self.layer_assignments=}")
+
         for i, token_id in enumerate(tokens.cpu().tolist()):
-            if token_id not in self.token_values:
+            logger.info(f"token_id = {token_id}, i = {i}")
+            if i not in self.token_values:
                 self.token_values[i] = token_id
 
-        # print(f"Stored tokens = {self.token_values=}")
-        # assert False, "check"
+        logger.info(f"Stored tokens = {self.token_values=}")
+        # logger.info(f"token_history = {self.token_history=}")
+        logger.info(f"layer_assignments = {self.layer_assignments=}")
+        logger.info("Done recording tokens")
+        # Remove the assert that was stopping execution
+
+        self.counter += 1
+        assert self.counter < 5, "check"
 
     def record_expert_assignment(self, layer_id, expert_indices):
         """
@@ -30,6 +45,9 @@ class TokenExpertTracker:
         """
         # Get all experts assigned to each token (all top_k values)
         experts_per_token = expert_indices.cpu().tolist()
+        logger.info(f"experts_per_token = {experts_per_token=}")
+        logger.info(f"token_values = {self.token_values=}")
+        logger.info(f"{layer_id=}")
 
         # For each token position, record which experts it was assigned to in this layer
         for token_pos, experts in enumerate(experts_per_token):

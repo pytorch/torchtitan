@@ -37,10 +37,10 @@ decay_type = "linear"
 lr_min = 0.1
 
 [training]
-batch_size = 4 # 8
-seq_len = 256 # 2048
+batch_size = 1 # 8
+seq_len = 16 # 2048
 max_norm = 1.0  # grad norm clipping
-steps = 5
+steps = 3
 compile = false
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
