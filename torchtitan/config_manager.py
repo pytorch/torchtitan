@@ -459,11 +459,12 @@ class MX:
     recipe_name: Literal["mxfp8"] = "mxfp8"
     """If specified, creates float8 config from recipe name"""
 
-    filter_fqns: list[str] = field(default_factory=list)
+    filter_fqns: list[str] = field(default_factory=lambda: ["output"])
     """
     Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
-    nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --MXFloat8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
+    By default we always skip the output layer.
+    Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
 
