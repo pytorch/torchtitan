@@ -389,7 +389,7 @@ class MetricsProcessor:
             f"{color.green}val loss: {loss:7.4f}  "
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,}  "
+            f"{color.blue}tps: {round(tps):,} {color.reset}"
         )
 
         self.ntokens_since_last_log = 0
