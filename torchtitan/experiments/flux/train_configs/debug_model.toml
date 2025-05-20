@@ -43,10 +43,11 @@ classifer_free_guidance_prob = 0.1
 img_size = 256
 
 [encoder]
-t5_encoder = "google/t5-v1_1-xxl"
-clip_encoder = "openai/clip-vit-large-patch14"
+t5_encoder = "torchtitan/experiments/flux/assets/t5_xxl_config.json"
+clip_encoder = "torchtitan/experiments/flux/assets/clip_vit_large_patch14_config.json"
 max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
+random_init = true
 
 [eval]
 enable_classifer_free_guidance = true

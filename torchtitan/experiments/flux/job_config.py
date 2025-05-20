@@ -27,8 +27,10 @@ class Encoder:
         "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
-    max_t5_encoding_len: int = 512
+    max_t5_encoding_len: int = 256
     """Maximum length of the T5 encoding."""
+    random_init_encoder: bool = False
+    """Whether to randomly initialize the encoder, used for offline integration test only"""
 
 
 @dataclass

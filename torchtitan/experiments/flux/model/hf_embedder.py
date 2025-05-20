@@ -9,19 +9,30 @@ from transformers import CLIPTextModel, T5EncoderModel
 
 
 class FluxEmbedder(nn.Module):
-    def __init__(self, version: str, **hf_kwargs):
+    def __init__(self, version: str, random_init=False, **hf_kwargs):
         super().__init__()
         self.is_clip = "clip" in version.lower()
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
-
         if self.is_clip:
-            self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(
-                version, **hf_kwargs
-            )
+            if random_init:
+                # Initialize CLIP model with  with random weights when offline
+                self.hf_module = CLIPTextModel(
+                    CLIPTextModel.config_class.from_pretrained(version, **hf_kwargs)
+                )
+            else:
+                self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(
+                    version, **hf_kwargs
+                )
         else:
-            self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
-                version, **hf_kwargs
-            )
+            if random_init:
+                # Initialize T5 model with random weights when offline
+                self.hf_module = T5EncoderModel._from_config(
+                    T5EncoderModel.config_class.from_pretrained(version, **hf_kwargs)
+                )
+            else:
+                self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
+                    version, **hf_kwargs
+                )
 
         self.hf_module = self.hf_module.eval().requires_grad_(False)
 
