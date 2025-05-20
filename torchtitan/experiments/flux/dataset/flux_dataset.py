@@ -330,7 +330,7 @@ class FluxDataset(IterableDataset, Stateful):
                 self.reset()
                 if not self.infinite:
                     logger.warning(f"Dataset {self.dataset_name} has run out of data")
-                    break
+                    raise  # Re-raise the StopIteration to properly signal end of iteration
                     
             # Reset for next epoch if infinite
             logger.warning(f"Dataset {self.dataset_name} is being re-looped")
