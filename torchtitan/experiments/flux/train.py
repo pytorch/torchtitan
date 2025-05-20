@@ -16,13 +16,11 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 from torchtitan.config_manager import TORCH_DTYPE_MAP, ConfigManager, JobConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
 from torchtitan.experiments.flux.sampling import (
     generate_and_save_images,
-    generate_image,
 )
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
