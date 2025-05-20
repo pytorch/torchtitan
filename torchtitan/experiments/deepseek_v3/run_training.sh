@@ -9,4 +9,4 @@ NGPU=${NGPU:-"8"}
 
 
 # Run the model with basic training loop
-torchrun --standalone --nproc-per-node ${NGPU} train.py
+python -m torch.distributed.run --standalone --nproc-per-node ${NGPU} train.py
