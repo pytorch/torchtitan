@@ -52,6 +52,16 @@ class Eval:
     batch_size: int = 16
     """Batch size for validation."""
 
+@dataclass
+class Inference:
+    """Inference configuration"""
+    save_path: str = "inference_results"
+    """Path to save the inference results"""
+    prompts: list[str] = field(default_factory=list)
+    """Prompts to generate images for"""
+    batch_size: int = 16
+    """Batch size for inference"""
+
 
 @dataclass
 class JobConfig:
@@ -62,3 +72,4 @@ class JobConfig:
     training: Training = field(default_factory=Training)
     encoder: Encoder = field(default_factory=Encoder)
     eval: Eval = field(default_factory=Eval)
+    inference: Inference = field(default_factory=Inference)

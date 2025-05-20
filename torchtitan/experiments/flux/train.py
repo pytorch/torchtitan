@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
@@ -335,36 +336,6 @@ class FluxTrainer(Trainer):
 
             # In the future, we could return avg_loss_per_timestep for more detailed reporting
             return global_loss_per_timestep, global_timestep_counts
-
-    @record
-    def inference(self, prompts: list[str], bs: int = 1):
-        """
-        Run inference on the Flux model.
-        """
-        self.checkpointer.load(step=self.job_config.checkpoint.load_step)
-        results = []
-        with torch.no_grad():
-            for i in range(0, len(prompts), bs):
-                images = generate_image(
-                    device=self.device,
-                    dtype=self._dtype,
-                    job_config=self.job_config,
-                    model=self.model_parts[0],
-                    prompt=prompts[i : i + bs],
-                    autoencoder=self.autoencoder,
-                    t5_tokenizer=FluxTokenizer(
-                        self.job_config.encoder.t5_encoder,
-                        max_length=self.job_config.encoder.max_t5_encoding_len,
-                    ),
-                    clip_tokenizer=FluxTokenizer(
-                        self.job_config.encoder.clip_encoder, max_length=77
-                    ),
-                    t5_encoder=self.t5_encoder,
-                    clip_encoder=self.clip_encoder,
-                )
-                results.append(images.detach())
-        results = torch.cat(results, dim=0)
-        return results
 
     @record
     def train(self):
