@@ -5,6 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 import os
 from pathlib import Path
 
@@ -64,7 +65,7 @@ if __name__ == "__main__":
     trainer = FluxTrainer(config)
     world_size = int(os.environ["WORLD_SIZE"])
     global_id = int(os.environ["RANK"])
-    original_prompts = config.inference.prompts
+    original_prompts = open(config.inference.prompts_path).readlines()
     total_prompts = len(original_prompts)
 
     # Each process processes its shard
@@ -79,9 +80,16 @@ if __name__ == "__main__":
 
     if global_id == 0:
         logger.info("Starting inference...")
-    images = inference(
-        prompts, trainer, t5_tokenizer, clip_tokenizer, bs=config.inference.batch_size
-    )
+    
+    if prompts:
+        images = inference(
+            prompts, trainer, t5_tokenizer, clip_tokenizer, bs=config.inference.batch_size
+        )
+        # pad the outputs to make sure all ranks have the same number of images for the gather step
+        images = torch.cat([images, torch.zeros(math.ceil(total_prompts / world_size) - images.shape[0], 3, 256, 256, device=trainer.device)])
+    else:
+        # if there are not enough prompts for all ranks, pad with empty tensors
+        images = torch.zeros(math.ceil(total_prompts / world_size), 3, 256, 256, device=trainer.device)
 
     # Create a list of tensors to gather results
     gathered_images = [
@@ -91,18 +99,19 @@ if __name__ == "__main__":
     # Gather images from all processes
     torch.distributed.all_gather(gathered_images, images)
 
-    # On rank 0, combine the gathered images based on the original ordering
+    # re-order the images to match the original ordering of prompts
     if global_id == 0:
         all_images = torch.zeros(
             size=[total_prompts, 3, 256, 256],
             dtype=torch.float32,
             device=trainer.device,
         )
-        for rank, rank_images in enumerate(gathered_images):
-            for i, img in enumerate(rank_images):
-                global_idx = rank + i * world_size
-                all_images[global_idx] = img
-
+        for in_rank_index in range(math.ceil(total_prompts / world_size)):
+            for rank_index in range(world_size):
+                global_idx = rank_index + in_rank_index * world_size
+                if global_idx >= total_prompts:
+                    break
+                all_images[global_idx] = gathered_images[rank_index][in_rank_index]
         logger.info("Inference done")
 
         # Computing FID activations
@@ -119,3 +128,4 @@ if __name__ == "__main__":
                 img.save(
                     path / f"img_{i}.png", exif=exif_data, quality=95, subsampling=0
                 )
+    torch.distributed.destroy_process_group()

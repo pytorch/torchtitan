@@ -176,7 +176,7 @@ def generate_image_from_latent(
         classifier_free_guidance_scale=classifier_free_guidance_scale,
     )
 
-    img = autoencoder.decode(img.to(torch.bfloat16))
+    img = autoencoder.decode(img.to(dtype))
     return img
 
 def generate_image(
@@ -212,7 +212,7 @@ def generate_image(
 
     batch = preprocess_data(
         device=device,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         autoencoder=None,
         clip_encoder=clip_encoder,
         t5_encoder=t5_encoder,

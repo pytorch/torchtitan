@@ -57,8 +57,8 @@ class Inference:
     """Inference configuration"""
     save_path: str = "inference_results"
     """Path to save the inference results"""
-    prompts: list[str] = field(default_factory=list)
-    """Prompts to generate images for"""
+    prompts_path: str = "prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
     batch_size: int = 16
     """Batch size for inference"""
 
