@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
 from torch import nn, Tensor
 from transformers import CLIPTextModel, T5EncoderModel
 
@@ -16,8 +18,10 @@ class FluxEmbedder(nn.Module):
         if self.is_clip:
             if random_init:
                 # Initialize CLIP model with  with random weights when offline
-                self.hf_module = CLIPTextModel(
-                    CLIPTextModel.config_class.from_pretrained(version, **hf_kwargs)
+                self.hf_module = CLIPTextModel._from_config(
+                    CLIPTextModel.config_class.from_pretrained(
+                        os.path.join(version, "config.json"), **hf_kwargs
+                    )
                 )
             else:
                 self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(
@@ -25,9 +29,11 @@ class FluxEmbedder(nn.Module):
                 )
         else:
             if random_init:
-                # Initialize T5 model with random weights when offline
+                # Initialize T5 model with random weights when offline, only loadT
                 self.hf_module = T5EncoderModel._from_config(
-                    T5EncoderModel.config_class.from_pretrained(version, **hf_kwargs)
+                    T5EncoderModel.config_class.from_pretrained(
+                        os.path.join(version, "config.json"), **hf_kwargs
+                    )
                 )
             else:
                 self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(
