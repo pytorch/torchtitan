@@ -187,14 +187,14 @@ class ScaledDotProductAttention(torch.nn.Module):
             raise ValueError(
                 "TorchTitan with SDPA currently only supports causal mask."
             )
-        base_backends = [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+        # Add CuDNN on B200 w/ highest priority
+        self.backends = [
+            SDPBackend.FLASH_ATTENTION,
+            SDPBackend.EFFICIENT_ATTENTION,
+            SDPBackend.MATH,
+        ]
         if has_cuda_capability(10, 0):
-            self.backends = [
-                SDPBackend.CUDNN_ATTENTION,
-                SDPBackend.FLASH_ATTENTION,
-            ] + base_backends
-        else:
-            self.backends = [SDPBackend.FLASH_ATTENTION] + base_backends
+            self.backends.insert(0, SDPBackend.CUDNN_ATTENTION)
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
