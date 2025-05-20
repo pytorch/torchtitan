@@ -318,34 +318,13 @@ class FluxDataset(IterableDataset, Stateful):
         while True:
             try:
                 sample = next(iterator)
-                
-                # Use the dataset-specific preprocessor
-                sample_dict = self._data_processor(
-                    sample,
-                    self._t5_tokenizer,
-                    self._clip_tokenizer,
-                    output_size=self.job_config.training.img_size,
+            except (UnicodeDecodeError, SyntaxError, OSError) as e:
+                # Handle other exception, eg, dataset corruption
+                logger.warning(
+                    f"Dataset {self.dataset_name} has error while loading batch data. \
+                    Error {type(e).__name__}: {e}. The error could be the result of a streaming glitch."
                 )
-
-                # skip low quality image or image with color channel = 1
-                if sample_dict["image"] is None:
-                    logger.warning(
-                        f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
-                    )
-                    continue
-
-                # Classifier-free guidance: Replace some of the strings with empty strings.
-                # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-                dropout_prob = self.job_config.training.classifer_free_guidance_prob
-                if dropout_prob > 0.0 and random.random() < dropout_prob:
-                    sample_dict["t5_tokens"] = self._t5_empty_token
-                    sample_dict["clip_tokens"] = self._clip_empty_token
-
-                self._sample_idx += 1
-
-                labels = sample_dict.pop("image")
-                yield sample_dict, labels
-                
+                continue
             except StopIteration:
                 # Handle the end of the iterator
                 self.reset()
@@ -353,9 +332,37 @@ class FluxDataset(IterableDataset, Stateful):
                     logger.warning(f"Dataset {self.dataset_name} has run out of data")
                     break
                     
-                # Reset for next epoch if infinite
-                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-                iterator = self._get_data_iter()
+            # Reset for next epoch if infinite
+            logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+            iterator = self._get_data_iter()
+            
+            # Use the dataset-specific preprocessor
+            sample_dict = self._data_processor(
+                sample,
+                self._t5_tokenizer,
+                self._clip_tokenizer,
+                output_size=self.job_config.training.img_size,
+            )
+
+            # skip low quality image or image with color channel = 1
+            if sample_dict["image"] is None:
+                logger.warning(
+                    f"Low quality image {sample['__key__']} is skipped in Flux Dataloader"
+                )
+                continue
+
+            # Classifier-free guidance: Replace some of the strings with empty strings.
+            # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+            dropout_prob = self.job_config.training.classifer_free_guidance_prob
+            if dropout_prob > 0.0 and random.random() < dropout_prob:
+                sample_dict["t5_tokens"] = self._t5_empty_token
+                sample_dict["clip_tokens"] = self._clip_empty_token
+
+            self._sample_idx += 1
+
+            labels = sample_dict.pop("image")
+            yield sample_dict, labels
+            
                 
 
     def load_state_dict(self, state_dict):
