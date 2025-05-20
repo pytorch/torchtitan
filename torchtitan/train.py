@@ -15,14 +15,14 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
 from torchtitan.config_manager import ConfigManager, JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -412,12 +412,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 job_config, global_step=self.step
             ) as memory_profiler,
             ft.maybe_semi_sync_training(
-            job_config,
-            ft_manager=self.ft_manager,
-            model=self.model_parts[0],
-            optimizer=self.optimizers,
-            sync_every=job_config.fault_tolerance.sync_steps,
-            )
+                job_config,
+                ft_manager=self.ft_manager,
+                model=self.model_parts[0],
+                optimizer=self.optimizers,
+                sync_every=job_config.fault_tolerance.sync_steps,
+            ),
         ):
             for inputs, labels in self.batch_generator(self.dataloader):
                 if self.step >= job_config.training.steps:
