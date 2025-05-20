@@ -38,7 +38,7 @@ class OverrideDefinitions:
 
 def build_test_list():
     """
-    key is the config file name and value is a list of OverrideDefinitionsn
+    key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """

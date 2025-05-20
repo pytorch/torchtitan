@@ -99,8 +99,14 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+
     # Random init encoder for offline testing
     random_init_encoder_arg = "--encoder.random_init_encoder"
+    clip_encoder_version_arg = "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/"
+    t5_encoder_version_arg = (
+        "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
+    )
+
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
@@ -109,6 +115,8 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         cmd += " " + dump_folder_arg
         cmd += " " + random_init_encoder_arg
+        cmd += " " + clip_encoder_version_arg
+        cmd += " " + t5_encoder_version_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
