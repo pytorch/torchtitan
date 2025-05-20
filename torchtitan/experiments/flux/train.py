@@ -20,10 +20,8 @@ from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
 from torchtitan.experiments.flux.sampling import (
-    generate_empty_batch,
+    generate_and_save_images,
     generate_image,
-    generate_image_from_latent,
-    save_image,
 )
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
@@ -70,13 +68,17 @@ class FluxTrainer(Trainer):
         # load components for pre-processing is the dataset is not preprocessed
         self.is_dataset_preprocessed = "preprocess" in job_config.training.dataset
 
-        self.val_dataloader = self.train_spec.build_val_dataloader_fn(
-            dp_world_size=self.dataloader.dp_world_size,
-            dp_rank=self.dataloader.dp_rank,
-            tokenizer=None,
-            job_config=job_config,
-            infinite=False,
-        ) if job_config.eval.dataset else None
+        self.val_dataloader = (
+            self.train_spec.build_val_dataloader_fn(
+                dp_world_size=self.dataloader.dp_world_size,
+                dp_rank=self.dataloader.dp_rank,
+                tokenizer=None,
+                job_config=job_config,
+                infinite=False,
+            )
+            if job_config.eval.dataset
+            else None
+        )
 
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
@@ -333,7 +335,7 @@ class FluxTrainer(Trainer):
 
             # In the future, we could return avg_loss_per_timestep for more detailed reporting
             return global_loss_per_timestep, global_timestep_counts
-    
+
     @record
     def inference(self, prompts: list[str], bs: int = 1):
         """
@@ -364,72 +366,6 @@ class FluxTrainer(Trainer):
         results = torch.cat(results, dim=0)
         return results
 
-    def generate_and_save_images(self, inputs) -> torch.Tensor:
-        with torch.no_grad():
-            if self.job_config.eval.enable_classifer_free_guidance:
-                empty_batch = generate_empty_batch(
-                    num_images=len(inputs["txt"]),
-                    device=self.device,
-                    dtype=self._dtype,
-                    clip_tokenizer=FluxTokenizer(
-                        self.job_config.encoder.clip_encoder, max_length=77
-                    ),
-                    t5_tokenizer=FluxTokenizer(
-                        self.job_config.encoder.t5_encoder,
-                        max_length=self.job_config.encoder.max_t5_encoding_len,
-                    ),
-                    clip_encoder=self.clip_encoder,
-                    t5_encoder=self.t5_encoder,
-                )
-            else:
-                empty_batch = {"t5_encodings": None, "clip_encodings": None}
-
-            img_height = 16 * (self.job_config.training.img_size // 16)
-            img_width = 16 * (self.job_config.training.img_size // 16)
-            images = generate_image_from_latent(
-                device=self.device,
-                dtype=self._dtype,
-                model=self.model_parts[0],
-                autoencoder=self.autoencoder,
-                img_width=img_width,
-                img_height=img_height,
-                denoising_steps=self.job_config.eval.denoising_steps,
-                clip_encodings=empty_batch["clip_encodings"],
-                t5_encodings=empty_batch["t5_encodings"],
-                enable_classifer_free_guidance=self.job_config.eval.enable_classifer_free_guidance,
-                empty_t5_encodings=empty_batch["t5_encodings"],
-                empty_clip_encodings=empty_batch["clip_encodings"],
-                classifier_free_guidance_scale=self.job_config.eval.classifier_free_guidance_scale,
-            )
-
-        base_path = os.path.join(
-            self.job_config.job.dump_folder, self.job_config.eval.save_img_folder
-        )
-        for i, image in enumerate(images):
-            name = (
-                f"image_rank{str(torch.distributed.get_rank())}_step{self.step}_{i}.png"
-            )
-            save_image(
-                name=name,
-                output_dir=base_path,
-                x=image,
-                prompt=inputs["txt"][i],
-            )
-        return images
-    
-    def generate_val_timesteps(self, cur_val_timestep, samples):
-        # generate timesteps for validation set
-        # first offset is the timesteps that have already been generated
-        # cycle through timesteps 0-7, repeating as necessary
-        first_offset = torch.arange(cur_val_timestep, 8, device=self.device)[:samples]
-        samples_left = samples - first_offset.numel()
-        val_timesteps = torch.arange(
-            0, 8, dtype=torch.int8, device=self.device
-        ).repeat_interleave(math.ceil(samples_left / 8))[:samples_left]
-        val_timesteps = torch.cat([first_offset, val_timesteps])
-        cur_val_timestep = (val_timesteps[-1].item() + 1) % 8
-        return val_timesteps, cur_val_timestep
-
     @record
     def train(self):
         job_config = self.job_config
@@ -437,16 +373,18 @@ class FluxTrainer(Trainer):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
-        with maybe_enable_profiling(
-            job_config, global_step=self.step
-        ) as torch_profiler, maybe_enable_memory_snapshot(
-            job_config, global_step=self.step
-        ) as memory_profiler, ft.maybe_semi_sync_training(
-            job_config,
-            ft_manager=self.ft_manager,
-            model=self.model_parts[0],
-            optimizer=self.optimizers,
-            sync_every=job_config.fault_tolerance.sync_steps,
+        with (
+            maybe_enable_profiling(job_config, global_step=self.step) as torch_profiler,
+            maybe_enable_memory_snapshot(
+                job_config, global_step=self.step
+            ) as memory_profiler,
+            ft.maybe_semi_sync_training(
+                job_config,
+                ft_manager=self.ft_manager,
+                model=self.model_parts[0],
+                optimizer=self.optimizers,
+                sync_every=job_config.fault_tolerance.sync_steps,
+            ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
             for inputs, labels in data_iterator:
@@ -459,39 +397,11 @@ class FluxTrainer(Trainer):
                     self.step, force=(self.step == job_config.training.steps)
                 )
 
-                if self.step % job_config.eval.eval_freq == 0 and job_config.eval.dataset:
-                    logger.info("Starting validation...")
-                    # Follow procedure set out in Flux paper of stratified timestep sampling
-                    val_data_iterator = self.batch_generator(self.val_dataloader)
-                    cur_val_timestep = 0
-                    eval_step = 0
-                    eval_samples = 0
-                    sum_loss_per_timestep = torch.zeros(8, device=self.device)
-                    sum_timestep_counts = torch.zeros(8, device=self.device)
-                    # Iterate through all validation batches
-                    # TODO: not sure how to handle profiling with validation
-                    for val_inputs, val_labels in val_data_iterator:
-                        eval_step += 1
-                        samples = len(val_labels)
-                        val_timesteps, cur_val_timestep = self.generate_val_timesteps(cur_val_timestep, samples)
-                        loss, counts = self.eval_step(
-                            val_inputs,
-                            val_labels,
-                            val_timesteps,
-                        )
-                        eval_samples += samples
-                        sum_loss_per_timestep += loss
-                        sum_timestep_counts += counts
-
-                        if eval_step == 1 and self.job_config.eval.save_img_folder:
-                            self.generate_and_save_images(val_inputs)
-
-                    # Different batches and timestepsmay have different number of samples, so we need to average the loss like this
-                    # rather than taking the mean of the mean batch losses.
-                    timestep_counts_proportions = sum_timestep_counts / sum_timestep_counts.sum()
-                    avg_loss_per_timestep = sum_loss_per_timestep / sum_timestep_counts
-                    avg_loss = (avg_loss_per_timestep * timestep_counts_proportions).sum()
-                    self.metrics_processor.val_log(self.step, avg_loss)
+                if (
+                    self.step % job_config.eval.eval_freq == 0
+                    and job_config.eval.dataset
+                ):
+                    self.eval()
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
@@ -516,6 +426,69 @@ class FluxTrainer(Trainer):
         self.metrics_processor.close()
         logger.info("Training completed")
 
+    def eval(self):
+        def generate_val_timesteps(cur_val_timestep, samples):
+            """
+            Generate timesteps for validation set
+
+            This is a helper function to generate timesteps 0 through 7, repeating as necessary.
+            """
+            first_offset = torch.arange(cur_val_timestep, 8, device=self.device)[
+                :samples
+            ]
+            samples_left = samples - first_offset.numel()
+            val_timesteps = torch.arange(
+                0, 8, dtype=torch.int8, device=self.device
+            ).repeat_interleave(math.ceil(samples_left / 8))[:samples_left]
+            val_timesteps = torch.cat([first_offset, val_timesteps])
+            cur_val_timestep = (val_timesteps[-1].item() + 1) % 8
+            return val_timesteps, cur_val_timestep
+
+        logger.info("Starting validation...")
+        # Follow procedure set out in Flux paper of stratified timestep sampling
+        val_data_iterator = self.batch_generator(self.val_dataloader)
+        cur_val_timestep = 0
+        eval_step = 0
+        eval_samples = 0
+        sum_loss_per_timestep = torch.zeros(8, device=self.device)
+        sum_timestep_counts = torch.zeros(8, device=self.device)
+        # Iterate through all validation batches
+        # TODO: not sure how to handle profiling with validation
+        for val_inputs, val_labels in val_data_iterator:
+            eval_step += 1
+            samples = len(val_labels)
+            val_timesteps, cur_val_timestep = generate_val_timesteps(
+                cur_val_timestep, samples
+            )
+            loss, counts = self.eval_step(
+                val_inputs,
+                val_labels,
+                val_timesteps,
+            )
+            eval_samples += samples
+            sum_loss_per_timestep += loss
+            sum_timestep_counts += counts
+
+            if eval_step == 1 and self.job_config.eval.save_img_folder:
+                generate_and_save_images(
+                    val_inputs,
+                    self.clip_tokenizer,
+                    self.t5_tokenizer,
+                    self.clip_encoder,
+                    self.t5_encoder,
+                    self.model_parts[0],
+                    self.autoencoder,
+                    self.job_config.encoder.img_size,
+                    self.step,
+                )
+
+        # Different batches and timestepsmay have different number of samples, so we need to average the loss like this
+        # rather than taking the mean of the mean batch losses.
+        timestep_counts_proportions = sum_timestep_counts / sum_timestep_counts.sum()
+        avg_loss_per_timestep = sum_loss_per_timestep / sum_timestep_counts
+        avg_loss = (avg_loss_per_timestep * timestep_counts_proportions).sum()
+        self.metrics_processor.val_log(self.step, avg_loss)
+
 
 if __name__ == "__main__":
     init_logger()
@@ -526,12 +499,12 @@ if __name__ == "__main__":
     try:
         trainer = FluxTrainer(config)
         if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable_checkpoint
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable_checkpoint, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, force=True)
             logger.info("Created seed checkpoint")
         else:

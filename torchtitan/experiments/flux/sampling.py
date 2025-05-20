@@ -69,6 +69,51 @@ def get_schedule(
 #       Sampling functions
 # ----------------------------------------
 
+def generate_and_save_images(inputs, clip_tokenizer, t5_tokenizer, clip_encoder, t5_encoder, model, autoencoder, img_size, step, dtype=torch.bfloat16, device="cuda", denoising_steps=50, enable_classifer_free_guidance=False, classifier_free_guidance_scale=None, save_img_folder="img") -> torch.Tensor:
+    with torch.no_grad():
+        if enable_classifer_free_guidance:
+            empty_batch = generate_empty_batch(
+                num_images=len(inputs["txt"]),
+                device=device,
+                dtype=dtype,
+                clip_tokenizer=clip_tokenizer,
+                t5_tokenizer=t5_tokenizer,
+                clip_encoder=clip_encoder,
+                t5_encoder=t5_encoder,
+            )
+        else:
+            empty_batch = {"t5_encodings": None, "clip_encodings": None}
+
+        img_height = 16 * (img_size // 16)
+        img_width = 16 * (img_size // 16)
+        images = generate_image_from_latent(
+            device=device,
+            dtype=dtype,
+            model=model,
+            autoencoder=autoencoder,
+            img_width=img_width,
+            img_height=img_height,
+            denoising_steps=denoising_steps,
+            clip_encodings=empty_batch["clip_encodings"],
+            t5_encodings=empty_batch["t5_encodings"],
+            enable_classifer_free_guidance=enable_classifer_free_guidance,
+            empty_t5_encodings=empty_batch["t5_encodings"],
+            empty_clip_encodings=empty_batch["clip_encodings"],
+            classifier_free_guidance_scale=classifier_free_guidance_scale,
+        )
+
+    for i, image in enumerate(images):
+        name = (
+            f"image_rank_{str(torch.distributed.get_rank())}_step{step}_{i}.png"
+        )
+        save_image(
+            name=name,
+            output_dir=save_img_folder,
+            x=image,
+            prompt=inputs["txt"][i],
+        )
+    return images
+
 def generate_empty_batch(
     num_images: int,
     device: torch.device,
