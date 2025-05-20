@@ -1,1 +1,1 @@
-.ci/docker/flux-requirements.txt
+.ci/docker/requirements-flux.txt
