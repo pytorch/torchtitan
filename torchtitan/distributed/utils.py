@@ -193,7 +193,7 @@ def get_train_context(
                 assert (
                     ScaledDotProductAttention.backends
                 ), "SDPA backends should not be empty."
-                ScaledDotProductAttention.backends.pop(SDPBackend.MATH)
+                ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
                 stack.enter_context(cp_context)
 
             yield
