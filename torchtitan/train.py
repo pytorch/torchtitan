@@ -15,7 +15,6 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -290,22 +289,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
         )
 
-    def next_batch(
-        self, data_iterator: Iterable
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        data_load_start = time.perf_counter()
-        batch = next(data_iterator)
-        input_dict, labels = batch
-        self.metrics_processor.ntokens_since_last_log += labels.numel()
-        self.metrics_processor.data_loading_times.append(
-            time.perf_counter() - data_load_start
-        )
-
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
-        for k, _ in input_dict.items():
-            input_dict[k] = input_dict[k].to(device_type)
-        labels = labels.to(device_type)
-        return input_dict, labels
+
+        for batch in iter(data_iterable):
+            data_load_start = time.perf_counter()
+            input_dict, labels = batch
+            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            self.metrics_processor.data_loading_times.append(
+                time.perf_counter() - data_load_start
+            )
+
+            # Move tensors to the appropriate device
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(device_type)
+            labels = labels.to(device_type)
+
+            yield input_dict, labels
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         self.optimizers.zero_grad()
@@ -401,22 +405,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
-        with maybe_enable_profiling(
-            job_config, global_step=self.step
-        ) as torch_profiler, maybe_enable_memory_snapshot(
-            job_config, global_step=self.step
-        ) as memory_profiler, ft.maybe_semi_sync_training(
-            job_config,
-            ft_manager=self.ft_manager,
-            model=self.model_parts[0],
-            optimizer=self.optimizers,
-            sync_every=job_config.fault_tolerance.sync_steps,
+        with (
+            maybe_enable_profiling(job_config, global_step=self.step) as torch_profiler,
+            maybe_enable_memory_snapshot(
+                job_config, global_step=self.step
+            ) as memory_profiler,
+            ft.maybe_semi_sync_training(
+                job_config,
+                ft_manager=self.ft_manager,
+                model=self.model_parts[0],
+                optimizer=self.optimizers,
+                sync_every=job_config.fault_tolerance.sync_steps,
+            ),
         ):
-            data_iterator = iter(self.dataloader)
-            while self.step < job_config.training.steps:
+            for inputs, labels in self.batch_generator(self.dataloader):
+                if self.step >= job_config.training.steps:
+                    break
                 self.step += 1
                 self.gc_handler.run(self.step)
-                inputs, labels = self.next_batch(data_iterator)
                 self.train_step(inputs, labels)
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
