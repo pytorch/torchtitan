@@ -1,5 +1,6 @@
 torchdata >= 0.8.0
 datasets >= 3.6.0
+ao >= 1.0.1
 tomli >= 1.1.0 ; python_version < "3.11"
 tensorboard
 tiktoken
