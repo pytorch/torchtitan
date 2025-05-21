@@ -117,6 +117,7 @@ def _cc12m_wds_data_processor(
 
     return result
 
+
 def _flux_data_processor_from_encodings(
     sample: dict[str, Any],
     t5_tokenizer: FluxTokenizer,  # Required for API compatibility
@@ -179,7 +180,9 @@ DATASETS = {
     ),
     "cc12m-wds-30k": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True).take(30_000),
+        loader=lambda path: load_dataset(path, split="train", streaming=True).take(
+            30_000
+        ),
         data_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
@@ -195,6 +198,7 @@ DATASETS = {
         data_processor=_flux_data_processor_from_encodings,
     ),
 }
+
 
 def _validate_dataset(
     dataset_name: str, dataset_path: Optional[str] = None
@@ -307,14 +311,14 @@ class FluxDataset(IterableDataset, Stateful):
     def __iter__(self):
         # Initialize the dataset iterator
         iterator = self._get_data_iter()
-        
+
         # Skip samples if we're resuming from a checkpoint
         if self._restored_checkpoint:
             logger.info(f"Restoring dataset state: skipping {self._sample_idx} samples")
             for _ in range(self._sample_idx):
                 next(iterator)
             self._restored_checkpoint = False
-        
+
         while True:
             try:
                 sample = next(iterator)
@@ -330,12 +334,12 @@ class FluxDataset(IterableDataset, Stateful):
                 self.reset()
                 if not self.infinite:
                     logger.warning(f"Dataset {self.dataset_name} has run out of data")
-                    raise  # Re-raise the StopIteration to properly signal end of iteration
-                    
+                    break
+
             # Reset for next epoch if infinite
             logger.warning(f"Dataset {self.dataset_name} is being re-looped")
             iterator = self._get_data_iter()
-            
+
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
                 sample,
@@ -362,8 +366,6 @@ class FluxDataset(IterableDataset, Stateful):
 
             labels = sample_dict.pop("image")
             yield sample_dict, labels
-            
-                
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict.get("sample_idx", 0)
@@ -402,7 +404,7 @@ def build_flux_val_dataloader(
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
     print(job_config.eval.dataset_path)
-    
+
     return _build_flux_dataloader(
         dataset_name=job_config.eval.dataset,
         dataset_path=job_config.eval.dataset_path,
@@ -456,4 +458,3 @@ def _build_flux_dataloader(
         dp_world_size=dp_world_size,
         batch_size=batch_size,
     )
-

@@ -69,7 +69,24 @@ def get_schedule(
 #       Sampling functions
 # ----------------------------------------
 
-def generate_and_save_images(inputs, clip_tokenizer, t5_tokenizer, clip_encoder, t5_encoder, model, autoencoder, img_size, step, dtype=torch.bfloat16, device="cuda", denoising_steps=50, enable_classifer_free_guidance=False, classifier_free_guidance_scale=None, save_img_folder="img") -> torch.Tensor:
+
+def generate_and_save_images(
+    inputs,
+    clip_tokenizer,
+    t5_tokenizer,
+    clip_encoder,
+    t5_encoder,
+    model,
+    autoencoder,
+    img_size,
+    step,
+    dtype=torch.bfloat16,
+    device="cuda",
+    denoising_steps=50,
+    enable_classifer_free_guidance=False,
+    classifier_free_guidance_scale=None,
+    save_img_folder="img",
+) -> torch.Tensor:
     with torch.no_grad():
         if enable_classifer_free_guidance:
             empty_batch = generate_empty_batch(
@@ -94,8 +111,8 @@ def generate_and_save_images(inputs, clip_tokenizer, t5_tokenizer, clip_encoder,
             img_width=img_width,
             img_height=img_height,
             denoising_steps=denoising_steps,
-            clip_encodings=empty_batch["clip_encodings"],
-            t5_encodings=empty_batch["t5_encodings"],
+            clip_encodings=inputs["clip_encodings"],
+            t5_encodings=inputs["t5_encodings"],
             enable_classifer_free_guidance=enable_classifer_free_guidance,
             empty_t5_encodings=empty_batch["t5_encodings"],
             empty_clip_encodings=empty_batch["clip_encodings"],
@@ -103,9 +120,7 @@ def generate_and_save_images(inputs, clip_tokenizer, t5_tokenizer, clip_encoder,
         )
 
     for i, image in enumerate(images):
-        name = (
-            f"image_rank_{str(torch.distributed.get_rank())}_step{step}_{i}.png"
-        )
+        name = f"image_rank_{str(torch.distributed.get_rank())}_step{step}_{i}.png"
         save_image(
             name=name,
             output_dir=save_img_folder,
@@ -113,6 +128,7 @@ def generate_and_save_images(inputs, clip_tokenizer, t5_tokenizer, clip_encoder,
             prompt=inputs["txt"][i],
         )
     return images
+
 
 def generate_empty_batch(
     num_images: int,
@@ -139,6 +155,7 @@ def generate_empty_batch(
         },
     )
 
+
 def generate_image_from_latent(
     device: torch.device,
     dtype: torch.dtype,
@@ -154,9 +171,13 @@ def generate_image_from_latent(
     empty_clip_encodings: torch.Tensor | None = None,
     classifier_free_guidance_scale: float | None = None,
 ) -> torch.Tensor:
-    if enable_classifer_free_guidance and (empty_t5_encodings is None or empty_clip_encodings is None):
-        raise ValueError("empty_t5_encodings and empty_clip_encodings must be provided if enable_classifer_free_guidance is True")
-    
+    if enable_classifer_free_guidance and (
+        empty_t5_encodings is None or empty_clip_encodings is None
+    ):
+        raise ValueError(
+            "empty_t5_encodings and empty_clip_encodings must be provided if enable_classifer_free_guidance is True"
+        )
+
     img = denoise(
         device=device,
         dtype=dtype,
@@ -178,6 +199,7 @@ def generate_image_from_latent(
 
     img = autoencoder.decode(img.to(dtype))
     return img
+
 
 def generate_image(
     device: torch.device,
@@ -310,7 +332,7 @@ def denoise(
             pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
             pred = pred.repeat(2, 1, 1)
         latents = latents + (t_prev - t_curr) * pred
-    
+
     if enable_classifer_free_guidance:
         latents = latents.chunk(2)[1]
 

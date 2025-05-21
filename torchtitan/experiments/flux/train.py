@@ -14,14 +14,13 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
-from torchtitan.config_manager import TORCH_DTYPE_MAP, ConfigManager, JobConfig
+from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
-from torchtitan.experiments.flux.sampling import (
-    generate_and_save_images,
-)
+from torchtitan.experiments.flux.sampling import generate_and_save_images
 from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -209,9 +208,11 @@ class FluxTrainer(Trainer):
             model.eval()
             # We need to set reshard_after_forward before last forward pass.
             # So the model wieghts are sharded the same way for checkpoint saving.
-            model.final_layer.set_reshard_after_forward(True)
+            if self.parallel_dims.dp_shard_enabled:
+                model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
-            model.final_layer.set_reshard_after_forward(False)
+            if self.parallel_dims.dp_shard_enabled:
+                model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(
@@ -219,6 +220,7 @@ class FluxTrainer(Trainer):
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
         timesteps: torch.Tensor,
+        save_imgs: bool = False,
     ):  # prompt: str = "A photo of a cat"):
         """
         Calculate the validation loss for the Flux model.
@@ -332,6 +334,26 @@ class FluxTrainer(Trainer):
                 global_loss_per_timestep = loss_per_timestep
                 global_timestep_counts = timestep_counts
 
+            if save_imgs:
+                t5_tokenizer = FluxTokenizer(
+                    self.job_config.encoder.t5_encoder,
+                    max_length=self.job_config.encoder.max_t5_encoding_len,
+                )
+                clip_tokenizer = FluxTokenizer(
+                    self.job_config.encoder.clip_encoder,
+                    max_length=77,
+                )
+                generate_and_save_images(
+                    input_dict,
+                    clip_tokenizer,
+                    t5_tokenizer,
+                    self.clip_encoder,
+                    self.t5_encoder,
+                    self.model_parts[0],
+                    self.autoencoder,
+                    self.job_config.training.img_size,
+                    self.step,
+                )
             # In the future, we could return avg_loss_per_timestep for more detailed reporting
             return global_loss_per_timestep, global_timestep_counts
 
@@ -414,6 +436,13 @@ class FluxTrainer(Trainer):
             return val_timesteps, cur_val_timestep
 
         logger.info("Starting validation...")
+        t5_tokenizer = FluxTokenizer(
+            config.encoder.t5_encoder,
+            max_length=config.encoder.max_t5_encoding_len,
+        )
+        clip_tokenizer = FluxTokenizer(
+            self.job_config.encoder.clip_encoder, max_length=77
+        )
         # Follow procedure set out in Flux paper of stratified timestep sampling
         val_data_iterator = iter(self.val_dataloader)
         cur_val_timestep = 0
@@ -437,23 +466,11 @@ class FluxTrainer(Trainer):
                 val_inputs,
                 val_labels,
                 val_timesteps,
+                save_imgs=eval_step == 1 and self.job_config.eval.save_img_folder,
             )
             eval_samples += samples
             sum_loss_per_timestep += loss
             sum_timestep_counts += counts
-
-            if eval_step == 1 and self.job_config.eval.save_img_folder:
-                generate_and_save_images(
-                    val_inputs,
-                    self.clip_tokenizer,
-                    self.t5_tokenizer,
-                    self.clip_encoder,
-                    self.t5_encoder,
-                    self.model_parts[0],
-                    self.autoencoder,
-                    self.job_config.encoder.img_size,
-                    self.step,
-                )
 
         # Different batches and timestepsmay have different number of samples, so we need to average the loss like this
         # rather than taking the mean of the mean batch losses.
@@ -472,12 +489,12 @@ if __name__ == "__main__":
     try:
         trainer = FluxTrainer(config)
         if config.checkpoint.create_seed_checkpoint:
-            assert int(os.environ["WORLD_SIZE"]) == 1, (
-                "Must create seed checkpoint using a single device, to disable sharding."
-            )
-            assert config.checkpoint.enable_checkpoint, (
-                "Must enable checkpointing when creating a seed checkpoint."
-            )
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable_checkpoint
+            ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, force=True)
             logger.info("Created seed checkpoint")
         else:
