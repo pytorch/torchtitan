@@ -55,7 +55,7 @@ class TransformerModelArgs(BaseModelArgs):
     interleave_moe_layer_step: int = 2
     # token-choice
     top_k: int = 1
-    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
+    use_grouped_mm: bool = False  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
@@ -74,12 +74,13 @@ class TransformerModelArgs(BaseModelArgs):
                 "FlexAttention is not compatible with selective AC yet. "
                 "See https://github.com/pytorch/pytorch/issues/147879"
             )
-
+        """
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise ValueError(
                 "FlexAttention is not compatible with CP yet. "
                 "We are still working on this."
             )
+        """
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
