@@ -70,6 +70,137 @@ def get_schedule(
 # ----------------------------------------
 
 
+def generate_and_save_images(
+    inputs,
+    clip_tokenizer,
+    t5_tokenizer,
+    clip_encoder,
+    t5_encoder,
+    model,
+    autoencoder,
+    img_size,
+    step,
+    dtype=torch.bfloat16,
+    device="cuda",
+    denoising_steps=50,
+    enable_classifer_free_guidance=False,
+    classifier_free_guidance_scale=None,
+    save_img_folder="img",
+) -> torch.Tensor:
+    with torch.no_grad():
+        if enable_classifer_free_guidance:
+            empty_batch = generate_empty_batch(
+                num_images=len(inputs["txt"]),
+                device=device,
+                dtype=dtype,
+                clip_tokenizer=clip_tokenizer,
+                t5_tokenizer=t5_tokenizer,
+                clip_encoder=clip_encoder,
+                t5_encoder=t5_encoder,
+            )
+        else:
+            empty_batch = {"t5_encodings": None, "clip_encodings": None}
+
+        img_height = 16 * (img_size // 16)
+        img_width = 16 * (img_size // 16)
+        images = generate_image_from_latent(
+            device=device,
+            dtype=dtype,
+            model=model,
+            autoencoder=autoencoder,
+            img_width=img_width,
+            img_height=img_height,
+            denoising_steps=denoising_steps,
+            clip_encodings=inputs["clip_encodings"],
+            t5_encodings=inputs["t5_encodings"],
+            enable_classifer_free_guidance=enable_classifer_free_guidance,
+            empty_t5_encodings=empty_batch["t5_encodings"],
+            empty_clip_encodings=empty_batch["clip_encodings"],
+            classifier_free_guidance_scale=classifier_free_guidance_scale,
+        )
+
+    for i, image in enumerate(images):
+        name = f"image_rank_{str(torch.distributed.get_rank())}_step{step}_{i}.png"
+        save_image(
+            name=name,
+            output_dir=save_img_folder,
+            x=image,
+            prompt=inputs["txt"][i],
+        )
+    return images
+
+
+def generate_empty_batch(
+    num_images: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    clip_tokenizer: Tokenizer,
+    t5_tokenizer: Tokenizer,
+    clip_encoder: FluxEmbedder,
+    t5_encoder: FluxEmbedder,
+):
+    empty_clip_tokens = clip_tokenizer.encode("")
+    empty_t5_tokens = t5_tokenizer.encode("")
+    empty_clip_tokens = empty_clip_tokens.repeat(num_images, 1)
+    empty_t5_tokens = empty_t5_tokens.repeat(num_images, 1)
+    return preprocess_data(
+        device=device,
+        dtype=dtype,
+        autoencoder=None,
+        clip_encoder=clip_encoder,
+        t5_encoder=t5_encoder,
+        batch={
+            "clip_tokens": empty_clip_tokens,
+            "t5_tokens": empty_t5_tokens,
+        },
+    )
+
+
+def generate_image_from_latent(
+    device: torch.device,
+    dtype: torch.dtype,
+    model: FluxModel,
+    autoencoder: AutoEncoder,
+    img_width: int,
+    img_height: int,
+    denoising_steps: int,
+    clip_encodings: torch.Tensor,
+    t5_encodings: torch.Tensor,
+    enable_classifer_free_guidance: bool = False,
+    empty_t5_encodings: torch.Tensor | None = None,
+    empty_clip_encodings: torch.Tensor | None = None,
+    classifier_free_guidance_scale: float | None = None,
+) -> torch.Tensor:
+    if enable_classifer_free_guidance and (
+        empty_t5_encodings is None or empty_clip_encodings is None
+    ):
+        raise ValueError(
+            "empty_t5_encodings and empty_clip_encodings must be provided if enable_classifer_free_guidance is True"
+        )
+
+    img = denoise(
+        device=device,
+        dtype=dtype,
+        model=model,
+        img_width=img_width,
+        img_height=img_height,
+        denoising_steps=denoising_steps,
+        clip_encodings=clip_encodings,
+        t5_encodings=t5_encodings,
+        enable_classifer_free_guidance=enable_classifer_free_guidance,
+        empty_t5_encodings=(
+            empty_t5_encodings if enable_classifer_free_guidance else None
+        ),
+        empty_clip_encodings=(
+            empty_clip_encodings if enable_classifer_free_guidance else None
+        ),
+        classifier_free_guidance_scale=classifier_free_guidance_scale,
+    )
+
+    img = autoencoder.decode(img.to(dtype))
+    return img
+
+
 def generate_image(
     device: torch.device,
     dtype: torch.dtype,
@@ -95,12 +226,15 @@ def generate_image(
     enable_classifer_free_guidance = job_config.eval.enable_classifer_free_guidance
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
-    clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
-    t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
+    clip_tokens = clip_tokenizer.encode(prompt)
+    t5_tokens = t5_tokenizer.encode(prompt)
+    if len(prompt) == 1:
+        clip_tokens = clip_tokens.unsqueeze(0)
+        t5_tokens = t5_tokens.unsqueeze(0)
 
     batch = preprocess_data(
         device=device,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         autoencoder=None,
         clip_encoder=clip_encoder,
         t5_encoder=t5_encoder,
@@ -111,24 +245,21 @@ def generate_image(
     )
 
     if enable_classifer_free_guidance:
-        empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
-        empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
-        empty_batch = preprocess_data(
+        empty_batch = generate_empty_batch(
+            num_images=len(prompt),
             device=device,
-            dtype=torch.bfloat16,
-            autoencoder=None,
+            dtype=dtype,
+            clip_tokenizer=clip_tokenizer,
+            t5_tokenizer=t5_tokenizer,
             clip_encoder=clip_encoder,
             t5_encoder=t5_encoder,
-            batch={
-                "clip_tokens": empty_clip_tokens,
-                "t5_tokens": empty_t5_tokens,
-            },
         )
 
-    img = denoise(
+    return generate_image_from_latent(
         device=device,
         dtype=dtype,
         model=model,
+        autoencoder=autoencoder,
         img_width=img_width,
         img_height=img_height,
         denoising_steps=job_config.eval.denoising_steps,
@@ -143,9 +274,6 @@ def generate_image(
         ),
         classifier_free_guidance_scale=job_config.eval.classifier_free_guidance_scale,
     )
-
-    img = autoencoder.decode(img)
-    return img
 
 
 def denoise(
@@ -176,9 +304,9 @@ def denoise(
     # create positional encodings
     POSITION_DIM = 3
     latent_pos_enc = create_position_encoding_for_latents(
-        bsz, latent_height, latent_width, POSITION_DIM
+        1, latent_height, latent_width, POSITION_DIM
     ).to(latents)
-    text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
+    text_pos_enc = torch.zeros(1, t5_encodings.shape[1], POSITION_DIM).to(latents)
 
     if enable_classifer_free_guidance:
         latents = torch.cat([latents, latents], dim=0)
@@ -190,7 +318,7 @@ def denoise(
 
     # this is ignored for schnell
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
-        t_vec = torch.full((bsz,), t_curr, dtype=dtype, device=device)
+        t_vec = torch.full((1,), t_curr, dtype=dtype, device=device)
         pred = model(
             img=latents,
             img_ids=latent_pos_enc,
@@ -202,8 +330,11 @@ def denoise(
         if enable_classifer_free_guidance:
             pred_u, pred_c = pred.chunk(2)
             pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
-
+            pred = pred.repeat(2, 1, 1)
         latents = latents + (t_prev - t_curr) * pred
+
+    if enable_classifer_free_guidance:
+        latents = latents.chunk(2)[1]
 
     # convert sequences of patches into img-like latents
     latents = unpack_latents(latents, latent_height, latent_width)
@@ -215,16 +346,17 @@ def save_image(
     name: str,
     output_dir: str,
     x: torch.Tensor,
-    add_sampling_metadata: bool,
-    prompt: str,
+    add_sampling_metadata: bool = False,
+    prompt: str | None = None,
 ):
     print(f"Saving {output_dir}/{name}")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.join(output_dir, name)
     # bring into PIL format and save
     x = x.clamp(-1, 1)
-    x = rearrange(x[0], "c h w -> h w c")
+    if len(x.shape) == 4:
+        x = x[0]
+    x = rearrange(x, "c h w -> h w c")
 
     img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
 

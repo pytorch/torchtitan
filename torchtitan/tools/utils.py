@@ -136,7 +136,7 @@ class NoColor:
 
 def check_if_feature_in_pytorch(
     feature_name: str,
-    pull_request: str,
+    pull_request_link: str,
     min_nightly_version: Optional[str] = None,
 ) -> None:
     if "git" in torch.__version__:  # pytorch is built from source

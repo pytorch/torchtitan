@@ -21,6 +21,36 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 
+def dist_collect(
+    x: torch.Tensor,
+    mesh: DeviceMesh,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Collect and sum tensors across devices.
+    
+    Unlike _dist_reduce, this function returns the full tensor after reduction
+    rather than extracting a scalar item.
+
+    Args:
+        x (torch.Tensor): Input tensor.
+        mesh (DeviceMesh): Device mesh to use for reduction.
+        extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
+            Defaults to None. If provided, this all_reduce will be called for the extra
+            process group, and then the result will be all_reduced for the mesh.
+            
+    Returns:
+        torch.Tensor: The summed tensor collected from all devices.
+    """
+    if isinstance(x, DTensor):
+        # functional collectives do not support DTensor inputs
+        x = x.full_tensor()
+
+    if extra_pg is not None:
+        x = funcol.all_reduce(x, reduceOp="sum", group=extra_pg)
+
+    return funcol.all_reduce(x, reduceOp="sum", group=mesh)
+
+
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,
