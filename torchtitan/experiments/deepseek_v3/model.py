@@ -49,6 +49,7 @@ from group_gemms import (
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
+    TritonCGBF16GroupGEMM,
 )
 
 from model_config import ModelArgs
@@ -473,9 +474,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = (
-        "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao"]
-    )
+    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
 
     def __init__(self, config):
         super().__init__()
@@ -542,6 +541,13 @@ class MoE(nn.Module):
             "dsgemm": (
                 DSGroupGEMM(MLP.act_fn, use_triton_quant=True)
                 if DSGroupGEMM.is_available()
+                else None
+            ),
+            "tritoncg": (
+                TritonCGBF16GroupGEMM(
+                    MLP.act_fn,
+                )
+                if TritonCGBF16GroupGEMM.is_available()
                 else None
             ),
         }

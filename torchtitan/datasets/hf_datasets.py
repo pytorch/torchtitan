@@ -96,16 +96,18 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 
         # Variables for checkpointing
         self._sample_idx = 0
-        self._all_tokens: list[int] = []
+        self._token_buffer: list[int] = []
 
     def _get_data_iter(self):
-        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
-            return iter([])
+        # For map-style datasets, resume by skipping to the correct index
+        # For iterable-style datasets, the underlying iterator already points to the correct index
+        if isinstance(self._data, Dataset):
+            if self._sample_idx == len(self._data):
+                return iter([])
+            else:
+                return iter(self._data.skip(self._sample_idx))
 
-        it = iter(self._data)
-        for _ in range(self._sample_idx):
-            next(it)
-        return it
+        return iter(self._data)
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len
@@ -115,13 +117,13 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
                 sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
-                self._all_tokens.extend(sample_tokens)
+                self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
-                while len(self._all_tokens) >= max_buffer_token_len:
-                    x = torch.LongTensor(self._all_tokens[:max_buffer_token_len])
+                while len(self._token_buffer) >= max_buffer_token_len:
+                    x = torch.LongTensor(self._token_buffer[:max_buffer_token_len])
                     # update tokens to the remaining tokens
-                    self._all_tokens = self._all_tokens[max_buffer_token_len:]
+                    self._token_buffer = self._token_buffer[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
                     yield {"input": input}, label
@@ -133,13 +135,33 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                 # Reset offset for the next iteration
                 self._sample_idx = 0
                 logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                # Ensures re-looping a dataset loaded from a checkpoint works correctly
+                if not isinstance(self._data, Dataset):
+                    if hasattr(self._data, "set_epoch") and hasattr(
+                        self._data, "epoch"
+                    ):
+                        self._data.set_epoch(self._data.epoch + 1)
 
     def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
-        self._all_tokens = state_dict["token_buffer"]
+        self._token_buffer = state_dict["token_buffer"]
+
+        if isinstance(self._data, Dataset):
+            self._sample_idx = state_dict["sample_idx"]
+        else:
+            assert "data" in state_dict
+            self._data.load_state_dict(state_dict["data"])
 
     def state_dict(self):
-        return {"token_buffer": self._all_tokens, "sample_idx": self._sample_idx}
+        _state_dict = {"token_buffer": self._token_buffer}
+
+        if isinstance(self._data, Dataset):
+            _state_dict["sample_idx"] = self._sample_idx
+        else:
+            # Save the iterable dataset's state to later efficiently resume from it
+            # https://huggingface.co/docs/datasets/v3.5.0/en/stream#save-a-dataset-checkpoint-and-resume-iteration
+            _state_dict["data"] = self._data.state_dict()
+
+        return _state_dict
 
 
 def build_hf_dataloader(

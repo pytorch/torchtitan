@@ -182,7 +182,11 @@ class FluxTrainer(Trainer):
             or self.step == self.job_config.training.steps
         ):
             model.eval()
+            # We need to set reshard_after_forward before last forward pass.
+            # So the model wieghts are sharded the same way for checkpoint saving.
+            model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
+            model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):

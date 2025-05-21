@@ -10,6 +10,7 @@ from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     BlockMask,
@@ -17,6 +18,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
+from torchtitan.tools.utils import has_cuda_capability
 
 # FlexAttention mask type. For each mask type, we initialize it at most once per
 # batch. To record what it is initialized, FLEX_ATTN_MASK_T is used as the key to
@@ -185,11 +187,20 @@ class ScaledDotProductAttention(torch.nn.Module):
             raise ValueError(
                 "TorchTitan with SDPA currently only supports causal mask."
             )
+        base_backends = [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+        if has_cuda_capability(10, 0):
+            self.backends = [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+            ] + base_backends
+        else:
+            self.backends = [SDPBackend.FLASH_ATTENTION] + base_backends
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        with sdpa_kernel(self.backends, set_priority=True):
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
 
 def build_attention(
