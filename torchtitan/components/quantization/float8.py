@@ -28,7 +28,7 @@ class Float8Converter(ModelConverter):
         float8_config: Float8 = job_config.float8
         if not has_cuda_capability(8, 9) and not float8_config.emulate:
             logger.warning(
-                "Float8Linear is only supported on SM89 or later hardware. "
+                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later."
                 "To enable support on older hardware, set `Float8.emulate` to True.",
             )
             return
