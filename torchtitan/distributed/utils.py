@@ -190,10 +190,10 @@ def get_train_context(
                 )
 
             if cp_context is not None:
-                assert (
-                    ScaledDotProductAttention.backends
-                ), "SDPA backends should not be empty."
-                ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+                try:
+                    ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+                except ValueError:
+                    pass
                 stack.enter_context(cp_context)
 
             yield
