@@ -174,7 +174,13 @@ def create_context_parallel_ctx(
         )
 
     set_rotate_method(cp_rotate_method)
-    _dispatch_mode = _DispatchMode.TORCH_DISPATCH
+    torch.distributed.tensor.experimental._attention._dispatch_mode = (
+        _DispatchMode.TORCH_DISPATCH
+    )
+    assert (
+        torch.distributed.tensor.experimental._attention._dispatch_mode
+        == _DispatchMode.TORCH_DISPATCH
+    )
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,

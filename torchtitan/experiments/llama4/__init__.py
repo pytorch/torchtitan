@@ -42,6 +42,7 @@ llama4_configs = {
         interleave_moe_layer_step=1,
         use_flex_attn=True,
         attn_mask_type="block_causal",
+        # attn_mask_type="causal",
     ),
     "17bx128e": TransformerModelArgs(
         dim=5120,

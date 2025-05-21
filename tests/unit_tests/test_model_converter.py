@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.float8 import Float8Converter
+from torchtitan.components.quantization.float8 import Float8Converter
 from torchtitan.config_manager import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (

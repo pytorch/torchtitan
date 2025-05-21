@@ -5,7 +5,7 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 ### Enable SimpleFSDP Training
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama/train_configs/llama3_8b.toml" ./run_train.sh --model.name llama3_simple_fsdp --training.compile
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name llama3_simple_fsdp --training.compile
 ```
 
 ### Composability Support
@@ -17,11 +17,11 @@ Some of the features require the updates from PyTorch, with which we are working
 |Meta Initialization| ✅ |
 |Activation Checkpointing| ✅ |
 |Mixed Precision Training| ✅ |
-|Tensor Parallelism| 🚧 |
+|Tensor Parallelism| ✅ |
 |Context Parallelism| ✅ |
 |Pipeline Parallelism| ✅ |
 |Distributed Checkpointing| 🚧 |
-|Float8 Training| ❌ |
+|Float8 Training| 🚧 |
 
 
 ### Citation
