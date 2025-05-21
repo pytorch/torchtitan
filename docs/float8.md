@@ -17,7 +17,6 @@ CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_train.sh --model.converters="
 * `--float8.enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
 * `--float8.precompute_float8_dynamic_scale_for_fsdp` (optional): communicate AMAX/scales efficiently in a single all-reduce for all parameters instead of doing many small all-reduce for each parameter.
 * `--float8.force_recompute_fp8_weight_in_bwd` (optional): force recomputation of fp8 weights during backward pass, preventing unsharded fp8 weights from being saved for backward.
-* `--float8.emulate` (optional): emulate float8 traning with older hardware in eager mode.
 * `--training.compile` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
 
 For float8 with rowwise scaling, launch training job with the following command (or alternatively set configs in toml files)
