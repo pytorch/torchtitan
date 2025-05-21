@@ -450,6 +450,13 @@ class Float8:
     Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
+    emulate: bool = False
+    """
+    Whether to run on earlier hardware in CI test. 
+    torch.compile with float8 dtypes is not going to work on older hardware, so the emulation can 
+    only be used in eager mode.
+    """
+
 
 @dataclass
 class MX:

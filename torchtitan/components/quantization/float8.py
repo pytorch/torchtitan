@@ -26,9 +26,15 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config: Float8 = job_config.float8
-        if not has_cuda_capability(8, 9):
+        if not has_cuda_capability(8, 9) and not float8_config.emulate:
             logger.warning(
-                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
+                "Float8Linear is only supported on SM89 or later hardware. "
+                "To enable support on older hardware, set `Float8.emulate` to True.",
+            )
+            return
+        elif float8_config.emulate and job_config.training.compile:
+            logger.warning(
+                "Failed to run on emulate with compile on, please disable compile to allow on emulate.",
             )
             return
         try:
