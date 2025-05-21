@@ -79,6 +79,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.version.cuda=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.get_device_capability()=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.current_device()=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.device_count()=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.get_arch_list()=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.get_device_properties()=}")
+        logger.warning(f"ASYNC_TP_DEBUG: {torch.cuda.get_device_name()=}")
+
         # init distributed
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
