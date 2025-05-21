@@ -335,10 +335,9 @@ class FluxDataset(IterableDataset, Stateful):
                 if not self.infinite:
                     logger.warning(f"Dataset {self.dataset_name} has run out of data")
                     break
-
-            # Reset for next epoch if infinite
-            logger.warning(f"Dataset {self.dataset_name} is being re-looped")
-            iterator = self._get_data_iter()
+                # Reset for next epoch if infinite
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                iterator = self._get_data_iter()
 
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
