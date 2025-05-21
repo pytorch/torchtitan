@@ -11,8 +11,9 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
+log_freq = 50
 enable_tensorboard = true
+# enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
@@ -27,22 +28,25 @@ lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up
+# warmup_steps = 200  # lr scheduler warm up
+warmup_steps = 600
 
 [training]
-batch_size = 1
+batch_size = 4
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
-compile = false
+# steps = 1000
+steps = 3000
+compile = true
 dataset = "c4"
+deterministic = true
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
-context_parallel_degree = 1
+context_parallel_degree = 4
 
 [checkpoint]
 enable_checkpoint = false
@@ -53,7 +57,8 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
+# mode = "selective"  # ["none", "selective", "full"]
+mode = "full"
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
