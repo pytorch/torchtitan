@@ -452,7 +452,7 @@ class Float8:
 
     emulate: bool = False
     """
-    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only, 
+    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
     as the current CI does have sm_90 capability, required by Float8.
     Not compatible with torch.compile.
     """
