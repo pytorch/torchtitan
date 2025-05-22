@@ -26,9 +26,7 @@ CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml
 - Parallelism: The model supports FSDP, HSDP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
-    - Notes on the current checkpointing implementation: Currently we need to enable `reshard_after_forward=True` before eval
-    process, and set it back to `False` after eval process. The reason is that eval step only runs forward, but not backward,
-    so FSDP reshard_after_forward plan would interfere with how parameters look like for the potential subsequent checkpointing step.
+    - Notes on the current checkpointing implementation: TO keep the model wieghts are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of envaluation, and sharding the weights of the module if it is a FSDPModule.
 
 
 
@@ -36,4 +34,3 @@ CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml
 - [ ] More parallesim support (Tensor Parallelism, Context Parallelism, etc)
 - [ ] Implement the num_flops_per_token calculation in get_nparams_and_flops() function
 - [ ] Implement test cases in CI for FLUX model. Adding more unit tests for FLUX model (eg, unit test for preprocessor, etc)
-- [ ] Checkpointing followup: Merge resharding strategy in `flux/trainer.py` to `parallel_flux.py`
