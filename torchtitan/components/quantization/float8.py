@@ -32,11 +32,6 @@ class Float8Converter(ModelConverter):
                 "To enable support on older hardware, set `float8.emulate` to True.",
             )
             return
-        elif float8_config.emulate and job_config.training.compile:
-            logger.warning(
-                "Failed to run on emulate with compile on, please disable compile to allow on emulate.",
-            )
-            return
         try:
             from torchao.float8 import Float8LinearConfig
         except ImportError as e:

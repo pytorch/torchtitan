@@ -452,9 +452,9 @@ class Float8:
 
     emulate: bool = False
     """
-    Whether to run on earlier hardware in CI test.
-    torch.compile with float8 dtypes is not going to work on older hardware, so the emulation can
-    only be used in eager mode.
+    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only, 
+    as the current CI does have sm_90 capability, required by Float8.
+    Not compatible with torch.compile.
     """
 
 
