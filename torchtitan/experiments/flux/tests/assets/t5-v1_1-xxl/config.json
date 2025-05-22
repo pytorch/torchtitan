@@ -1,5 +1,5 @@
 {
-  "_name_or_path": "/home/patrick/t5/t5-v1_1-xxl",
+  "_name_or_path": "t5-v1_1-xxl",
   "architectures": [
     "T5ForConditionalGeneration"
   ],

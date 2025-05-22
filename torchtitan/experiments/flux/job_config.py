@@ -29,7 +29,7 @@ class Encoder:
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     max_t5_encoding_len: int = 256
     """Maximum length of the T5 encoding."""
-    random_init_encoder: bool = False
+    use_random_init: bool = False
     """Whether to randomly initialize the encoder, used for offline integration test only"""
 
 

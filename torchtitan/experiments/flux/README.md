@@ -30,6 +30,21 @@ If you want to train with other model config, run the following command:
 CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml" ./torchtitan/experiments/flux/run_train.sh
 ```
 
+## Running Tests
+
+### Unit Tests
+To run the unit tests for the FLUX model, use the following command:
+```bash
+pytest -s torchtitan/experiments/flux/tests/
+```
+
+### Integration Tests
+To run the integration tests for the FLUX model, use the following command:
+```bash
+python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
+```
+
+
 ## Supported Features
 - Parallelism: The model supports FSDP, HSDP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
@@ -42,3 +57,4 @@ CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml
 ## TODO
 - [ ] More parallesim support (Tensor Parallelism, Context Parallelism, etc)
 - [ ] Implement the num_flops_per_token calculation in get_nparams_and_flops() function
+- [ ] Add `torch.compile` support

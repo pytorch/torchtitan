@@ -101,11 +101,12 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
-    random_init_encoder_arg = "--encoder.random_init_encoder"
+    random_init_encoder_arg = "--encoder.use_random_init"
     clip_encoder_version_arg = "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/"
     t5_encoder_version_arg = (
         "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
     )
+    tokenzier_path_arg = "--model.tokenizer_path tests/assets/test_tiktoken.model"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -117,6 +118,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
+        cmd += " " + tokenzier_path_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(

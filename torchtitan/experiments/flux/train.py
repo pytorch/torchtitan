@@ -12,7 +12,7 @@ from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
+from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
 from torchtitan.experiments.flux.model.autoencoder import load_ae
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
@@ -61,16 +61,16 @@ class FluxTrainer(Trainer):
             model_config.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
-            random_init=job_config.encoder.random_init_encoder,
+            random_init=job_config.encoder.use_random_init,
         )
 
         self.clip_encoder = FluxEmbedder(
             version=job_config.encoder.clip_encoder,
-            random_init=job_config.encoder.random_init_encoder,
+            random_init=job_config.encoder.use_random_init,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
             version=job_config.encoder.t5_encoder,
-            random_init=job_config.encoder.random_init_encoder,
+            random_init=job_config.encoder.use_random_init,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
@@ -201,6 +201,8 @@ class FluxTrainer(Trainer):
         2) [TODO] Calculate loss with fixed t value on validation set.
         """
 
+        t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
+
         image = generate_image(
             device=self.device,
             dtype=self._dtype,
@@ -208,13 +210,8 @@ class FluxTrainer(Trainer):
             model=self.model_parts[0],
             prompt=prompt,  # TODO(jianiw): change this to a prompt from validation set
             autoencoder=self.autoencoder,
-            t5_tokenizer=FluxTokenizer(
-                self.job_config.encoder.t5_encoder,
-                max_length=self.job_config.encoder.max_t5_encoding_len,
-            ),
-            clip_tokenizer=FluxTokenizer(
-                self.job_config.encoder.clip_encoder, max_length=77
-            ),
+            t5_tokenizer=t5_tokenizer,
+            clip_tokenizer=clip_tokenizer,
             t5_encoder=self.t5_encoder,
             clip_encoder=self.clip_encoder,
         )

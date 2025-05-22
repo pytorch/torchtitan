@@ -17,7 +17,7 @@ class FluxEmbedder(nn.Module):
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
         if self.is_clip:
             if random_init:
-                # Initialize CLIP model with  with random weights when offline
+                # Initialize CLIP model with random weights for test purpose only
                 self.hf_module = CLIPTextModel._from_config(
                     CLIPTextModel.config_class.from_pretrained(
                         os.path.join(version, "config.json"), **hf_kwargs
@@ -29,7 +29,7 @@ class FluxEmbedder(nn.Module):
                 )
         else:
             if random_init:
-                # Initialize T5 model with random weights when offline, only loadT
+                # Initialize T5 model with random weights for test purpose only
                 self.hf_module = T5EncoderModel._from_config(
                     T5EncoderModel.config_class.from_pretrained(
                         os.path.join(version, "config.json"), **hf_kwargs
