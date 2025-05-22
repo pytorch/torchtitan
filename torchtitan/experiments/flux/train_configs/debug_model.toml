@@ -66,8 +66,8 @@ custom_args_module = "torchtitan.experiments.flux.flux_argparser"
 mode = "full"
 
 [checkpoint]
-enable_checkpoint = true
-folder = "checkpoint2"
+enable_checkpoint = false
+folder = "checkpoint"
 interval = 5
 model_weights_only = false
 export_dtype = "float32"
