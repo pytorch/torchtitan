@@ -230,7 +230,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
 
-        if self.ft_manager.enabled:
+        if (
+            self.ft_manager.enabled
+            and job_config.fault_tolerance.semi_sync_method is None
+        ):
             self.ft_manager.set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
@@ -388,7 +391,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             or self.ft_manager.enabled
         ):
             loss = loss.detach()
-            ft_pg = self.ft_manager.replicate_pg if self.ft_manager.enabled else None
+            # Skip ft manager communication when using semi sync training
+            use_ft_pg = (
+                self.ft_manager.enabled
+                and self.job_config.fault_tolerance.semi_sync_method is None
+            )
+            ft_pg = self.ft_manager.replicate_pg if use_ft_pg else None
             global_avg_loss, global_max_loss = (
                 dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
