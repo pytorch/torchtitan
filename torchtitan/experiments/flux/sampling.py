@@ -27,6 +27,7 @@ from torchtitan.experiments.flux.utils import (
     preprocess_data,
     unpack_latents,
 )
+from torchtitan.tools.logging import logger
 
 
 # ----------------------------------------
@@ -218,11 +219,10 @@ def save_image(
     add_sampling_metadata: bool,
     prompt: str,
 ):
-    output_dir = os.path.join(output_dir, f"rank_{torch.distributed.get_rank()}")
-    print(f"Saving {output_dir}/{name}")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    logger.info(f"Saving image to {output_dir}/{name}")
+    os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.join(output_dir, name)
+
     # bring into PIL format and save
     x = x.clamp(-1, 1)
     x = rearrange(x[0], "c h w -> h w c")
