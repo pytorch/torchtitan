@@ -26,12 +26,15 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config: Float8 = job_config.float8
-        if not has_cuda_capability(8, 9) and not float8_config.emulate:
-            logger.warning(
+        if has_cuda_capability(8, 9) or (
+            float8_config.emulate and not job_config.training.compile
+        ):
+            pass
+        else:
+            raise ValueError(
                 "Failed to swap to Float8Linear because float8 is only supported on SM89 or later."
-                "To enable support on older hardware, set `float8.emulate` to True.",
+                "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
-            return
         try:
             from torchao.float8 import Float8LinearConfig
         except ImportError as e:
