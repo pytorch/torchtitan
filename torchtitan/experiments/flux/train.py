@@ -216,7 +216,7 @@ class FluxTrainer(Trainer):
         )
 
         save_image(
-            name=f"image_rank{str(torch.distributed.get_rank())}_{self.step}.png",
+            name=f"image_{self.step}.png",
             output_dir=os.path.join(
                 self.job_config.job.dump_folder, self.job_config.eval.save_img_folder
             ),
