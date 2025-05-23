@@ -117,7 +117,7 @@ def build_flux_tokenizer(job_config: JobConfig) -> tuple[Tokenizer, Tokenizer]:
     max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
 
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
-    if job_config.encoder.use_random_init:
+    if job_config.training.test_mode:
         tokenizer_class = FluxTikTokenizer
         t5_tokenizer_path = clip_tokenzier_path = job_config.model.tokenizer_path
     else:

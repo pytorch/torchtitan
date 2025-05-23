@@ -101,7 +101,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
-    random_init_encoder_arg = "--encoder.use_random_init"
+    random_init_encoder_arg = "--training.test_mode"
     clip_encoder_version_arg = "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/"
     t5_encoder_version_arg = (
         "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"

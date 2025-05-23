@@ -61,16 +61,16 @@ class FluxTrainer(Trainer):
             model_config.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
-            random_init=job_config.encoder.use_random_init,
+            random_init=job_config.training.test_mode,
         )
 
         self.clip_encoder = FluxEmbedder(
             version=job_config.encoder.clip_encoder,
-            random_init=job_config.encoder.use_random_init,
+            random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
             version=job_config.encoder.t5_encoder,
-            random_init=job_config.encoder.use_random_init,
+            random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model

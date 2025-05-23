@@ -13,6 +13,8 @@ class Training:
     """Classifier-free guidance with probability p to dropout the text conditioning"""
     img_size: int = 256
     """Image width to sample"""
+    test_mode: bool = False
+    """Whether to use intergration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
 
 
 @dataclass
@@ -29,8 +31,6 @@ class Encoder:
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     max_t5_encoding_len: int = 256
     """Maximum length of the T5 encoding."""
-    use_random_init: bool = False
-    """Whether to randomly initialize the encoder, used for offline integration test only"""
 
 
 @dataclass
