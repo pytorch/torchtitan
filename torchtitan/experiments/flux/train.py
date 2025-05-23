@@ -42,7 +42,6 @@ class FluxTrainer(Trainer):
             distinct_seed_mesh_dim="dp_shard",
         )
 
-        self.preprocess_fn = preprocess_data
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
         # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
         # the dtype for encoders is torch.float32 (default dtype for Flux Model).
@@ -85,7 +84,7 @@ class FluxTrainer(Trainer):
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         # generate t5 and clip embeddings
         input_dict["image"] = labels
-        input_dict = self.preprocess_fn(
+        input_dict = preprocess_data(
             device=self.device,
             dtype=self._dtype,
             autoencoder=self.autoencoder,
