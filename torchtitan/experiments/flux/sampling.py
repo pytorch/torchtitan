@@ -218,6 +218,7 @@ def save_image(
     add_sampling_metadata: bool,
     prompt: str,
 ):
+    output_dir = os.path.join(output_dir, f"rank_{torch.distributed.get_rank()}")
     print(f"Saving {output_dir}/{name}")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
