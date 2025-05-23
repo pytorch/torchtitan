@@ -8,6 +8,7 @@ import os
 from typing import Optional
 
 import torch
+from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
@@ -184,9 +185,7 @@ class FluxTrainer(Trainer):
             model.eval()
             # We need to set reshard_after_forward before last forward pass.
             # So the model wieghts are sharded the same way for checkpoint saving.
-            model.final_layer.set_reshard_after_forward(True)
             self.eval_step()
-            model.final_layer.set_reshard_after_forward(False)
             model.train()
 
     def eval_step(self, prompt: str = "A photo of a cat"):
@@ -226,6 +225,12 @@ class FluxTrainer(Trainer):
             add_sampling_metadata=True,
             prompt=prompt,
         )
+
+        # Reshard after run forward pass in eval_step.
+        # This is to ensure the model weights are sharded the same way for checkpoint saving.
+        for module in self.model_parts[0].modules():
+            if isinstance(module, FSDPModule):
+                module.reshard()
 
 
 if __name__ == "__main__":
