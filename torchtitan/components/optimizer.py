@@ -192,7 +192,8 @@ class FTOptimizersContainer(OptimizersContainer):
         }
         self.cache_state_dict: dict[str, Any] = {}
         self._ft_optimizer = ft.Optimizer(ft_manager, self)
-        self._call_from_ft: bool = False
+        # Originally this is False, True means we just call the step() as normally
+        self._call_from_ft: bool = True
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
