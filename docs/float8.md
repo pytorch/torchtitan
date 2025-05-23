@@ -11,7 +11,7 @@ USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
 
 For float8 with tensorwise scaling, launch training job with the following command (or alternatively set configs in toml files)
 ```
-CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_train.sh --model.converters="float8" --float8.enable_fsdp_float8_all_gather --float8.precompute_float8_dynamic_scale_for_fsdp --float8.force_recompute_fp8_weight_in_bwd --training.compile
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="float8" --float8.enable_fsdp_float8_all_gather --float8.precompute_float8_dynamic_scale_for_fsdp --float8.force_recompute_fp8_weight_in_bwd --training.compile
 ```
 * `--model.converters="float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
 * `--float8.enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
@@ -21,7 +21,7 @@ CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_train.sh --model.converters="
 
 For float8 with rowwise scaling, launch training job with the following command (or alternatively set configs in toml files)
 ```
-CONFIG_FILE="./train_configs/llama3_8b.toml" ./run_train.sh --model.converters="float8" --float8.recipe_name rowwise --training.compile
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="float8" --float8.recipe_name rowwise --training.compile
 ```
 * `--model.converters="float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
 * `--float8.recipe_name="rowwise"`: use the rowwise scaling recipe for higher accuracy compared to tensorwise scaling
