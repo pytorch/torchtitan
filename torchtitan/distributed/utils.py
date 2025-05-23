@@ -16,7 +16,9 @@ import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.nn.attention import SDPBackend
 
+from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -188,17 +190,11 @@ def get_train_context(
                 )
 
             if cp_context is not None:
-                from torch.nn.attention import sdpa_kernel, SDPBackend
-
-                stack.enter_context(
-                    sdpa_kernel(
-                        [
-                            SDPBackend.FLASH_ATTENTION,
-                            SDPBackend.EFFICIENT_ATTENTION,
-                            SDPBackend.CUDNN_ATTENTION,
-                        ]
-                    )
-                )
+                if SDPBackend.MATH in ScaledDotProductAttention.backends:
+                    ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+                assert (
+                    ScaledDotProductAttention.backends
+                ), "No valid SDPA backends with CP."
                 stack.enter_context(cp_context)
 
             yield
