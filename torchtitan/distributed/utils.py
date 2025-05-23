@@ -190,10 +190,8 @@ def get_train_context(
                 )
 
             if cp_context is not None:
-                try:
+                if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
-                except ValueError:
-                    pass
                 assert (
                     ScaledDotProductAttention.backends
                 ), "No valid SDPA backends with CP."
