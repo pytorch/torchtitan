@@ -365,6 +365,17 @@ class Checkpoint:
     The default value is false.
     """
 
+    unshard_weights: bool = False
+    """
+    Whether to unshard the weights before saving the checkpoint. If the option is set to True,
+    the weights will be unsharded as plain torch.Tensor before saving the checkpoint. Moreover,
+    since the weights are unsharded (full weights), ``torch.save()`` will be used instead of
+    ``DCP.save()``. Note that only rank0 will save the checkpoint so the saving can be slow.
+    This option can only be set when ``model_weights_only`` is set to True.
+    If ``model_weights_only`` is set to False, an assertion error will be raised.
+    The default value is False.
+    """
+
     export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     """
     Converts to the specified precision when training completes and model_weights_only=true.
