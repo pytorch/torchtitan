@@ -39,8 +39,9 @@ install_python() {
 install_pip_dependencies() {
   pushd /opt/conda
   # Install all Python dependencies
-  pip_install -r /opt/conda/dev-requirements.txt
+  pip_install -r /opt/conda/requirements-dev.txt
   pip_install -r /opt/conda/requirements.txt
+  pip_install -r /opt/conda/requirements-flux.txt
   popd
 }
 

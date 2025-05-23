@@ -59,7 +59,7 @@ data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 
 [experimental]
-custom_args_module = "torchtitan.experiments.flux.flux_argparser"
+custom_args_module = "torchtitan.experiments.flux.job_config"
 
 [activation_checkpoint]
 mode = "full"

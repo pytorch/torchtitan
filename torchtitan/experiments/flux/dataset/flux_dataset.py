@@ -20,8 +20,12 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 
+from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
+from torchtitan.experiments.flux.dataset.tokenizer import (
+    build_flux_tokenizer,
+    FluxTokenizer,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -115,6 +119,13 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
+    "cc12m-test": TextToImageDatasetConfig(
+        path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        data_processor=_cc12m_wds_data_processor,
+    ),
 }
 
 
@@ -150,8 +161,8 @@ class FluxDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        t5_tokenizer: FluxTokenizer,
-        clip_tokenizer: FluxTokenizer,
+        t5_tokenizer: Tokenizer,
+        clip_tokenizer: Tokenizer,
         job_config: Optional[JobConfig] = None,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -243,6 +254,7 @@ class FluxDataset(IterableDataset, Stateful):
             self._sample_idx += 1
 
             labels = sample_dict.pop("image")
+
             yield sample_dict, labels
 
     def load_state_dict(self, state_dict):
@@ -267,21 +279,13 @@ def build_flux_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.batch_size
 
-    t5_encoder_name = job_config.encoder.t5_encoder
-    clip_encoder_name = job_config.encoder.clip_encoder
-    max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
+    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(job_config)
 
     ds = FluxDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
-        t5_tokenizer=FluxTokenizer(
-            t5_encoder_name,
-            max_length=max_t5_encoding_len,
-        ),
-        clip_tokenizer=FluxTokenizer(
-            clip_encoder_name,
-            max_length=77,
-        ),  # fix max_length for CLIP
+        t5_tokenizer=t5_tokenizer,
+        clip_tokenizer=clip_tokenizer,
         job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,

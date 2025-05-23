@@ -357,6 +357,7 @@ def load_ae(
     autoencoder_params: AutoEncoderParams,
     device: str | torch.device = "cuda",
     dtype=torch.bfloat16,
+    random_init=False,
 ) -> AutoEncoder:
     """
     Load the autoencoder from the given model name.
@@ -367,9 +368,11 @@ def load_ae(
         AutoEncoder: The loaded autoencoder.
     """
     # Loading the autoencoder
-    print("Init AE")
     with torch.device(device):
         ae = AutoEncoder(autoencoder_params)
+
+    if random_init:
+        return ae.to(dtype=dtype)
 
     if not os.path.exists(ckpt_path):
         raise ValueError(

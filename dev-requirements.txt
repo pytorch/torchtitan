@@ -1,1 +1,0 @@
-.ci/docker/dev-requirements.txt

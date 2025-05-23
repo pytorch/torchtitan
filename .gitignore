@@ -14,7 +14,7 @@ wandb
 
 torchtitan/datasets/**/*.model
 assets/**/*.model
-torchtitan/experiments/**/assets/*
+torchtitan/experiments/flux/assets/*
 
 # temp files
 *.log

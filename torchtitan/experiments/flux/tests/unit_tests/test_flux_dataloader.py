@@ -14,17 +14,17 @@ from torchtitan.tools.profiling import (
 
 class TestFluxDataLoader:
     def test_load_dataset(self):
-        for dataset_name in ["cc12m-wds"]:
+        for dataset_name in ["cc12m-test"]:
             self._test_flux_dataloader(dataset_name)
 
     def _test_flux_dataloader(self, dataset_name):
-        batch_size = 32
+        batch_size = 4
         world_size = 4
         rank = 0
 
         num_steps = 10
 
-        path = "torchtitan.experiments.flux.flux_argparser"
+        path = "torchtitan.experiments.flux.job_config"
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
@@ -36,6 +36,8 @@ class TestFluxDataLoader:
                 # "--profiling.enable_memory_snapshot",
                 # "--profiling.save_memory_snapshot_folder",
                 # "memory_snapshot_flux",
+                "--training.img_size",
+                str(256),
                 "--training.dataset",
                 dataset_name,
                 "--training.batch_size",
@@ -67,15 +69,10 @@ class TestFluxDataLoader:
 
             for i in range(0, num_steps):
                 input_data, labels = next(dl)
-                print(f"Step {i} image size: {labels.shape}")
                 if torch_profiler:
                     torch_profiler.step()
                 if memory_profiler:
                     memory_profiler.step()
-
-                print(len(input_data["clip_tokens"]))
-                for k, v in input_data.items():
-                    print(f"Step {i} {k} value: {type(v), v.shape}")
 
                 assert len(input_data) == 2  # (clip_encodings, t5_encodings)
                 assert labels.shape == (batch_size, 3, 256, 256)
@@ -98,5 +95,5 @@ class TestFluxDataLoader:
             dp_rank=rank,
             job_config=job_config,
             tokenizer=None,
-            infinite=False,
+            infinite=True,
         )
