@@ -1,6 +1,10 @@
-# FLUX model in torchtitan
-[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/flux_integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/flux_integration_test_8gpu.yaml?query=branch%3Amain)
+<div align="center">
 
+# FLUX model in torchtitan
+
+[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)
+
+</div>
 
 ## Overview
 This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. In torchtitan, we showcase the pre-training process of text-to-image part of the FLUX model.
