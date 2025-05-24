@@ -1,0 +1,29 @@
+home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<float, signed char, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5349:15: error: there are no arguments to ‘__dp4a’ that depend on a template parameter, so a declaration of ‘__dp4a’ must be available [-fpermissive]
+ 5349 |       t[ii] = __dp4a(x, mask[ii], 0);
+      |               ^~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5349:15: note: (if you use ‘-fpermissive’, G++ will accept your code, but allowing the use of an undeclared name is deprecated)
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<float, unsigned char, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5423:27: error: there are no arguments to ‘__byte_perm’ that depend on a template parameter, so a declaration of ‘__byte_perm’ must be available [-fpermissive]
+ 5423 |       result_as_int[ii] = __byte_perm(src_reg, 0x4B000000, prmt_indices[ii]);
+      |                           ^~~~~~~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<cutlass::half_t, cutlass::integer_subbyte<2, true>, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5562:20: error: there are no arguments to ‘__hfma2’ that depend on a template parameter, so a declaration of ‘__hfma2’ must be available [-fpermissive]
+ 5562 |       fp16x2_val = __hfma2(fp16x2_val,
+      |                    ^~~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<cutlass::half_t, cutlass::integer_subbyte<2, false>, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5698:20: error: there are no arguments to ‘__hfma2’ that depend on a template parameter, so a declaration of ‘__hfma2’ must be available [-fpermissive]
+ 5698 |       fp16x2_val = __hfma2(fp16x2_val,
+      |                    ^~~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<cutlass::half_t, cutlass::integer_subbyte<4, true>, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5844:20: error: there are no arguments to ‘__hfma2’ that depend on a template parameter, so a declaration of ‘__hfma2’ must be available [-fpermissive]
+ 5844 |       fp16x2_val = __hfma2(hfma_scale, fp16x2_val, hfma_bias);
+      |                    ^~~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static PackedResultType cutlass::NumericArrayConverter<cutlass::half_t, cutlass::integer_subbyte<4, false>, N, Round>::packed_convert(const PackedSrcType&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:5970:22: error: there are no arguments to ‘__hfma2’ that depend on a template parameter, so a declaration of ‘__hfma2’ must be available [-fpermissive]
+ 5970 |         fp16x2_val = __hfma2(fp16x2_val, reinterpret_cast<const __half2&>(hfma_scale), reinterpret_cast<const __half2&>(hfma_bias));
+      |                      ^~~~~~~
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h: In static member function ‘static cutlass::FastNumericArrayConverter<signed char, float, 4, Round>::result_type cutlass::FastNumericArrayConverter<signed char, float, 4, Round>::convert(const source_type&)’:
+/home/less/local/cutlass40/include/cutlass/numeric_conversion.h:6890:17: error: there are no arguments to ‘__byte_perm’ that depend on a template parameter, so a declaration of ‘__byte_perm’ must be available [-fpermissive]
+ 6890 |     result[0] = __byte_perm(result[0], result[1], 0x40);
+      |                 ^~~~~~~~~~~
