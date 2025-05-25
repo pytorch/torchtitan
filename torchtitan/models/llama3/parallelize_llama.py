@@ -63,12 +63,14 @@ def parallelize_llama(
         # float8 scaling recipes. For rowwise recipes, we use regular TP and
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+        enable_float8_rowwise_tp = enable_float8_linear and float8_is_rowwise
 
         apply_tp(
             model,
             world_mesh["tp"],
             loss_parallel=parallel_dims.loss_parallel_enabled,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            enable_float8_rowwise_tp=enable_float8_rowwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
@@ -125,6 +127,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    enable_float8_rowwise_tp: bool,
     enable_async_tp: bool,
 ):
     """Apply tensor parallelism."""
@@ -158,12 +161,24 @@ def apply_tp(
             Float8RowwiseParallel,
             PrepareFloat8ModuleInput,
         )
-
         rowwise_parallel, colwise_parallel, prepare_module_input = (
             Float8RowwiseParallel,
             Float8ColwiseParallel,
             PrepareFloat8ModuleInput,
         )
+        logger.info("Using float8 tensorwise all-gather")
+    elif enable_float8_rowwise_tp:
+        from torchao.float8.float8_tensor_parallel_rowwise_scales import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+        logger.info("Using float8 rowwise all-gather")
     else:
         rowwise_parallel, colwise_parallel, prepare_module_input = (
             RowwiseParallel,
