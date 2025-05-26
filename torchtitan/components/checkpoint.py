@@ -561,11 +561,7 @@ class CheckpointManager:
 
             # For now, we will manually pop the freqs_cis buffer, as we made this permanent
             # temporarily and we don't want to include it in the exported state_dict.
-<<<<<<< HEAD
             # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-=======
-            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama/model.py#L348
->>>>>>> 4c7eee3 (for mast jobs)
             self.states.pop("freqs_cis", None)
 
             if self.export_dtype != torch.float32:
