@@ -68,5 +68,10 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     trust_remote_code=True,
 )
-
-print(f"{model=}")
+if model:
+    print(f"\n{80*'-'}")
+    print(f"Model '{model_id}' downloaded successfully!")
+    print(f"{80*'-'}\n")
+    print(f"{model=}")
+else:
+    print("Error: Model download failed")
