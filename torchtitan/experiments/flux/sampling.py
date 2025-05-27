@@ -95,50 +95,6 @@ def generate_empty_batch(
         },
     )
 
-def generate_image_from_latent(
-    device: torch.device,
-    dtype: torch.dtype,
-    model: FluxModel,
-    autoencoder: AutoEncoder,
-    img_width: int,
-    img_height: int,
-    denoising_steps: int,
-    clip_encodings: torch.Tensor,
-    t5_encodings: torch.Tensor,
-    enable_classifer_free_guidance: bool = False,
-    empty_t5_encodings: torch.Tensor | None = None,
-    empty_clip_encodings: torch.Tensor | None = None,
-    classifier_free_guidance_scale: float | None = None,
-) -> torch.Tensor:
-    if enable_classifer_free_guidance and (
-        empty_t5_encodings is None or empty_clip_encodings is None
-    ):
-        raise ValueError(
-            "empty_t5_encodings and empty_clip_encodings must be provided if enable_classifer_free_guidance is True"
-        )
-
-    img = denoise(
-        device=device,
-        dtype=dtype,
-        model=model,
-        img_width=img_width,
-        img_height=img_height,
-        denoising_steps=denoising_steps,
-        clip_encodings=clip_encodings,
-        t5_encodings=t5_encodings,
-        enable_classifer_free_guidance=enable_classifer_free_guidance,
-        empty_t5_encodings=(
-            empty_t5_encodings if enable_classifer_free_guidance else None
-        ),
-        empty_clip_encodings=(
-            empty_clip_encodings if enable_classifer_free_guidance else None
-        ),
-        classifier_free_guidance_scale=classifier_free_guidance_scale,
-    )
-
-    img = autoencoder.decode(img.to(dtype))
-    return img
-
 def generate_image(
     device: torch.device,
     dtype: torch.dtype,
