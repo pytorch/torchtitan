@@ -119,12 +119,12 @@ if __name__ == "__main__":
         if config.inference.save_path:
             path = Path(config.job.dump_folder, config.inference.save_path)
             path.mkdir(parents=True, exist_ok=True)
-            images_to_save = pil_images[:2]
-            for i, img in enumerate(images_to_save):
+            for i, img in enumerate(pil_images):
                 exif_data = Image.Exif()
                 exif_data[ExifTags.Base.Software] = "AI generated;txt2img;flux"
                 exif_data[ExifTags.Base.Make] = "Black Forest Labs"
                 exif_data[ExifTags.Base.Model] = "Schnell"
+                exif_data[ExifTags.Base.ImageDescription] = original_prompts[i]
                 img.save(
                     path / f"img_{i}.png", exif=exif_data, quality=95, subsampling=0
                 )
