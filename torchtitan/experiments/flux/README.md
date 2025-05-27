@@ -36,7 +36,7 @@ CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml
 
 To perform inference with the model, run the following command:
 ```bash
-JOB_FOLDER=outputs torchtitan/experiments/flux/run_inference.sh 
+JOB_FOLDER=outputs torchtitan/experiments/flux/run_inference.sh
 ```
 
 ## Running Tests

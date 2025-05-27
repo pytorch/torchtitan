@@ -1,5 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
@@ -80,16 +80,33 @@ if __name__ == "__main__":
 
     if global_id == 0:
         logger.info("Starting inference...")
-    
+
     if prompts:
         images = inference(
-            prompts, trainer, t5_tokenizer, clip_tokenizer, bs=config.inference.batch_size
+            prompts,
+            trainer,
+            t5_tokenizer,
+            clip_tokenizer,
+            bs=config.inference.batch_size,
         )
         # pad the outputs to make sure all ranks have the same number of images for the gather step
-        images = torch.cat([images, torch.zeros(math.ceil(total_prompts / world_size) - images.shape[0], 3, 256, 256, device=trainer.device)])
+        images = torch.cat(
+            [
+                images,
+                torch.zeros(
+                    math.ceil(total_prompts / world_size) - images.shape[0],
+                    3,
+                    256,
+                    256,
+                    device=trainer.device,
+                ),
+            ]
+        )
     else:
         # if there are not enough prompts for all ranks, pad with empty tensors
-        images = torch.zeros(math.ceil(total_prompts / world_size), 3, 256, 256, device=trainer.device)
+        images = torch.zeros(
+            math.ceil(total_prompts / world_size), 3, 256, 256, device=trainer.device
+        )
 
     # Create a list of tensors to gather results
     gathered_images = [

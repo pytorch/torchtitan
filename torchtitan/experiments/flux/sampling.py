@@ -70,6 +70,7 @@ def get_schedule(
 #       Sampling functions
 # ----------------------------------------
 
+
 def generate_empty_batch(
     num_images: int,
     device: torch.device,
@@ -94,6 +95,7 @@ def generate_empty_batch(
             "t5_tokens": empty_t5_tokens,
         },
     )
+
 
 def generate_image(
     device: torch.device,
@@ -173,6 +175,7 @@ def generate_image(
 
     img = autoencoder.decode(img.to(dtype))
     return img
+
 
 def denoise(
     device: torch.device,

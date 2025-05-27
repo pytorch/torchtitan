@@ -46,9 +46,11 @@ class Eval:
     save_img_folder: str = "img"
     """Directory to save image generated/sampled from the model"""
 
+
 @dataclass
 class Inference:
     """Inference configuration"""
+
     save_path: str = "inference_results"
     """Path to save the inference results"""
     prompts_path: str = "prompts.txt"
