@@ -196,11 +196,10 @@ def generate_image(
             t5_encoder=t5_encoder,
         )
 
-    return generate_image_from_latent(
+    img = denoise(
         device=device,
         dtype=dtype,
         model=model,
-        autoencoder=autoencoder,
         img_width=img_width,
         img_height=img_height,
         denoising_steps=job_config.eval.denoising_steps,
@@ -215,6 +214,9 @@ def generate_image(
         ),
         classifier_free_guidance_scale=job_config.eval.classifier_free_guidance_scale,
     )
+
+    img = autoencoder.decode(img.to(dtype))
+    return img
 
 def denoise(
     device: torch.device,
