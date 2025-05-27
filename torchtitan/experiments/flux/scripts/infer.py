@@ -114,7 +114,6 @@ if __name__ == "__main__":
                 all_images[global_idx] = gathered_images[rank_index][in_rank_index]
         logger.info("Inference done")
 
-        # Computing FID activations
         pil_images = [torch_to_pil(img) for img in all_images]
         if config.inference.save_path:
             path = Path(config.job.dump_folder, config.inference.save_path)
