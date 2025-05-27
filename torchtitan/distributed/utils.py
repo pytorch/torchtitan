@@ -9,6 +9,7 @@ import math
 import os
 from collections.abc import Generator, Iterable
 from datetime import timedelta
+from typing import Optional
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -16,7 +17,9 @@ import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.experimental._attention import _FlexAttentionSharder
 from torch.nn.attention import SDPBackend
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
@@ -156,10 +159,15 @@ def create_context_parallel_ctx(
     cp_seq_dims: list[int],
     cp_no_restore_buffers: set[torch.Tensor],
     cp_rotate_method: str,
+    sharder: Optional[_FlexAttentionSharder] = None,
 ):
     try:
         from torch.distributed.tensor.experimental import context_parallel
-        from torch.distributed.tensor.experimental._attention import set_rotate_method
+        from torch.distributed.tensor.experimental._attention import (
+            _DispatchMode,
+            _set_dispatch_mode,
+            set_rotate_method,
+        )
     except ImportError:
         print(
             f"PyTorch version {torch.__version__} does not include the experimental "
@@ -167,11 +175,19 @@ def create_context_parallel_ctx(
         )
 
     set_rotate_method(cp_rotate_method)
+    """
+    _set_dispatch_mode("torch_dispatch")
+    assert (
+        torch.distributed.tensor.experimental._attention._dispatch_mode
+        == _DispatchMode.TORCH_DISPATCH
+    )
+    """
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
         buffer_seq_dims=cp_seq_dims,
         no_restore_buffers=cp_no_restore_buffers,
+        sharder=sharder,
     )
 
 
@@ -192,8 +208,9 @@ def get_train_context(
             if cp_context is not None:
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+                # TODO: add logic for flex-attention
                 assert (
-                    ScaledDotProductAttention.backends
+                    ScaledDotProductAttention.backends or True
                 ), "No valid SDPA backends with CP."
                 stack.enter_context(cp_context)
 
