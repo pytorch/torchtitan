@@ -46,6 +46,16 @@ class Eval:
     save_img_folder: str = "img"
     """Directory to save image generated/sampled from the model"""
 
+@dataclass
+class Inference:
+    """Inference configuration"""
+    save_path: str = "inference_results"
+    """Path to save the inference results"""
+    prompts_path: str = "prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
+    batch_size: int = 16
+    """Batch size for inference"""
+
 
 @dataclass
 class JobConfig:
@@ -56,3 +66,4 @@ class JobConfig:
     training: Training = field(default_factory=Training)
     encoder: Encoder = field(default_factory=Encoder)
     eval: Eval = field(default_factory=Eval)
+    inference: Inference = field(default_factory=Inference)
