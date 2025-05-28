@@ -224,6 +224,14 @@ class Training:
     gc_freq: int = 50
     """Python garbage control scheduling interval, in steps"""
 
+    gc_debug: bool = False
+    """
+    Enable GC debugging mode. This will perform gc.collect() at every step to
+    detect if there is a reference cycle that includes a CUDA Tensor.
+    Note that you may want to lower the training steps to avoid generating too
+    many temporary files.
+    """
+
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
@@ -625,7 +633,6 @@ class ConfigManager:
         return self.config
 
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
-
         # 1. Check CLI
         valid_keys = {"--job.config-file", "--job.config_file"}
         for i, arg in enumerate(args):

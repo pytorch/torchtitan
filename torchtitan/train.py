@@ -70,9 +70,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.job.print_args:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
-        # take control of garbage collection to avoid stragglers
-        self.gc_handler = utils.GarbageCollection(gc_freq=job_config.training.gc_freq)
-
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
@@ -105,6 +102,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # dataloader must be changed.
         if self.ft_manager.enabled:
             dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
+
+        # take control of garbage collection to avoid stragglers
+        self.gc_handler = utils.GarbageCollection(
+            gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
+        )
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).

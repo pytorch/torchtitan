@@ -36,14 +36,23 @@ device_type, device_module = get_device_info()
 
 # used to avoid stragglers in garbage collection
 class GarbageCollection:
-    def __init__(self, gc_freq=1000):
+    def __init__(self, gc_freq: int = 1000, debug: bool = False):
         assert gc_freq > 0, "gc_freq must be a positive integer"
         self.gc_freq = gc_freq
+        self.debug = debug
         gc.disable()
         self.collect("Initial GC collection.")
+        if debug:
+            from torch.utils.viz._cycles import warn_tensor_cycles
 
-    def run(self, step_count):
-        if step_count > 1 and step_count % self.gc_freq == 0:
+            if torch.distributed.get_rank() == 0:
+                warn_tensor_cycles()
+
+    def run(self, step_count: int):
+        if self.debug:
+            logger.info("Force GC to perform collection to obtain debug information.")
+            gc.collect()
+        elif step_count > 1 and step_count % self.gc_freq == 0:
             self.collect("Peforming periodical GC collection.")
 
     @staticmethod
