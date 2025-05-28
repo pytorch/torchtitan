@@ -482,6 +482,19 @@ def build_test_list():
             "Optional checkpoint",
             "optional_checkpoint",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--float8.force_recompute_fp8_weight_in_bwd",
+                    "--float8.emulate",
+                ],
+            ],
+            "Float8 emulation test",
+            "float8_emulation",
+        ),
     ]
     return integration_tests_flavors
 

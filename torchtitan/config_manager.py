@@ -450,6 +450,13 @@ class Float8:
     Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
+    emulate: bool = False
+    """
+    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
+    as the current CI does not have sm_89 capability, required by Float8.
+    Not compatible with torch.compile.
+    """
+
 
 @dataclass
 class MX:

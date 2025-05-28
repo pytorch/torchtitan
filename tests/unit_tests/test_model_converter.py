@@ -39,7 +39,9 @@ def test_build_model_converters_empty_list():
 
 def test_build_model_converters_float8_converter():
     config_manager = ConfigManager()
-    config = config_manager.parse_args(["--model.converters", "float8"])
+    config = config_manager.parse_args(
+        ["--model.converters", "float8", "--float8.emulate"]
+    )
     parallel_dims = build_parallel_dims(config, 1)
 
     model_converters = build_model_converters(config, parallel_dims)
