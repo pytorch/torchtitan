@@ -226,9 +226,9 @@ class Training:
 
     gc_debug: bool = False
     """
-    Enable GC debugging mode. This will performance gc.collect() every step to
+    Enable GC debugging mode. This will perform gc.collect() at every step to
     detect if there is a reference cycle that includes a CUDA Tensor.
-    Note that you may want to lower the training step to avoid generateing too
+    Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
 
