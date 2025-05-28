@@ -6,6 +6,7 @@
 
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
+import os
 
 import torch
 import torch.distributed as dist
@@ -143,6 +144,9 @@ def run_full_model(
 
 
 if __name__ == "__main__":
+    # set device before init_device mesh, otherwise ep will have duplicate device mapping
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
     mesh = dist.init_device_mesh("cuda", (2, 2, 2), mesh_dim_names=("pp", "ep", "fsdp"))
 
     run_full_model(mesh)
