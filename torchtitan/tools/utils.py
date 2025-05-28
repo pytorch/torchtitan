@@ -40,17 +40,17 @@ class GarbageCollection:
         assert gc_freq > 0, "gc_freq must be a positive integer"
         self.gc_freq = gc_freq
         gc.disable()
-        self.collect("Initial GC collection.")
+        self.collect("Initial GC collection")
 
     def run(self, step_count):
         if step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Peforming periodical GC collection.")
+            self.collect("Peforming periodical GC collection")
 
     @staticmethod
     def collect(reason: str):
         begin = time.monotonic()
         gc.collect(1)
-        logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
+        logger.info("[GC] %s %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
@@ -146,12 +146,12 @@ def check_if_feature_in_pytorch(
     if "git" in torch.__version__:  # pytorch is built from source
         # notify users to check if the pull request is included in their pytorch
         logger.warning(
-            "detected that the pytorch is built from source. Please make sure the PR "
+            "Detected that the pytorch is built from source. Please make sure the PR "
             f"({pull_request_link}) is included in pytorch for correct {feature_name}."
         )
     elif min_nightly_version is not None and torch.__version__ < min_nightly_version:
         logger.warning(
-            f"detected that the pytorch version {torch.__version__} is older than "
+            f"Detected that the pytorch version {torch.__version__} is older than "
             f"{min_nightly_version}. Please upgrade a newer version to include the "
             f"change in ({pull_request_link}) for correct {feature_name}."
         )
