@@ -267,6 +267,8 @@ class CheckpointManager:
         self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.initial_load_path = ckpt_config.initial_load_path
+        self.initial_load_full_checkpoint = ckpt_config.initial_load_full_checkpoint
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.ASYNC or self.ft_manager:
@@ -408,21 +410,38 @@ class CheckpointManager:
         if self.ft_manager:
             self._ft_load()
 
-        if not self.enable_checkpoint or not os.path.isdir(self.folder):
+        if not self.enable_checkpoint:
             return False
 
-        if step == -1:
-            step = self._find_load_step()
+        model_only = False
+        if not os.path.exists(self.folder):
+            if self.initial_load_path:
+                checkpoint_id = self.initial_load_path
+                if not os.path.isdir(checkpoint_id):
+                    raise ValueError(
+                        "initial_load_full_checkpoint is specified but the path is not valid."
+                    )
+                model_only = not self.initial_load_full_checkpoint
+            else:
+                return False
+        else:
+            if self.initial_load_path:
+                logger.info(
+                    "`initial_load_path` is provided but the checkpoint folder exists. "
+                    "Checkpointer will use the checkpoints from the checkpoint folder."
+                )
+            step = self._find_load_step() if step == -1 else step
             if step == -1:
                 return False
+            model_only = step == 0
+            checkpoint_id = self._create_checkpoint_id(step)
 
-        checkpoint_id = self._create_checkpoint_id(step)
-        if not os.path.isdir(checkpoint_id):
-            return False
+            if not os.path.isdir(checkpoint_id):
+                return False
 
-        logger.info(f"Loading the checkpoint at step {step}.")
+        logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
-        states = self._states_to_load(step)
+        states = self._states_to_load(model_only)
         dcp.load(states, checkpoint_id=checkpoint_id)
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -521,28 +540,33 @@ class CheckpointManager:
             f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
 
-    def _states_to_load(self, step: int) -> dict[str, Any]:
+    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         """Determines which states to load for the given step.
 
-        When checkpointer determines which step of the checkpoint to load, this API is
-        used to determine which states to load based on the step.
+        This API is used to determine which states to load based on the
+        configurations.
 
         Args:
-            step (int): The step to load the checkpoint for.
+            model_only (bool): Whether to load the model only.
 
         Returns:
             Dict[str, Any]: The states to load for the given step.
         """
         # For the first step, we will only load the model weights.
-        states = {MODEL: self.states[MODEL]} if step == 0 else self.states
-        states_to_load = {
-            k: v for k, v in states.items() if k not in self.exclude_from_loading
-        }
+        if model_only:
+            return {MODEL: self.states[MODEL]}
+
         for exclude_key in self.exclude_from_loading:
-            if exclude_key not in states:
+            if exclude_key not in self.states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
+
+        states_to_load = {
+            k: v for k, v in self.states.items() if k not in self.exclude_from_loading
+        }
+
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
+
         return states_to_load
 
     def _save_last_step(self, curr_step: int) -> None:

@@ -373,6 +373,29 @@ class Checkpoint:
     When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
+    initial_load_path: str | None = None
+    """
+    This option specifies the path to the initial checkpoint to load, which is
+    particularly useful for resuming training from a previous run with a
+    different output path or when loading a checkpoint from a pre-trained model.
+    If the checkpoint folder for the current run is not empty,
+    located at {--job.dump_folder}/{--checkpoint.folder}, this option will be ignored.
+    This feature allows users to load an initial checkpoint from a different folder and
+    continue training, saving new checkpoints to the specified folder without affecting
+    the existing ones.
+
+    Note that the path should contain the full path to the checkpoint folder,
+    including the step number, if any; for example,
+    "//pre_train/checkpoints/llama3/llama3_8b/step_10000".
+    """
+
+    initial_load_full_checkpoint: bool = False
+    """
+    This option specifies if the full checkpoint should be loaded when `initial_load_path` is set.
+    If True, the checkpoint at `initial_load_path` is treated as a standard training checkpoint,
+    including optimizer and training states. The default setting for this option is False.
+    """
+
     interval: int = 500
     """Checkpointing interval in steps."""
 
