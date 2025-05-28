@@ -27,7 +27,7 @@ jobs:
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      script: |
+      sscript: |
         set -eux
 
         # The generic Linux job chooses to use base env, not the one setup by the image
@@ -37,6 +37,8 @@ jobs:
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
         python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
