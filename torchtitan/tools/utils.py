@@ -50,15 +50,18 @@ class GarbageCollection:
 
     def run(self, step_count: int):
         if self.debug:
-            logger.info("Force GC to perform collection to obtain debug information.")
+            self.collect(
+                "Force GC to perform collection to obtain debug information.",
+                generation=2,
+            )
             gc.collect()
         elif step_count > 1 and step_count % self.gc_freq == 0:
             self.collect("Peforming periodical GC collection.")
 
     @staticmethod
-    def collect(reason: str):
+    def collect(reason: str, generation: int = 1):
         begin = time.monotonic()
-        gc.collect(1)
+        gc.collect(generation)
         logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
