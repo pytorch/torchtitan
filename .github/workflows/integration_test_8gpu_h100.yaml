@@ -27,7 +27,7 @@ jobs:
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      sscript: |
+      script: |
         set -eux
 
         # The generic Linux job chooses to use base env, not the one setup by the image
