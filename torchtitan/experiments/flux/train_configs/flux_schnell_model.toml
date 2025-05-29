@@ -5,9 +5,9 @@ description = "Flux-schnell model"
 print_args = false
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 10
+profile_freq = 100
 enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
@@ -28,14 +28,14 @@ lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 40  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.0  # no decay
 
 [training]
 batch_size = 4
 seq_len = 512
 max_norm = 1.0  # grad norm clipping
-steps = 30_000
+steps = 200
 compile = false
 dataset = "cc12m-wds"
 classifer_free_guidance_prob = 0.1

@@ -81,17 +81,17 @@ def apply_fsdp(
     for layer in linear_layers:
         fully_shard(layer, **fsdp_config)
 
-    for block in model.double_blocks:
-        fully_shard(
-            block,
-            **fsdp_config,
-        )
+    # apply FSDP to the double blocks and single blocks
+    for modules in [model.double_blocks, model.single_blocks]:
+        # Wrap every 2 blocks together in one FSDP Module
+        for i in range(0, len(modules), 2):
+            block1 = modules[i]
+            block2 = modules[i + 1] if i + 1 < len(modules) else None
+            fully_shard(
+                [block1, block2] if block2 else block1,
+                **fsdp_config,
+            )
 
-    for block in model.single_blocks:
-        fully_shard(
-            block,
-            **fsdp_config,
-        )
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
     fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
 
