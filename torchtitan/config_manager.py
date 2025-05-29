@@ -192,7 +192,7 @@ class Training:
     batch_size: int = 8
     """Batch size"""
 
-    global_batch_size: int | None = None
+    global_batch_size: int = -1
     """
     Global batch size (defaults to `training.batch_size * data-parallel degree`)
     """
