@@ -93,18 +93,6 @@ def build_test_list():
             "2D compile",
             "2d_compile",
         ),
-        # TODO: re-enable this test once the async TP issue is fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--training.compile",
-        #             "--parallelism.tensor_parallel_degree 2",
-        #             "--parallelism.enable_async_tensor_parallel",
-        #         ],
-        #     ],
-        #     "2D async TP compile",
-        #     "2d_asynctp_compile",
-        # ),
         OverrideDefinitions(
             [
                 [
@@ -227,6 +215,39 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+                [
+                    "--training.steps 20",
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+DP+TP 3D test with save/load resume ckpt",
+            "pp_dp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.compile",
+                ],
+            ],
+            "PP+DP+TP 3D test with torch.compile",
+            "3d_compile",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
@@ -322,6 +343,18 @@ def build_test_list():
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.context_parallel_degree=2",
                 ]
             ],
@@ -340,6 +373,51 @@ def build_test_list():
             "HSDP+CP (with dp_shard)",
             "hsdp+cp_without_dp_shard",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_with_dp_shard",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+            ],
+            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+            "cpu_offload+opt_in_bwd+TP+DP+CP",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
