@@ -83,12 +83,14 @@ def apply_fsdp(
 
     # apply FSDP to the double blocks and single blocks
     for modules in [model.double_blocks, model.single_blocks]:
-        # Wrap every 2 blocks together in one FSDP Module
-        for i in range(0, len(modules), 2):
+        # Wrap every 4 blocks together in one FSDP Module
+        for i in range(0, len(modules), 4):
             block1 = modules[i]
             block2 = modules[i + 1] if i + 1 < len(modules) else None
+            block3 = modules[i + 2] if i + 2 < len(modules) else None
+            block4 = modules[i + 3] if i + 3 < len(modules) else None
             fully_shard(
-                [block1, block2] if block2 else block1,
+                [block for block in [block1, block2, block3, block4] if block],
                 **fsdp_config,
             )
 
