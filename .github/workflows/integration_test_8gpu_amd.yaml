@@ -1,4 +1,4 @@
-name: 4 AMD GPU Integration Test
+name: 8 AMD GPU Integration Test
 
 on:
   push:
