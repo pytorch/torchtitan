@@ -121,8 +121,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # verify batch sizes
         if job_config.training.global_batch_size is None:
-            job_config.training.global_batch_size = \
+            job_config.training.global_batch_size = (
                 job_config.training.batch_size * dp_degree
+            )
         assert job_config.training.global_batch_size > 0
         assert (
             job_config.training.global_batch_size
@@ -134,9 +135,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"% ({job_config.training.batch_size} * {dp_degree}) != 0)"
         )
 
-        self.gradient_accumulation_steps = (
-            job_config.training.global_batch_size
-            // (job_config.training.batch_size * dp_degree)
+        self.gradient_accumulation_steps = job_config.training.global_batch_size // (
+            job_config.training.batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
 
@@ -402,8 +402,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return loss
 
     def train_step(
-            self,
-            data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
+        self,
+        data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
     ) -> bool | None:
         """
         Execute a training step and return whether the data loader ran
@@ -499,7 +499,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         "Saving final checkpoint and exiting."
                     )
                 self.checkpointer.save(
-                    self.step, force=(self.step == job_config.training.steps or data_ran_out)
+                    self.step,
+                    force=(self.step == job_config.training.steps or data_ran_out),
                 )
 
                 # signal the profiler that the next profiling step has started
