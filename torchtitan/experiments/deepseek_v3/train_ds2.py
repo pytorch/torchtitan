@@ -31,17 +31,21 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.config_manager import ConfigManager, JobConfig
-from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
+
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
-    parallelize_deepseek,
-)
+
+# from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
+#    parallelize_deepseek,
+# )
 
 # from checkpoint import load_weights_from_hf
 from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
 from torchtitan.experiments.deepseek_v3.models.model_config import (
     deepseek_config_registry,
 )
+
+from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import get_device_info
@@ -123,8 +127,6 @@ def run_full_model(
 
     # build tokenizer
     tokenizer = get_hf_tokenizer(model_id)
-
-    from torchtitan.datasets.hf_datasets import build_hf_dataloader
 
     # TODO - ep is not the same as dp really...just a temp shim atm.
     dataloader = build_hf_dataloader(

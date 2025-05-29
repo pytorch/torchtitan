@@ -9,7 +9,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer.hf_tokenizer import get_hf_tokenizer
+from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
 
 # ToDO - this is not suitable for deepseek but using for now...
 from torchtitan.models.llama3 import pipeline_llama
