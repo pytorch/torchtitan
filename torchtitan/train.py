@@ -120,7 +120,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # verify batch sizes
-        if job_config.training.global_batch_size is None:
+        if job_config.training.global_batch_size < 0:
             job_config.training.global_batch_size = (
                 job_config.training.batch_size * dp_degree
             )
