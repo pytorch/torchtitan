@@ -203,7 +203,7 @@ class FluxTrainer(Trainer):
             self.eval_step()
             model.train()
 
-    def eval_step(self, prompt: str = "A photo of a cat"):
+    def eval_step(self, prompt: str = "A cat holding a sign says Hello!"):
         """
         Evaluate the Flux model.
         1) generate and save images every few steps. Currently, we run the eval and on the same
