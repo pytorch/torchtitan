@@ -23,4 +23,9 @@ fi
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.experiments.flux.train --job.config_file ${CONFIG_FILE} $overrides
+-m torchtitan.experiments.flux.train --job.config_file ${CONFIG_FILE} \
+--checkpoint.enable_checkpoint \
+--checkpoint.folder "/home/jianiw/tmp/mffuse/flux/checkpoint/torchtitan-256-jianiw-cqs3s4" \
+--checkpoint.exclude_from_loading=lr_scheduler,dataloader,optimizer \
+--checkpoint.load_step 29000 \
+$overrides
