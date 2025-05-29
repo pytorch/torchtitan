@@ -45,6 +45,8 @@ from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
 from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
 from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
+
+# from torchtitan.experiments.deepseek_v3.train_configs.custom_args import JobConfig
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import get_device_info
@@ -96,6 +98,12 @@ def run_full_model(
     # setup mesh
     pp_dim = config.parallelism.pipeline_parallel_degree
     ep_dim = config.parallelism.expert_parallel_degree
+    if not ep_dim:
+        logger.info(f"No EP degree specified, {ep_dim=}")
+        ep_dim = 2
+        logger.info(f"Using default EP degree 2")
+        logger.info(f"{config=  }")
+        assert False, "no ep degreee specified"
     fsdp_dim = config.parallelism.data_parallel_shard_degree
     logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}, {_device_info=}")
 
