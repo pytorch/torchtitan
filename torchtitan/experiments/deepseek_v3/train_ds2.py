@@ -7,6 +7,7 @@
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
 
+import os
 import time
 from collections.abc import Callable
 from typing import Iterable, Optional, TypeAlias
@@ -40,10 +41,8 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 # )
 
 # from checkpoint import load_weights_from_hf
-from torchtitan.experiments.deepseek_v3.models.model import DeepseekForCausalLM
-from torchtitan.experiments.deepseek_v3.models.model_config import (
-    deepseek_config_registry,
-)
+from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
+from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
 from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
 from torchtitan.tools import utils

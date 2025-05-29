@@ -17,9 +17,9 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize_deepseek import parallelize_deepseek
 
-from .models.model import DeepseekForCausalLM
+from .model import DeepseekForCausalLM
 
-from .models.model_args import TransformerModelArgs
+from .model_args import TransformerModelArgs
 
 
 __all__ = [
