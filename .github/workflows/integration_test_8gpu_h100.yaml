@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test
+name: 8 GPU Integration Test at H100
 
 on:
   push:
@@ -17,9 +17,9 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
     with:
-      runner: linux.g5.48xlarge.nvidia.gpu
+      runner: linux.aws.h100.8
       gpu-arch-type: cuda
       gpu-arch-version: "12.6"
       # This image is faster to clone than the default, but it lacks CC needed by triton
@@ -41,4 +41,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
+        python ./tests/integration_tests_h100.py artifacts-to-be-uploaded --ngpu 8
