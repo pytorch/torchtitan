@@ -721,7 +721,7 @@ class ConfigManager:
         # Only in Custom
         for name, f in c_map.items():
             if name not in b_map:
-                result.append((name, f.type, field(default_factory=f.type)))
+                result.append((name, f.type, f))
 
         return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))
 

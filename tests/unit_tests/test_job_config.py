@@ -281,6 +281,7 @@ class TestJobConfig(unittest.TestCase):
                 ]
             )
             assert config.custom_args.how_is_your_day == "bad"
+            assert config.training.my_custom_steps == 32
             assert config.model.converters == ["float8", "mxfp"]
             result = config.to_dict()
             assert isinstance(result, dict)
