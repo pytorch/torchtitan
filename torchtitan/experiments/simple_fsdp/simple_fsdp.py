@@ -77,16 +77,21 @@ def _distribute_dtensor(
     assert inner_mesh.mesh_dim_names is not None
     submesh_names = outer_mesh.mesh_dim_names + inner_mesh.mesh_dim_names
     spanned_mesh = outer_global_mesh[submesh_names]
-    shard_dim = placements[0].dim
-    split_factor = inner_spec.num_shards_map[shard_dim]
-    tensor_placement = (
-        (
-            _StridedShard(shard_dim, split_factor=split_factor)
-            if split_factor > 1
-            else placements[0]
-        ),
-        inner_spec.placements[0],
-    )
+
+    placements = list(placements)
+    tensor_placement = ()
+    for idx, placement in enumerate(placements):
+        if placement.is_shard():
+            shard_dim = placement.dim
+            split_factor = inner_spec.num_shards_map[shard_dim]
+            tensor_placement = tensor_placement + (
+                _StridedShard(shard_dim, split_factor=split_factor)
+                if split_factor > 1
+                else placements[0],
+            )
+
+        elif placements[0].is_replicate():
+            tensor_placement = tensor_placement + (placements[0],)
 
     current_spec = DTensorSpec(
         mesh=outer_mesh,
@@ -95,7 +100,7 @@ def _distribute_dtensor(
     )
     target_spec = DTensorSpec(
         mesh=outer_mesh,
-        placements=(placements[0],),
+        placements=tensor_placement,
         tensor_meta=inner_spec.tensor_meta,
     )
     result_tensor = redistribute_local_tensor(
@@ -107,7 +112,7 @@ def _distribute_dtensor(
         result_tensor.requires_grad_(tensor.requires_grad),
         DTensorSpec(
             mesh=spanned_mesh,
-            placements=tensor_placement,
+            placements=tensor_placement + (inner_spec.placements[0],),
             tensor_meta=inner_spec.tensor_meta,
         ),
         requires_grad=tensor.requires_grad,
@@ -156,9 +161,9 @@ class ReplicateComputation(torch.nn.Module):
 
         # NOTE: specifying mixed precision is only available in pytorch_intern24
         #       https://github.com/tianyu-l/pytorch_intern24/pull/20
-        # support for FSDP + TP (assuming TP shards the inner-most dim)
-        if self.mode == "fully_shard" and x._spec.mesh.ndim == 2:
-            dp_placement, tp_placement = x._spec.placements
+        # support for FSDP/DDP/HSDP + TP (assuming TP shards the inner-most dim)
+        if self.tp_mesh is not None and x._spec.mesh.ndim >= 2:
+            tp_placement = x._spec.placements[-1]
             # TODO: remove tp_mesh as an input arg to data_parallel API and use x._spec.mesh["tp"]
             #       after DeviceMesh supports slicing a non-root mesh
             # dp_mesh, tp_mesh = self.device_mesh, x._spec.mesh["tp"]
