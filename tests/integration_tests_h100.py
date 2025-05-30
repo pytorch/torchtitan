@@ -73,7 +73,7 @@ def build_test_list():
                     "--training.compile",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.enable_async_tensor_parallel",
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
