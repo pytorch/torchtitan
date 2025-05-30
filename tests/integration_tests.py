@@ -382,7 +382,7 @@ def build_test_list():
                     "--parallelism.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP (with dp_shard)",
+            "HSDP+CP (without dp_shard)",
             "hsdp+cp_without_dp_shard",
             ngpu=4,
         ),
@@ -394,7 +394,7 @@ def build_test_list():
                     "--parallelism.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP (without dp_shard)",
+            "HSDP+CP (with dp_shard)",
             "hsdp+cp_with_dp_shard",
             ngpu=8,
         ),
