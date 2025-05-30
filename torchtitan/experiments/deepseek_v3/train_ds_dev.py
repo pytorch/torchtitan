@@ -6,6 +6,10 @@
 
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
+
+# this file runs a simple training loop with synthetic data
+# and is intended to be used for debugging and development
+
 import os
 
 import torch

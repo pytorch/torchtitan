@@ -7,6 +7,8 @@
 # torchrun --standalone --nproc-per-node 8 train.py
 # bash run_training.sh
 
+# this file runs a real training loop with real data, optimizer, metrics, etc.
+
 import os
 import time
 
@@ -17,11 +19,16 @@ import torch.distributed as dist
 
 import torchtitan.components.ft as ft
 
+from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.components.lr_scheduler import build_lr_schedulers
+
 from torchtitan.components.metrics import build_metrics_processor
+from torchtitan.components.optimizer import build_optimizers
 
 from torchtitan.config_manager import ConfigManager, JobConfig
 
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.distributed import ParallelDims
 
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
     parallelize_deepseek,
