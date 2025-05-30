@@ -53,6 +53,7 @@ class Float8Converter(ModelConverter):
 
         self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
+        self.moe_fqns = float8_config.moe_fqns
 
         if float8_config.recipe_name is not None:
             assert (
@@ -113,6 +114,22 @@ class Float8Converter(ModelConverter):
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
+
+        # Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        if self.moe_fqns:
+            from torchao.prototype.scaled_grouped_mm.conversion_utils import (
+                convert_moe_to_float8_training,
+            )
+
+            def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+                for target_fqn in self.moe_fqns:
+                    if target_fqn in cur_fqn:
+                        return True
+                return False
+
+            convert_moe_to_float8_training(model, module_filter_fn=moe_module_filter_fn)
+            logger.info("Converted MoE to float8")
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         if not self.enabled:
