@@ -710,6 +710,10 @@ class ConfigManager:
                 m_type = ConfigManager._merge_configs(f.type, c_map[name].type)
 
                 # Create a default factory that preserves custom defaults
+                # We do this by using a closure to capture both the merged type and custom fields,
+                # ensuring the custom defaults are preserved when creating instances of the merged type.
+                # Previously, we were using a default_factory that would create an instance of the merged type,
+                # but this would not preserve the custom defaults as it would use base class defaults.
                 def make_factory(m_type, c_field):
                     def factory():
                         # Initialize with custom defaults first
