@@ -19,7 +19,6 @@ import torch.distributed as dist
 
 import torchtitan.components.ft as ft
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 
 from torchtitan.components.metrics import build_metrics_processor
