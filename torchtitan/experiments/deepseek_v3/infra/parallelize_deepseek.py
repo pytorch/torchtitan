@@ -9,26 +9,13 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.pipelining import PipelineStage, Schedule1F1B
-
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
 
 # from checkpoint import load_weights_from_hf
 from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
-from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
-from torchtitan.models.llama3.parallelize_llama import (
-    apply_ac,
-    apply_compile,
-    apply_ddp,
-    apply_fsdp,
-    apply_tp,
-)
 from torchtitan.tools.logging import logger
 
 

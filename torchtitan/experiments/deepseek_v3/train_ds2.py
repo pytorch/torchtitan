@@ -9,40 +9,26 @@
 
 import os
 import time
-from collections.abc import Callable
-from typing import Iterable, Optional, TypeAlias
+
+from typing import Iterable
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import fully_shard
-from torch.distributed.pipelining import PipelineStage, Schedule1F1B
 
 import torchtitan.components.ft as ft
-from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import (
-    build_lr_schedulers,
-    LRSchedulersContainer,
-)
 
-from torchtitan.components.metrics import (
-    build_metrics_processor,
-    ensure_pp_loss_visible,
-)
-from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
+from torchtitan.components.metrics import build_metrics_processor
+
 from torchtitan.config_manager import ConfigManager, JobConfig
 
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.distributed import ParallelDims, utils as dist_utils
 
 from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
     parallelize_deepseek,
 )
 
 # from checkpoint import load_weights_from_hf
-from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
+
 from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
 from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
@@ -103,7 +89,7 @@ def run_full_model(
         # TODO - the fix for config extension is in PR...need it to land
         # logger.info(f"No EP degree specified, {ep_dim=}")
         ep_dim = 2
-        logger.info(f"Using default EP degree 2")
+        logger.info("Using default EP degree 2")
 
     fsdp_dim = config.parallelism.data_parallel_shard_degree
     logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}, {_device_info=}")
