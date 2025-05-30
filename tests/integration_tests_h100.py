@@ -77,6 +77,8 @@ def build_test_list():
                     "--parallelism.enable_async_tensor_parallel",
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--float8.force_recompute_fp8_weight_in_bwd",
                 ]
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
@@ -92,6 +94,8 @@ def build_test_list():
                     "--parallelism.context_parallel_degree=2",
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--float8.force_recompute_fp8_weight_in_bwd",
                 ]
             ],
             "HSDP+CP+torch.compile+Float8",
