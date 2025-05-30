@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 
 from torch import nn
+
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 
