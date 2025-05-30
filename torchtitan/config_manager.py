@@ -708,33 +708,17 @@ class ConfigManager:
                 and is_dataclass(c_map[name].type)
             ):
                 m_type = ConfigManager._merge_configs(f.type, c_map[name].type)
+                result.append((name, m_type, field(default_factory=m_type)))
 
-                # Create a default factory that preserves custom defaults
-                # We do this by using a closure to capture both the merged type and custom fields,
-                # ensuring the custom defaults are preserved when creating instances of the merged type.
-                # Previously, we were using a default_factory that would create an instance of the merged type,
-                # but this would not preserve the custom defaults as it would use base class defaults.
-                def make_factory(m_type, c_field):
-                    def factory():
-                        # Initialize with custom defaults first
-                        instance = c_field.type()
-                        # Then create merged instance
-                        return m_type(**{k: v for k, v in asdict(instance).items()})
-
-                    return factory
-
-                result.append(
-                    (
-                        name,
-                        m_type,
-                        field(default_factory=make_factory(m_type, c_map[name])),
-                    )
-                )
+            # Custom field overrides base type
             elif name in c_map:
                 result.append((name, c_map[name].type, c_map[name]))
+
+            # Only in Base
             else:
                 result.append((name, f.type, f))
 
+        # Only in Custom
         for name, f in c_map.items():
             if name not in b_map:
                 result.append((name, f.type, f))
