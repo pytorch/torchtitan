@@ -67,6 +67,37 @@ def build_test_list():
             "Float8 test",
             "float8",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.enable_async_tensor_parallel",
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                ]
+            ],
+            "FSDP+async TP+PP+torch.compile+Float8",
+            "fsdp+tp+cp+compile+float8",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                ]
+            ],
+            "HSDP+CP+torch.compile+Float8",
+            "hsdp+cp+compile+float8",
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
 
