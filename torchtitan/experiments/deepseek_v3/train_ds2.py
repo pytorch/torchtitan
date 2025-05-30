@@ -36,9 +36,9 @@ from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
-# from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
-#    parallelize_deepseek,
-# )
+from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
+    parallelize_deepseek,
+)
 
 # from checkpoint import load_weights_from_hf
 from torchtitan.experiments.deepseek_v3.model import DeepseekForCausalLM
@@ -99,11 +99,12 @@ def run_full_model(
     pp_dim = config.parallelism.pipeline_parallel_degree
     ep_dim = config.parallelism.expert_parallel_degree
     if not ep_dim:
-        logger.info(f"No EP degree specified, {ep_dim=}")
+        # TODO - the fix for config extension is in PR...
+        # logger.info(f"No EP degree specified, {ep_dim=}")
         ep_dim = 2
         logger.info(f"Using default EP degree 2")
         logger.info(f"{config=  }")
-        assert False, "no ep degreee specified"
+        # assert False, "no ep degreee specified"
     fsdp_dim = config.parallelism.data_parallel_shard_degree
     logger.info(f"{pp_dim=}, {ep_dim=}, {fsdp_dim=}, {_device_info=}")
 
