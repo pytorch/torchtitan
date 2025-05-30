@@ -29,6 +29,7 @@ tokenizer_path = "./tests/assets/test_tiktoken.model"
 name = "AdamW"
 lr = 4e-3
 eps = 1e-15
+implementation = "foreach"
 
 [lr_scheduler]
 warmup_steps = 5  # lr scheduler warm up, normally 20% of the train steps
