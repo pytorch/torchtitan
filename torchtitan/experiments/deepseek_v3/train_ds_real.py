@@ -37,7 +37,10 @@ from torchtitan.experiments.deepseek_v3.infra.parallelize_deepseek import (
 
 from torchtitan.experiments.deepseek_v3.model_config import deepseek_config_registry
 
-from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import get_hf_tokenizer
+from torchtitan.experiments.deepseek_v3.tokenizers.hf_tokenizer import (
+    get_hf_tokenizer,
+    remove_notset_root_handlers,
+)
 
 # from torchtitan.experiments.deepseek_v3.train_configs.custom_args import JobConfig
 from torchtitan.tools import utils
@@ -239,6 +242,10 @@ if __name__ == "__main__":
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
     init_logger()
+    # we do this to remove a root logger that is added by HF
+    # otherwise we get duplicate logs
+    remove_notset_root_handlers()
+
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 
