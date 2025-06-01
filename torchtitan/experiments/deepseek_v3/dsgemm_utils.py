@@ -104,9 +104,12 @@ def create_indices_from_offsets_nosync(m_offsets: torch.Tensor) -> torch.Tensor:
     total_size = m_offsets[-1]
     all_indices = torch.arange(total_size,
                                device=m_offsets.device,
-                               dtype=m_offsets.dtype)
-    indices = torch.bucketize(all_indices, m_offsets, right=True)
-    return indices.to(torch.int32)
+                               dtype=torch.int32)
+    indices = torch.bucketize(all_indices,
+                              m_offsets,
+                              right=True,
+                              out_int32=True)
+    return indices
 
 
 def create_m_indices_from_offsets(m_offsets: torch.Tensor) -> torch.Tensor:
