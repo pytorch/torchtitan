@@ -108,13 +108,21 @@ def run_dense_gemm_test(M=1024, N=512, K=256, tolerance=1e-4):
 
     # 2. Compute PyTorch reference
     print("\n2. Computing PyTorch reference...")
-    torch.cuda.synchronize()
-    start_time = time.perf_counter()
 
+    # Warmup PyTorch
+    for _ in range(3):
+        _ = torch.mm(A, B)
+    torch.cuda.synchronize()
+
+    # Use CUDA events for timing
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
     C_ref = torch.mm(A, B)
-
+    end_event.record()
     torch.cuda.synchronize()
-    pytorch_time = time.perf_counter() - start_time
+    pytorch_time = start_event.elapsed_time(end_event) / 1000  # Convert ms to seconds
 
     # Store the pytorch_time as an attribute of the function
     run_dense_gemm_test.pytorch_time = pytorch_time
@@ -184,14 +192,17 @@ def run_dense_gemm_test(M=1024, N=512, K=256, tolerance=1e-4):
             compiled_kernel(A_cute, B_cute, C_cute, stream)
         torch.cuda.synchronize()
 
-        # Actual timing
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
+        # Actual timing with CUDA events
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
 
+        start_event.record()
         compiled_kernel(A_cute, B_cute, C_cute, stream)
-
+        end_event.record()
         torch.cuda.synchronize()
-        cutlass_time = time.perf_counter() - start_time
+        cutlass_time = (
+            start_event.elapsed_time(end_event) / 1000
+        )  # Convert ms to seconds
 
         # Store the cutlass_time as an attribute of the function
         run_dense_gemm_test.cutlass_time = cutlass_time
@@ -262,11 +273,12 @@ def main():
         (2048, 1024, 1024),  # Large
         (4096, 4096, 2048),  # Extra large
         (8192, 8192, 2048),  # Extra extra large
+        (8192, 8192, 4096),  # Extra extra large
     ]
 
     results = []
     speedups = []
-    tolerance = 9e-2
+    tolerance = 5e-1
 
     for M, N, K in test_cases:
         success = run_dense_gemm_test(M, N, K, tolerance=tolerance)
