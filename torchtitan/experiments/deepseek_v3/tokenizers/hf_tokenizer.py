@@ -4,8 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+
 from torchtitan.tools.logging import logger
 from transformers import AutoTokenizer
+
+
+# HF AutoTokenizer will instantiate a root level logger, which will cause
+# duplicate logs. We need to disable their root logger to avoid this.
+def remove_notset_root_handlers():
+    """
+    Remove handlers with level NOTSET from root logger.
+    Titan's logger is set, and thus we can differentiate between these.
+    """
+    for handler in logger.handlers[:]:
+        if handler.level == logging.NOTSET:
+            logger.removeHandler(handler)
 
 
 class TokenizerWrapper:
