@@ -88,35 +88,6 @@ there are also the following constrains:
 * The majorness for A, B and C must be the same across all groups.
 """
 
-# Current errors:
-"""
-Verifying results...
-  Group 0: norm_diff = 4.12e+03, rel_error = 1.01e+00
-    C_ref first 3 elements: [-1.6416015625, -2.4609375, -15.578125]
-    C result first 3 elements: [-1.6416015625, -1.6416015625, -1.6416015625]
-    ✗ Group 0 failed tolerance check
-  Group 1: norm_diff = 1.89e+04, rel_error = 1.63e+00
-    C_ref first 3 elements: [-20.671875, -12.9765625, -17.703125]
-    C result first 3 elements: [-20.671875, -20.671875, -20.671875]
-    ✗ Group 1 failed tolerance check
-  Group 2: norm_diff = 1.15e+04, rel_error = 1.52e+00
-    C_ref first 3 elements: [15.9609375, -1.83203125, -10.9609375]
-    C result first 3 elements: [15.9609375, 15.9609375, 15.9609375]
-    ✗ Group 2 failed tolerance check
-
-9. Using results in PyTorch operations...
-  Group 0: norm=594.500, after_bias_norm=558.500
-  Group 1: norm=14968.000, after_bias_norm=14904.000
-  Group 2: norm=8664.000, after_bias_norm=8720.000
-
-10. Performance Summary:
-    Execution time: 0.15 ms
-    Total FLOPs: 0.11 GFLOP
-    Throughput: 0.75 TFLOP/s
-    All results correct: False
-
-"""
-
 
 class GroupedGemmKernel:
 
@@ -1406,7 +1377,11 @@ class GroupedGemmKernel:
         tensor_address_abc: cute.Tensor,
         tensor_index: int,
     ):
-        """Extract stride and tensor address for a given group and construct a global tensor."""
+        """
+        Fixed version: Extract stride and tensor address for a given group and construct a global tensor.
+
+        The key fix is proper stride interpretation for each tensor type.
+        """
         ptr_i64 = tensor_address_abc[(group_idx, tensor_index)]
         if cutlass.const_expr(
             not isclass(dtype) or not issubclass(dtype, cutlass.Numeric)
@@ -1424,36 +1399,43 @@ class GroupedGemmKernel:
             strides_abc.element_type,
         )
         cute.autovec_copy(strides_tensor_gmem, strides_tensor_reg)
-        stride_mn = strides_tensor_reg[0]
-        stride_k = strides_tensor_reg[1]
+
+        # Extract the actual stride values
+        stride_0 = strides_tensor_reg[0]  # Stride for dimension 0
+        stride_1 = strides_tensor_reg[1]  # Stride for dimension 1
         c1 = cutlass.Int32(1)
         c0 = cutlass.Int32(0)
 
         if cutlass.const_expr(tensor_index == 0):  # tensor A
+            # A has shape (M, K, 1) in MNKL format
+            # strides are (stride_M, stride_K)
             m = problem_shape_mnk[0]
             k = problem_shape_mnk[2]
             return cute.make_tensor(
                 tensor_gmem_ptr,
-                cute.make_layout((m, k, c1), stride=(stride_mn, stride_k, c0)),
+                cute.make_layout((m, k, c1), stride=(stride_0, stride_1, c0)),
             )
         elif cutlass.const_expr(tensor_index == 1):  # tensor B
+            # B has shape (N, K, 1) in MNKL format (note: transposed from original K,N)
+            # strides are (stride_N, stride_K)
             n = problem_shape_mnk[1]
             k = problem_shape_mnk[2]
             return cute.make_tensor(
                 tensor_gmem_ptr,
-                cute.make_layout((n, k, c1), stride=(stride_mn, stride_k, c0)),
+                cute.make_layout((n, k, c1), stride=(stride_0, stride_1, c0)),
             )
         else:  # tensor C
+            # C has shape (M, N, 1) in MNKL format
+            # strides are (stride_M, stride_N)
             m = problem_shape_mnk[0]
             n = problem_shape_mnk[1]
-            # Fix: Use the strides directly as provided
             return cute.make_tensor(
                 tensor_gmem_ptr,
-                cute.make_layout((m, n, c1), stride=(stride_k, stride_mn, c0)),
+                cute.make_layout((m, n, c1), stride=(stride_0, stride_1, c0)),
             )
 
     @cute.jit
-    def make_tensor_for_tensormap_update_orig(
+    def make_tensor_for_tensormap_update_old(
         self,
         group_idx: cutlass.Int32,
         dtype: Type[cutlass.Numeric],
