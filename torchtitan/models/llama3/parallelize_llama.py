@@ -364,7 +364,9 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
+    # keep root unsharded since its parameters will be
+    # used in the backward immediately
+    fully_shard(model, **fsdp_config, reshard_after_forward=False)
 
 
 def apply_ddp(
