@@ -86,6 +86,7 @@ def fill_indices_wrapper(
     # grid = one block per expert unless capped and then we loop...
     grid = (num_blocks,)
 
+    # launch kernel
     _fill_indices_kernel[grid](
         tokens_per_expert_group,
         start_index_values,
@@ -153,9 +154,9 @@ def generate_permute_indices(
         use_cpu: whether to use CPU implementation.
 
     Returns:
-        permuted_indices: Tensor of indices with size sum(m_sizes).
+        permuted_indices: Tensor of indices with size sum(m_sizes), that map original token order to the expert-grouped order.
         m_sizes: aligned number of tokens for each expert (padded to alignment boundary).
-        m_offsets: Cumulative sum of m_sizes.
+        m_offsets: Cumulative sum of m_sizes. The exclusive ending position for each expert's tokens.
 
     Explanatory details:
         `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
@@ -195,7 +196,7 @@ def generate_permute_indices(
             write_offsets,
             experts_per_rank,
             num_ranks,
-            total_size,  # Use calculated size instead of max_len
+            total_size,
         )
     else:  # gpu
         permuted_indices = fill_indices_wrapper(
@@ -204,7 +205,7 @@ def generate_permute_indices(
             write_offsets,
             experts_per_rank,
             num_ranks,
-            total_size,  # Use exact size instead of max_len
+            total_size,
         )
 
     return permuted_indices, m_sizes, m_offsets.to(torch.int32)
