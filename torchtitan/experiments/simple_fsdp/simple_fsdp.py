@@ -77,16 +77,26 @@ def _distribute_dtensor(
     assert inner_mesh.mesh_dim_names is not None
     submesh_names = outer_mesh.mesh_dim_names + inner_mesh.mesh_dim_names
     spanned_mesh = outer_global_mesh[submesh_names]
-    shard_dim = placements[0].dim
-    split_factor = inner_spec.num_shards_map[shard_dim]
-    tensor_placement = (
-        (
-            _StridedShard(shard_dim, split_factor=split_factor)
-            if split_factor > 1
-            else placements[0]
-        ),
-        inner_spec.placements[0],
-    )
+
+    if placements[0].is_shard():
+        # for FSDP + TP dtensor placement
+        shard_dim = placements[0].dim
+        split_factor = inner_spec.num_shards_map[shard_dim]
+        tensor_placement = (
+            (
+                _StridedShard(shard_dim, split_factor=split_factor)
+                if split_factor > 1
+                else placements[0]
+            ),
+            inner_spec.placements[0],
+        )
+    elif placements[0].is_replicate():
+        # for DDP + TP dtensor placement
+        tensor_placement = (placements[0], inner_spec.placements[0])
+    else:
+        raise ValueError(
+            f"Unsupported placement {placements[0]} for distributing DTensor {tensor}"
+        )
 
     current_spec = DTensorSpec(
         mesh=outer_mesh,
@@ -154,10 +164,8 @@ class ReplicateComputation(torch.nn.Module):
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
 
-        # NOTE: specifying mixed precision is only available in pytorch_intern24
-        #       https://github.com/tianyu-l/pytorch_intern24/pull/20
-        # support for FSDP + TP (assuming TP shards the inner-most dim)
-        if self.mode == "fully_shard" and x._spec.mesh.ndim == 2:
+        # support for FSDP/DDP + TP (assuming TP shards the inner-most dim)
+        if x._spec.mesh.mesh_dim_names[-1] == "tp":
             dp_placement, tp_placement = x._spec.placements
             # TODO: remove tp_mesh as an input arg to data_parallel API and use x._spec.mesh["tp"]
             #       after DeviceMesh supports slicing a non-root mesh
@@ -170,7 +178,8 @@ class ReplicateComputation(torch.nn.Module):
                 sharded_local_tensor, dp_mesh, self.param_sharding
             )
 
-            # the actuall FSDP all-gather on dp_mesh
+            # the actual FSDP's fwd all-gather & bwd reduce-scatter
+            # DDP's bwd all-reduce on dp_mesh
             replicated_dtensor = sharded_dtensor.redistribute(
                 placements=self.compute_placements,
                 forward_dtype=self.param_dtype,
