@@ -6,7 +6,6 @@
 
 import os
 
-import torch
 from torch import nn, Tensor
 from transformers import CLIPTextModel, T5EncoderModel
 
@@ -16,7 +15,6 @@ class FluxEmbedder(nn.Module):
         super().__init__()
         self.is_clip = "clip" in version.lower()
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
-
         if self.is_clip:
             if random_init:
                 # Initialize CLIP model with random weights for test purpose only

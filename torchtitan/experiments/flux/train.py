@@ -63,7 +63,6 @@ class FluxTrainer(Trainer):
             random_init=job_config.training.test_mode,
         )
 
-        # TODO(jianiw): Seems this with torch.decide_device() is not working for from_pretrained
         self.clip_encoder = FluxEmbedder(
             version=job_config.encoder.clip_encoder,
             random_init=job_config.training.test_mode,
@@ -94,11 +93,6 @@ class FluxTrainer(Trainer):
             batch=input_dict,
         )
         labels = input_dict["img_encodings"]
-
-        # call reshard to save memory
-        # for moudle in (self.clip_encoder, self.t5_encoder):
-        #     if isinstance(moudle, FSDPModule):
-        #         moudle.reshard()
 
         self.optimizers.zero_grad()
 
