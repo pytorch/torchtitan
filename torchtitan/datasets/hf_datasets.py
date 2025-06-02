@@ -40,7 +40,7 @@ class DatasetConfig:
 # Add your dataset here here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
-        path="allenai/c4",
+        path="ls /home/jianiw/tmp/mffuse",
         loader=_load_c4_dataset,
         text_processor=_process_c4_text,
     ),

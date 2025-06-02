@@ -62,15 +62,16 @@ class FluxTrainer(Trainer):
             dtype=self._dtype,
             random_init=job_config.training.test_mode,
         )
-        with torch.device(self.device):
-            self.clip_encoder = FluxEmbedder(
-                version=job_config.encoder.clip_encoder,
-                random_init=job_config.training.test_mode,
-            ).to(device=self.device, dtype=self._dtype)
-            self.t5_encoder = FluxEmbedder(
-                version=job_config.encoder.t5_encoder,
-                random_init=job_config.training.test_mode,
-            ).to(device=self.device, dtype=self._dtype)
+
+        # TODO(jianiw): Seems this with torch.decide_device() is not working for from_pretrained
+        self.clip_encoder = FluxEmbedder(
+            version=job_config.encoder.clip_encoder,
+            random_init=job_config.training.test_mode,
+        ).to(device=self.device, dtype=self._dtype)
+        self.t5_encoder = FluxEmbedder(
+            version=job_config.encoder.t5_encoder,
+            random_init=job_config.training.test_mode,
+        ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
@@ -94,6 +95,11 @@ class FluxTrainer(Trainer):
         )
         labels = input_dict["img_encodings"]
 
+        # call reshard to save memory
+        # for moudle in (self.clip_encoder, self.t5_encoder):
+        #     if isinstance(moudle, FSDPModule):
+        #         moudle.reshard()
+
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -112,25 +118,24 @@ class FluxTrainer(Trainer):
 
         bsz = labels.shape[0]
 
-        with torch.device(self.device):
-            with torch.no_grad():
-                noise = torch.randn_like(labels)
-                timesteps = torch.rand((bsz,)).to(labels)
-                sigmas = timesteps.view(-1, 1, 1, 1)
-                latents = (1 - sigmas) * labels + sigmas * noise
+        with torch.no_grad(), torch.device(self.device):
+            noise = torch.randn_like(labels)
+            timesteps = torch.rand((bsz,))
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            latents = (1 - sigmas) * labels + sigmas * noise
 
-            bsz, _, latent_height, latent_width = latents.shape
+        bsz, _, latent_height, latent_width = latents.shape
 
-            POSITION_DIM = 3  # constant for Flux flow model
-            with torch.no_grad():
-                # Create positional encodings
-                latent_pos_enc = create_position_encoding_for_latents(
-                    bsz, latent_height, latent_width, POSITION_DIM
-                )
-                text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
+        POSITION_DIM = 3  # constant for Flux flow model
+        with torch.no_grad(), torch.device(self.device):
+            # Create positional encodings
+            latent_pos_enc = create_position_encoding_for_latents(
+                bsz, latent_height, latent_width, POSITION_DIM
+            )
+            text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM)
 
-                # Patchify: Convert latent into a sequence of patches
-                latents = pack_latents(latents)
+            # Patchify: Convert latent into a sequence of patches
+            latents = pack_latents(latents)
 
         latent_noise_pred = model(
             img=latents,
