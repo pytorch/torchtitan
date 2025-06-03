@@ -112,16 +112,16 @@ class FluxTrainer(Trainer):
 
         bsz = labels.shape[0]
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.device(self.device):
             noise = torch.randn_like(labels)
-            timesteps = torch.rand((bsz,)).to(labels)
+            timesteps = torch.rand((bsz,))
             sigmas = timesteps.view(-1, 1, 1, 1)
             latents = (1 - sigmas) * labels + sigmas * noise
 
         bsz, _, latent_height, latent_width = latents.shape
 
         POSITION_DIM = 3  # constant for Flux flow model
-        with torch.no_grad():
+        with torch.no_grad(), torch.device(self.device):
             # Create positional encodings
             latent_pos_enc = create_position_encoding_for_latents(
                 bsz, latent_height, latent_width, POSITION_DIM
@@ -133,11 +133,11 @@ class FluxTrainer(Trainer):
 
         latent_noise_pred = model(
             img=latents,
-            img_ids=latent_pos_enc.to(latents),
-            txt=t5_encodings.to(latents),
-            txt_ids=text_pos_enc.to(latents),
-            y=clip_encodings.to(latents),
-            timesteps=timesteps.to(latents),
+            img_ids=latent_pos_enc,
+            txt=t5_encodings,
+            txt_ids=text_pos_enc,
+            y=clip_encodings,
+            timesteps=timesteps,
         )
 
         # Convert sequence of patches to latent shape
