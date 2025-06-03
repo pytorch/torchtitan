@@ -44,6 +44,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     parallel_dims: ParallelDims
     train_spec: train_spec_module.TrainSpec
     world_mesh: torch.distributed.DeviceMesh
+    gradient_accumulation_steps: int
 
     dataloader: train_spec_module.BaseDataLoader
     metrics_processor: train_spec_module.MetricsProcessor
