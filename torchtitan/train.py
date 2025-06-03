@@ -34,6 +34,7 @@ from torchtitan.tools.profiling import (
 
 class DataloaderStopIteration(StopIteration):
     """An exception that indicates dataloader exhaustion."""
+
     pass
 
 
@@ -198,7 +199,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # step.
             global_batch_size = job_config.training.local_batch_size * dp_degree
         assert global_batch_size > 0
-        assert global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0, (
+        assert (
+            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+        ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
             f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
@@ -359,7 +362,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise DataloaderStopIteration() from ex
         return input_dict, labels
 
-    def forward_backward_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+    def forward_backward_step(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
@@ -412,7 +417,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         return loss
 
-    def train_step(self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]):
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -493,7 +500,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.info("Ran out of data; last step was canceled.")
                     break
-                self.checkpointer.save(self.step, force=(self.step == job_config.training.steps))
+                self.checkpointer.save(
+                    self.step, force=(self.step == job_config.training.steps)
+                )
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
