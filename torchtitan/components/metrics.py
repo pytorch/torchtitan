@@ -308,7 +308,6 @@ class MetricsProcessor:
     gpu_peak_flops: int
     ntokens_since_last_log: int
     data_loading_times: list[float]
-    accumulated_losses: list[torch.Tensor]
     time_last_log: float
 
     num_flops_per_token: int
@@ -337,7 +336,6 @@ class MetricsProcessor:
         )
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
-        self.accumulated_losses = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
