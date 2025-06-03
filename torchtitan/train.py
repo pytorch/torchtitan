@@ -127,6 +127,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # verify batch sizes
         global_batch_size = job_config.training.global_batch_size
         if global_batch_size < 0:
+            # This global batch size results in 1 gradient accumulation
+            # step.
             global_batch_size = job_config.training.local_batch_size * dp_degree
         assert global_batch_size > 0
         assert global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0, (
