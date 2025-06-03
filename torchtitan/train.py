@@ -494,14 +494,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.gc_handler.run(self.step)
                 data_ran_out = self.train_step(data_iterator)
                 if data_ran_out:
-                    logger.info(
-                        "Ran out of data; last step was canceled. "
-                        "Saving final checkpoint and exiting."
-                    )
-                self.checkpointer.save(
-                    self.step,
-                    force=(self.step == job_config.training.steps or data_ran_out),
-                )
+                    logger.info("Ran out of data; last step was canceled.")
+                    break
+                self.checkpointer.save(self.step, force=(self.step == job_config.training.steps))
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
