@@ -32,6 +32,11 @@ from torchtitan.tools.profiling import (
 )
 
 
+class DataloaderStopIteration(StopIteration):
+    """An exception that indicates dataloader exhaustion."""
+    pass
+
+
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
     gc_handler: utils.GarbageCollection
@@ -348,6 +353,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
+    def next_batch(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        try:
+            input_dict, labels = next(data_iterator)
+        except StopIteration as ex:
+            # If data runs out during gradient accumulation, that
+            # entire step will not be executed.
+            raise DataloaderStopIteration() from ex
+        return input_dict, labels
+
     def batch_backward(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         model_parts = self.model_parts
         world_mesh = self.world_mesh
@@ -401,14 +417,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 loss.backward()
         return loss
 
-    def train_step(
-        self,
-        data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
-    ) -> bool | None:
-        """
-        Execute a training step and return whether the data loader ran
-        out of data.
-        """
+    def train_step(self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         self.optimizers.zero_grad()
 
         # Keep these variables local to shorten the code as these are
@@ -418,12 +427,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         parallel_dims = self.parallel_dims
 
         for microbatch in range(self.gradient_accumulation_steps):
-            try:
-                input_dict, labels = next(data_iterator)
-            except StopIteration:
-                # If data runs out during gradient accumulation, that
-                # entire step will not be executed.
-                return True
+            input_dict, labels = self.next_batch(data_iterator)
             loss = self.batch_backward(input_dict, labels)
             self.metrics_processor.accumulated_losses.append(loss.detach())
 
@@ -488,12 +492,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
-            data_ran_out = False
-            while self.step < job_config.training.steps and not data_ran_out:
+            while self.step < job_config.training.steps:
                 self.step += 1
                 self.gc_handler.run(self.step)
-                data_ran_out = self.train_step(data_iterator)
-                if data_ran_out:
+                try:
+                    self.train_step(data_iterator)
+                except DataloaderStopIteration:
                     logger.info("Ran out of data; last step was canceled.")
                     break
                 self.checkpointer.save(self.step, force=(self.step == job_config.training.steps))
