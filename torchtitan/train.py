@@ -124,24 +124,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
-        # verify batch sizes
-        global_batch_size = job_config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = job_config.training.local_batch_size * dp_degree
-        assert global_batch_size > 0
-        assert global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0, (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
-        )
-
-        self.gradient_accumulation_steps = global_batch_size // (
-            job_config.training.local_batch_size * dp_degree
-        )
-        assert self.gradient_accumulation_steps > 0
-
         # build dataloader
         tokenizer = (
             self.train_spec.build_tokenizer_fn(job_config)
@@ -206,6 +188,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = None
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
+
+        # verify batch sizes
+        global_batch_size = job_config.training.global_batch_size
+        if global_batch_size < 0:
+            # This global batch size results in 1 gradient accumulation
+            # step.
+            global_batch_size = job_config.training.local_batch_size * dp_degree
+        assert global_batch_size > 0
+        assert global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0, (
+            f"global batch size must be multiple of local batch size times "
+            f"data-parallel degree ({global_batch_size} "
+            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+        )
+
+        # calculate gradient accumulation steps
+        self.gradient_accumulation_steps = global_batch_size // (
+            job_config.training.local_batch_size * dp_degree
+        )
+        assert self.gradient_accumulation_steps > 0
         self.loss_fn = rescale_accumulated_loss(
             self.loss_fn, self.gradient_accumulation_steps
         )
