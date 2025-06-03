@@ -21,6 +21,8 @@ try:
     # Import the DenseGemmKernel (assuming it's in the same directory)
     from dense_gemm import DenseGemmKernel
 
+    # from persistent_dense_gemm import PersistentDenseGemmKernel as DenseGemmKernel
+
     HAS_CUTLASS = True
     print("CUTLASS Python imported successfully")
 except ImportError as e:
@@ -90,8 +92,8 @@ class CutlassGemmBenchmark:
         self.gemm_kernel = DenseGemmKernel(
             acc_dtype=cutlass.Float32,
             use_2cta_instrs=True,
-            mma_tiler_mn=(256, 256),
-            cluster_shape_mn=(4, 4),
+            mma_tiler_mn=(128, 128),
+            cluster_shape_mn=(2, 2),
             use_tma_store=True,
         )
 
