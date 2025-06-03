@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
 import importlib
 import os
 import time
@@ -17,6 +16,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -209,15 +209,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = None
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
-
-        unwrapped_loss_fn = self.loss_fn
-
-        @functools.wraps(unwrapped_loss_fn)
-        def accumulated_loss_fn(*args, **kwargs):
-            loss = unwrapped_loss_fn(*args, **kwargs)
-            return loss / self.gradient_accumulation_steps
-
-        self.loss_fn = accumulated_loss_fn
+        self.loss_fn = rescale_accumulated_loss(
+            self.loss_fn, self.gradient_accumulation_steps
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
