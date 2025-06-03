@@ -364,7 +364,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise DataloaderStopIteration() from ex
         return input_dict, labels
 
-    def batch_backward(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+    def forward_backward_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         model_parts = self.model_parts
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
@@ -428,7 +428,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         for microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = self.next_batch(data_iterator)
-            loss = self.batch_backward(input_dict, labels)
+            loss = self.forward_backward_step(input_dict, labels)
             self.metrics_processor.accumulated_losses.append(loss.detach())
 
         dist_utils.clip_grad_norm_(
