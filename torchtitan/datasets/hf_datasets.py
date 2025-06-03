@@ -174,7 +174,7 @@ def build_hf_dataloader(
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.batch_size
+    batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
     hf_ds = HuggingFaceDataset(

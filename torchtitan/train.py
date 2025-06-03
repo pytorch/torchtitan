@@ -127,21 +127,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # verify batch sizes
         if job_config.training.global_batch_size < 0:
             job_config.training.global_batch_size = (
-                job_config.training.batch_size * dp_degree
+                job_config.training.local_batch_size * dp_degree
             )
         assert job_config.training.global_batch_size > 0
         assert (
             job_config.training.global_batch_size
-            % (job_config.training.batch_size * dp_degree)
+            % (job_config.training.local_batch_size * dp_degree)
             == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({job_config.training.global_batch_size} "
-            f"% ({job_config.training.batch_size} * {dp_degree}) != 0)"
+            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
         )
 
         self.gradient_accumulation_steps = job_config.training.global_batch_size // (
-            job_config.training.batch_size * dp_degree
+            job_config.training.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
 
@@ -323,7 +323,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {job_config.training.batch_size}, "
+            f"local batch size {job_config.training.local_batch_size}, "
             f"global batch size {job_config.training.global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "

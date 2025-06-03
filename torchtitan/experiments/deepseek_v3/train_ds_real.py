@@ -145,7 +145,7 @@ def run_full_model(
     # model.setup_symm_mem(torch.bfloat16, device)
 
     torch.manual_seed(ep_rank)
-    bs = config.training.batch_size  # * microbatches  # 4
+    bs = config.training.local_batch_size  # * microbatches  # 4
     seqlen = config.training.seq_len  # 128
 
     # metrics manager
