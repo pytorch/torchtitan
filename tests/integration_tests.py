@@ -494,6 +494,20 @@ def build_test_list():
             "Float8 emulation test",
             "float8_emulation",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    # Default local batch size = 8, and `ngpu=2`, so
+                    # default global batch size = 8 * 2 = 16.
+                    # To achieve 2 gradient accumulation steps, multiply
+                    # default global batch size by 2. 16 * 2 = 32.
+                    "--training.global_batch_size 32",
+                ],
+            ],
+            "Gradient accumulation",
+            "gradient_accumulation",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 
