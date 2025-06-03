@@ -358,7 +358,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def forward_backward_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
         model_parts = self.model_parts
-        world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
         # apply context parallelism if cp is enabled
@@ -366,7 +365,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh=world_mesh["cp"],
+                cp_mesh=self.world_mesh["cp"],
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
@@ -414,8 +413,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        model_parts = self.model_parts
-        world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
         for microbatch in range(self.gradient_accumulation_steps):
@@ -424,7 +421,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.accumulated_losses.append(loss.detach())
 
         dist_utils.clip_grad_norm_(
-            [p for m in model_parts for p in m.parameters()],
+            [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
@@ -455,8 +452,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             ft_pg = self.ft_manager.replicate_pg if use_ft_pg else None
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
-                dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_mean(loss, self.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_max(loss, self.world_mesh["dp_cp"], ft_pg),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
