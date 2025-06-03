@@ -406,6 +406,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
+
         return loss
 
     def train_step(self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]):
