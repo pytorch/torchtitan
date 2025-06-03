@@ -138,7 +138,8 @@ def parallelize_encoders(
         if job_config.training.enable_cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-        # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder
+        # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.
+        # CLIP Text encoder has low computation / communication ratio, so it's not necessary to apply FSDP to it.
         for block in t5_model.hf_module.encoder.block:
             fully_shard(block, **fsdp_config)
         fully_shard(t5_model.hf_module, **fsdp_config)
