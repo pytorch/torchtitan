@@ -12,6 +12,8 @@ import time
 
 import torch
 
+torch.backends.cuda.matmul.allow_tf32 = True
+
 # Import CUTLASS components
 try:
     import cuda.bindings.driver as cuda
@@ -173,9 +175,9 @@ def simple_grouped_gemm_example():
 
     grouped_gemm = GroupedGemmKernel(
         acc_dtype=cutlass.Float32,
-        use_2cta_instrs=False,
-        mma_tiler_mn=(128, 64),
-        cluster_shape_mn=(1, 1),
+        use_2cta_instrs=True,
+        mma_tiler_mn=(128, 128),
+        cluster_shape_mn=(4, 4),
         tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
     )
 
@@ -184,9 +186,9 @@ def simple_grouped_gemm_example():
 
     def compute_total_clusters():
         cta_tile_m = 128
-        cta_tile_n = 64
-        cluster_m = 1
-        cluster_n = 1
+        cta_tile_n = 128
+        cluster_m = 4
+        cluster_n = 4
 
         cluster_tile_m = cta_tile_m * cluster_m
         cluster_tile_n = cta_tile_n * cluster_n
