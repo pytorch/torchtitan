@@ -338,7 +338,7 @@ class Parallelism:
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
-    This value is used to compute the total number of microbatches by dividing local batch_size with
+    This value is used to compute the total number of microbatches by dividing local_batch_size with
     pipeline_parallel_microbatch_size.
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
