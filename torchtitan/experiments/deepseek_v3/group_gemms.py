@@ -209,20 +209,20 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         self.dtype_torch = torch.bfloat16
         self.dtype_cutlass = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
-        self.m_tiler = 16
-        self.n_tiler = 8
+        self.m_tiler = 128
+        self.n_tiler = 64
 
         logger.info("Using CUTLASS GroupedGemmKernel for BF16, init")
 
         # CUTLASS kernel configuration - optimized for typical MoE workloads
         self.grouped_gemm = GroupedGemmKernel(
             acc_dtype=self.acc_dtype,
-            use_2cta_instrs=False,  # Set to True for larger problems if beneficial
+            use_2cta_instrs=True,  # Set to True for larger problems if beneficial
             mma_tiler_mn=(
                 self.m_tiler,
                 self.n_tiler,
             ),  # Can be tuned based on problem sizes
-            cluster_shape_mn=(1, 1),  # Can be increased for larger problems
+            cluster_shape_mn=(2, 2),  # Can be increased for larger problems
             tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
         )
 
@@ -362,25 +362,46 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         valid_tokens = []
         valid_weights = []
         valid_problem_sizes = []
+        padded_m_sizes = []
 
         offset = 0
         for i, size in enumerate(m_sizes):
             if size > 0:
                 # Get tokens for this group
                 group_tokens = input_tokens[offset : offset + size].contiguous()
-                valid_tokens.append(group_tokens)
+
+                # Pad M dimension to nearest multiple of 128 (or power of 2)
+                padded_size = ((size + 127) // 128) * 128
+                padded_tokens = torch.zeros(
+                    padded_size,
+                    group_tokens.shape[1],
+                    dtype=group_tokens.dtype,
+                    device=device,
+                )
+                padded_tokens[:size] = group_tokens
+
+                valid_tokens.append(padded_tokens)
+                padded_m_sizes.append(padded_size)
 
                 # Get weight for this expert
                 expert_weight = weights[i].contiguous()
                 valid_weights.append(expert_weight)
 
-                # Create problem size specification
+                # Create problem size specification with padded M
                 if is_down_proj:
                     # down: (intermediate_size, hidden_size)
-                    m, n, k = size, expert_weight.shape[1], expert_weight.shape[0]
+                    m, n, k = (
+                        padded_size,
+                        expert_weight.shape[1],
+                        expert_weight.shape[0],
+                    )
                 else:
                     # gate/up: (hidden_size, intermediate_size)
-                    m, n, k = size, expert_weight.shape[1], expert_weight.shape[0]
+                    m, n, k = (
+                        padded_size,
+                        expert_weight.shape[1],
+                        expert_weight.shape[0],
+                    )
                 valid_problem_sizes.append((m, n, k, 1))
 
             offset += size
@@ -499,7 +520,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
             raise e
 
         # Extract results from MNKL format back to MN
-        for i, (torch_a, torch_b, torch_c) in enumerate(torch_tensors_abc):
+        """for i, (torch_a, torch_b, torch_c) in enumerate(torch_tensors_abc):
             start_idx = sum(valid_problem_sizes[j][0] for j in range(i))
             end_idx = start_idx + valid_problem_sizes[i][0]
             concat_output[start_idx:end_idx] = torch_c.squeeze(
@@ -507,6 +528,27 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
             )  # (M, N, 1) -> (M, N)
 
         return concat_output
+        """
+        full_output = torch.zeros(
+            sum(m_sizes),
+            hidden_size,
+            dtype=self.dtype_torch,
+            device=contig_tokens.device,
+        )
+
+        # Fill in results for valid groups, removing padding
+        valid_offset = 0
+        full_offset = 0
+        for i, (size, padded_size) in enumerate(zip(m_sizes, padded_m_sizes)):
+            if size > 0:
+                # Only copy the non-padded part of the result
+                full_output[full_offset : full_offset + size] = final_output[
+                    valid_offset : valid_offset + size
+                ]
+                valid_offset += padded_size
+            full_offset += size
+
+        return full_output
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         """Execute the complete MoE forward pass using CUTLASS grouped GEMM"""
