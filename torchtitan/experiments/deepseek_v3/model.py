@@ -45,6 +45,7 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from group_gemms import (
+    CUTLASSGroupGEMM,  # blackwell specific
     DSGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
@@ -474,7 +475,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "cutlass"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg", "cutlass"]
 
     def __init__(self, config):
         super().__init__()
@@ -548,6 +549,11 @@ class MoE(nn.Module):
                     MLP.act_fn,
                 )
                 if TritonCGBF16GroupGEMM.is_available()
+                else None
+            ),
+            "cutlass": (  # Add CUTLASS strategy
+                CUTLASSGroupGEMM(MLP.act_fn)
+                if CUTLASSGroupGEMM.is_available()
                 else None
             ),
         }

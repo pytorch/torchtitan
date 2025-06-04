@@ -1377,10 +1377,66 @@ class GroupedGemmKernel:
         tensor_address_abc: cute.Tensor,
         tensor_index: int,
     ):
+        """Extract stride and tensor address for a given group and construct a global tensor."""
+        ptr_i64 = tensor_address_abc[(group_idx, tensor_index)]
+        if cutlass.const_expr(
+            not isclass(dtype) or not issubclass(dtype, cutlass.Numeric)
+        ):
+            raise TypeError(
+                f"dtype must be a type of cutlass.Numeric, got {type(dtype)}"
+            )
+        tensor_gmem_ptr = cute.make_ptr(
+            dtype, ptr_i64, cute.AddressSpace.gmem, assumed_align=16
+        )
+
+        strides_tensor_gmem = strides_abc[(group_idx, tensor_index, None)]
+        strides_tensor_reg = cute.make_fragment(
+            cute.make_layout(2),
+            strides_abc.element_type,
+        )
+        cute.autovec_copy(strides_tensor_gmem, strides_tensor_reg)
+
+        # Extract the actual stride values directly from the register
+        stride_m = strides_tensor_reg[0]  # First stride value
+        stride_n = strides_tensor_reg[1]  # Second stride value
+        c1 = cutlass.Int32(1)
+        c0 = cutlass.Int32(0)
+
+        if cutlass.const_expr(tensor_index == 0):  # tensor A (M, K, 1)
+            m = problem_shape_mnk[0]
+            k = problem_shape_mnk[2]
+            return cute.make_tensor(
+                tensor_gmem_ptr,
+                cute.make_layout((m, k, c1), stride=(stride_m, stride_n, c0)),
+            )
+        elif cutlass.const_expr(tensor_index == 1):  # tensor B (N, K, 1)
+            n = problem_shape_mnk[1]
+            k = problem_shape_mnk[2]
+            return cute.make_tensor(
+                tensor_gmem_ptr,
+                cute.make_layout((n, k, c1), stride=(stride_m, stride_n, c0)),
+            )
+        else:  # tensor C (M, N, 1)
+            m = problem_shape_mnk[0]
+            n = problem_shape_mnk[1]
+            return cute.make_tensor(
+                tensor_gmem_ptr,
+                cute.make_layout((m, n, c1), stride=(stride_m, stride_n, c0)),
+            )
+
+    @cute.jit
+    def make_tensor_for_tensormap_update_old(
+        self,
+        group_idx: cutlass.Int32,
+        dtype: Type[cutlass.Numeric],
+        problem_shape_mnk: tuple[cutlass.Int32, cutlass.Int32, cutlass.Int32],
+        strides_abc: cute.Tensor,
+        tensor_address_abc: cute.Tensor,
+        tensor_index: int,
+    ):
         """
         Fixed version: Extract stride and tensor address for a given group and construct a global tensor.
 
-        The key fix is proper stride interpretation for each tensor type.
         """
         ptr_i64 = tensor_address_abc[(group_idx, tensor_index)]
         if cutlass.const_expr(
