@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Optional
+from typing import Iterable, Optional
 
 import torch
 from torch.distributed.fsdp import FSDPModule
@@ -81,7 +81,10 @@ class FluxTrainer(Trainer):
             job_config=job_config,
         )
 
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        input_dict, labels = self.next_batch(data_iterator)
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
