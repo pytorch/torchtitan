@@ -16,6 +16,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -30,12 +31,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-
-
-class DataloaderStopIteration(StopIteration):
-    """An exception that indicates dataloader exhaustion."""
-
-    pass
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
