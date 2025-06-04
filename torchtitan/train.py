@@ -493,7 +493,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 try:
                     self.train_step(data_iterator)
                 except DataloaderStopIteration:
-                    logger.info("Ran out of data; last step was canceled.")
+                    logger.warning("Ran out of data; last step was canceled.")
                     break
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
