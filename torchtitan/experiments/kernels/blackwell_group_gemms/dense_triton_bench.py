@@ -9,6 +9,8 @@ infrastructure for more accurate and consistent timing measurements.
 import torch
 import triton.testing
 
+torch.backends.cuda.matmul.allow_tf32 = True
+
 # Import CUTLASS CUTE components
 try:
     import cuda.bindings.driver as cuda
