@@ -268,7 +268,9 @@ class CheckpointManager:
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.initial_load_path = ckpt_config.initial_load_path
-        self.initial_load_full_checkpoint = ckpt_config.initial_load_full_checkpoint
+        self.initial_load_model_weights_only = (
+            ckpt_config.initial_load_model_weights_only
+        )
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.ASYNC or self.ft_manager:
@@ -289,7 +291,7 @@ class CheckpointManager:
         else:
             self.purge_thread = None
 
-        self.model_weights_only = ckpt_config.model_weights_only
+        self.save_model_weights_only = ckpt_config.save_model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
         self.exclude_from_loading = ckpt_config.exclude_from_loading
 
@@ -421,7 +423,7 @@ class CheckpointManager:
                     raise ValueError(
                         "initial_load_full_checkpoint is specified but the path is not valid."
                     )
-                model_only = not self.initial_load_full_checkpoint
+                model_only = self.initial_load_model_weights_only
             else:
                 return False
         else:
@@ -575,7 +577,7 @@ class CheckpointManager:
         # dtype conversion when we are checkpoint model weights only and the
         # current dtype is not the same as the export dtype at the end of the training.
 
-        if self.model_weights_only:
+        if self.save_model_weights_only:
             # We update self.states to keep the model only.
             # After this update, self.states = {
             #      'tok_embeddings.weight':...,
