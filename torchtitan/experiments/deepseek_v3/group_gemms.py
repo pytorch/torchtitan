@@ -209,20 +209,20 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         self.dtype_torch = torch.bfloat16
         self.dtype_cutlass = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
-        self.m_tiler = 128
-        self.n_tiler = 64
+        self.m_tiler = 256
+        self.n_tiler = 256
 
         logger.info("Using CUTLASS GroupedGemmKernel for BF16, init")
 
         # CUTLASS kernel configuration - optimized for typical MoE workloads
         self.grouped_gemm = GroupedGemmKernel(
             acc_dtype=self.acc_dtype,
-            use_2cta_instrs=True,  # Set to True for larger problems if beneficial
+            use_2cta_instrs=False,  # Set to True for larger problems if beneficial
             mma_tiler_mn=(
                 self.m_tiler,
                 self.n_tiler,
             ),  # Can be tuned based on problem sizes
-            cluster_shape_mn=(2, 2),  # Can be increased for larger problems
+            cluster_shape_mn=(1, 1),  # Can be increased for larger problems
             tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
         )
 
