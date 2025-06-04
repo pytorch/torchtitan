@@ -5,21 +5,92 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Current cutlass issue:
-Generating: NCCL version 2.26.5+cuda12.9
-loc("kernel"("/data/users/less/torchtitan/torchtitan/experiments/kernels/blackwell_group_gemms/cute_grouped_gemm.py":651:0)): error: failed to construct a valid coordinate from #cute.coord<"(_,_,_)"> resulting in an incorrect profile
-Error using cutlass strategy: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
-loc("kernel"("/data/users/less/torchtitan/torchtitan/experiments/kernels/blackwell_group_gemms/cute_grouped_gemm.py":651:0)): error: failed to construct a valid coordinate from #cute.coord<"(_,_,_)"> resulting in an incorrect profile
-Error using cutlass strategy: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
-loc("kernel"("/data/users/less/torchtitan/torchtitan/experiments/kernels/blackwell_group_gemms/cute_grouped_gemm.py":651:0)): error: failed to construct a valid coordinate from #cute.coord<"(_,_,_)"> resulting in an incorrect profile
-Error using cutlass strategy: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
-loc("kernel"("/data/users/less/torchtitan/torchtitan/experiments/kernels/blackwell_group_gemms/cute_grouped_gemm.py":651:0)): error: failed to construct a valid coordinate from #cute.coord<"(_,_,_)"> resulting in an incorrect profile
-Error using cutlass strategy: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
+[CUTLASS] Kernel compilation failed: DSLRuntimeError: 704 to integer conversion is not supported
+[CUTLASS] Tensor shapes:
+  Group 0: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 1: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 2: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 3: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 4: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 5: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 6: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 7: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 8: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 9: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 10: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 11: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 12: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 13: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 14: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 15: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+Error using cutlass strategy: DSLRuntimeError: 704 to integer conversion is not supported
+[CUTLASS] Kernel compilation failed: DSLRuntimeError: 928 to integer conversion is not supported
+[CUTLASS] Tensor shapes:
+  Group 0: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 1: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 2: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 3: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 4: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 5: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 6: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 7: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 8: Atorch.Size([256, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([256, 2048, 1])
+  Group 9: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 10: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 11: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 12: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 13: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 14: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 15: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+Error using cutlass strategy: DSLRuntimeError: 928 to integer conversion is not supported
+[CUTLASS] Kernel compilation failed: DSLRuntimeError: 704 to integer conversion is not supported
+[CUTLASS] Tensor shapes:
+  Group 0: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 1: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 2: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 3: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 4: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 5: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 6: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 7: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 8: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 9: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 10: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 11: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 12: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 13: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 14: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 15: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+Error using cutlass strategy: DSLRuntimeError: 704 to integer conversion is not supported
 
+and tiler_m and tiler_n = 16,16
+
+[CUTLASS] Kernel compilation failed: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
+[CUTLASS] Tensor shapes:
+  Group 0: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 1: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 2: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 3: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 4: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 5: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 6: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 7: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 8: Atorch.Size([256, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([256, 2048, 1])
+  Group 9: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 10: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 11: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 12: Atorch.Size([896, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([896, 2048, 1])
+  Group 13: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 14: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+  Group 15: Atorch.Size([128, 2048, 1]), Btorch.Size([2048, 1408, 1]), Ctorch.Size([128, 2048, 1])
+Error using cutlass strategy: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
+[CUTLASS] Kernel compilation failed: DSLRuntimeError: 💥💥💥 Error during runtime code generation for function `__call__` 💥💥💥
 """
 
 import torch
 import torch.nn as nn
+
+from torchtitan.tools.logging import logger
 
 try:
     import deep_gemm
@@ -138,12 +209,19 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         self.dtype_torch = torch.bfloat16
         self.dtype_cutlass = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
+        self.m_tiler = 16
+        self.n_tiler = 8
+
+        logger.info("Using CUTLASS GroupedGemmKernel for BF16, init")
 
         # CUTLASS kernel configuration - optimized for typical MoE workloads
         self.grouped_gemm = GroupedGemmKernel(
             acc_dtype=self.acc_dtype,
             use_2cta_instrs=False,  # Set to True for larger problems if beneficial
-            mma_tiler_mn=(128, 128),  # Can be tuned based on problem sizes
+            mma_tiler_mn=(
+                self.m_tiler,
+                self.n_tiler,
+            ),  # Can be tuned based on problem sizes
             cluster_shape_mn=(1, 1),  # Can be increased for larger problems
             tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
         )
@@ -160,8 +238,10 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         """Prepare expert weights for CUTLASS grouped GEMM"""
         # Stack weights for easier manipulation
         combined_weights = torch.stack(all_weights)
+        # combined_weights shape: torch.Size([16, 1408, 2048])
+        # logger.info(f"cutlass log: combined_weights shape: {combined_weights.shape}")
 
-        # CUTLASS expects specific tensor layouts -  handle conversion in execute()
+        # CUTLASS expects specific tensor layouts - we'll handle conversion in execute()
         return combined_weights
 
     def _prepare_cutlass_tensors(self, torch_tensor, is_weight=False):
@@ -174,33 +254,22 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         cute_tensor.element_type = self.dtype_cutlass
 
         # Mark appropriate dimension as dynamic for grouped operations
-        # For PyTorch tensors in row-major order, the last dimension has stride 1
-        # Use the dimension index directly instead of -1
-        dim_with_stride_1 = torch_tensor.dim() - 1
-        cute_tensor = cute_tensor.mark_layout_dynamic(leading_dim=dim_with_stride_1)
+        if is_weight:
+            # logger.info("cutlass log: is_weight")
+            # For weights, find the dimension with stride 1
+            for i, stride in enumerate(torch_tensor.stride()):
+                if stride == 1:
+                    cute_tensor = cute_tensor.mark_layout_dynamic(leading_dim=i)
+                    break
+        else:
+            # For activations, find the dimension with stride 1
+            # logger.info("cutlass log: not is_weight")
+            for i, stride in enumerate(torch_tensor.stride()):
+                if stride == 1:
+                    cute_tensor = cute_tensor.mark_layout_dynamic(leading_dim=i)
+                    break
 
         return cute_tensor
-
-    def _create_problem_specification(
-        self, m_sizes, hidden_size, intermediate_size, is_down_proj=False
-    ):
-        """Create CUTLASS problem specification from MoE group sizes"""
-        num_groups = len(m_sizes)
-        problem_sizes = []
-
-        for m in m_sizes:
-            if is_down_proj:
-                # down projection: intermediate_size -> hidden_size
-                problem_sizes.append(
-                    (int(m), int(hidden_size), int(intermediate_size), 1)
-                )
-            else:
-                # gate/up projections: hidden_size -> intermediate_size
-                problem_sizes.append(
-                    (int(m), int(intermediate_size), int(hidden_size), 1)
-                )
-
-        return problem_sizes
 
     def _setup_cutlass_metadata(self, torch_tensors_abc, problem_sizes):
         """Setup metadata tensors required by CUTLASS"""
@@ -217,10 +286,10 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         pointers = []
 
         for torch_a, torch_b, torch_c in torch_tensors_abc:
-            # Get 2D strides (ignore batch dimension if present)
-            a_strides = torch_a.stride()[-2:] if torch_a.dim() > 2 else torch_a.stride()
-            b_strides = torch_b.stride()[-2:] if torch_b.dim() > 2 else torch_b.stride()
-            c_strides = torch_c.stride()[-2:] if torch_c.dim() > 2 else torch_c.stride()
+            # For MNKL tensors, we need strides for M,N,K dimensions (ignoring L=1)
+            a_strides = [torch_a.stride(0), torch_a.stride(1)]  # M, K strides
+            b_strides = [torch_b.stride(0), torch_b.stride(1)]  # N, K strides
+            c_strides = [torch_c.stride(0), torch_c.stride(1)]  # M, N strides
 
             strides.append([a_strides, b_strides, c_strides])
             pointers.append(
@@ -229,10 +298,15 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
         # Convert to tensors
         strides_tensor = torch.tensor(strides, dtype=torch.int32, device=device)
+        logger.info(f"cutlass log: strides_tensor: {strides_tensor}")
         strides_cute = from_dlpack(strides_tensor, assumed_align=16)
+        logger.info(f"cutlass log: strides_cute: {strides_cute}")
 
         pointers_tensor = torch.tensor(pointers, dtype=torch.int64, device=device)
         pointers_cute = from_dlpack(pointers_tensor, assumed_align=16)
+
+        logger.info(f"{pointers_tensor=}")
+        logger.info(f"cutlass log: pointers_cute: {pointers_cute}")
 
         return problem_sizes_cute, strides_cute, pointers_cute
 
@@ -256,8 +330,8 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
     def _compute_total_clusters(self, problem_sizes):
         """Compute total number of clusters needed"""
         # Use same calculation as in cute_grouped_gemm.py
-        cluster_tile_m = 128  # matches mma_tiler_mn[0]
-        cluster_tile_n = 128  # matches mma_tiler_mn[1]
+        cluster_tile_m = self.m_tiler  # matches mma_tiler_mn[0]
+        cluster_tile_n = self.n_tiler  # matches mma_tiler_mn[1]
 
         total = 0
         for m, n, k, l in problem_sizes:
@@ -267,26 +341,82 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
         return total
 
-    def _execute_grouped_gemm(self, input_tokens, weights, problem_sizes, bias=None):
+    def _execute_grouped_gemm(self, input_tokens, weights, m_sizes, is_down_proj=False):
         """Execute a single grouped GEMM operation using CUTLASS"""
         device = input_tokens.device
-        num_groups = len(problem_sizes)
+        num_groups = len([s for s in m_sizes if s > 0])  # Only count non-empty groups
 
-        # Prepare tensor groups for each problem
+        if num_groups == 0:
+            # No valid groups, return zeros
+            if is_down_proj:
+                return torch.zeros_like(input_tokens[:, : weights.shape[-1]])
+            else:
+                return torch.zeros(
+                    input_tokens.shape[0],
+                    weights.shape[-1],
+                    dtype=self.dtype_torch,
+                    device=device,
+                )
+
+        # Create contiguous input tensor by filtering out empty groups
+        valid_tokens = []
+        valid_weights = []
+        valid_problem_sizes = []
+
+        offset = 0
+        for i, size in enumerate(m_sizes):
+            if size > 0:
+                # Get tokens for this group
+                group_tokens = input_tokens[offset : offset + size].contiguous()
+                valid_tokens.append(group_tokens)
+
+                # Get weight for this expert
+                expert_weight = weights[i].contiguous()
+                valid_weights.append(expert_weight)
+
+                # Create problem size specification
+                if is_down_proj:
+                    # down: (intermediate_size, hidden_size)
+                    m, n, k = size, expert_weight.shape[1], expert_weight.shape[0]
+                else:
+                    # gate/up: (hidden_size, intermediate_size)
+                    m, n, k = size, expert_weight.shape[1], expert_weight.shape[0]
+                valid_problem_sizes.append((m, n, k, 1))
+
+            offset += size
+
+        # Concatenate all valid inputs
+        concat_tokens = torch.cat(valid_tokens, dim=0)
+
+        # Create output tensor for concatenated results
+        if is_down_proj:
+            output_dim = valid_weights[0].shape[1]  # hidden_size
+        else:
+            output_dim = valid_weights[0].shape[1]  # intermediate_size
+
+        concat_output = torch.zeros(
+            concat_tokens.shape[0], output_dim, dtype=self.dtype_torch, device=device
+        )
+
+        # Prepare tensors in MNKL format as expected by CUTLASS
         torch_tensors_abc = []
-
         token_offset = 0
-        for i, (m, n, k, l) in enumerate(problem_sizes):
-            # Get tokens for this group
-            group_tokens = input_tokens[token_offset : token_offset + m].contiguous()
 
-            # Get weight for this expert
-            expert_weight = weights[i].contiguous()
+        for i, (m, n, k, l) in enumerate(valid_problem_sizes):
+            # Get tokens for this problem
+            group_tokens = concat_tokens[token_offset : token_offset + m]
+            group_output = concat_output[token_offset : token_offset + m]
 
-            # Create output tensor
-            group_output = torch.zeros(m, n, dtype=self.dtype_torch, device=device)
+            # Reshape tensors to MNKL format (add L=1 dimension)
+            group_tokens_mnkl = group_tokens.unsqueeze(-1)  # (M, K) -> (M, K, 1)
+            expert_weight_mnkl = (
+                valid_weights[i].transpose(0, 1).unsqueeze(-1)
+            )  # (K, N) -> (N, K, 1)
+            group_output_mnkl = group_output.unsqueeze(-1)  # (M, N) -> (M, N, 1)
 
-            torch_tensors_abc.append((group_tokens, expert_weight, group_output))
+            torch_tensors_abc.append(
+                (group_tokens_mnkl, expert_weight_mnkl, group_output_mnkl)
+            )
             token_offset += m
 
         # Convert to CUTLASS format
@@ -299,14 +429,14 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
         # Setup metadata
         problem_sizes_cute, strides_cute, pointers_cute = self._setup_cutlass_metadata(
-            torch_tensors_abc, problem_sizes
+            torch_tensors_abc, valid_problem_sizes
         )
 
         # Get tensormap buffer
         tensormap_cute = self._get_tensormap_buffer(num_groups, device)
 
         # Compute grid parameters
-        total_clusters = self._compute_total_clusters(problem_sizes)
+        total_clusters = self._compute_total_clusters(valid_problem_sizes)
 
         # Choose initial tensors (use first group)
         initial_a, initial_b, initial_c = cute_tensors_abc[0]
@@ -316,43 +446,67 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         stream = cuda.CUstream(torch_stream.cuda_stream)
 
         # Compile kernel (cache based on problem configuration)
-        cache_key = (num_groups, tuple(problem_sizes))
+        cache_key = (num_groups, tuple(valid_problem_sizes))
         if cache_key not in self._compiled_kernels:
-            self._compiled_kernels[cache_key] = cute.compile(
-                self.grouped_gemm,
-                initial_a,
-                initial_b,
-                initial_c,
-                num_groups,
-                problem_sizes_cute,
-                strides_cute,
-                pointers_cute,
-                total_clusters,
-                tensormap_cute,
-                self.max_active_clusters,
-                stream,
-            )
+            try:
+
+                self._compiled_kernels[cache_key] = cute.compile(
+                    self.grouped_gemm,
+                    initial_a,
+                    initial_b,
+                    initial_c,
+                    num_groups,
+                    problem_sizes_cute,
+                    strides_cute,
+                    pointers_cute,
+                    total_clusters,
+                    tensormap_cute,
+                    self.max_active_clusters,
+                    stream,
+                )
+
+                print(f"[CUTLASS] Successfully compiled kernel")
+
+            except Exception as e:
+                print(f"[CUTLASS] Kernel compilation failed: {e}")
+                print(f"[CUTLASS] Tensor shapes:")
+                for i, (ta, tb, tc) in enumerate(torch_tensors_abc):
+                    print(f"  Group {i}: A{ta.shape}, B{tb.shape}, C{tc.shape}")
+                raise e
 
         compiled_kernel = self._compiled_kernels[cache_key]
 
         # Execute kernel
-        compiled_kernel(
-            initial_a,
-            initial_b,
-            initial_c,
-            problem_sizes_cute,
-            strides_cute,
-            pointers_cute,
-            tensormap_cute,
-            stream,
-        )
+        try:
 
-        # Collect results
-        results = []
-        for torch_a, torch_b, torch_c in torch_tensors_abc:
-            results.append(torch_c)
+            logger.info(f"[CUTLASS] Executing kernel for {num_groups} groups")
 
-        return torch.cat(results, dim=0)
+            compiled_kernel(
+                initial_a,
+                initial_b,
+                initial_c,
+                problem_sizes_cute,
+                strides_cute,
+                pointers_cute,
+                tensormap_cute,
+                stream,
+            )
+
+            logger.info(f"[CUTLASS] Kernel execution completed")
+
+        except Exception as e:
+            print(f"[CUTLASS] Kernel execution failed: {e}")
+            raise e
+
+        # Extract results from MNKL format back to MN
+        for i, (torch_a, torch_b, torch_c) in enumerate(torch_tensors_abc):
+            start_idx = sum(valid_problem_sizes[j][0] for j in range(i))
+            end_idx = start_idx + valid_problem_sizes[i][0]
+            concat_output[start_idx:end_idx] = torch_c.squeeze(
+                -1
+            )  # (M, N, 1) -> (M, N)
+
+        return concat_output
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         """Execute the complete MoE forward pass using CUTLASS grouped GEMM"""
@@ -363,7 +517,6 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
         # Get dimensions
         hidden_size = w_gate.shape[1]  # input dimension
-        intermediate_size = w_gate.shape[2]  # output dimension for gate/up
 
         # Split contiguous tokens back into groups
         token_groups = []
@@ -371,50 +524,35 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         for size in m_sizes:
             if size > 0:
                 token_groups.append(contig_tokens[offset : offset + size])
-                offset += size
-            else:
-                token_groups.append(
-                    torch.empty(
-                        0,
-                        hidden_size,
-                        dtype=self.dtype_torch,
-                        device=contig_tokens.device,
-                    )
-                )
+            offset += size
 
         # Filter out empty groups for CUTLASS execution
         valid_indices = [i for i, size in enumerate(m_sizes) if size > 0]
         valid_m_sizes = [m_sizes[i] for i in valid_indices]
-        valid_token_groups = [token_groups[i] for i in valid_indices]
 
         if not valid_m_sizes:
             # No valid tokens, return zeros
-            return torch.zeros_like(contig_tokens[: sum(m_sizes)])
+            return torch.zeros(
+                sum(m_sizes),
+                hidden_size,
+                dtype=self.dtype_torch,
+                device=contig_tokens.device,
+            )
 
         # Concatenate valid tokens
-        valid_tokens = torch.cat(valid_token_groups, dim=0)
+        valid_tokens = torch.cat([token_groups[i] for i in valid_indices], dim=0)
 
-        # Prepare weights for valid experts
+        # Prepare weights for valid experts only
         valid_w_gate = w_gate[valid_indices]
         valid_w_up = w_up[valid_indices]
         valid_w_down = w_down[valid_indices]
 
-        # Create problem specifications
-        gate_up_problems = self._create_problem_specification(
-            valid_m_sizes, hidden_size, intermediate_size, is_down_proj=False
-        )
-        down_problems = self._create_problem_specification(
-            valid_m_sizes, hidden_size, intermediate_size, is_down_proj=True
-        )
-
-        # Execute gate projection
+        # Execute gate and up projections
         gate_output = self._execute_grouped_gemm(
-            valid_tokens, valid_w_gate, gate_up_problems
+            valid_tokens, valid_w_gate, valid_m_sizes, is_down_proj=False
         )
-
-        # Execute up projection
         up_output = self._execute_grouped_gemm(
-            valid_tokens, valid_w_up, gate_up_problems
+            valid_tokens, valid_w_up, valid_m_sizes, is_down_proj=False
         )
 
         # Apply activation and element-wise multiplication
@@ -422,7 +560,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
         # Execute down projection
         final_output = self._execute_grouped_gemm(
-            hidden_states, valid_w_down, down_problems
+            hidden_states, valid_w_down, valid_m_sizes, is_down_proj=True
         )
 
         # Reconstruct full output with zeros for empty groups

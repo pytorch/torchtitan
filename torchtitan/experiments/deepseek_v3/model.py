@@ -61,6 +61,8 @@ from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
 
+from torchtitan.tools.logging import logger
+
 
 # Get model parallel subgroup by name:
 # e.g. "pp", "ep", None
@@ -551,7 +553,7 @@ class MoE(nn.Module):
                 if TritonCGBF16GroupGEMM.is_available()
                 else None
             ),
-            "cutlass": (  # Add CUTLASS strategy
+            "cutlass": (
                 CUTLASSGroupGEMM(MLP.act_fn)
                 if CUTLASSGroupGEMM.is_available()
                 else None
@@ -566,7 +568,6 @@ class MoE(nn.Module):
             all_weights.append(lin.weight)
             lin.weight = None
 
-        # let the group gemm strategy prep the final weight layout
         combined_weight = self.group_gemm_instance.arrange_expert_weights(
             all_weights, submod_name, self
         )
