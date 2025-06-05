@@ -118,8 +118,9 @@ class Float8Converter(ModelConverter):
         # Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
         # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
         if self.moe_fqns:
+            from torchao.quantization.quant_api import quantize_
             from torchao.prototype.scaled_grouped_mm.conversion_utils import (
-                convert_moe_to_float8_training,
+                MoETrainingConfig,
             )
 
             def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
@@ -127,8 +128,9 @@ class Float8Converter(ModelConverter):
                     if target_fqn in cur_fqn:
                         return True
                 return False
-
-            convert_moe_to_float8_training(model, module_filter_fn=moe_module_filter_fn)
+            
+            config = MoETrainingConfig(module_filter_fn=moe_module_filter_fn)
+            quantize_(model, config=config)
             logger.info("Converted MoE to float8")
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
