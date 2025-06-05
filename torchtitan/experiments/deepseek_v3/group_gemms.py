@@ -63,12 +63,15 @@ try:
     import cutlass.cute as cute
     import cutlass.torch as cutlass_torch
     import cutlass.utils as utils
-    from cute_grouped_gemm import GroupedGemmKernel  # Import the working kernel
     from cutlass.cute.runtime import from_dlpack
+    from torchtitan.experiments.kernels.blackwell_group_gemms.cute_grouped_gemm import (
+        GroupedGemmKernel,
+    )
 
     CUTLASS_AVAILABLE = True
 except ImportError:
     CUTLASS_AVAILABLE = False
+    assert False, "CUTLASS is not available"
 
 
 # Export all strategies
@@ -134,10 +137,11 @@ class ManualLoopGroupGEMM(GroupGEMMStrategy):
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         """Execute using manual loops over experts"""
-        # Get weights
-        w_gate = module.get_parameter("gate_proj_weight")
-        w_up = module.get_parameter("up_proj_weight")
-        w_down = module.get_parameter("down_proj_weight")
+        # Get weights and ensure they're on the same device as tokens
+        device = contig_tokens.device
+        w_gate = module.get_parameter("gate_proj_weight").to(device)
+        w_up = module.get_parameter("up_proj_weight").to(device)
+        w_down = module.get_parameter("down_proj_weight").to(device)
 
         # Prepare output tensor
         hidden_size = w_gate.shape[
@@ -699,16 +703,19 @@ class TritonCGBF16GroupGEMM(GroupGEMMStrategy):
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         # Get weights
-        w_gate = module.get_parameter("gate_proj_weight")
-        w_up = module.get_parameter("up_proj_weight")
-        w_down = module.get_parameter("down_proj_weight")
+        device = contig_tokens.device
+        w_gate = module.get_parameter("gate_proj_weight").to(device)
+        w_up = module.get_parameter("up_proj_weight").to(device)
+        w_down = module.get_parameter("down_proj_weight").to(device)
 
         # Run first two GEMMs (gate and up projections)
         # Get only valid tokens
         valid_tokens = contig_tokens[: m_offsets[-1]]
 
         # Create indices from offsets without CPU-GPU sync
-        m_indices = dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+        m_indices = torch.tensor(
+            dsgemm_utils.create_indices_from_offsets_nosync(m_offsets)
+        )
 
         gate_proj = cg_grouped_gemm_forward(valid_tokens, w_gate, m_indices)
         up_proj = cg_grouped_gemm_forward(valid_tokens, w_up, m_indices)

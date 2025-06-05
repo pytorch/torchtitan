@@ -1368,7 +1368,7 @@ class GroupedGemmKernel:
                 )
 
     @cute.jit
-    def make_tensor_for_tensormap_update(
+    def make_tensor_for_tensormap_update_old(
         self,
         group_idx: cutlass.Int32,
         dtype: Type[cutlass.Numeric],
@@ -1425,7 +1425,7 @@ class GroupedGemmKernel:
             )
 
     @cute.jit
-    def make_tensor_for_tensormap_update_old(
+    def make_tensor_for_tensormap_update(
         self,
         group_idx: cutlass.Int32,
         dtype: Type[cutlass.Numeric],

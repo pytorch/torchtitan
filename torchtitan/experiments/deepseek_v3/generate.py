@@ -8,6 +8,7 @@
 
 # use inference.sh "Your Question Here?" to run inference with a single prompt.
 
+import logging
 import sys
 from dataclasses import dataclass
 
@@ -27,6 +28,16 @@ from transformers import AutoTokenizer
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
 # model_id, mesh_shape = "deepseek-ai/deepseek-v3", (8, 4)
+
+
+def remove_notset_root_handlers():
+    """
+    Remove handlers with level NOTSET from root logger.
+    Titan's logger is set, and thus we can differentiate between these.
+    """
+    for handler in logger.handlers[:]:
+        if handler.level == logging.NOTSET:
+            logger.removeHandler(handler)
 
 
 def colorize_chat(text, user_color=None, assistant_color=None, output_color=None):
@@ -128,7 +139,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 1024  # 16384
+    model_args.max_seq_len = 512  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -355,6 +366,9 @@ def generate_with_cuda_graph(
 
 if __name__ == "__main__":
     init_logger()
+    # get rid of HF duplicate logs
+    remove_notset_root_handlers()
+
     # Get user prompt from command line arguments
     user_prompt = "What is 2+2?"  # Default prompt
     if len(sys.argv) > 1:

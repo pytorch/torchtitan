@@ -238,7 +238,7 @@ if __name__ == "__main__":
     # set device before init_device mesh, otherwise ep will have duplicate device mapping
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
-    init_logger()
+    # init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 
