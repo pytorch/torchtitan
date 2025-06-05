@@ -40,7 +40,7 @@ class TestFluxDataLoader:
                 str(256),
                 "--training.dataset",
                 dataset_name,
-                "--training.batch_size",
+                "--training.local_batch_size",
                 str(batch_size),
                 "--training.seed",
                 "0",

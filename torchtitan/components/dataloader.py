@@ -17,6 +17,12 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.tools.logging import logger
 
 
+class DataloaderStopIteration(StopIteration):
+    """An exception that indicates dataloader exhaustion."""
+
+    pass
+
+
 class BaseDataLoader(Stateful, ABC):
     """Base class for all dataloaders.
 

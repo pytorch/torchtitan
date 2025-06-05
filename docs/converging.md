@@ -12,7 +12,7 @@ This note clarifies the recommended practices to follow when testing the loss co
 
 ## Guidelines
 
-To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To make sure the global batch size and in general #tokens per iteration stay the same, one can fix the local batch size (`training.batch_size`) in the toml config, and at the same time fix the data parallel degree.
+To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To make sure the global batch size and in general #tokens per iteration stay the same, one can fix the local batch size (`training.local_batch_size`) in the toml config, and at the same time fix the data parallel degree.
 
 If the technique is a parallelism (TP/PP/CP/etc)
 - The control set is a 1D FSDP job on `dp` GPUs (or any other verified setups), with a trusted training config (e.g. those under train_configs).
@@ -40,7 +40,7 @@ Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `tor
 
 ### Setup
 - Base config: [torchtitan/models/llama3/train_configs/llama3_8b.toml](../torchtitan/models/llama3/train_configs/llama3_8b.toml)
-- `training.batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
+- `training.local_batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
 - `training.data_parallel_shard_degree = 8`, resulting in global batch size 32
 - `training.steps = 3000`, `lr_scheduler.warmup_steps = 600`
 

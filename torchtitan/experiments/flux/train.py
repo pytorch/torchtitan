@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Optional
+from typing import Iterable, Optional
 
 import torch
 from torch.distributed.fsdp import FSDPModule
@@ -81,7 +81,9 @@ class FluxTrainer(Trainer):
             job_config=job_config,
         )
 
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
+    def forward_backward_step(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> torch.Tensor:
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
@@ -94,17 +96,10 @@ class FluxTrainer(Trainer):
         )
         labels = input_dict["img_encodings"]
 
-        self.optimizers.zero_grad()
-
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        model_parts = self.model_parts
-        assert len(self.model_parts) == 1
         # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
         model = self.model_parts[0]
-
-        world_mesh = self.world_mesh
-        parallel_dims = self.parallel_dims
 
         # image in latent space transformed by self.auto_encoder
         clip_encodings = input_dict["clip_encodings"]
@@ -148,6 +143,27 @@ class FluxTrainer(Trainer):
         # need to free to before bwd to avoid peaking memory
         del (pred, noise, target)
         loss.backward()
+
+        return loss
+
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        input_dict, labels = next(data_iterator)
+
+        self.optimizers.zero_grad()
+
+        # Keep these variables local to shorten the code as these are
+        # the major variables that are used in the training loop.
+        model_parts = self.model_parts
+        assert len(self.model_parts) == 1
+        # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
+        model = self.model_parts[0]
+
+        world_mesh = self.world_mesh
+        parallel_dims = self.parallel_dims
+
+        loss = self.forward_backward_step(input_dict, labels)
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],

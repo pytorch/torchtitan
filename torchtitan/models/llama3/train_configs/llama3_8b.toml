@@ -30,7 +30,7 @@ eps = 1e-8
 warmup_steps = 200  # lr scheduler warm up
 
 [training]
-batch_size = 1
+local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 1000

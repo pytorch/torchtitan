@@ -35,7 +35,7 @@ def main(
         [
             "--training.dataset",
             dataset,
-            "--training.batch_size",
+            "--training.local_batch_size",
             str(batch_size),
             "--training.seq_len",
             str(seq_len),

@@ -278,7 +278,7 @@ def build_flux_dataloader(
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.batch_size
+    batch_size = job_config.training.local_batch_size
 
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(job_config)
 
