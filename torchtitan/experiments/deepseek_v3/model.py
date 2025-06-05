@@ -47,7 +47,7 @@ from attn_mask_utils import _prepare_4d_causal_attention_mask
 from group_gemms import (
     CUTLASSGroupGEMM,  # blackwell specific
     DSGroupGEMM,
-    TorchAOBF16GroupGEMM,
+    ManualLoopGroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
     TritonCGBF16GroupGEMM,
@@ -477,13 +477,14 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "cutlass"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg", "cutlass"]
+    group_mm = (
+        "manual"  # Options: ["manual", "torch", "torchao", "tritoncg", "cutlass"]
+    )
 
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
-        # do we use triton kernel for input(activation) quantization or the default dsgemm utils (Pytorch eager based)
         self.activation_function = MLP.act_fn
 
         # ep_size is the number of ranks in expert dimension
@@ -521,35 +522,35 @@ class MoE(nn.Module):
 
         assert (
             MoE.group_mm in MoE.group_gemm_strategies
-        ), f"selected group gemm {self.group_mm} is not avaiable!"
+        ), f"selected group gemm {self.group_mm} is not available!"
+
         # keep active gg ready
         self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
         self._buffer_initialized = False
 
+        logger.info(f"Initialized MoE with {self.group_mm} group GEMM strategy")
+
     @classmethod
     def _initialize_group_gemm_strategies(cls):
         """Initialize available group GEMM strategies"""
+        from group_gemms import (
+            CUTLASSGroupGEMM,
+            ManualLoopGroupGEMM,
+            TorchBF16GroupGEMM,
+            TorchFP8GroupGEMM,
+            TritonCGBF16GroupGEMM,
+        )
+
         cls.group_gemm_strategies = {
+            "manual": ManualLoopGroupGEMM(MLP.act_fn),
             "torch": TorchBF16GroupGEMM(MLP.act_fn),
             "torchao": (
-                TorchAOBF16GroupGEMM(MLP.act_fn)
-                if TorchAOBF16GroupGEMM.is_available()
-                else None
-            ),
-            "torchfp8": (
                 TorchFP8GroupGEMM(MLP.act_fn)
                 if TorchFP8GroupGEMM.is_available()
                 else None
             ),
-            "dsgemm": (
-                DSGroupGEMM(MLP.act_fn, use_triton_quant=True)
-                if DSGroupGEMM.is_available()
-                else None
-            ),
             "tritoncg": (
-                TritonCGBF16GroupGEMM(
-                    MLP.act_fn,
-                )
+                TritonCGBF16GroupGEMM(MLP.act_fn)
                 if TritonCGBF16GroupGEMM.is_available()
                 else None
             ),
@@ -560,10 +561,14 @@ class MoE(nn.Module):
             ),
         }
 
+        # Log available strategies
+        available = [k for k, v in cls.group_gemm_strategies.items() if v is not None]
+        logger.info(f"Available group GEMM strategies: {available}")
+
     def combine_experts(self, submod_name: str):
+        """Combine expert weights for group GEMM usage"""
         all_weights = []
         for expert in self.experts.values():
-
             lin = expert.get_submodule(submod_name)
             all_weights.append(lin.weight)
             lin.weight = None
@@ -573,16 +578,12 @@ class MoE(nn.Module):
         )
 
         if combined_weight is None:
-            raise NotImplementedError("expert weights not handled by group gemmm")
+            raise NotImplementedError("expert weights not handled by group gemm")
 
         self.register_parameter(f"{submod_name}_weight", nn.Parameter(combined_weight))
 
-    # This function is used to create a symm mem buffer for MoE's. It is for
-    # shuffling tokens fully "on-device", as compared to traditional torch
-    # all_to_all APIs which require a GPU-to-CPU sync of the splits.  If a user
-    # calls this function, the `shuffle_method` would switch from
-    # `torch_all_to_all` to `symm_mem`.
     def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
+        """Setup symmetric memory for MoE's"""
         # Switch shuffle method
         self.shuffle_method = "symm_mem"
 
@@ -621,19 +622,12 @@ class MoE(nn.Module):
         )
 
     def get_send_buf(self):
-        # [Why detach?] During a first forward-backward step, the buffer would
-        # be included in a computational graph. In a second step, autograd will
-        # return an error saying "Trying to backward through the graph a second
-        # time (or directly access saved tensors more than once)". This is
-        # because the buffer is still in the graph, and autograd is trying to
-        # backward through the graph a second time. To avoid this, we detach the
-        # buffer from the graph. `detach()` returns a new tensor, which shares
-        # the same storage with the original one.
+        """Get detached send buffer"""
         self.token_send_buf.grad = None
         return self.token_send_buf.detach()
 
     def get_gather_buf(self):
-        # See [Why detach?] in `get_send_buf`
+        """Get detached gather buffer"""
         self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
@@ -643,6 +637,7 @@ class MoE(nn.Module):
         # for each token, select top-k experts, and compute the weight for each expert
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
         if self.shuffle_method == "symm_mem":
             y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
         else:  # "torch_all_to_all"
@@ -654,6 +649,7 @@ class MoE(nn.Module):
         return y
 
     def moe_forward(self, x, topk_ids, topk_weight):
+        """Standard MoE forward with all-to-all communication"""
         (
             sorted_tokens,
             token_indices,
@@ -663,14 +659,7 @@ class MoE(nn.Module):
         # keep the seqlen dimension for later use without holding onto the sorted tokens
         seqlen_sorted_tokens = sorted_tokens.shape[0]
 
-        # all to all
-        # This part exchange the information about the number of tokens send and
-        # received by each expert. We can understand this information as "side
-        # band", which is not part of the actual data. Thus no gradient is
-        # needed.
-
-        # Sum the tokens over local experts, then we get tokens per EP rank,
-        # which is the input splits
+        # all to all communication for token distribution
         with torch.no_grad():
             tokens_per_expert_group = tokens_per_expert.new_empty(
                 tokens_per_expert.shape[0]
@@ -680,82 +669,53 @@ class MoE(nn.Module):
             )
             input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
 
-        # DP to EP token shuffle. This part needs gradient.
-        if self.shuffle_method == "symm_mem":
-            # Move input to the `token_send_buf` symm mem
-            token_send_buf = self.get_send_buf()
-            token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
-            # Note: `out=` avoids copy, but it is not differentiable
-            # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=self.token_send_buf[: idxs.shape[0]])
-            token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
-                token_send_buf,
-                input_splits,
-                self.ep_group,
-            )
-            with torch.no_grad():
-                # Received tokens from all other ranks. TODO: use mask instead
-                received = output_splits.sum()
-            # TODO: don't use `received`
-            gathered_tokens = token_gather_buf[:received]
-        else:  # "torch_all_to_all"
-            # Prepare input ans output splits
-            with torch.no_grad():
-                output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
-                    dim=1
-                )
-            gathered_tokens = all_to_all_single_autograd(
-                sorted_tokens,
-                output_splits.tolist(),
-                input_splits.tolist(),
-                self.ep_group,
-            )
-
-        # This part prepares a 1D tensor with the same length as
-        # `gathered_tokens`. The 1D tensor is filled with local expert IDs which
-        # the tokens in `gathered_tokens` are headed for. This part doesn't need
-        # gradient.
+        # DP to EP token shuffle
         with torch.no_grad():
-            gatherd_idxs = (
+            output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(dim=1)
+
+        gathered_tokens = all_to_all_single_autograd(
+            sorted_tokens,
+            output_splits.tolist(),
+            input_splits.tolist(),
+            self.ep_group,
+        )
+
+        # Process tokens with group GEMM
+        with torch.no_grad():
+            gathered_idxs = (
                 torch.arange(
                     tokens_per_expert_group.numel(),
                     device=tokens_per_expert_group.device,
                 )
                 % self.experts_per_rank
             )
-            gatherd_idxs = gatherd_idxs.repeat_interleave(tokens_per_expert_group)
+            gathered_idxs = gathered_idxs.repeat_interleave(tokens_per_expert_group)
 
-        # Prepare buffer for tokens processed by experts
-        if self.shuffle_method == "symm_mem":
-            # Take necessary space from `token_gather_buf` symm mem because we are
-            # going to send them out after expert processing
-            processed_tokens = self.get_gather_buf()[: gathered_tokens.shape[0]]
-        else:  # "torch_all_to_all"
+        # Use group GEMM if available, otherwise fall back to individual expert processing
+        if hasattr(self, "gate_proj_weight"):
+            # Group GEMM path
+            processed_tokens = self._run_group_gemm(
+                gathered_tokens,
+                tokens_per_expert_group.tolist(),
+                self._compute_offsets(tokens_per_expert_group),
+            )
+        else:
+            # Individual expert processing path
             processed_tokens = torch.empty_like(gathered_tokens)
+            for i, expert in enumerate(self.experts.values()):
+                mask = gathered_idxs == i
+                if mask.any():
+                    processed_tokens[mask] = expert(gathered_tokens[mask])
 
-        # This part processes the tokens routed to the local experts.
-        # TODO: can we use group GEMM here?
-        for i, expert in enumerate(self.experts.values()):
-            processed_tokens[gatherd_idxs == i] = expert(
-                gathered_tokens[gatherd_idxs == i]
-            )
+        # EP to DP shuffle back
+        returned_tokens = all_to_all_single_autograd(
+            processed_tokens,
+            input_splits.tolist(),
+            output_splits.tolist(),
+            self.ep_group,
+        )
 
-        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
-        # The input/output splits are just a reverse of the previous shuffle.
-        if self.shuffle_method == "symm_mem":
-            token_return_buf, _ = OnDeviceAllToAllV.apply(
-                processed_tokens,
-                output_splits,
-                self.ep_group,
-            )
-            returned_tokens = token_return_buf[:seqlen_sorted_tokens]
-        else:  # "torch_all_to_all"
-            returned_tokens = all_to_all_single_autograd(
-                processed_tokens,
-                input_splits.tolist(),
-                output_splits.tolist(),
-                self.ep_group,
-            )
-
+        # Reorder and combine results
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[token_indices] = returned_tokens
         final_out = (
@@ -767,12 +727,113 @@ class MoE(nn.Module):
         )
         return final_out
 
-    def sort_tokens(self, x, topk_ids, topk_weights):
-        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
-        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
-        # Since this is an "aritificial" index creation (final outcome being
-        # `idxs`), we don't need gradients here.
+    def _compute_offsets(self, sizes):
+        """Compute cumulative offsets from sizes"""
+        offsets = [0]
+        for size in sizes:
+            offsets.append(offsets[-1] + size)
+        return offsets
 
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets):
+        """Run the appropriate group GEMM implementation"""
+        try:
+            return self.group_gemm_instance.execute(
+                contig_tokens, m_sizes, m_offsets, self
+            )
+        except Exception as e:
+            logger.error(f"Error using {self.group_mm} strategy: {e}")
+            # Fall back to manual processing
+            return self._fallback_expert_processing(contig_tokens, m_sizes)
+
+    def _fallback_expert_processing(self, tokens, m_sizes):
+        """Fallback to individual expert processing"""
+        logger.warning("Falling back to individual expert processing")
+        output = torch.zeros_like(tokens)
+        offset = 0
+
+        for i, (expert_key, expert) in enumerate(self.experts.items()):
+            if i < len(m_sizes) and m_sizes[i] > 0:
+                size = m_sizes[i]
+                expert_tokens = tokens[offset : offset + size]
+                output[offset : offset + size] = expert(expert_tokens)
+                offset += size
+
+        return output
+
+    def moe_on_device(self, x, topk_ids, topk_weight):
+        """MoE forward with symmetric memory (on-device all-to-all)"""
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
+
+        # keep the seqlen dimension for later use
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
+
+        # Exchange token counts
+        with torch.no_grad():
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+
+        # Move input to symmetric memory buffer
+        token_send_buf = self.get_send_buf()
+        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
+
+        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
+            token_send_buf,
+            input_splits,
+            self.ep_group,
+        )
+
+        # Process with group GEMM
+        with torch.no_grad():
+            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
+                tokens_per_expert_group,
+                self.experts_per_rank,
+                self.ep_size,
+                token_gather_buf.shape[0],
+                ALIGN_SIZE_M,
+            )
+
+        # Permute tokens for contiguous expert processing
+        contig_tokens = token_gather_buf[permuted_indices]
+
+        # Run group GEMM
+        hidden_outputs = self._run_group_gemm(contig_tokens, m_sizes, m_offsets)
+
+        # Move results back to symmetric memory
+        processed_tokens = self.get_gather_buf()
+        processed_tokens[permuted_indices] = hidden_outputs
+
+        # Return shuffle
+        token_return_buf, _ = OnDeviceAllToAllV.apply(
+            processed_tokens,
+            output_splits,
+            self.ep_group,
+        )
+
+        returned_tokens = token_return_buf[:seqlen_sorted_tokens]
+        output_tokens = torch.empty_like(returned_tokens)
+        output_tokens[token_indices] = returned_tokens
+
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(returned_tokens.dtype)
+        )
+
+        return final_out
+
+    def sort_tokens(self, x, topk_ids, topk_weights):
+        """Sort tokens by expert assignment"""
         with torch.no_grad():
             # [seq_len, n_routed_experts]
             expert_counts = topk_ids.new_zeros(
@@ -785,8 +846,6 @@ class MoE(nn.Module):
             token_indices = topk_ids.view(-1).argsort()
 
         sorted_tokens = x[token_indices // topk_ids.shape[1]]
-        # assert sorted_tokens.shape == sorted_tokens_shape
-
         return (sorted_tokens, token_indices, tokens_per_expert)
 
     # ------- Group GEMM implementation ------
