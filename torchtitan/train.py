@@ -462,6 +462,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
+    def eval_step(self):
+        """Evaluates the model on the validation dataset.
+        Currently is not implemented and this is a placeholder."""
+        return
+
     @record
     def train(self):
         job_config = self.job_config
@@ -491,6 +496,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
+
+                self.eval_step()
+
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
                 )
