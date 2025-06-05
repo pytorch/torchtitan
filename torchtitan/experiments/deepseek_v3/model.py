@@ -478,7 +478,7 @@ class MoE(nn.Module):
     group_gemm_strategies = None
     # which group gemm to use?
     group_mm = (
-        "manual"  # Options: ["manual", "torch", "torchao", "tritoncg", "cutlass"]
+        "cute"  # Options: ["manual", "torch", "torchao", "tritoncg", "cutlass", "cute"]
     )
 
     def __init__(self, config):
@@ -534,6 +534,7 @@ class MoE(nn.Module):
     def _initialize_group_gemm_strategies(cls):
         """Initialize available group GEMM strategies"""
         from group_gemms import (
+            CuteDenseLoopingGroupGEMM,
             CUTLASSGroupGEMM,
             ManualLoopGroupGEMM,
             TorchBF16GroupGEMM,
@@ -557,6 +558,11 @@ class MoE(nn.Module):
             "cutlass": (
                 CUTLASSGroupGEMM(MLP.act_fn)
                 if CUTLASSGroupGEMM.is_available()
+                else None
+            ),
+            "cute": (
+                CuteDenseLoopingGroupGEMM(MLP.act_fn)
+                if CuteDenseLoopingGroupGEMM.is_available()
                 else None
             ),
         }

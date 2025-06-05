@@ -131,21 +131,228 @@ class GroupGEMMStrategy:
 
 # ========= Manual Looping Baseline ===================
 class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
-    """CuteDenseLoopingGroupGEMM baseline implementation for comparison"""
+    """
+    Implementation of grouped GEMM using Blackwell Dense GEMM kernel with manual looping.
+
+    This class provides a way to execute multiple GEMM operations with different problem
+    sizes using the Blackwell Dense GEMM kernel. It loops through each expert and
+    executes the kernel for each matrix multiplication.
+    """
+
+    def __init__(self, custom_activation):
+        """
+        Initialize the CuteDenseLoopingGroupGEMM.
+
+        Args:
+            custom_activation: Activation function to use
+        """
+        super().__init__(custom_activation)
+
+        # Default configuration for the dense GEMM kernel
+        self.acc_dtype = cutlass.Float32
+        self.use_2cta_instrs = False
+        self.mma_tiler_mn = (128, 128)
+        self.cluster_shape_mn = (1, 1)
+        self.use_tma_store = True
+
+        # Create the dense GEMM kernel
+        self.gemm_kernel = DenseGemmKernel(
+            acc_dtype=self.acc_dtype,
+            use_2cta_instrs=self.use_2cta_instrs,
+            mma_tiler_mn=self.mma_tiler_mn,
+            cluster_shape_mn=self.cluster_shape_mn,
+            use_tma_store=self.use_tma_store,
+        )
+
+        # Cache for compiled kernels
+        self._compiled_kernels = {}
+
+        logger.info(
+            "Initialized CuteDenseLoopingGroupGEMM with Blackwell Dense GEMM kernel"
+        )
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """Store weights in a simple list format"""
         return torch.stack(all_weights)
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        """
+        Execute the grouped GEMM operation using the Blackwell Dense GEMM kernel.
+
+        Args:
+            contig_tokens: The input tokens, arranged contiguously by expert
+            m_sizes: Sizes of each group
+            m_offsets: Offsets of each group
+            module: The MoE module containing weights and parameters
+
+        Returns:
+            The processed tokens
+        """
+        try:
+            # Get weights
+            w_gate = module.get_parameter("gate_proj_weight")
+            w_up = module.get_parameter("up_proj_weight")
+            w_down = module.get_parameter("down_proj_weight")
+
+            # Setup CUDA stream
+            torch_stream = torch.cuda.current_stream()
+            stream = cuda.CUstream(torch_stream.cuda_stream)
+
+            # Prepare output tensor
+            hidden_size = w_gate.shape[2]  # [num_experts, out_dim, in_dim]
+            output = torch.zeros(
+                contig_tokens.shape[0],
+                hidden_size,
+                dtype=contig_tokens.dtype,
+                device=contig_tokens.device,
+            )
+
+            # Process each expert sequentially
+            offset = 0
+            for expert_idx, size in enumerate(m_sizes):
+                if size > 0:
+                    # Get tokens for this expert
+                    expert_tokens = contig_tokens[offset : offset + size]
+
+                    # Get weights for this expert
+                    gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
+                    up_weight = w_up[expert_idx]
+                    down_weight = w_down[expert_idx]
+
+                    # Forward pass: gate projection using CUTE kernel
+                    gate_out = self._execute_gemm(expert_tokens, gate_weight, stream)
+
+                    # Forward pass: up projection using CUTE kernel
+                    up_out = self._execute_gemm(expert_tokens, up_weight, stream)
+
+                    # Apply activation and combine
+                    hidden = self.activation_function(gate_out) * up_out
+
+                    # Down projection using CUTE kernel
+                    expert_output = self._execute_gemm(hidden, down_weight, stream)
+
+                    # Store results
+                    output[offset : offset + size] = expert_output
+
+                offset += size
+
+            return output
+
+        except Exception as e:
+            logger.error(f"Error in CuteDenseLoopingGroupGEMM: {e}")
+            # Fall back to PyTorch mm implementation
+            return self._fallback_execute(contig_tokens, m_sizes, module)
+
+    def _execute_gemm(
+        self, input_tensor: torch.Tensor, weight: torch.Tensor, stream: cuda.CUstream
+    ) -> torch.Tensor:
+        """
+        Execute a single GEMM operation using the Blackwell Dense GEMM kernel.
+
+        Args:
+            input_tensor: Input tensor of shape [M, K]
+            weight: Weight tensor of shape [N, K]
+            stream: CUDA stream
+
+        Returns:
+            Output tensor of shape [M, N]
+        """
+        # Ensure tensors are contiguous
+        if not input_tensor.is_contiguous():
+            input_tensor = input_tensor.contiguous()
+        if not weight.is_contiguous():
+            weight = weight.contiguous()
+
+        # Transpose weight for GEMM: [N, K] -> [K, N]
+        weight_t = weight.t().contiguous()
+
+        # Create output tensor
+        output = torch.zeros(
+            input_tensor.shape[0],
+            weight.shape[0],
+            dtype=input_tensor.dtype,
+            device=input_tensor.device,
+        )
+
+        # Convert to CUTE tensors
+        a_cute = self._convert_to_cute_tensor(input_tensor)
+        b_cute = self._convert_to_cute_tensor(weight_t)
+        c_cute = self._convert_to_cute_tensor(output)
+
+        # Get or compile the kernel
+        key = (input_tensor.shape, weight.shape, input_tensor.dtype)
+        if key not in self._compiled_kernels:
+            self._compiled_kernels[key] = cute.compile(
+                self.gemm_kernel, a_cute, b_cute, c_cute, stream
+            )
+
+        compiled_kernel = self._compiled_kernels[key]
+
+        # Execute the kernel
+        compiled_kernel(a_cute, b_cute, c_cute, stream)
+
+        # torch.cuda.synchronize()
+
+        return output
+
+    def _convert_to_cute_tensor(self, tensor: torch.Tensor) -> cute.Tensor:
+        """
+        Convert a PyTorch tensor to a CUTE tensor.
+
+        Args:
+            tensor: PyTorch tensor to convert
+
+        Returns:
+            CUTE tensor
+        """
+        # Convert to MNKL format (add batch dimension if needed)
+        if tensor.dim() == 2:
+            tensor_mnkl = tensor.unsqueeze(-1).contiguous()
+        else:
+            tensor_mnkl = tensor.contiguous()
+
+        # Create CUTE tensor
+        cute_tensor = from_dlpack(tensor_mnkl, assumed_align=16)
+
+        # Set CUTLASS data type
+        if tensor.dtype == torch.float16:
+            cute_tensor.element_type = cutlass.Float16
+        elif tensor.dtype == torch.bfloat16:
+            cute_tensor.element_type = cutlass.BFloat16
+        elif tensor.dtype == torch.float32:
+            cute_tensor.element_type = cutlass.Float32
+        elif tensor.dtype == torch.int8:
+            cute_tensor.element_type = cutlass.Int8
+        elif tensor.dtype == torch.uint8:
+            cute_tensor.element_type = cutlass.Uint8
+        else:
+            raise ValueError(f"Unsupported dtype: {tensor.dtype}")
+
+        # Mark layout as dynamic
+        cute_tensor = cute_tensor.mark_layout_dynamic(leading_dim=1)
+
+        return cute_tensor
+
+    def _fallback_execute(self, contig_tokens, m_sizes, module):
+        """
+        Fallback implementation using PyTorch mm.
+
+        Args:
+            contig_tokens: The input tokens, arranged contiguously by expert
+            m_sizes: Sizes of each group
+            module: The MoE module containing weights and parameters
+
+        Returns:
+            The processed tokens
+        """
+        logger.warning("Falling back to PyTorch mm implementation")
+
         w_gate = module.get_parameter("gate_proj_weight")
         w_up = module.get_parameter("up_proj_weight")
         w_down = module.get_parameter("down_proj_weight")
 
         # Prepare output tensor
-        hidden_size = w_gate.shape[
-            2
-        ]  # Assuming stacked weights shape [num_experts, out_dim, in_dim]
+        hidden_size = w_gate.shape[2]  # [num_experts, out_dim, in_dim]
         output = torch.zeros(
             contig_tokens.shape[0],
             hidden_size,
@@ -184,7 +391,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
 
     @staticmethod
     def is_available() -> bool:
-        return True
+        return CUTLASS_AVAILABLE
 
 
 class ManualLoopGroupGEMM(GroupGEMMStrategy):

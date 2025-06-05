@@ -236,7 +236,7 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 200,
+    n_tokens: int = 100,
 ):
     rank = dist.get_rank()
     device = dist_config.device
@@ -365,9 +365,9 @@ def generate_with_cuda_graph(
 
 
 if __name__ == "__main__":
-    init_logger()
+    # init_logger()
     # get rid of HF duplicate logs
-    remove_notset_root_handlers()
+    # remove_notset_root_handlers()
 
     # Get user prompt from command line arguments
     user_prompt = "What is 2+2?"  # Default prompt
