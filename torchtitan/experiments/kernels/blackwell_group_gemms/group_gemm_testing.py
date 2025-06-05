@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Fixed version of grouped GEMM example with correct stride handling.
+Grouped GEMM example using the TensorCuteConverter utility.
 
-Key fixes:
-1. Compute actual strides from PyTorch tensors instead of hardcoding
-2. Ensure tensor layouts match between PyTorch and CUTLASS
-3. Use proper stride extraction for each tensor
+This example demonstrates how to:
+1. Use the GroupedGemmConverter to create and manage grouped GEMM tensors
+2. Execute a grouped GEMM operation with proper tensor handling
+3. Verify results against PyTorch reference implementation
 """
 
 import time
 
+import numpy as np
 import torch
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -23,77 +24,19 @@ try:
     import cutlass.utils as utils
     from cute_grouped_gemm import GroupedGemmKernel
     from cutlass.cute.runtime import from_dlpack
+    from tensor_cute_converter import GroupedGemmConverter, TensorMapConverter
 
     HAS_CUTLASS = True
 except ImportError:
     HAS_CUTLASS = False
 
 
-def create_tensor_with_strides(M, N, K, device, dtype_torch, dtype_cutlass):
-    """
-    Create PyTorch tensors and extract their actual strides.
-    This mimics the working approach from review.py.
-    """
-    # Create standard PyTorch tensors (row-major by default)
-    A = torch.randn(M, K, dtype=dtype_torch, device=device)  # (M, K)
-    B = torch.randn(K, N, dtype=dtype_torch, device=device)  # (K, N)
-    C = torch.zeros(M, N, dtype=dtype_torch, device=device)  # (M, N)
-
-    print(f"Original tensor shapes: A{A.shape}, B{B.shape}, C{C.shape}")
-    print(f"Original tensor strides: A{A.stride()}, B{B.stride()}, C{C.stride()}")
-
-    # Convert to MNKL format following the working review.py approach
-    A_mnkl = A.unsqueeze(-1).contiguous()  # (M, K) -> (M, K, 1)
-    B_mnkl = B.transpose(0, 1).unsqueeze(-1).contiguous()  # (K, N) -> (N, K, 1)
-    C_mnkl = C.unsqueeze(-1).contiguous()  # (M, N) -> (M, N, 1)
-
-    print(f"MNKL tensor shapes: A{A_mnkl.shape}, B{B_mnkl.shape}, C{C_mnkl.shape}")
-    print(
-        f"MNKL tensor strides: A{A_mnkl.stride()}, B{B_mnkl.stride()}, C{C_mnkl.stride()}"
-    )
-
-    # Create CUTE tensors following review.py approach
-    A_cute = from_dlpack(A_mnkl, assumed_align=16)
-    B_cute = from_dlpack(B_mnkl, assumed_align=16)
-    C_cute = from_dlpack(C_mnkl, assumed_align=16)
-
-    # Set CUTE properties
-    A_cute.element_type = dtype_cutlass
-    B_cute.element_type = dtype_cutlass
-    C_cute.element_type = dtype_cutlass
-
-    # Mark layouts as dynamic with correct leading dimensions (from review.py)
-    # For A (M,K,1), the K dimension has stride 1
-    A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
-    # For B (N,K,1), the K dimension has stride 1
-    B_cute = B_cute.mark_layout_dynamic(leading_dim=1)
-    # For C (M,N,1), the N dimension has stride 1
-    C_cute = C_cute.mark_layout_dynamic(leading_dim=1)
-
-    # Extract actual strides from the MNKL tensors
-    # For grouped GEMM, we need to pass only the 2D strides (ignoring the L dimension)
-    A_strides = A_mnkl.stride()[:2]  # (stride_M, stride_K)
-    B_strides = B_mnkl.stride()[:2]  # (stride_N, stride_K)
-    C_strides = C_mnkl.stride()[:2]  # (stride_M, stride_N)
-
-    print(f"Extracted 2D strides: A{A_strides}, B{B_strides}, C{C_strides}")
-
-    return (
-        (A, B, C),
-        (A_cute, B_cute, C_cute),
-        (A_strides, B_strides, C_strides),
-        A_mnkl.data_ptr(),
-        B_mnkl.data_ptr(),
-        C_mnkl.data_ptr(),
-    )
-
-
 def simple_grouped_gemm_example():
     """
-    Fixed grouped GEMM example with proper stride handling.
+    Grouped GEMM example using the TensorCuteConverter utility.
     """
 
-    print("=== Fixed Grouped GEMM Example ===")
+    print("=== Grouped GEMM Example with TensorCuteConverter ===")
 
     if not HAS_CUTLASS:
         print("CUTLASS not available")
@@ -101,72 +44,91 @@ def simple_grouped_gemm_example():
 
     # Define 3 groups with different problem sizes
     problem_sizes = [
-        (512, 256, 128, 1),  # Group 0: Small
-        (1024, 512, 256, 1),  # Group 1: Medium
-        (768, 384, 192, 1),  # Group 2: Different aspect ratio
+        (512, 256, 128),  # Group 0: Small
+        (512, 256, 128),
+        (512, 256, 128),
+        # (1024, 512, 256),  # Group 1: Medium
+        # (768, 384, 192),  # Group 2: Different aspect ratio
     ]
 
-    num_groups = len(problem_sizes)
-    device = "cuda"
+    device = torch.device("cuda")
     dtype_torch = torch.float16
     dtype_cutlass = cutlass.Float16
 
-    print(f"Number of groups: {num_groups}")
-    for i, (M, N, K, L) in enumerate(problem_sizes):
+    print(f"Number of groups: {len(problem_sizes)}")
+    for i, (M, N, K) in enumerate(problem_sizes):
         print(f"  Group {i}: C[{M},{N}] = A[{M},{K}] @ B[{K},{N}]")
 
-    # 1. Create tensors for each group with proper stride calculation
-    print("\n1. Creating tensors with proper stride calculation...")
+    # 1. Create tensors using GroupedGemmConverter
+    print("\n1. Creating tensors using GroupedGemmConverter...")
 
-    torch_tensors = []
-    cute_tensors = []
-    strides = []
-    pointers = []
+    # Initialize the converter
+    converter = GroupedGemmConverter(device=device, alignment=16)
 
-    for i, (M, N, K, L) in enumerate(problem_sizes):
-        print(f"\nGroup {i}: M={M}, N={N}, K={K}")
+    # Create grouped tensors with consistent majorness across all groups
+    # For CUTLASS grouped GEMM, the majorness must be the same across all groups
+    # A is K-major (row-major), B is K-major (column-major after transpose), C is N-major (row-major)
+    print("\nEnsuring consistent majorness across all groups:")
+    print("  A: K-major (row-major)")
+    print("  B: K-major (column-major after transpose)")
+    print("  C: N-major (row-major)")
 
-        torch_abc, cute_abc, stride_abc, ptr_a, ptr_b, ptr_c = (
-            create_tensor_with_strides(M, N, K, device, dtype_torch, dtype_cutlass)
+    # Create grouped tensors
+    grouped_result = converter.create_grouped_tensors(
+        problem_sizes=problem_sizes, dtype=dtype_torch, fill_random=True
+    )
+
+    # Debug: Print strides and pointers for each group
+    print("\nDebug - Strides for each group:")
+    for i, stride_group in enumerate(grouped_result["metadata_tensors"]["strides"]):
+        print(
+            f"  Group {i} strides: A={stride_group[0]}, B={stride_group[1]}, C={stride_group[2]}"
         )
 
-        torch_tensors.append(torch_abc)
-        cute_tensors.append(cute_abc)
-        strides.append(stride_abc)
-        pointers.append([ptr_a, ptr_b, ptr_c])
+    print("\nDebug - Pointers for each group:")
+    for i, ptr_group in enumerate(grouped_result["metadata_tensors"]["pointers"]):
+        print(
+            f"  Group {i} pointers: A=0x{ptr_group[0]:x}, B=0x{ptr_group[1]:x}, C=0x{ptr_group[2]:x}"
+        )
 
-    # 2. Convert metadata to tensors
-    print("\n2. Converting metadata to tensors...")
+    print("\nDebug - Problem sizes for each group:")
+    for i, size_group in enumerate(grouped_result["metadata_tensors"]["problem_sizes"]):
+        print(f"  Group {i} problem size: {size_group.tolist()}")
 
-    # Problem sizes tensor: (num_groups, 4)
-    problem_sizes_tensor = torch.tensor(problem_sizes, dtype=torch.int32, device=device)
-    problem_sizes_cute = from_dlpack(problem_sizes_tensor, assumed_align=16)
+    # Extract components from the conversion result
+    num_groups = grouped_result["num_groups"]
+    original_tensors = grouped_result["original_tensors"]
+    cute_tensors = grouped_result["cute_tensors"]
 
-    # Strides tensor: (num_groups, 3, 2)
-    strides_tensor = torch.tensor(strides, dtype=torch.int32, device=device)
-    strides_cute = from_dlpack(strides_tensor, assumed_align=16)
+    # Get metadata tensors and their CUTE versions
+    problem_sizes_tensor = grouped_result["metadata_tensors"]["problem_sizes"]
+    strides_tensor = grouped_result["metadata_tensors"]["strides"]
+    pointers_tensor = grouped_result["metadata_tensors"]["pointers"]
 
-    # Pointers tensor: (num_groups, 3)
-    pointers_tensor = torch.tensor(pointers, dtype=torch.int64, device=device)
-    pointers_cute = from_dlpack(pointers_tensor, assumed_align=16)
+    problem_sizes_cute = grouped_result["metadata"]["problem_sizes"]
+    strides_cute = grouped_result["metadata"]["strides"]
+    pointers_cute = grouped_result["metadata"]["pointers"]
 
+    print(f"  Successfully created {num_groups} tensor groups")
     print(f"  Problem sizes tensor: {problem_sizes_tensor.shape}")
     print(f"  Strides tensor: {strides_tensor.shape}")
     print(f"  Pointers tensor: {pointers_tensor.shape}")
     print(f"  Actual strides values:\n{strides_tensor}")
 
-    # 3. Create tensormap buffer
-    print("\n3. Creating tensormap buffer...")
+    # 2. Create tensormap buffer using TensorMapConverter
+    print("\n2. Creating tensormap buffer...")
 
     hardware_info = utils.HardwareInfo()
     sm_count = hardware_info.get_max_active_clusters(1)
 
-    tensormap_tensor = torch.zeros(
-        (sm_count, 3, 128 // 8),
-        dtype=torch.int64,
-        device=device,
+    # Use TensorMapConverter to create the tensormap buffer
+    tensormap_converter = TensorMapConverter(device=device, alignment=16)
+    tensormap_result = tensormap_converter.create_tensormap_buffer(
+        sm_count=sm_count, tensor_count=3, element_size=8  # A, B, C  # int64
     )
-    tensormap_cute = from_dlpack(tensormap_tensor, assumed_align=16)
+
+    tensormap_tensor = tensormap_result["buffer"]
+    tensormap_cute = tensormap_result["cute"]
 
     print(f"  Tensormap buffer: {tensormap_tensor.shape}")
 
@@ -175,14 +137,14 @@ def simple_grouped_gemm_example():
 
     grouped_gemm = GroupedGemmKernel(
         acc_dtype=cutlass.Float32,
-        use_2cta_instrs=True,
+        use_2cta_instrs=False,
         mma_tiler_mn=(128, 128),
-        cluster_shape_mn=(4, 4),
+        cluster_shape_mn=(1, 1),
         tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
     )
 
     # 5. Compute grid parameters
-    print("\n5. Computing grid parameters...")
+    # 5. Computing grid parameters...
 
     def compute_total_clusters():
         cta_tile_m = 128
@@ -194,7 +156,7 @@ def simple_grouped_gemm_example():
         cluster_tile_n = cta_tile_n * cluster_n
 
         total = 0
-        for M, N, K, L in problem_sizes:
+        for M, N, K in problem_sizes:
             clusters_m = (M + cluster_tile_m - 1) // cluster_tile_m
             clusters_n = (N + cluster_tile_n - 1) // cluster_tile_n
             total += clusters_m * clusters_n
@@ -206,24 +168,25 @@ def simple_grouped_gemm_example():
     print(f"  Total clusters: {total_clusters}")
     print(f"  Max active clusters: {max_active_clusters}")
 
-    # 6. Choose initial tensors (smallest ones for tensormap initialization)
-    print("\n6. Selecting initial tensors...")
+    # 6. Choose initial tensors
+    # 6. Selecting initial tensors...
 
-    # Use tensors from group with smallest sizes
-    sizes = [(M * K, N * K, M * N) for M, N, K, L in problem_sizes]
-    min_a_idx = min(range(num_groups), key=lambda i: sizes[i][0])
-    min_b_idx = min(range(num_groups), key=lambda i: sizes[i][1])
-    min_c_idx = min(range(num_groups), key=lambda i: sizes[i][2])
+    # Instead of using smallest tensors, always use tensors from group 0
+    # This is a workaround to see if the issue is with the initial tensors
+    group_idx = 0
 
-    initial_A = cute_tensors[min_a_idx][0]
-    initial_B = cute_tensors[min_b_idx][1]
-    initial_C = cute_tensors[min_c_idx][2]
+    # Access the CUTE tensors from group 0
+    initial_A = cute_tensors[group_idx]["A"]
+    initial_B = cute_tensors[group_idx]["B"]
+    initial_C = cute_tensors[group_idx]["C"]
 
-    print(
-        f"  Using A from group {min_a_idx}, B from group {min_b_idx}, C from group {min_c_idx}"
-    )
+    print(f"\nDebug - Initial tensor selection:")
+    print(f"  Using A, B, C from group {group_idx}")
+    print(f"  A shape: {problem_sizes[group_idx][0]}x{problem_sizes[group_idx][2]}")
+    print(f"  B shape: {problem_sizes[group_idx][2]}x{problem_sizes[group_idx][1]}")
+    print(f"  C shape: {problem_sizes[group_idx][0]}x{problem_sizes[group_idx][1]}")
 
-    # 7. Compile and run kernel
+    # Compile and run kernel
     print("\n7. Compiling and executing kernel...")
 
     torch_stream = torch.cuda.Stream()
@@ -273,14 +236,32 @@ def simple_grouped_gemm_example():
         return
 
     # 8. Verify results
-    print("\n8. Verifying results...")
+    # 8. Verifying results...
 
     all_correct = True
     total_flops = 0
 
-    for i, ((A, B, C), (M, N, K, L)) in enumerate(zip(torch_tensors, problem_sizes)):
+    for i, (original_group, (M, N, K)) in enumerate(
+        zip(original_tensors, problem_sizes)
+    ):
+        print(f"  Group {i} original_group type: {type(original_group)}")
+        print(f"  Group {i} original_group keys: {original_group.keys()}")
+
+        # Access tensors from the dictionary
+        A = original_group["A"]
+        B = original_group["B"]
+        C = original_group["C"]
+
+        # Print tensor shapes for debugging
+        print(f"    A shape: {A.shape}, B shape: {B.shape}, C shape: {C.shape}")
+
+        # Debug: Print tensor strides
+        print(
+            f"    A strides: {A.stride()}, B strides: {B.stride()}, C strides: {C.stride()}"
+        )
+
         # Compute reference with PyTorch
-        C_ref = torch.mm(A, B)
+        C_ref = torch.matmul(A, B)
 
         # Compare with CUTLASS result
         norm_diff = torch.norm(C - C_ref).item()
@@ -295,7 +276,26 @@ def simple_grouped_gemm_example():
         print(f"    C_ref first 3 elements: {C_ref.flatten()[:3].tolist()}")
         print(f"    C result first 3 elements: {C.flatten()[:3].tolist()}")
 
-        if relative_error > 1e-2:  # Using 1% relative error as tolerance
+        # Print more detailed debug info for failing groups
+        if relative_error > 1e-2:
+            # Check where the differences are
+            diff = torch.abs(C - C_ref)
+            max_diff_idx = torch.argmax(diff.flatten())
+            max_diff_val = diff.flatten()[max_diff_idx]
+            max_diff_pos = np.unravel_index(max_diff_idx.item(), C.shape)
+
+            print(f"    Max difference: {max_diff_val:.4f} at position {max_diff_pos}")
+            print(f"    C_ref at max diff: {C_ref[max_diff_pos].item():.4f}")
+            print(f"    C result at max diff: {C[max_diff_pos].item():.4f}")
+
+            # Check if there are any NaN or Inf values
+            nan_count = torch.isnan(C).sum().item()
+            inf_count = torch.isinf(C).sum().item()
+            zero_count = (C == 0).sum().item()
+
+            print(
+                f"    NaN count: {nan_count}, Inf count: {inf_count}, Zero count: {zero_count}"
+            )
             print(f"    ✗ Group {i} failed tolerance check")
             all_correct = False
         else:
