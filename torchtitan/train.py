@@ -359,7 +359,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ):
+    ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 

@@ -83,7 +83,7 @@ class FluxTrainer(Trainer):
 
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ):
+    ) -> torch.Tensor:
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
