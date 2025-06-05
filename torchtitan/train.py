@@ -329,8 +329,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
+        data_iterator = iter(data_iterable)
 
-        for batch in iter(data_iterable):
+        while True:
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                # If data runs out during gradient accumulation, that
+                # entire step will not be executed.
+                raise DataloaderStopIteration() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -345,17 +352,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             labels = labels.to(device_type)
 
             yield input_dict, labels
-
-    def next_batch(
-        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        try:
-            input_dict, labels = next(data_iterator)
-        except StopIteration as ex:
-            # If data runs out during gradient accumulation, that
-            # entire step will not be executed.
-            raise DataloaderStopIteration() from ex
-        return input_dict, labels
 
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
@@ -421,8 +417,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
 
+        # If data runs out during gradient accumulation, that
+        # entire step will not be executed.
         for microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = self.next_batch(data_iterator)
+            input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
             self.accumulated_losses.append(loss.detach())
 

@@ -149,7 +149,7 @@ class FluxTrainer(Trainer):
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        input_dict, labels = self.next_batch(data_iterator)
+        input_dict, labels = next(data_iterator)
 
         self.optimizers.zero_grad()
 
