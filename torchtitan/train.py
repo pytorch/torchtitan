@@ -41,7 +41,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     train_spec: train_spec_module.TrainSpec
     world_mesh: torch.distributed.DeviceMesh
     gradient_accumulation_steps: int
-    accumulated_losses: list[torch.Tensor]
 
     dataloader: train_spec_module.BaseDataLoader
     metrics_processor: train_spec_module.MetricsProcessor
@@ -210,7 +209,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.loss_fn = rescale_accumulated_loss(
             self.loss_fn, self.gradient_accumulation_steps
         )
-        self.accumulated_losses = []
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -417,12 +415,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
 
+        accumulated_losses = []
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
         for microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
-            self.accumulated_losses.append(loss.detach())
+            accumulated_losses.append(loss.detach())
 
         dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -435,8 +434,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
-        loss = torch.sum(torch.stack(self.accumulated_losses))
-        self.accumulated_losses.clear()
+        loss = torch.sum(torch.stack(accumulated_losses))
 
         # log metrics
         if not self.metrics_processor.should_log(self.step):
