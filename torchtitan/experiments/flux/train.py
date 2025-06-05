@@ -146,7 +146,7 @@ class FluxTrainer(Trainer):
 
         return loss
 
-    def eval_step(self):
+    def eval_step(self, prompt: str = "A photo of a cat"):
         """
         Evaluate the Flux model.
         1) generate and save images every few steps. Currently, we run the eval and on the same
@@ -156,15 +156,6 @@ class FluxTrainer(Trainer):
         2) [TODO] Calculate loss with fixed t value on validation set.
         """
 
-        # NOTE: We put the check inside the function becuase other model's job cofig might not have eval config.
-        if (
-            self.step % self.job_config.eval.eval_freq != 0
-            and not self.step == self.job_config.training.steps
-        ):
-            return
-
-        model = self.model_parts[0]
-        model.eval()
         t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
 
         prompt = "A photo of a cat"
@@ -172,7 +163,7 @@ class FluxTrainer(Trainer):
             device=self.device,
             dtype=self._dtype,
             job_config=self.job_config,
-            model=model,
+            model=self.model_parts[0],
             prompt=prompt,  # TODO(jianiw): change this to a prompt from validation set
             autoencoder=self.autoencoder,
             t5_tokenizer=t5_tokenizer,
@@ -197,7 +188,22 @@ class FluxTrainer(Trainer):
             if isinstance(module, FSDPModule):
                 module.reshard()
 
-        model.train()
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        super().train_step(data_iterator)
+
+        # Evaluate the model during training
+        if (
+            self.step % self.job_config.eval.eval_freq == 0
+            or self.step == self.job_config.training.steps
+        ):
+            model = self.model_parts[0]
+            model.eval()
+            # We need to set reshard_after_forward before last forward pass.
+            # So the model wieghts are sharded the same way for checkpoint saving.
+            self.eval_step()
+            model.train()
 
 
 if __name__ == "__main__":

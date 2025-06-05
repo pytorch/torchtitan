@@ -60,11 +60,12 @@ To accelerate contributions to and innovations around torchtitan, we are hosting
 7. DDP and HSDP
 8. [TorchFT](https://github.com/pytorch/torchft) integration
 9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-10. Flexible learning rate scheduler (warmup-stable-decay)
-11. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-12. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-13. All options easily configured via [toml files](torchtitan/models/llama3/train_configs/)
-14. [Helper scripts](scripts/) to
+10. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument in configuration
+11. Flexible learning rate scheduler (warmup-stable-decay)
+12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+14. All options easily configured via [toml files](torchtitan/models/llama3/train_configs/)
+15. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
     - estimate FSDP/HSDP memory usage without materializing the model
