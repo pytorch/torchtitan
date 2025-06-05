@@ -45,7 +45,7 @@ class TestFluxDataLoader:
                 "--training.seed",
                 "0",
                 "--training.classifer_free_guidance_prob",
-                "0.1",
+                "0.447",
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-small",
                 "--encoder.clip_encoder",

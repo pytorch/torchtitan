@@ -249,6 +249,7 @@ class FluxDataset(IterableDataset, Stateful):
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:
                     sample_dict["t5_tokens"] = self._t5_empty_token
+                if torch.rand(1).item() < dropout_prob:
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
             self._sample_idx += 1
