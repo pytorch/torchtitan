@@ -19,9 +19,10 @@ from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from transformers import AutoTokenizer
+from torchtitan.tools.logging import init_logger, logger
 
 from torchtitan.tools.utils import Color
+from transformers import AutoTokenizer
 
 # Uncomment the model you want to run.
 model_id, mesh_shape = "deepseek-ai/DeepSeek-V2-Lite-Chat", (1, 4)
@@ -127,7 +128,7 @@ def create_model(dist_config: DistConfig):
     model_args.ep_size = dist_config.ep_size
     model_args.num_stages = dist_config.pp_size
     model_args.stage_idx = dist_config.pp_rank
-    model_args.max_seq_len = 4096  # 16384
+    model_args.max_seq_len = 1024  # 16384
 
     with dist_config.device, dist_config.mesh:
         model = DeepseekForCausalLM(model_args)
@@ -353,6 +354,7 @@ def generate_with_cuda_graph(
 
 
 if __name__ == "__main__":
+    init_logger()
     # Get user prompt from command line arguments
     user_prompt = "What is 2+2?"  # Default prompt
     if len(sys.argv) > 1:
@@ -375,7 +377,7 @@ if __name__ == "__main__":
     ]
 
     generate(model, pp_schedule, tokenizer, dist_config, messages)
-    generate_with_cuda_graph(model, tokenizer, dist_config, messages)
+    # generate_with_cuda_graph(model, tokenizer, dist_config, messages)
 
     if rank == 0:
         print(f"\n{color.yellow}Closing inference mesh...{color.reset}")
