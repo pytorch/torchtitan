@@ -158,7 +158,6 @@ class FluxTrainer(Trainer):
 
         t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
 
-        prompt = "A photo of a cat"
         image = generate_image(
             device=self.device,
             dtype=self._dtype,
