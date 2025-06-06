@@ -81,6 +81,12 @@ class SaveDone:
     pass
 
 
+# For now, we will manually pop the freqs_cis buffer, as we made this permanent
+# temporarily and we don't want to include it in the exported state_dict.
+# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
+excluded_parameters_for_model_only = {"freqs_cis"}
+
+
 @torch.no_grad()
 def save_with_gc(state, checkpoint_id):
     dcp.save(state, checkpoint_id=checkpoint_id)
@@ -556,7 +562,10 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model weights.
         if model_only:
-            return {MODEL: self.states[MODEL]}
+            sd = self.states[MODEL].state_dict()
+            for k in excluded_parameters_for_model_only:
+                sd.pop(k, None)
+            return sd
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -585,10 +594,8 @@ class CheckpointManager:
             # }.
             self.states = self.states[MODEL].state_dict()
 
-            # For now, we will manually pop the freqs_cis buffer, as we made this permanent
-            # temporarily and we don't want to include it in the exported state_dict.
-            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-            self.states.pop("freqs_cis", None)
+            for k in excluded_parameters_for_model_only:
+                self.states.pop(k, None)
 
             if self.export_dtype != torch.float32:
                 self.states = {
