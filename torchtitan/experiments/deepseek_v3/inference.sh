@@ -8,6 +8,7 @@
 
 NGPU=${NGPU:-"4"}
 export LOG_RANK=${LOG_RANK:-0}
+export CUTE_DSL_LOG_LEVEL=40
 
 # Get the prompt from command line argument or use a default
 prompt="${1:-What is 2+2?}"

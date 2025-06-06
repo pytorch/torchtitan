@@ -14,12 +14,17 @@
 
 """
 
+# init_logger()
+import logging
+from logging import Logger
+
 import torch
 import torch.nn as nn
 
-from torchtitan.tools.logging import init_logger, logger
+# from torchtitan.tools.logging import init_logger, logger
 
-init_logger()
+# logger.setLevel("INFO")
+# logging.getLogger("cutlass").setLevel(logging.WARNING)
 
 try:
     import deep_gemm
@@ -143,8 +148,24 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     def __init__(self, custom_activation):
         super().__init__(custom_activation)
         self.alignment = 16
+        try:
+            gemm_kernel = DenseGemmKernel(
+                acc_dtype=cutlass.Float32,  # Accumulator type
+                use_2cta_instrs=False,  # Paired CTA
+                mma_tiler_mn=(128, 128),  # Tile size
+                cluster_shape_mn=(1, 1),  # Cluster size
+                use_tma_store=False,  #  store method
+            )
+        except Exception as e:
+            print(f"  ✗ Kernel setup failed: {e}")
+            assert False, "Kernel setup failed"
+        # setup stream
+        torch_stream = torch.cuda.Stream()
+        self.stream = cuda.CUstream(torch_stream.cuda_stream)
+        self.gemm_kernel = gemm_kernel
+        self.compiled_kernel = None
         # self.converter = GemmTensorConverter()
-        # logger.info("Initialized CuteDenseLoopingGroupGEMM")
+        # print("Initialized CuteDenseLoopingGroupGEMM")
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """Store weights in a simple list format"""
@@ -186,8 +207,8 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 down_weight = w_down[expert_idx]
 
                 # Forward pass: gate and up projections
-                logger.info(f"expert_assigned_tokens: {expert_assigned_tokens.shape}")
-                logger.info(f"gate_weight: {gate_weight.shape}")  # 6144, 1408
+                # print(f"expert_assigned_tokens: {expert_assigned_tokens.shape}")
+                # print(f"gate_weight: {gate_weight.shape}")  # 6144, 1408
 
                 gate_out = torch.mm(expert_assigned_tokens, gate_weight.t())
 
@@ -227,40 +248,71 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 B_strides = B_mnkl.stride()[:2]
                 C_strides = C_mnkl.stride()[:2]
 
-                logger.info(f"A_cute: {A_cute}")
-                logger.info(f"B_cute: {B_cute}")
-                logger.info(f"C_cute: {C_cute}")
+                # print(f"A_cute: {A_cute}")
+                # print(f"B_cute: {B_cute}")
+                # print(f"C_cute: {C_cute}")
 
                 # 5  Create kernel
-                try:
-                    gemm_kernel = DenseGemmKernel(
-                        acc_dtype=cutlass.Float32,  # Accumulator type
-                        use_2cta_instrs=False,  # Paired CTA
-                        mma_tiler_mn=(128, 128),  # Tile size
-                        cluster_shape_mn=(1, 1),  # Cluster size
-                        use_tma_store=False,  #  store method
-                    )
-                except Exception as e:
-                    logger.info(f"  ✗ Kernel setup failed: {e}")
-                    assert False, "Kernel setup failed"
 
-                logger.info(f"gate_out: {gate_out.shape}")  # 6144, 1408
+                # Todo - move to init
+                # torch_stream = torch.cuda.Stream()
+                # stream = cuda.CUstream(torch_stream.cuda_stream)
+
+                if not self.compiled_kernel:
+                    try:
+                        # Compile the kernel
+                        self.compiled_kernel = cute.compile(
+                            self.gemm_kernel, A_cute, B_cute, C_cute, self.stream
+                        )
+                        print(f"  ✓ Kernel compiled successfully")
+                        # print(f"  ✓ Kernel compiled successfully")
+                    except Exception as e:
+                        print(f"  ✗ Kernel compilation failed: {e}")
+                        assert False, "Kernel compilation failed"
+
+                # C_mnkl.zero_()
+                try:
+                    # Execute the kernel
+                    # self.gemm_kernel(
+                    self.compiled_kernel(
+                        A_cute,
+                        B_cute,
+                        C_cute,
+                        self.stream,
+                    )
+                    print(f"  ✓ Kernel executed successfully")
+                except Exception as e:
+                    print(f"  ✗ Kernel execution failed: {e}")
+                    assert False, "Kernel execution failed"
+
+                C = C_mnkl.squeeze(-1)
+                print(f"C: {C.shape}")
+                # print(f"gate_out: {gate_out.shape}")  # 6144, 1408
+                # print(f"C: {C}")
+                # print(f"gate_out: {gate_out}")
+                # print(f"gate_out: {gate_out[0][0:5]}")
+                # print(f"C: {C[0][0:5]}")
+                # print(f"gate_out: {gate_out[-1][0:5]}")
+                # print(f"C: {C[-1][0:5]}")
+
+                # print(f"gate_out: {gate_out.shape}")  # 6144, 1408
 
                 # ---- back to pytorch ----
 
                 up_out = torch.mm(expert_assigned_tokens, up_weight.t())
 
                 # Apply activation and combine
-                hidden = self.activation_function(gate_out) * up_out
+                # hidden = self.activation_function(gate_out) * up_out
+                hidden2 = self.activation_function(C) * up_out
 
                 # Down projection
-                expert_output = torch.mm(hidden, down_weight.t())
+                expert_output = torch.mm(hidden2, down_weight.t())
 
                 # Store results
                 output[offset : offset + size] = expert_output
 
             offset += size
-        # logger.info(f"gemm output shape: {output.shape}")
+        print(f"gemm output shape: {output.shape}")
         # gemm output shape: torch.Size([98304, 2048])
         return output
 
@@ -334,15 +386,13 @@ class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
             "output_pytorch": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
         }
 
-        logger.info(
-            "Initialized CuteDenseLoopingGroupGEMM with Blackwell Dense GEMM kernel"
-        )
+        print("Initialized CuteDenseLoopingGroupGEMM with Blackwell Dense GEMM kernel")
 
     def nan_checker(self, item, name):
         nan_mask = torch.isnan(item)
         if nan_mask.any():
             nan_count = nan_mask.sum().item()
-            logger.info(f"Found nans in {name} with {nan_count} nan values")
+            print(f"Found nans in {name} with {nan_count} nan values")
             # assert False, "Found nans in {name}"
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
@@ -370,11 +420,11 @@ class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
         # Check for NaN values in the input tokens
         if self.debug_mode:
             self._check_tensor_validity(contig_tokens, "initial_contig_tokens")
-            logger.info(
+            print(
                 f"Input tokens shape: {contig_tokens.shape}, dtype: {contig_tokens.dtype}"
             )
-            logger.info(f"m_sizes: {m_sizes}")
-            logger.info(f"m_offsets: {m_offsets}")
+            print(f"m_sizes: {m_sizes}")
+            print(f"m_offsets: {m_offsets}")
         try:
             # Get weights
             w_gate = module.get_parameter("gate_proj_weight")
@@ -415,9 +465,7 @@ class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
                         expert_tokens, gate_weight, stream, "gate_proj"
                     )
                     gate_out_ref = torch.mm(expert_tokens, gate_weight.t())
-                    logger.info(
-                        f"gate_out: {gate_out[0][0:5]}, {gate_out_ref[0][0:5] }"
-                    )
+                    print(f"gate_out: {gate_out[0][0:5]}, {gate_out_ref[0][0:5] }")
                     assert torch.allclose(gate_out, gate_out_ref, atol=1e-3)
                     # Forward pass: up projection using CUTE kernel
                     up_out = self._execute_gemm(
@@ -450,22 +498,22 @@ class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
 
     def _print_debug_stats(self):
         """Print debug statistics to help identify issues"""
-        logger.info("=== CUTE Kernel Debug Statistics ===")
+        print("=== CUTE Kernel Debug Statistics ===")
 
         for stage, stats in self.debug_stats.items():
             total = stats["passed"] + stats["failed"]
             if total > 0:
                 pass_rate = (stats["passed"] / total) * 100
-                logger.info(
+                print(
                     f"{stage}: {stats['passed']}/{total} passed ({pass_rate:.1f}%), max_diff={stats['max_diff']:.6f}"
                 )
 
         if self.debug_max_diff > 0:
-            logger.info(
+            print(
                 f"Overall max difference: {self.debug_max_diff:.6f} in {self.debug_stage} at position {self.debug_max_diff_pos}"
             )
         else:
-            logger.info("All results within tolerance")
+            print("All results within tolerance")
 
     def _execute_gemm(
         self,
@@ -557,7 +605,7 @@ class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
         # If force_pytorch_fallback is enabled, skip CUTE kernel execution
         if self.force_pytorch_fallback:
             if self.debug_mode:
-                logger.info(f"Using PyTorch mm for {stage_name} (forced fallback)")
+                print(f"Using PyTorch mm for {stage_name} (forced fallback)")
                 self._update_tensor_stats(ref_output, "output_pytorch")
             return ref_output
 
@@ -862,7 +910,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         self.dtype_cutlass = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
 
-        logger.info("Initializing CUTLASS GroupedGemmKernel")
+        print("Initializing CUTLASS GroupedGemmKernel")
 
         # Kernel configuration
         self.grouped_gemm = GroupedGemmKernel(
@@ -885,7 +933,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
         """Prepare expert weights for CUTLASS grouped GEMM"""
         # Stack weights: [num_experts, out_dim, in_dim]
         combined_weights = torch.stack(all_weights)
-        logger.info(f"CUTLASS arranged weights {submod_name}: {combined_weights.shape}")
+        print(f"CUTLASS arranged weights {submod_name}: {combined_weights.shape}")
         return combined_weights
 
     def _create_tensor_metadata(self, tokens, w_gate, w_up, w_down, m_sizes, device):
@@ -1069,7 +1117,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
             if num_valid_experts == 0:
                 return torch.zeros_like(contig_tokens)
 
-            logger.info(f"CUTLASS executing with {num_valid_experts} experts")
+            print(f"CUTLASS executing with {num_valid_experts} experts")
 
             # Step 1: Create metadata for gate and up projections (can be batched)
             gate_up_metadata = self._create_tensor_metadata(
@@ -1217,7 +1265,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
             # Compile kernel if not already cached
             cache_key = (num_groups, total_clusters)
             if cache_key not in self._compiled_kernels:
-                logger.info(
+                print(
                     f"Compiling CUTLASS kernel for {num_groups} groups, {total_clusters} clusters"
                 )
 
@@ -1236,12 +1284,12 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
                     stream,
                 )
 
-                logger.info("CUTLASS kernel compilation successful")
+                print("CUTLASS kernel compilation successful")
 
             compiled_kernel = self._compiled_kernels[cache_key]
 
             # Execute kernel
-            logger.info(f"Executing CUTLASS grouped GEMM kernel")
+            print(f"Executing CUTLASS grouped GEMM kernel")
             compiled_kernel(
                 initial_A,
                 initial_B,
@@ -1255,7 +1303,7 @@ class CUTLASSGroupGEMM(GroupGEMMStrategy):
 
             # Synchronize to ensure completion
             torch.cuda.synchronize()
-            logger.info("CUTLASS kernel execution completed")
+            print("CUTLASS kernel execution completed")
 
             return True
 
