@@ -167,6 +167,8 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         self.gate_compiled_kernel = None
         self.up_compiled_kernel = None
         self.down_compiled_kernel = None
+        # cutlass details
+        self.cutlass_dtype = cutlass.BFloat16
         # self.converter = GemmTensorConverter()
         # print("Initialized CuteDenseLoopingGroupGEMM")
 
@@ -242,10 +244,10 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 C_cute = from_dlpack(C_mnkl, assumed_align=self.alignment)
 
                 # 3 set data types
-                cutlass_dtype = cutlass.BFloat16
-                A_cute.element_type = cutlass_dtype
-                B_cute.element_type = cutlass_dtype
-                C_cute.element_type = cutlass_dtype
+
+                A_cute.element_type = self.cutlass_dtype
+                B_cute.element_type = self.cutlass_dtype
+                C_cute.element_type = self.cutlass_dtype
 
                 # 4 Mark layouts as dynamic
                 # Mark layouts as dynamic
@@ -332,10 +334,9 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 C_cute_up = from_dlpack(C_mnkl_up, assumed_align=self.alignment)
 
                 # 3 set data types
-                cutlass_dtype = cutlass.BFloat16
                 # A_cute.element_type = cutlass_dtype
-                B_cute_up.element_type = cutlass_dtype
-                C_cute_up.element_type = cutlass_dtype
+                B_cute_up.element_type = self.cutlass_dtype
+                C_cute_up.element_type = self.cutlass_dtype
 
                 # 4 Mark layouts as dynamic
                 # Mark layouts as dynamic
@@ -396,9 +397,77 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 # hidden = self.activation_function(gate_out) * up_out
                 hidden2 = self.activation_function(C) * C_up_finished
 
-                # Down projection
+                # =========== Down projection via cute =================
                 # dims: expert_output: torch.Size([3072, 2048])
-                expert_output = torch.mm(hidden2, down_weight.t())
+                # expert_output = torch.mm(hidden2, down_weight.t())
+                expert_output_C = torch.zeros(
+                    (3072, 2048), device=gate_weight.device, dtype=self.dtype
+                )
+                # A = hidden2_A, B = down_weight_B, C = expert_output_C
+                # cute dense gemm
+                # 1  Convert to MNKL format
+                A_mnkl_down = (
+                    hidden2.unsqueeze(-1).contiguous().detach()
+                )  # (M, K) -> (M, K, 1)
+
+                B_mnkl_down = (
+                    down_weight.unsqueeze(-1).contiguous().detach()
+                )  # (N, K) -> (N, K, 1)
+
+                C_mnkl_down = expert_output_C.unsqueeze(
+                    -1
+                ).contiguous()  # (M, N) -> (M, N, 1)
+
+                # 2  Create CUTE tensors
+                # Create CUTE tensors
+                A_cute_down = from_dlpack(A_mnkl_down, assumed_align=self.alignment)
+                B_cute_down = from_dlpack(B_mnkl_down, assumed_align=self.alignment)
+                C_cute_down = from_dlpack(C_mnkl_down, assumed_align=self.alignment)
+
+                # 3 set data types
+                A_cute_down.element_type = self.cutlass_dtype
+                B_cute_down.element_type = self.cutlass_dtype
+                C_cute_down.element_type = self.cutlass_dtype
+
+                # 4 Mark layouts as dynamic
+                # Mark layouts as dynamic
+                A_cute_down = A_cute_down.mark_layout_dynamic(leading_dim=1)
+                B_cute_down = B_cute_down.mark_layout_dynamic(leading_dim=1)
+                C_cute_down = C_cute_down.mark_layout_dynamic(leading_dim=1)
+
+                # compile gemm if needed
+                if not self.down_compiled_kernel:
+                    try:
+                        # Compile the kernel
+                        self.down_compiled_kernel = cute.compile(
+                            self.gemm_kernel,
+                            A_cute_down,
+                            B_cute_down,
+                            C_cute_down,
+                            self.stream,
+                        )
+                        print(f"  ✓ Down Kernel compiled successfully")
+                        # print(f"  ✓ Kernel compiled successfully")
+                    except Exception as e:
+                        print(f"  ✗ Down Kernel compilation failed: {e}")
+                        assert False, "Down Kernel compilation failed"
+
+                try:
+                    # Execute the kernel
+                    # self.gemm_kernel(
+                    self.down_compiled_kernel(
+                        A_cute_down,
+                        B_cute_down,
+                        C_cute_down,
+                        self.stream,
+                    )
+                    print(f"  ✓ Down Kernel executed successfully")
+                except Exception as e:
+                    print(f"  ✗ Down Kernel execution failed: {e}")
+                    assert False, "Down Kernel execution failed"
+
+                expert_output = C_mnkl_down.squeeze(-1)
+
                 print(f"{expert_idx} expert_output: {expert_output.shape}")
 
                 # Store results
