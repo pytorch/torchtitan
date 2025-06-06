@@ -141,3 +141,39 @@ class NoParallel(ParallelStyle):
             ),
             partial(self._prepare_output_fn, self.output_layout, self.use_local_output),
         )
+
+
+class ExpertParallel(ParallelStyle):
+
+    def __init__(self, ):
+        super().__init__()
+
+    @staticmethod
+    def _prepare_input_fn(mod, inputs, device_mesh):
+        for inp in inputs:
+            if isinstance(inp, torch.Tensor):
+                assert not isinstance(
+                    inp, DTensor), "ExpertParallel expects local tensor inputs."
+        return inputs
+
+    def _partition_fn(self, name, module, device_mesh):
+        # shard on the expert dimension
+        for name, param in module.named_parameters(recurse=False):
+            dist_param = nn.Parameter(
+                distribute_tensor(param, device_mesh, [Shard(0)]))
+            module.register_parameter(name, dist_param)
+
+    @staticmethod
+    def _prepare_output_fn(mod, outputs, device_mesh):
+        assert not isinstance(
+            outputs, DTensor), "ExpertParallel expects local tensor outputs."
+        return outputs
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            self._partition_fn,
+            self._prepare_input_fn,
+            self._prepare_output_fn,
+        )

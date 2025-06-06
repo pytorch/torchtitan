@@ -46,6 +46,7 @@ pipeline_parallel_degree = 4
 # pipeline_parallel_schedule = "interleaved1f1b"
 # pipeline_parallel_microbatches = 2
 context_parallel_degree = 1
+enable_tp2ep = false
 
 [checkpoint]
 enable_checkpoint = false
