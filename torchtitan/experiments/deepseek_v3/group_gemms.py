@@ -148,13 +148,14 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     def __init__(self, custom_activation):
         super().__init__(custom_activation)
         self.alignment = 16
+        self.dtype = torch.bfloat16
         try:
             gemm_kernel = DenseGemmKernel(
                 acc_dtype=cutlass.Float32,  # Accumulator type
                 use_2cta_instrs=False,  # Paired CTA
                 mma_tiler_mn=(128, 128),  # Tile size
                 cluster_shape_mn=(1, 1),  # Cluster size
-                use_tma_store=False,  #  store method
+                use_tma_store=True,  #  store method
             )
         except Exception as e:
             print(f"  ✗ Kernel setup failed: {e}")
@@ -210,7 +211,9 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 # print(f"expert_assigned_tokens: {expert_assigned_tokens.shape}")
                 # print(f"gate_weight: {gate_weight.shape}")  # 6144, 1408
 
-                gate_out = torch.mm(expert_assigned_tokens, gate_weight.t())
+                # dims: gate_out: torch.Size([3072, 1408])
+                # gate_out = torch.mm(expert_assigned_tokens, gate_weight.t())
+                # print(f"gate_out: {gate_out.shape}")  # 6144, 1408
 
                 # cute dense gemm
                 # 1  Convert to MNKL format
@@ -221,7 +224,12 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 B_mnkl = (
                     gate_weight.unsqueeze(-1).contiguous().detach()
                 )  # (N, K) -> (N, K, 1)
-                C = torch.zeros_like(gate_out).detach()  # (M, N) -> (M, N, 1)
+                C = torch.zeros(
+                    (3072, 1408),
+                    device=gate_weight.device,
+                    dtype=self.dtype,
+                    requires_grad=False,
+                )  # (M, N) -> (M, N, 1)
 
                 C_mnkl = C.unsqueeze(-1).contiguous()  # (M, N) -> (M, N, 1)
 
@@ -298,21 +306,25 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 # print(f"gate_out: {gate_out.shape}")  # 6144, 1408
 
                 # ---- back to pytorch ----
-
+                # dims: p_out: torch.Size([3072, 1408])
                 up_out = torch.mm(expert_assigned_tokens, up_weight.t())
+                print(f"up_out: {up_out.shape}")  # 6144, 2048
 
                 # Apply activation and combine
                 # hidden = self.activation_function(gate_out) * up_out
                 hidden2 = self.activation_function(C) * up_out
 
                 # Down projection
+                # dims: expert_output: torch.Size([3072, 2048])
                 expert_output = torch.mm(hidden2, down_weight.t())
+                print(f"{expert_idx} expert_output: {expert_output.shape}")
 
                 # Store results
                 output[offset : offset + size] = expert_output
 
             offset += size
         print(f"gemm output shape: {output.shape}")
+
         # gemm output shape: torch.Size([98304, 2048])
         return output
 
