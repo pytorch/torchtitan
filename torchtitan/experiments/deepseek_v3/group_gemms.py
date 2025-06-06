@@ -164,7 +164,9 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         torch_stream = torch.cuda.Stream()
         self.stream = cuda.CUstream(torch_stream.cuda_stream)
         self.gemm_kernel = gemm_kernel
-        self.compiled_kernel = None
+        self.gate_compiled_kernel = None
+        self.up_compiled_kernel = None
+        self.down_compiled_kernel = None
         # self.converter = GemmTensorConverter()
         # print("Initialized CuteDenseLoopingGroupGEMM")
 
@@ -266,23 +268,23 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 # torch_stream = torch.cuda.Stream()
                 # stream = cuda.CUstream(torch_stream.cuda_stream)
 
-                if not self.compiled_kernel:
+                if not self.gate_compiled_kernel:
                     try:
                         # Compile the kernel
-                        self.compiled_kernel = cute.compile(
+                        self.gate_compiled_kernel = cute.compile(
                             self.gemm_kernel, A_cute, B_cute, C_cute, self.stream
                         )
-                        print(f"  ✓ Kernel compiled successfully")
+                        print(f"  ✓ Gate Kernel compiled successfully")
                         # print(f"  ✓ Kernel compiled successfully")
                     except Exception as e:
                         print(f"  ✗ Kernel compilation failed: {e}")
-                        assert False, "Kernel compilation failed"
+                        assert False, "gate Kernel compilation failed"
 
                 # C_mnkl.zero_()
                 try:
                     # Execute the kernel
                     # self.gemm_kernel(
-                    self.compiled_kernel(
+                    self.gate_compiled_kernel(
                         A_cute,
                         B_cute,
                         C_cute,
@@ -307,12 +309,92 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
 
                 # ---- back to pytorch ----
                 # dims: p_out: torch.Size([3072, 1408])
-                up_out = torch.mm(expert_assigned_tokens, up_weight.t())
-                print(f"up_out: {up_out.shape}")  # 6144, 2048
+                # up_out = torch.mm(expert_assigned_tokens, up_weight.t())
+                # print(f"up_out: {up_out.shape}")  # 6144, 2048
+
+                # up via cute
+                # 1  Convert to MNKL format
+                # we can re-use A_mnkl as expert_assigned_tokens
+
+                B_mnkl_up = (
+                    up_weight.unsqueeze(-1).contiguous().detach()
+                )  # (N, K) -> (N, K, 1)
+                C_up = torch.zeros(
+                    (3072, 1408),
+                    device=gate_weight.device,
+                    dtype=self.dtype,
+                    requires_grad=False,
+                )  # (N, K) -> (N, K, 1)
+
+                C_mnkl_up = C_up.unsqueeze(-1).contiguous()
+                # up cute prepare -------------------
+                B_cute_up = from_dlpack(B_mnkl_up, assumed_align=self.alignment)
+                C_cute_up = from_dlpack(C_mnkl_up, assumed_align=self.alignment)
+
+                # 3 set data types
+                cutlass_dtype = cutlass.BFloat16
+                # A_cute.element_type = cutlass_dtype
+                B_cute_up.element_type = cutlass_dtype
+                C_cute_up.element_type = cutlass_dtype
+
+                # 4 Mark layouts as dynamic
+                # Mark layouts as dynamic
+                # A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
+                B_cute_up = B_cute_up.mark_layout_dynamic(leading_dim=1)
+                C_cute_up = C_cute_up.mark_layout_dynamic(leading_dim=1)
+
+                # Extract metadata
+                # A_strides = A_mnkl.stride()[:2]
+                B_strides_up = B_mnkl_up.stride()[:2]
+                C_strides_up = C_mnkl_up.stride()[:2]
+
+                # print(f"A_cute: {A_cute}")
+                # print(f"B_cute: {B_cute}")
+                # print(f"C_cute: {C_cute}")
+
+                # 5  Create kernel
+
+                # Todo - move to init
+                # torch_stream = torch.cuda.Stream()
+                # stream = cuda.CUstream(torch_stream.cuda_stream)
+
+                if not self.up_compiled_kernel:
+                    try:
+                        # Compile the kernel
+                        self.up_compiled_kernel = cute.compile(
+                            self.gemm_kernel,
+                            A_cute,
+                            B_cute_up,
+                            C_cute_up,
+                            self.stream,
+                        )
+                        print(f"  ✓ UP Kernel compiled successfully")
+                        # print(f"  ✓ Kernel compiled successfully")
+                    except Exception as e:
+                        print(f"  ✗ UP Kernel compilation failed: {e}")
+                        assert False, "Up Kernel compilation failed"
+
+                # C_mnkl.zero_()
+                try:
+                    # Execute the kernel
+                    # self.gemm_kernel(
+                    self.up_compiled_kernel(
+                        A_cute,
+                        B_cute_up,
+                        C_cute_up,
+                        self.stream,
+                    )
+                    print(f"  ✓ Up Kernel executed successfully")
+                except Exception as e:
+                    print(f"  ✗ Up Kernel execution failed: {e}")
+                    assert False, "Up Kernel execution failed"
+
+                C_up_finished = C_mnkl_up.squeeze(-1)
+                print(f"C: {C_up_finished.shape}")
 
                 # Apply activation and combine
                 # hidden = self.activation_function(gate_out) * up_out
-                hidden2 = self.activation_function(C) * up_out
+                hidden2 = self.activation_function(C) * C_up_finished
 
                 # Down projection
                 # dims: expert_output: torch.Size([3072, 2048])
