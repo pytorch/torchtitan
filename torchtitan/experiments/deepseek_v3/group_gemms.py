@@ -11,13 +11,15 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Fixed Group GEMM implementations with proper CUTLASS integration and manual baseline
+
 """
 
 import torch
 import torch.nn as nn
 
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import init_logger, logger
+
+init_logger()
 
 try:
     import deep_gemm
@@ -129,8 +131,77 @@ class GroupGEMMStrategy:
         return False
 
 
-# ========= Manual Looping Baseline ===================
+# ========= Manual Looping Baselines ===================
+
+
 class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
+    """Manual looping start, adding in cute dense gemms"""
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """Store weights in a simple list format"""
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        """Execute using manual loops over experts"""
+        # Get weights and ensure they're on the same device as tokens
+        # device = contig_tokens.device
+        w_gate = module.get_parameter("gate_proj_weight")  # .to(device)
+        w_up = module.get_parameter("up_proj_weight")  # .to(device)
+        w_down = module.get_parameter("down_proj_weight")  # .to(device)
+
+        # Prepare output tensor
+        hidden_size = w_gate.shape[
+            2
+        ]  # Assuming stacked weights shape [num_experts, out_dim, in_dim]
+
+        output = torch.zeros(
+            contig_tokens.shape[0],
+            hidden_size,
+            dtype=contig_tokens.dtype,
+            device=contig_tokens.device,
+        )
+
+        # Process each expert sequentially
+        offset = 0
+        for expert_idx, size in enumerate(m_sizes):
+            if size > 0:
+                # Get tokens for this expert
+                expert_assigned_tokens = contig_tokens[offset : offset + size]
+
+                # Get weights for this expert
+                # expert_assigned_tokens: torch.Size([6144, 2048])
+                # gate_weight: torch.Size([1408, 2048])
+                gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
+                up_weight = w_up[expert_idx]
+                down_weight = w_down[expert_idx]
+
+                # Forward pass: gate and up projections
+                logger.info(f"expert_assigned_tokens: {expert_assigned_tokens.shape}")
+                logger.info(f"gate_weight: {gate_weight.shape}")
+                gate_out = torch.mm(expert_assigned_tokens, gate_weight.t())
+
+                up_out = torch.mm(expert_assigned_tokens, up_weight.t())
+
+                # Apply activation and combine
+                hidden = self.activation_function(gate_out) * up_out
+
+                # Down projection
+                expert_output = torch.mm(hidden, down_weight.t())
+
+                # Store results
+                output[offset : offset + size] = expert_output
+
+            offset += size
+        # logger.info(f"gemm output shape: {output.shape}")
+        # gemm output shape: torch.Size([98304, 2048])
+        return output
+
+    @staticmethod
+    def is_available() -> bool:
+        return True
+
+
+class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
     """
     Implementation of grouped GEMM using Blackwell Dense GEMM kernel with manual looping.
 
@@ -167,9 +238,44 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         # Cache for compiled kernels
         self._compiled_kernels = {}
 
+        # Debug mode - set to True to enable comparison with PyTorch mm
+        self.debug_mode = True
+        self.debug_tolerance = 1e-3
+        self.debug_max_diff = 0.0
+        self.debug_max_diff_pos = None
+        self.debug_stage = None
+
+        # Force PyTorch fallback - set to True to completely bypass CUTE kernel
+        self.force_pytorch_fallback = False
+
+        # Fix NaN issue - set to True to replace NaN values with zeros
+        self.fix_nan_values = False
+
+        # Stats for debugging
+        self.debug_stats = {
+            "gate_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
+            "up_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
+            "down_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
+        }
+
+        # Tensor statistics for debugging
+        self.debug_tensor_stats = {
+            "input": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
+            "weight": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
+            "output_cute": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
+            "output_pytorch": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
+        }
+
         logger.info(
             "Initialized CuteDenseLoopingGroupGEMM with Blackwell Dense GEMM kernel"
         )
+
+    def nan_checker(self, item, name):
+        nan_mask = torch.isnan(item)
+        if nan_mask.any():
+            nan_count = nan_mask.sum().item()
+            logger.info(f"Found nans in {name} with {nan_count} nan values")
+            # assert False, "Found nans in {name}"
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """Store weights in a simple list format"""
@@ -188,10 +294,25 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         Returns:
             The processed tokens
         """
+        # Reset debug stats for this execution
+        self.debug_max_diff = 0.0
+        self.debug_max_diff_pos = None
+        self.debug_stage = None
+
+        # Check for NaN values in the input tokens
+        if self.debug_mode:
+            self._check_tensor_validity(contig_tokens, "initial_contig_tokens")
+            logger.info(
+                f"Input tokens shape: {contig_tokens.shape}, dtype: {contig_tokens.dtype}"
+            )
+            logger.info(f"m_sizes: {m_sizes}")
+            logger.info(f"m_offsets: {m_offsets}")
         try:
             # Get weights
             w_gate = module.get_parameter("gate_proj_weight")
+
             w_up = module.get_parameter("up_proj_weight")
+
             w_down = module.get_parameter("down_proj_weight")
 
             # Setup CUDA stream
@@ -220,31 +341,70 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                     down_weight = w_down[expert_idx]
 
                     # Forward pass: gate projection using CUTE kernel
-                    gate_out = self._execute_gemm(expert_tokens, gate_weight, stream)
-
+                    # self.nan_checker(gate_weight)
+                    # self.nan_checker(expert_tokens)
+                    gate_out = self._execute_gemm(
+                        expert_tokens, gate_weight, stream, "gate_proj"
+                    )
+                    gate_out_ref = torch.mm(expert_tokens, gate_weight.t())
+                    logger.info(
+                        f"gate_out: {gate_out[0][0:5]}, {gate_out_ref[0][0:5] }"
+                    )
+                    assert torch.allclose(gate_out, gate_out_ref, atol=1e-3)
                     # Forward pass: up projection using CUTE kernel
-                    up_out = self._execute_gemm(expert_tokens, up_weight, stream)
+                    up_out = self._execute_gemm(
+                        expert_tokens, up_weight, stream, "up_proj"
+                    )
 
                     # Apply activation and combine
                     hidden = self.activation_function(gate_out) * up_out
 
                     # Down projection using CUTE kernel
-                    expert_output = self._execute_gemm(hidden, down_weight, stream)
+                    expert_output = self._execute_gemm(
+                        hidden, down_weight, stream, "down_proj"
+                    )
 
                     # Store results
                     output[offset : offset + size] = expert_output
 
                 offset += size
 
+            # Print debug statistics
+            if self.debug_mode:
+                self._print_debug_stats()
+
             return output
 
         except Exception as e:
             logger.error(f"Error in CuteDenseLoopingGroupGEMM: {e}")
             # Fall back to PyTorch mm implementation
-            return self._fallback_execute(contig_tokens, m_sizes, module)
+            # return self._fallback_execute(contig_tokens, m_sizes, module)
+
+    def _print_debug_stats(self):
+        """Print debug statistics to help identify issues"""
+        logger.info("=== CUTE Kernel Debug Statistics ===")
+
+        for stage, stats in self.debug_stats.items():
+            total = stats["passed"] + stats["failed"]
+            if total > 0:
+                pass_rate = (stats["passed"] / total) * 100
+                logger.info(
+                    f"{stage}: {stats['passed']}/{total} passed ({pass_rate:.1f}%), max_diff={stats['max_diff']:.6f}"
+                )
+
+        if self.debug_max_diff > 0:
+            logger.info(
+                f"Overall max difference: {self.debug_max_diff:.6f} in {self.debug_stage} at position {self.debug_max_diff_pos}"
+            )
+        else:
+            logger.info("All results within tolerance")
 
     def _execute_gemm(
-        self, input_tensor: torch.Tensor, weight: torch.Tensor, stream: cuda.CUstream
+        self,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        stream: cuda.CUstream,
+        stage_name: str = "unknown",
     ) -> torch.Tensor:
         """
         Execute a single GEMM operation using the Blackwell Dense GEMM kernel.
@@ -253,6 +413,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
             input_tensor: Input tensor of shape [M, K]
             weight: Weight tensor of shape [N, K]
             stream: CUDA stream
+            stage_name: Name of the stage (gate_proj, up_proj, down_proj) for debugging
 
         Returns:
             Output tensor of shape [M, N]
@@ -262,6 +423,26 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
             input_tensor = input_tensor.contiguous()
         if not weight.is_contiguous():
             weight = weight.contiguous()
+
+        # Fix NaN values if enabled
+        if self.fix_nan_values:
+            # Check for NaN values in input tensor
+            nan_mask = torch.isnan(input_tensor)
+            if nan_mask.any():
+                nan_count = nan_mask.sum().item()
+                logger.warning(f"Fixing {nan_count} NaN values in {stage_name}_input")
+                # Replace NaN values with zeros
+                input_tensor = torch.where(
+                    nan_mask, torch.zeros_like(input_tensor), input_tensor
+                )
+
+            # Check for NaN values in weight tensor
+            nan_mask = torch.isnan(weight)
+            if nan_mask.any():
+                nan_count = nan_mask.sum().item()
+                logger.warning(f"Fixing {nan_count} NaN values in {stage_name}_weight")
+                # Replace NaN values with zeros
+                weight = torch.where(nan_mask, torch.zeros_like(weight), weight)
 
         # Transpose weight for GEMM: [N, K] -> [K, N]
         weight_t = weight.t().contiguous()
@@ -274,10 +455,65 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
             device=input_tensor.device,
         )
 
+        # Check for NaN or Inf values in input tensors
+        if self.debug_mode:
+            self._check_tensor_validity(input_tensor, f"{stage_name}_input")
+            self._check_tensor_validity(weight, f"{stage_name}_weight")
+
+            # Compute tensor statistics
+            self._update_tensor_stats(input_tensor, "input")
+            self._update_tensor_stats(weight, "weight")
+
+        # Compute reference result with PyTorch
+        with torch.no_grad():
+            ref_output = torch.mm(input_tensor, weight.t())
+
+        # Print first few elements of input, weight, and reference output for debugging
+        if self.debug_mode:
+            print(f"\n=== {stage_name} Tensor Comparison ===")
+            print(
+                f"Input tensor shape: {input_tensor.shape}, dtype: {input_tensor.dtype}"
+            )
+            print(f"Weight tensor shape: {weight.shape}, dtype: {weight.dtype}")
+            print(f"Weight_t tensor shape: {weight_t.shape}, dtype: {weight_t.dtype}")
+            print(
+                f"Reference output shape: {ref_output.shape}, dtype: {ref_output.dtype}"
+            )
+
+            # Print first few elements
+            print(f"Input first 5 elements: {input_tensor[0, :5]}")
+            print(f"Weight first 5 elements: {weight[0, :5]}")
+            print(f"Weight_t first 5 elements: {weight_t[:5, 0]}")
+            print(f"Reference output first 5 elements: {ref_output[0, :5]}")
+
+        # If force_pytorch_fallback is enabled, skip CUTE kernel execution
+        if self.force_pytorch_fallback:
+            if self.debug_mode:
+                logger.info(f"Using PyTorch mm for {stage_name} (forced fallback)")
+                self._update_tensor_stats(ref_output, "output_pytorch")
+            return ref_output
+
+        # If in debug mode, check reference output
+        if self.debug_mode:
+            self._check_tensor_validity(ref_output, f"{stage_name}_ref_output")
+            self._update_tensor_stats(ref_output, "output_pytorch")
+
         # Convert to CUTE tensors
         a_cute = self._convert_to_cute_tensor(input_tensor)
         b_cute = self._convert_to_cute_tensor(weight_t)
         c_cute = self._convert_to_cute_tensor(output)
+
+        # Print CUTE tensor information
+        if self.debug_mode:
+            print(
+                f"a_cute shape: {a_cute.shape}, layout: {a_cute.layout}, element_type: {a_cute.element_type}"
+            )
+            print(
+                f"b_cute shape: {b_cute.shape}, layout: {b_cute.layout}, element_type: {b_cute.element_type}"
+            )
+            print(
+                f"c_cute shape: {c_cute.shape}, layout: {c_cute.layout}, element_type: {c_cute.element_type}"
+            )
 
         # Get or compile the kernel
         key = (input_tensor.shape, weight.shape, input_tensor.dtype)
@@ -291,9 +527,95 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         # Execute the kernel
         compiled_kernel(a_cute, b_cute, c_cute, stream)
 
-        # torch.cuda.synchronize()
+        # Make sure the kernel execution is complete
+        torch.cuda.synchronize()
+
+        # Check for NaN or Inf values in output tensor
+        if self.debug_mode:
+            self._check_tensor_validity(output, f"{stage_name}_output")
+            self._update_tensor_stats(output, "output_cute")
+
+            # Print CUTE kernel output
+            print(f"CUTE kernel output first 5 elements: {output[0, :5]}")
+            print(f"Reference output first 5 elements: {ref_output[0, :5]}")
+            print(f"gate_out: {output[0, :5]}, {ref_output[0, :5]}")
+
+        # If in debug mode, compare with reference result
+        if self.debug_mode:
+            # Compare with reference result
+            diff = torch.abs(output - ref_output)
+            max_diff = torch.max(diff).item()
+            max_diff_pos = torch.argmax(diff.view(-1)).item()
+            max_diff_pos = (
+                max_diff_pos // output.shape[1],
+                max_diff_pos % output.shape[1],
+            )
+
+            # Update stats
+            if stage_name in self.debug_stats:
+                if max_diff < self.debug_tolerance:
+                    self.debug_stats[stage_name]["passed"] += 1
+                else:
+                    self.debug_stats[stage_name]["failed"] += 1
+
+                if max_diff > self.debug_stats[stage_name]["max_diff"]:
+                    self.debug_stats[stage_name]["max_diff"] = max_diff
+
+            # Update global stats
+            if max_diff > self.debug_max_diff:
+                self.debug_max_diff = max_diff
+                self.debug_max_diff_pos = max_diff_pos
+                self.debug_stage = stage_name
+
+            # Log if there's a significant difference
+            if max_diff > self.debug_tolerance:
+                print(
+                    f"CUTE kernel output differs from PyTorch mm in {stage_name}: "
+                    f"max_diff={max_diff:.6f} at position {max_diff_pos}"
+                )
+
+                # Log values at max diff position
+                cute_val = output[max_diff_pos[0], max_diff_pos[1]].item()
+                ref_val = ref_output[max_diff_pos[0], max_diff_pos[1]].item()
+                print(f"Values at max diff: CUTE={cute_val:.6f}, PyTorch={ref_val:.6f}")
+
+                # Log tensor statistics
+                self._log_tensor_stats()
+
+                # If the difference is very large, use the reference result
+                if max_diff > 1.0:
+                    print(
+                        f"Using PyTorch mm result for {stage_name} due to large difference"
+                    )
+                    return ref_output
 
         return output
+
+    def _check_tensor_validity(self, tensor: torch.Tensor, name: str):
+        """Check if tensor contains NaN or Inf values"""
+        nan_count = torch.isnan(tensor).sum().item()
+        inf_count = torch.isinf(tensor).sum().item()
+
+        if nan_count > 0 or inf_count > 0:
+            logger.warning(
+                f"Tensor {name} contains {nan_count} NaN and {inf_count} Inf values"
+            )
+
+    def _update_tensor_stats(self, tensor: torch.Tensor, tensor_type: str):
+        """Update tensor statistics for debugging"""
+        if tensor_type in self.debug_tensor_stats:
+            self.debug_tensor_stats[tensor_type]["min"] = tensor.min().item()
+            self.debug_tensor_stats[tensor_type]["max"] = tensor.max().item()
+            self.debug_tensor_stats[tensor_type]["mean"] = tensor.mean().item()
+            self.debug_tensor_stats[tensor_type]["std"] = tensor.std().item()
+
+    def _log_tensor_stats(self):
+        """Log tensor statistics for debugging"""
+        print("=== Tensor Statistics ===")
+        for tensor_type, stats in self.debug_tensor_stats.items():
+            print(
+                f"{tensor_type}: min={stats['min']:.6f}, max={stats['max']:.6f}, mean={stats['mean']:.6f}, std={stats['std']:.6f}"
+            )
 
     def _convert_to_cute_tensor(self, tensor: torch.Tensor) -> cute.Tensor:
         """
@@ -305,6 +627,10 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         Returns:
             CUTE tensor
         """
+        # Ensure tensor is contiguous
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
         # Convert to MNKL format (add batch dimension if needed)
         if tensor.dim() == 2:
             tensor_mnkl = tensor.unsqueeze(-1).contiguous()
@@ -328,8 +654,10 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         else:
             raise ValueError(f"Unsupported dtype: {tensor.dtype}")
 
-        # Mark layout as dynamic
-        cute_tensor = cute_tensor.mark_layout_dynamic(leading_dim=1)
+        # Print tensor information for debugging
+        if self.debug_mode:
+            print(f"Tensor shape: {tensor.shape}, strides: {tensor.stride()}")
+            print(f"CUTE tensor shape: {cute_tensor.shape}")
 
         return cute_tensor
 
