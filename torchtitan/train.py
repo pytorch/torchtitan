@@ -63,6 +63,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
     def __init__(self, job_config: JobConfig):
+        torch._C._log_api_usage_once("torchtitan.train")
+
         self.job_config = job_config
 
         logger.info(f"Starting job: {job_config.job.description}")
