@@ -72,6 +72,9 @@ try:
     from torchtitan.experiments.kernels.blackwell_group_gemms.dense_gemm import (
         DenseGemmKernel,
     )
+    from torchtitan.experiments.kernels.blackwell_group_gemms.tensor_cute_converter import (
+        GemmTensorConverter,
+    )
 
     CUTLASS_AVAILABLE = True
 except ImportError:
@@ -137,6 +140,12 @@ class GroupGEMMStrategy:
 class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     """Manual looping start, adding in cute dense gemms"""
 
+    def __init__(self, custom_activation):
+        super().__init__(custom_activation)
+        self.alignment = 16
+        # self.converter = GemmTensorConverter()
+        # logger.info("Initialized CuteDenseLoopingGroupGEMM")
+
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """Store weights in a simple list format"""
         return torch.stack(all_weights)
@@ -144,7 +153,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         """Execute using manual loops over experts"""
         # Get weights and ensure they're on the same device as tokens
-        # device = contig_tokens.device
+        device = contig_tokens.device
         w_gate = module.get_parameter("gate_proj_weight")  # .to(device)
         w_up = module.get_parameter("up_proj_weight")  # .to(device)
         w_down = module.get_parameter("down_proj_weight")  # .to(device)
@@ -172,13 +181,72 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 # expert_assigned_tokens: torch.Size([6144, 2048])
                 # gate_weight: torch.Size([1408, 2048])
                 gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
+
                 up_weight = w_up[expert_idx]
                 down_weight = w_down[expert_idx]
 
                 # Forward pass: gate and up projections
                 logger.info(f"expert_assigned_tokens: {expert_assigned_tokens.shape}")
-                logger.info(f"gate_weight: {gate_weight.shape}")
+                logger.info(f"gate_weight: {gate_weight.shape}")  # 6144, 1408
+
                 gate_out = torch.mm(expert_assigned_tokens, gate_weight.t())
+
+                # cute dense gemm
+                # 1  Convert to MNKL format
+                A_mnkl = (
+                    expert_assigned_tokens.unsqueeze(-1).contiguous().detach()
+                )  # (M, K) -> (M, K, 1)
+
+                B_mnkl = (
+                    gate_weight.unsqueeze(-1).contiguous().detach()
+                )  # (N, K) -> (N, K, 1)
+                C = torch.zeros_like(gate_out).detach()  # (M, N) -> (M, N, 1)
+
+                C_mnkl = C.unsqueeze(-1).contiguous()  # (M, N) -> (M, N, 1)
+
+                # 2  Create CUTE tensors
+                # Create CUTE tensors
+                A_cute = from_dlpack(A_mnkl, assumed_align=self.alignment)
+                B_cute = from_dlpack(B_mnkl, assumed_align=self.alignment)
+                C_cute = from_dlpack(C_mnkl, assumed_align=self.alignment)
+
+                # 3 set data types
+                cutlass_dtype = cutlass.BFloat16
+                A_cute.element_type = cutlass_dtype
+                B_cute.element_type = cutlass_dtype
+                C_cute.element_type = cutlass_dtype
+
+                # 4 Mark layouts as dynamic
+                # Mark layouts as dynamic
+                A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
+                B_cute = B_cute.mark_layout_dynamic(leading_dim=1)
+                C_cute = C_cute.mark_layout_dynamic(leading_dim=1)
+
+                # Extract metadata
+                A_strides = A_mnkl.stride()[:2]
+                B_strides = B_mnkl.stride()[:2]
+                C_strides = C_mnkl.stride()[:2]
+
+                logger.info(f"A_cute: {A_cute}")
+                logger.info(f"B_cute: {B_cute}")
+                logger.info(f"C_cute: {C_cute}")
+
+                # 5  Create kernel
+                try:
+                    gemm_kernel = DenseGemmKernel(
+                        acc_dtype=cutlass.Float32,  # Accumulator type
+                        use_2cta_instrs=False,  # Paired CTA
+                        mma_tiler_mn=(128, 128),  # Tile size
+                        cluster_shape_mn=(1, 1),  # Cluster size
+                        use_tma_store=False,  #  store method
+                    )
+                except Exception as e:
+                    logger.info(f"  ✗ Kernel setup failed: {e}")
+                    assert False, "Kernel setup failed"
+
+                logger.info(f"gate_out: {gate_out.shape}")  # 6144, 1408
+
+                # ---- back to pytorch ----
 
                 up_out = torch.mm(expert_assigned_tokens, up_weight.t())
 

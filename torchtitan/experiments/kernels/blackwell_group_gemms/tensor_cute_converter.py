@@ -97,7 +97,11 @@ class GemmTensorConverter(PyTorchCuteConverter):
     """Specialized converter for GEMM operations (A @ B = C)."""
 
     def pytorch_to_cute_gemm(
-        self, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        transpose_B: bool = False,
     ) -> Dict[str, Any]:
         """
         Convert PyTorch GEMM tensors (A @ B = C) to CUTE format.
@@ -116,7 +120,12 @@ class GemmTensorConverter(PyTorchCuteConverter):
         C = self._validate_tensor(C, 2)
 
         M, K1 = A.shape
-        K2, N = B.shape
+
+        if transpose_B:
+            K2, N = B.shape
+        else:
+            N, K2 = B.shape
+
         M2, N2 = C.shape
 
         if K1 != K2:
@@ -130,7 +139,10 @@ class GemmTensorConverter(PyTorchCuteConverter):
 
         # Convert to MNKL format
         A_mnkl = A.unsqueeze(-1).contiguous()  # (M, K) -> (M, K, 1)
-        B_mnkl = B.transpose(0, 1).unsqueeze(-1).contiguous()  # (K, N) -> (N, K, 1)
+        if transpose_B:
+            B_mnkl = B.transpose(0, 1).unsqueeze(-1).contiguous()  # (K, N) -> (N, K, 1)
+        else:
+            B_mnkl = B.unsqueeze(-1).contiguous()  # (K, N) -> (1, K, N)
         C_mnkl = C.unsqueeze(-1).contiguous()  # (M, N) -> (M, N, 1)
 
         # Create CUTE tensors
