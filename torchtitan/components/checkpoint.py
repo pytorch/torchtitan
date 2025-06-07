@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import enum
 import functools
 import os
@@ -12,7 +13,7 @@ import re
 import shutil
 import threading
 import time
-from typing import Any
+from typing import Any, Generator
 
 import torch
 import torch.distributed as dist
@@ -55,9 +56,24 @@ class ModelWrapper(Stateful):
         self.cache_state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
+        self._unshard_state_dict = False
+
+    @contextlib.contextmanager
+    def unshard_state_dict(self) -> Generator[None, None, None]:
+        self._unshard_state_dict = True
+        try:
+            yield
+        finally:
+            self._unshard_state_dict = False
 
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        if self._unshard_state_dict:
+            func = functools.partial(
+                get_model_state_dict, options=StateDictOptions(full_state_dict=True)
+            )
+            return {k: v for sd in map(func, self.model) for k, v in sd.items()}
+        else:
+            return self.cache_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -288,6 +304,11 @@ class CheckpointManager:
             self.purge_thread = None
 
         self.model_weights_only = ckpt_config.model_weights_only
+        self.unshard_weights = ckpt_config.unshard_weights
+        if self.unshard_weights and not self.model_weights_only:
+            raise ValueError(
+                "unshard_weights is only supported for model_weights_only=True"
+            )
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
         self.exclude_from_loading = ckpt_config.exclude_from_loading
 
@@ -405,6 +426,7 @@ class CheckpointManager:
             bool: Whether the checkpoint was loaded successfully.
         """
 
+        # TODO: add support for loading the checkpoint from the HF checkpoint.
         if self.ft_manager:
             self._ft_load()
 
@@ -545,6 +567,42 @@ class CheckpointManager:
             states_to_load.pop(DATALOADER)
         return states_to_load
 
+    def _export_weights(self, curr_step: int) -> None:
+        # We update self.states to keep the model only.
+        # After this update, self.states = {
+        #      'tok_embeddings.weight':...,
+        #      'layers.0.attention.wq.weight': ...
+        # }.
+        context = (
+            self.states[MODEL].unshard_state_dict()
+            if self.unshard_weights
+            else contextlib.nullcontext()
+        )
+        with context:
+            self.states = self.states[MODEL].state_dict()
+
+        # For now, we will manually pop the freqs_cis buffer, as we made this permanent
+        # temporarily and we don't want to include it in the exported state_dict.
+        # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
+        self.states.pop("freqs_cis", None)
+
+        if self.export_dtype != torch.float32:
+            # TODO: Ensure FP8 tensor is converted back to the plain torch.Tensor.
+            self.states = {k: v.to(self.export_dtype) for k, v in self.states.items()}
+        logger.info(
+            f"Saving a model weights only checkpoint in {self.export_dtype} "
+            f"at last step, step {curr_step}."
+        )
+        checkpoint_id = self._create_checkpoint_id(curr_step)
+        if self.unshard_weights:
+            # TODO: support HF format
+            os.makedirs(checkpoint_id, exist_ok=True)
+            torch.save(self.states, os.path.join(checkpoint_id, "model_weights.pt"))
+        else:
+            save_with_gc(
+                self.states, checkpoint_id=self._create_checkpoint_id(curr_step)
+            )
+
     def _save_last_step(self, curr_step: int) -> None:
         # We only consider saving weights only at the end of the training. So
         # this won't affect preemption and training resume. We also only allow
@@ -552,30 +610,12 @@ class CheckpointManager:
         # current dtype is not the same as the export dtype at the end of the training.
 
         if self.model_weights_only:
-            # We update self.states to keep the model only.
-            # After this update, self.states = {
-            #      'tok_embeddings.weight':...,
-            #      'layers.0.attention.wq.weight': ...
-            # }.
-            self.states = self.states[MODEL].state_dict()
-
-            # For now, we will manually pop the freqs_cis buffer, as we made this permanent
-            # temporarily and we don't want to include it in the exported state_dict.
-            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-            self.states.pop("freqs_cis", None)
-
-            if self.export_dtype != torch.float32:
-                self.states = {
-                    k: v.to(self.export_dtype) for k, v in self.states.items()
-                }
-            logger.info(
-                f"Saving a model weights only checkpoint in {self.export_dtype} "
-                f"at last step, step {curr_step}."
-            )
+            self._export_weights(curr_step)
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
-
-        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+            save_with_gc(
+                self.states, checkpoint_id=self._create_checkpoint_id(curr_step)
+            )
 
     def _should_save(self, curr_step: int, force: bool = False) -> bool:
         if not self.enable_checkpoint:
