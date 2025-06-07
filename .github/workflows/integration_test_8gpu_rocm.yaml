@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test at H100
+name: 8 GPU Integration Test
 
 on:
   push:
@@ -17,13 +17,11 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.rocm.gpu.mi300.8
       gpu-arch-type: rocm
       gpu-arch-version: "6.4"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
       docker-image: torchtitan-rocm-pytorch-nightly-ubuntu-22.04-clang19-py3
       repository: pytorch/torchtitan
       upload-artifact: outputs
@@ -33,5 +31,5 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests_h100.py artifacts-to-be-uploaded --ngpu 8
+        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
 
