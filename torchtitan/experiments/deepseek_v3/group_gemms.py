@@ -140,9 +140,212 @@ class GroupGEMMStrategy:
 
 
 # ========= Manual Looping Baselines ===================
-
-
 class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
+    """Manual looping, adding in cute dense gemms"""
+
+    def __init__(self, custom_activation):
+        super().__init__(custom_activation)
+        self.alignment = 16
+        self.dtype = torch.bfloat16
+        self.cutlass_dtype = cutlass.BFloat16
+
+        # Initialize Dense GEMM kernel
+        try:
+            self.gemm_kernel = DenseGemmKernel(
+                acc_dtype=cutlass.Float32,  # Accumulator type
+                use_2cta_instrs=False,  # Paired CTA
+                mma_tiler_mn=(128, 128),  # Tile size
+                cluster_shape_mn=(1, 1),  # Cluster size
+                use_tma_store=True,  #  store method
+            )
+        except Exception as e:
+            print(f"✗ Kernel setup failed: {e}")
+            raise RuntimeError(f"Dense Gemm Kernel setup failed: {e}")
+
+        # setup stream
+        torch_stream = torch.cuda.Stream()
+        self.stream = cuda.CUstream(torch_stream.cuda_stream)
+
+        self.kernel_cache = {}
+
+        self.debug = False
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """Store weights (experts) in a stacked or cat format"""
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        """
+        Execute using manual loops and cute dense blackwell gemms over experts
+
+         Args:
+            contig_tokens: Contiguous token tensor [total_tokens, hidden_size]
+            m_sizes: List of token counts per expert
+            m_offsets: List of token offsets per expert
+            module: Module containing the expert weights
+
+        Returns:
+            Processed output tensor [total_tokens, hidden_size]
+
+        """
+        # Get weights
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Prepare output tensor
+        hidden_size = w_gate.shape[2]  # [num_experts, out_dim, in_dim]
+        output = torch.zeros(
+            contig_tokens.shape[0],
+            hidden_size,
+            dtype=contig_tokens.dtype,
+            device=contig_tokens.device,
+        )
+
+        # Process each expert sequentially
+        offset = 0
+        for expert_idx, size in enumerate(m_sizes):
+            if size > 0:
+                # Get tokens for this expert
+                expert_tokens = contig_tokens[offset : offset + size]
+
+                # Get weights for this expert
+                gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
+                up_weight = w_up[expert_idx]
+                down_weight = w_down[expert_idx]
+
+                # execute gate projection
+                gate_out = self._execute_gemm(
+                    expert_tokens,
+                    gate_weight,
+                    f"gate_{expert_idx}",
+                    expert_tokens.shape[0],
+                    gate_weight.shape[0],
+                )
+
+                # execute up projection (# TODO - this has shared A)
+                up_out = self._execute_gemm(
+                    expert_tokens,
+                    up_weight,
+                    f"up_{expert_idx}",
+                    expert_tokens.shape[0],
+                    up_weight.shape[0],
+                )
+
+                # execute down projection
+                down_out = self._execute_gemm(
+                    expert_tokens,
+                    down_weight,
+                    f"down_{expert_idx}",
+                    expert_tokens.shape[0],
+                    down_weight.shape[0],
+                )
+
+                # apply activation and combine
+                hidden = self.activation_function(gate_out) * up_out
+
+                # execute down projection
+                expert_output = self._execute_gemm(
+                    hidden,
+                    down_weight,
+                    f"down_{expert_idx}",
+                    hidden.shape[0],
+                    down_weight.shape[0],
+                )
+
+                # store results
+                output[offset : offset + size] = expert_output
+
+            offset += size
+
+        if self.debug:
+            print(f"GEMM output shape: {output.shape}")
+
+        return output
+
+    def _execute_gemm(self, input_tensor, weight, kernel_name, M, N):
+        """
+        Execute a single GEMM operation using the CUTLASS CUTE Dense GEMM kernel.
+
+        Args:
+            input_tensor: Input tensor of shape [M, K]
+            weight: Weight tensor of shape [N, K]
+            kernel_name: Name for the kernel (for caching)
+            M: Number of rows in input_tensor
+            N: Number of rows in weight
+
+        Returns:
+            Output tensor of shape [M, N]
+        """
+        if self.debug:
+            print(f"Executing {kernel_name} with M={M}, N={N}")
+            # Ensure tensors are contiguous
+            if not input_tensor.is_contiguous():
+                input_tensor = input_tensor.contiguous()
+            if not weight.is_contiguous():
+                weight = weight.contiguous()
+
+        K = input_tensor.shape[1]
+
+        # Create output tensor with correct dimensions
+        output = torch.zeros(
+            (M, N), device=input_tensor.device, dtype=self.dtype, requires_grad=False
+        )
+
+        # Convert to MNKL format (add batch dimension)
+        A_mnkl = input_tensor.unsqueeze(-1).contiguous().detach()  # [M, K, 1]
+        B_mnkl = weight.unsqueeze(-1).contiguous().detach()  # [N, K, 1]
+        C_mnkl = output.unsqueeze(-1).contiguous()  # [M, N, 1]
+
+        # Create CUTE tensors
+        A_cute = from_dlpack(A_mnkl, assumed_align=self.alignment)
+        B_cute = from_dlpack(B_mnkl, assumed_align=self.alignment)
+        C_cute = from_dlpack(C_mnkl, assumed_align=self.alignment)
+
+        # Set data types
+        A_cute.element_type = self.cutlass_dtype
+        B_cute.element_type = self.cutlass_dtype
+        C_cute.element_type = self.cutlass_dtype
+
+        # Mark layouts as dynamic
+        A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
+        B_cute = B_cute.mark_layout_dynamic(leading_dim=1)
+        C_cute = C_cute.mark_layout_dynamic(leading_dim=1)
+
+        # Get or compile kernel
+        cache_key = (M, N, K, kernel_name)
+
+        if cache_key not in self.kernel_cache:
+            try:
+                self.kernel_cache[cache_key] = cute.compile(
+                    self.gemm_kernel, A_cute, B_cute, C_cute, self.stream
+                )
+                if self.debug:
+                    self.print(
+                        f"Compiled kernel for {kernel_name} with shape [{M}, {N}, {K}]"
+                    )
+            except Exception as e:
+                self.print(f"Kernel compilation failed for {kernel_name}: {e}")
+                raise RuntimeError(f"Failed to compile kernel for {kernel_name}: {e}")
+
+        # Execute kernel
+        try:
+            self.kernel_cache[cache_key](A_cute, B_cute, C_cute, self.stream)
+            if self.debug:
+                self.print(f"Executed kernel {kernel_name} successfully")
+        except Exception as e:
+            self.print(f"Kernel execution failed for {kernel_name}: {e}")
+            raise RuntimeError(f"Failed to execute kernel for {kernel_name}: {e}")
+
+        # Return output tensor
+        return C_mnkl.squeeze(-1)
+
+    @staticmethod
+    def is_available() -> bool:
+        return CUTLASS_AVAILABLE
+
+
+class CuteDenseLoopingGroupGEMM_original(GroupGEMMStrategy):
     """Manual looping start, adding in cute dense gemms"""
 
     def __init__(self, custom_activation):
@@ -482,523 +685,6 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     @staticmethod
     def is_available() -> bool:
         return True
-
-
-class CuteDenseLoopingGroupGEMM_old(GroupGEMMStrategy):
-    """
-    Implementation of grouped GEMM using Blackwell Dense GEMM kernel with manual looping.
-
-    This class provides a way to execute multiple GEMM operations with different problem
-    sizes using the Blackwell Dense GEMM kernel. It loops through each expert and
-    executes the kernel for each matrix multiplication.
-    """
-
-    def __init__(self, custom_activation):
-        """
-        Initialize the CuteDenseLoopingGroupGEMM.
-
-        Args:
-            custom_activation: Activation function to use
-        """
-        super().__init__(custom_activation)
-
-        # Default configuration for the dense GEMM kernel
-        self.acc_dtype = cutlass.Float32
-        self.use_2cta_instrs = False
-        self.mma_tiler_mn = (128, 128)
-        self.cluster_shape_mn = (1, 1)
-        self.use_tma_store = True
-
-        # Create the dense GEMM kernel
-        self.gemm_kernel = DenseGemmKernel(
-            acc_dtype=self.acc_dtype,
-            use_2cta_instrs=self.use_2cta_instrs,
-            mma_tiler_mn=self.mma_tiler_mn,
-            cluster_shape_mn=self.cluster_shape_mn,
-            use_tma_store=self.use_tma_store,
-        )
-
-        # Cache for compiled kernels
-        self._compiled_kernels = {}
-
-        # Debug mode - set to True to enable comparison with PyTorch mm
-        self.debug_mode = True
-        self.debug_tolerance = 1e-3
-        self.debug_max_diff = 0.0
-        self.debug_max_diff_pos = None
-        self.debug_stage = None
-
-        # Force PyTorch fallback - set to True to completely bypass CUTE kernel
-        self.force_pytorch_fallback = False
-
-        # Fix NaN issue - set to True to replace NaN values with zeros
-        self.fix_nan_values = False
-
-        # Stats for debugging
-        self.debug_stats = {
-            "gate_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
-            "up_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
-            "down_proj": {"passed": 0, "failed": 0, "max_diff": 0.0},
-        }
-
-        # Tensor statistics for debugging
-        self.debug_tensor_stats = {
-            "input": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
-            "weight": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
-            "output_cute": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
-            "output_pytorch": {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0},
-        }
-
-        print("Initialized CuteDenseLoopingGroupGEMM with Blackwell Dense GEMM kernel")
-
-    def nan_checker(self, item, name):
-        nan_mask = torch.isnan(item)
-        if nan_mask.any():
-            nan_count = nan_mask.sum().item()
-            print(f"Found nans in {name} with {nan_count} nan values")
-            # assert False, "Found nans in {name}"
-
-    def arrange_expert_weights(self, all_weights, submod_name, module):
-        """Store weights in a simple list format"""
-        return torch.stack(all_weights)
-
-    def execute(self, contig_tokens, m_sizes, m_offsets, module):
-        """
-        Execute the grouped GEMM operation using the Blackwell Dense GEMM kernel.
-
-        Args:
-            contig_tokens: The input tokens, arranged contiguously by expert
-            m_sizes: Sizes of each group
-            m_offsets: Offsets of each group
-            module: The MoE module containing weights and parameters
-
-        Returns:
-            The processed tokens
-        """
-        # Reset debug stats for this execution
-        self.debug_max_diff = 0.0
-        self.debug_max_diff_pos = None
-        self.debug_stage = None
-
-        # Check for NaN values in the input tokens
-        if self.debug_mode:
-            self._check_tensor_validity(contig_tokens, "initial_contig_tokens")
-            print(
-                f"Input tokens shape: {contig_tokens.shape}, dtype: {contig_tokens.dtype}"
-            )
-            print(f"m_sizes: {m_sizes}")
-            print(f"m_offsets: {m_offsets}")
-        try:
-            # Get weights
-            w_gate = module.get_parameter("gate_proj_weight")
-
-            w_up = module.get_parameter("up_proj_weight")
-
-            w_down = module.get_parameter("down_proj_weight")
-
-            # Setup CUDA stream
-            torch_stream = torch.cuda.current_stream()
-            stream = cuda.CUstream(torch_stream.cuda_stream)
-
-            # Prepare output tensor
-            hidden_size = w_gate.shape[2]  # [num_experts, out_dim, in_dim]
-            output = torch.zeros(
-                contig_tokens.shape[0],
-                hidden_size,
-                dtype=contig_tokens.dtype,
-                device=contig_tokens.device,
-            )
-
-            # Process each expert sequentially
-            offset = 0
-            for expert_idx, size in enumerate(m_sizes):
-                if size > 0:
-                    # Get tokens for this expert
-                    expert_tokens = contig_tokens[offset : offset + size]
-
-                    # Get weights for this expert
-                    gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
-                    up_weight = w_up[expert_idx]
-                    down_weight = w_down[expert_idx]
-
-                    # Forward pass: gate projection using CUTE kernel
-                    # self.nan_checker(gate_weight)
-                    # self.nan_checker(expert_tokens)
-                    gate_out = self._execute_gemm(
-                        expert_tokens, gate_weight, stream, "gate_proj"
-                    )
-                    gate_out_ref = torch.mm(expert_tokens, gate_weight.t())
-                    print(f"gate_out: {gate_out[0][0:5]}, {gate_out_ref[0][0:5] }")
-                    assert torch.allclose(gate_out, gate_out_ref, atol=1e-3)
-                    # Forward pass: up projection using CUTE kernel
-                    up_out = self._execute_gemm(
-                        expert_tokens, up_weight, stream, "up_proj"
-                    )
-
-                    # Apply activation and combine
-                    hidden = self.activation_function(gate_out) * up_out
-
-                    # Down projection using CUTE kernel
-                    expert_output = self._execute_gemm(
-                        hidden, down_weight, stream, "down_proj"
-                    )
-
-                    # Store results
-                    output[offset : offset + size] = expert_output
-
-                offset += size
-
-            # Print debug statistics
-            if self.debug_mode:
-                self._print_debug_stats()
-
-            return output
-
-        except Exception as e:
-            logger.error(f"Error in CuteDenseLoopingGroupGEMM: {e}")
-            # Fall back to PyTorch mm implementation
-            # return self._fallback_execute(contig_tokens, m_sizes, module)
-
-    def _print_debug_stats(self):
-        """Print debug statistics to help identify issues"""
-        print("=== CUTE Kernel Debug Statistics ===")
-
-        for stage, stats in self.debug_stats.items():
-            total = stats["passed"] + stats["failed"]
-            if total > 0:
-                pass_rate = (stats["passed"] / total) * 100
-                print(
-                    f"{stage}: {stats['passed']}/{total} passed ({pass_rate:.1f}%), max_diff={stats['max_diff']:.6f}"
-                )
-
-        if self.debug_max_diff > 0:
-            print(
-                f"Overall max difference: {self.debug_max_diff:.6f} in {self.debug_stage} at position {self.debug_max_diff_pos}"
-            )
-        else:
-            print("All results within tolerance")
-
-    def _execute_gemm(
-        self,
-        input_tensor: torch.Tensor,
-        weight: torch.Tensor,
-        stream: cuda.CUstream,
-        stage_name: str = "unknown",
-    ) -> torch.Tensor:
-        """
-        Execute a single GEMM operation using the Blackwell Dense GEMM kernel.
-
-        Args:
-            input_tensor: Input tensor of shape [M, K]
-            weight: Weight tensor of shape [N, K]
-            stream: CUDA stream
-            stage_name: Name of the stage (gate_proj, up_proj, down_proj) for debugging
-
-        Returns:
-            Output tensor of shape [M, N]
-        """
-        # Ensure tensors are contiguous
-        if not input_tensor.is_contiguous():
-            input_tensor = input_tensor.contiguous()
-        if not weight.is_contiguous():
-            weight = weight.contiguous()
-
-        # Fix NaN values if enabled
-        if self.fix_nan_values:
-            # Check for NaN values in input tensor
-            nan_mask = torch.isnan(input_tensor)
-            if nan_mask.any():
-                nan_count = nan_mask.sum().item()
-                logger.warning(f"Fixing {nan_count} NaN values in {stage_name}_input")
-                # Replace NaN values with zeros
-                input_tensor = torch.where(
-                    nan_mask, torch.zeros_like(input_tensor), input_tensor
-                )
-
-            # Check for NaN values in weight tensor
-            nan_mask = torch.isnan(weight)
-            if nan_mask.any():
-                nan_count = nan_mask.sum().item()
-                logger.warning(f"Fixing {nan_count} NaN values in {stage_name}_weight")
-                # Replace NaN values with zeros
-                weight = torch.where(nan_mask, torch.zeros_like(weight), weight)
-
-        # Transpose weight for GEMM: [N, K] -> [K, N]
-        weight_t = weight.t().contiguous()
-
-        # Create output tensor
-        output = torch.zeros(
-            input_tensor.shape[0],
-            weight.shape[0],
-            dtype=input_tensor.dtype,
-            device=input_tensor.device,
-        )
-
-        # Check for NaN or Inf values in input tensors
-        if self.debug_mode:
-            self._check_tensor_validity(input_tensor, f"{stage_name}_input")
-            self._check_tensor_validity(weight, f"{stage_name}_weight")
-
-            # Compute tensor statistics
-            self._update_tensor_stats(input_tensor, "input")
-            self._update_tensor_stats(weight, "weight")
-
-        # Compute reference result with PyTorch
-        with torch.no_grad():
-            ref_output = torch.mm(input_tensor, weight.t())
-
-        # Print first few elements of input, weight, and reference output for debugging
-        if self.debug_mode:
-            print(f"\n=== {stage_name} Tensor Comparison ===")
-            print(
-                f"Input tensor shape: {input_tensor.shape}, dtype: {input_tensor.dtype}"
-            )
-            print(f"Weight tensor shape: {weight.shape}, dtype: {weight.dtype}")
-            print(f"Weight_t tensor shape: {weight_t.shape}, dtype: {weight_t.dtype}")
-            print(
-                f"Reference output shape: {ref_output.shape}, dtype: {ref_output.dtype}"
-            )
-
-            # Print first few elements
-            print(f"Input first 5 elements: {input_tensor[0, :5]}")
-            print(f"Weight first 5 elements: {weight[0, :5]}")
-            print(f"Weight_t first 5 elements: {weight_t[:5, 0]}")
-            print(f"Reference output first 5 elements: {ref_output[0, :5]}")
-
-        # If force_pytorch_fallback is enabled, skip CUTE kernel execution
-        if self.force_pytorch_fallback:
-            if self.debug_mode:
-                print(f"Using PyTorch mm for {stage_name} (forced fallback)")
-                self._update_tensor_stats(ref_output, "output_pytorch")
-            return ref_output
-
-        # If in debug mode, check reference output
-        if self.debug_mode:
-            self._check_tensor_validity(ref_output, f"{stage_name}_ref_output")
-            self._update_tensor_stats(ref_output, "output_pytorch")
-
-        # Convert to CUTE tensors
-        a_cute = self._convert_to_cute_tensor(input_tensor)
-        b_cute = self._convert_to_cute_tensor(weight_t)
-        c_cute = self._convert_to_cute_tensor(output)
-
-        # Print CUTE tensor information
-        if self.debug_mode:
-            print(
-                f"a_cute shape: {a_cute.shape}, layout: {a_cute.layout}, element_type: {a_cute.element_type}"
-            )
-            print(
-                f"b_cute shape: {b_cute.shape}, layout: {b_cute.layout}, element_type: {b_cute.element_type}"
-            )
-            print(
-                f"c_cute shape: {c_cute.shape}, layout: {c_cute.layout}, element_type: {c_cute.element_type}"
-            )
-
-        # Get or compile the kernel
-        key = (input_tensor.shape, weight.shape, input_tensor.dtype)
-        if key not in self._compiled_kernels:
-            self._compiled_kernels[key] = cute.compile(
-                self.gemm_kernel, a_cute, b_cute, c_cute, stream
-            )
-
-        compiled_kernel = self._compiled_kernels[key]
-
-        # Execute the kernel
-        compiled_kernel(a_cute, b_cute, c_cute, stream)
-
-        # Make sure the kernel execution is complete
-        torch.cuda.synchronize()
-
-        # Check for NaN or Inf values in output tensor
-        if self.debug_mode:
-            self._check_tensor_validity(output, f"{stage_name}_output")
-            self._update_tensor_stats(output, "output_cute")
-
-            # Print CUTE kernel output
-            print(f"CUTE kernel output first 5 elements: {output[0, :5]}")
-            print(f"Reference output first 5 elements: {ref_output[0, :5]}")
-            print(f"gate_out: {output[0, :5]}, {ref_output[0, :5]}")
-
-        # If in debug mode, compare with reference result
-        if self.debug_mode:
-            # Compare with reference result
-            diff = torch.abs(output - ref_output)
-            max_diff = torch.max(diff).item()
-            max_diff_pos = torch.argmax(diff.view(-1)).item()
-            max_diff_pos = (
-                max_diff_pos // output.shape[1],
-                max_diff_pos % output.shape[1],
-            )
-
-            # Update stats
-            if stage_name in self.debug_stats:
-                if max_diff < self.debug_tolerance:
-                    self.debug_stats[stage_name]["passed"] += 1
-                else:
-                    self.debug_stats[stage_name]["failed"] += 1
-
-                if max_diff > self.debug_stats[stage_name]["max_diff"]:
-                    self.debug_stats[stage_name]["max_diff"] = max_diff
-
-            # Update global stats
-            if max_diff > self.debug_max_diff:
-                self.debug_max_diff = max_diff
-                self.debug_max_diff_pos = max_diff_pos
-                self.debug_stage = stage_name
-
-            # Log if there's a significant difference
-            if max_diff > self.debug_tolerance:
-                print(
-                    f"CUTE kernel output differs from PyTorch mm in {stage_name}: "
-                    f"max_diff={max_diff:.6f} at position {max_diff_pos}"
-                )
-
-                # Log values at max diff position
-                cute_val = output[max_diff_pos[0], max_diff_pos[1]].item()
-                ref_val = ref_output[max_diff_pos[0], max_diff_pos[1]].item()
-                print(f"Values at max diff: CUTE={cute_val:.6f}, PyTorch={ref_val:.6f}")
-
-                # Log tensor statistics
-                self._log_tensor_stats()
-
-                # If the difference is very large, use the reference result
-                if max_diff > 1.0:
-                    print(
-                        f"Using PyTorch mm result for {stage_name} due to large difference"
-                    )
-                    return ref_output
-
-        return output
-
-    def _check_tensor_validity(self, tensor: torch.Tensor, name: str):
-        """Check if tensor contains NaN or Inf values"""
-        nan_count = torch.isnan(tensor).sum().item()
-        inf_count = torch.isinf(tensor).sum().item()
-
-        if nan_count > 0 or inf_count > 0:
-            logger.warning(
-                f"Tensor {name} contains {nan_count} NaN and {inf_count} Inf values"
-            )
-
-    def _update_tensor_stats(self, tensor: torch.Tensor, tensor_type: str):
-        """Update tensor statistics for debugging"""
-        if tensor_type in self.debug_tensor_stats:
-            self.debug_tensor_stats[tensor_type]["min"] = tensor.min().item()
-            self.debug_tensor_stats[tensor_type]["max"] = tensor.max().item()
-            self.debug_tensor_stats[tensor_type]["mean"] = tensor.mean().item()
-            self.debug_tensor_stats[tensor_type]["std"] = tensor.std().item()
-
-    def _log_tensor_stats(self):
-        """Log tensor statistics for debugging"""
-        print("=== Tensor Statistics ===")
-        for tensor_type, stats in self.debug_tensor_stats.items():
-            print(
-                f"{tensor_type}: min={stats['min']:.6f}, max={stats['max']:.6f}, mean={stats['mean']:.6f}, std={stats['std']:.6f}"
-            )
-
-    def _convert_to_cute_tensor(self, tensor: torch.Tensor) -> cute.Tensor:
-        """
-        Convert a PyTorch tensor to a CUTE tensor.
-
-        Args:
-            tensor: PyTorch tensor to convert
-
-        Returns:
-            CUTE tensor
-        """
-        # Ensure tensor is contiguous
-        if not tensor.is_contiguous():
-            tensor = tensor.contiguous()
-
-        # Convert to MNKL format (add batch dimension if needed)
-        if tensor.dim() == 2:
-            tensor_mnkl = tensor.unsqueeze(-1).contiguous()
-        else:
-            tensor_mnkl = tensor.contiguous()
-
-        # Create CUTE tensor
-        cute_tensor = from_dlpack(tensor_mnkl, assumed_align=16)
-
-        # Set CUTLASS data type
-        if tensor.dtype == torch.float16:
-            cute_tensor.element_type = cutlass.Float16
-        elif tensor.dtype == torch.bfloat16:
-            cute_tensor.element_type = cutlass.BFloat16
-        elif tensor.dtype == torch.float32:
-            cute_tensor.element_type = cutlass.Float32
-        elif tensor.dtype == torch.int8:
-            cute_tensor.element_type = cutlass.Int8
-        elif tensor.dtype == torch.uint8:
-            cute_tensor.element_type = cutlass.Uint8
-        else:
-            raise ValueError(f"Unsupported dtype: {tensor.dtype}")
-
-        # Print tensor information for debugging
-        if self.debug_mode:
-            print(f"Tensor shape: {tensor.shape}, strides: {tensor.stride()}")
-            print(f"CUTE tensor shape: {cute_tensor.shape}")
-
-        return cute_tensor
-
-    def _fallback_execute(self, contig_tokens, m_sizes, module):
-        """
-        Fallback implementation using PyTorch mm.
-
-        Args:
-            contig_tokens: The input tokens, arranged contiguously by expert
-            m_sizes: Sizes of each group
-            module: The MoE module containing weights and parameters
-
-        Returns:
-            The processed tokens
-        """
-        logger.warning("Falling back to PyTorch mm implementation")
-
-        w_gate = module.get_parameter("gate_proj_weight")
-        w_up = module.get_parameter("up_proj_weight")
-        w_down = module.get_parameter("down_proj_weight")
-
-        # Prepare output tensor
-        hidden_size = w_gate.shape[2]  # [num_experts, out_dim, in_dim]
-        output = torch.zeros(
-            contig_tokens.shape[0],
-            hidden_size,
-            dtype=contig_tokens.dtype,
-            device=contig_tokens.device,
-        )
-
-        # Process each expert sequentially
-        offset = 0
-        for expert_idx, size in enumerate(m_sizes):
-            if size > 0:
-                # Get tokens for this expert
-                expert_tokens = contig_tokens[offset : offset + size]
-
-                # Get weights for this expert
-                gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
-                up_weight = w_up[expert_idx]
-                down_weight = w_down[expert_idx]
-
-                # Forward pass: gate and up projections
-                gate_out = torch.mm(expert_tokens, gate_weight.t())
-                up_out = torch.mm(expert_tokens, up_weight.t())
-
-                # Apply activation and combine
-                hidden = self.activation_function(gate_out) * up_out
-
-                # Down projection
-                expert_output = torch.mm(hidden, down_weight.t())
-
-                # Store results
-                output[offset : offset + size] = expert_output
-
-            offset += size
-
-        return output
-
-    @staticmethod
-    def is_available() -> bool:
-        return CUTLASS_AVAILABLE
 
 
 class ManualLoopGroupGEMM(GroupGEMMStrategy):
