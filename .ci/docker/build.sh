@@ -17,9 +17,7 @@ OS=ubuntu
 
 # set Dockerfile
 DOCKERFILE="${OS}/Dockerfile"
-if [[ "$IMAGE_NAME" == *cuda* ]]; then
-  DOCKERFILE="${OS}-cuda/Dockerfile"
-elif [[ "$IMAGE_NAME" == *rocm* ]]; then
+if [[ "$IMAGE_NAME" == *rocm* ]]; then
   DOCKERFILE="${OS}-rocm/Dockerfile"
 fi
 
