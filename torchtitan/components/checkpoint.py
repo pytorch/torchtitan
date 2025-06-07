@@ -20,6 +20,7 @@ import torch.distributed.checkpoint as dcp
 import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
+from torch.distributed.checkpoint.default_planner import DefaultSavePlanner
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -83,7 +84,7 @@ class SaveDone:
 
 @torch.no_grad()
 def save_with_gc(state, checkpoint_id):
-    dcp.save(state, checkpoint_id=checkpoint_id)
+    dcp.save(state, checkpoint_id=checkpoint_id, planner=DefaultSavePlanner(enable_plan_caching=True))
     GarbageCollection.collect("GC collection invoked by checkpointer.")
 
 
