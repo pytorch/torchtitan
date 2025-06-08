@@ -154,7 +154,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 use_tma_store=False,
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize GEMM kernel: {e}")
+            raise RuntimeError(f"Failed to initialize GEMM kernel: {e}") from e
 
         # Setup CUDA stream
         torch_stream = torch.cuda.Stream()
@@ -216,7 +216,9 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
                 if self.debug_mode:
                     print(f"✓ Compiled kernel for {operation_name}")
             except Exception as e:
-                raise RuntimeError(f"Failed to compile {operation_name} kernel: {e}")
+                raise RuntimeError(
+                    f"Failed to compile {operation_name} kernel: {e}"
+                ) from e
 
         return self._compiled_kernels[cache_key]
 
@@ -253,7 +255,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         except Exception as e:
             raise RuntimeError(
                 f"Failed to create CUTE tensors for {operation_name}: {e}"
-            )
+            ) from e
 
         # Get or compile kernel
         compiled_kernel = self._get_or_compile_kernel(
@@ -266,7 +268,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
             if self.debug_mode:
                 print(f"✓ Executed {operation_name} kernel successfully")
         except Exception as e:
-            raise RuntimeError(f"Failed to execute {operation_name} kernel: {e}")
+            raise RuntimeError(f"Failed to execute {operation_name} kernel: {e}") from e
 
         return output.squeeze(-1) if output.dim() > 2 else output
 
@@ -306,7 +308,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         except Exception as e:
             raise RuntimeError(
                 f"Failed to create CUTE tensors for {operation_name}: {e}"
-            )
+            ) from e
 
         # Get or compile kernel
         compiled_kernel = self._get_or_compile_kernel(
@@ -319,7 +321,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
             if self.debug_mode:
                 print(f"✓ Executed {operation_name} kernel successfully")
         except Exception as e:
-            raise RuntimeError(f"Failed to execute {operation_name} kernel: {e}")
+            raise RuntimeError(f"Failed to execute {operation_name} kernel: {e}") from e
 
         return output.squeeze(-1) if output.dim() > 2 else output
 
@@ -353,10 +355,10 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         # so we convert to CUTE format once and reuse to avoid redundant overhead
         try:
             expert_tokens_cute = self._create_cute_tensor(expert_tokens)
-        except Exception as e:
+        except BaseException as e:
             raise RuntimeError(
                 f"Failed to create CUTE tensor for expert {expert_idx} input: {e}"
-            )
+            ) from e
 
         # Gate projection - reuse the CUTE input tensor
         gate_out = self._execute_gemm_with_cute_input(
@@ -517,7 +519,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
         """Check if this strategy is available on the current system."""
         try:
             return CUTLASS_AVAILABLE and torch.cuda.is_available()
-        except:
+        except Exception:
             return False
 
 
