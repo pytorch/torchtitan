@@ -170,17 +170,8 @@ class DenseGemmKernel:
         ...     cluster_shape_mn=(2, 2)
         ... )
         >>> gemm(a_tensor, b_tensor, c_tensor, stream)
-    """
 
-    def __init__(
-        self,
-        acc_dtype: Type[cutlass.Numeric],
-        use_2cta_instrs: bool,
-        mma_tiler_mn: Tuple[int, int],
-        cluster_shape_mn: Tuple[int, int],
-        use_tma_store: bool,
-    ):
-        """Initializes the configuration for a Blackwell dense GEMM kernel.
+        Initializes the configuration for a Blackwell dense GEMM kernel.
 
         This configuration includes several key aspects:
 
@@ -206,7 +197,16 @@ class DenseGemmKernel:
         :type cluster_shape_mn: Tuple[int, int]
         :param use_tma_store: Use Tensor Memory Access (TMA) or normal store for output C tensor.
         :type use_tma_store: bool
-        """
+    """
+
+    def __init__(
+        self,
+        acc_dtype: Type[cutlass.Numeric],
+        use_2cta_instrs: bool,
+        mma_tiler_mn: Tuple[int, int],
+        cluster_shape_mn: Tuple[int, int],
+        use_tma_store: bool,
+    ):
 
         self.acc_dtype: Type[cutlass.Numeric] = acc_dtype
         self.use_2cta_instrs = use_2cta_instrs
@@ -450,7 +450,7 @@ class DenseGemmKernel:
             tmem_dealloc_mbar_ptr: cutlass.Int64
             tmem_holding_buf: cutlass.Int32
             # (EPI_TILE_M, EPI_TILE_N, STAGE)
-            sC: cute.struct.Align[
+            sC: cute.struct.Align[  # noqa: N815
                 cute.struct.MemRange[
                     self.c_dtype,
                     c_smem_size,
@@ -458,14 +458,14 @@ class DenseGemmKernel:
                 self.buffer_align_bytes,
             ]
             # (MMA, MMA_M, MMA_K, STAGE)
-            sA: cute.struct.Align[
+            sA: cute.struct.Align[  # noqa: N815
                 cute.struct.MemRange[
                     self.a_dtype, cute.cosize(self.a_smem_layout_staged.outer)
                 ],
                 self.buffer_align_bytes,
             ]
             # (MMA, MMA_N, MMA_K, STAGE)
-            sB: cute.struct.Align[
+            sB: cute.struct.Align[  # noqa: N815
                 cute.struct.MemRange[
                     self.b_dtype, cute.cosize(self.b_smem_layout_staged.outer)
                 ],
@@ -1522,7 +1522,9 @@ class DenseGemmKernel:
         """
         is_valid = True
 
-        def check_contigous_16B_alignment(dtype, is_mode0_major, tensor_shape):
+        def check_contigous_16B_alignment(  # noqa: N802
+            dtype, is_mode0_major, tensor_shape
+        ):  # noqa: N802
             major_mode_idx = 0 if is_mode0_major else 1
             num_major_elements = tensor_shape[major_mode_idx]
             num_contiguous_elements = 16 * 8 // dtype.width
@@ -1668,7 +1670,7 @@ def run_dense_gemm(
     """
     Prepare A/B/C tensors, launch GPU kernel, and reference checking.
     """
-    print(f"Running B100 Dense GEMM test with:")
+    print("Running B100 Dense GEMM test with:")
     print(f"mnkl: {mnkl}")
     print(f"AB dtype: {ab_dtype}, C dtype: {c_dtype}, Acc dtype: {acc_dtype}")
     print(f"Matrix majors - A: {a_major}, B: {b_major}, C: {c_major}")
@@ -1701,7 +1703,7 @@ def run_dense_gemm(
         c_major,
     ):
         raise TypeError(
-            f"Unsupported testcase {ab_dtype}, {acc_dtype}, {c_dtype}, {use_2cta_instrs}, {mma_tiler_mn}, {cluster_shape_mn}, {use_tma_store}, {m}, {n}, {k}, {l}, {a_major}, {b_major}, {c_major}"
+            f"Unsupported testcase {ab_dtype}, {acc_dtype}, {c_dtype}, {use_2cta_instrs}, {mma_tiler_mn}, {cluster_shape_mn}, {use_tma_store}, {m}, {n}, {k}, {l}, {a_major}, {b_major}, {c_major}"  # noqa: B950
         )
 
     if not torch.cuda.is_available():
@@ -1852,7 +1854,7 @@ if __name__ == "__main__":
         except ValueError:
             raise argparse.ArgumentTypeError(
                 "Invalid format. Expected comma-separated integers."
-            )
+            ) from None
 
     parser = argparse.ArgumentParser(
         description="Example of MxNxKxL GEMM on Blackwell."

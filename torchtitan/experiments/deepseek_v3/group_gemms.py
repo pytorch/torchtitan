@@ -52,8 +52,9 @@ try:
     import cuda.bindings.driver as cuda
     import cutlass
     import cutlass.cute as cute
-    import cutlass.torch as cutlass_torch
-    import cutlass.utils as utils
+
+    # import cutlass.torch as cutlass_torch
+    # import cutlass.utils as utils
     from cutlass.cute.runtime import from_dlpack
 
     from torchtitan.experiments.kernels.blackwell.cute_dense_gemm import DenseGemmKernel
@@ -131,12 +132,7 @@ class CuteDenseLoopingGroupGEMM(GroupGEMMStrategy):
     """
 
     def __init__(self, custom_activation):
-        """
-        Initialize the CuteDenseLoopingGroupGEMM.
 
-        Args:
-            custom_activation: Activation function to use
-        """
         super().__init__(custom_activation)
 
         # Kernel configuration
