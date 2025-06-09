@@ -567,6 +567,15 @@ class MoEBenchmark:
                 "num_experts": 32,
                 "top_k": 2,
             },
+            {
+                "name": "X-Large MoE",
+                "batch_size": 8,
+                "seq_len": 4096,
+                "hidden_size": 2048,
+                "intermediate_size": 4096,
+                "num_experts": 256,
+                "top_k": 6,
+            },
         ]
 
         all_passed = True
