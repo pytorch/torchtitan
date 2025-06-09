@@ -24,11 +24,6 @@ from torch.distributed.tensor.parallel import (
 )
 from torch.distributed.tensor.placement_types import Placement
 
-from torchtitan.experiments.kernels.moe.token_dispatcher import (
-    DefaultTokenDispatcher,
-    TorchAllToAllTokenDispatcher,
-)
-
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
@@ -185,35 +180,3 @@ class ExpertParallel(ParallelStyle):
             self._prepare_input_fn,
             self._prepare_output_fn,
         )
-
-
-class PrepareModuleInputOutputWithParams(PrepareModuleInputOutput):
-
-    def __init__(self, *args, **kwargs):
-        self.enable_tp2ep = kwargs.pop("enable_tp2ep", False)
-        super().__init__(*args, **kwargs)
-
-    def _partition_fn(
-        self,
-        name,
-        module,
-        device_mesh,
-    ):
-        for name, param in module.named_parameters(recurse=False):
-            dist_param = nn.Parameter(
-                distribute_tensor(param, device_mesh, [Replicate()]))
-            module.register_parameter(name, dist_param)
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        if hasattr(module, "token_dispatcher") and isinstance(
-                module.token_dispatcher, DefaultTokenDispatcher):
-            module.token_dispatcher = TorchAllToAllTokenDispatcher(
-                num_experts=module.num_experts,
-                ep_size=device_mesh.size(),
-                ep_group=device_mesh.get_group(),
-            )
-
-        super()._apply(module, device_mesh)
-        self._partition_fn("", module, device_mesh)
-
-        return module
