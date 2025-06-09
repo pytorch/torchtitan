@@ -129,8 +129,8 @@ class Float8Converter(ModelConverter):
                         return True
                 return False
             
-            config = MoETrainingConfig(module_filter_fn=moe_module_filter_fn)
-            quantize_(model, config=config)
+            config = MoETrainingConfig()
+            quantize_(model, config=config, filter_fn=moe_module_filter_fn)
             logger.info("Converted MoE to float8")
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
