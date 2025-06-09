@@ -3,7 +3,11 @@ name: CPU Unit Test
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
