@@ -3,10 +3,15 @@ name: 8 GPU Integration Test
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   schedule:
     # Runs every 6 hours
     - cron: '0 */6 * * *'
+
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
