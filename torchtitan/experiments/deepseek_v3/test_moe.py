@@ -7,17 +7,27 @@ This benchmark creates a realistic MoE layer and compares:
 2. Manual looping through experts (baseline)
 3. PyTorch grouped_mm (if available)
 
-Measures performance across different scales and expert utilization patterns.
+Uses Triton's do_bench for accurate GPU timing, with CUDA events as fallback.
 """
 
 import gc
 import math
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Import timing utilities
+try:
+    import triton.testing
+
+    HAS_TRITON_BENCH = True
+    print("✓ Triton do_bench available for accurate timing")
+except ImportError:
+    HAS_TRITON_BENCH = False
+    print("⚠️  Triton do_bench not available, using CUDA events")
 
 # Import CUTLASS components
 try:
@@ -27,10 +37,12 @@ try:
     import cutlass.torch as cutlass_torch
     import cutlass.utils as utils
 
-    # Import our strategy - UPDATE PATH AS NEEDED
-
     from cutlass.cute.runtime import from_dlpack
-    from group_gemms import CUTLASSGroupedGemmStrategy, ManualLoopGroupGEMM
+    from group_gemms import (
+        CUTLASSGroupedGemmStrategy,
+        GroupGEMMStrategy,
+        ManualLoopGroupGEMM,
+    )
 
     HAS_CUTLASS = True
     print("✓ CUTLASS and strategies imported successfully")
@@ -101,14 +113,14 @@ class SimpleMoELayer(nn.Module):
 
     def route_tokens(
         self, hidden_states: torch.Tensor
-    ) -> Tuple[torch.Tensor, List[int], List[int], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, List[int], torch.Tensor, torch.Tensor]:
         """
         Route tokens to experts using top-k selection
 
         Returns:
             contig_tokens: Tokens arranged contiguously by expert assignment
             m_sizes: Number of tokens assigned to each expert
-            m_offsets: Cumulative token offsets for each expert
+            m_offsets: Cumulative token offsets for each expert (as torch.Tensor)
             routing_weights: Weights for combining expert outputs
         """
         batch_size, seq_len, hidden_size = hidden_states.shape
@@ -163,12 +175,16 @@ class SimpleMoELayer(nn.Module):
                 0, hidden_size, dtype=self.dtype, device=hidden_states.device
             )
 
-        # Create offsets
-        m_offsets = []
+        # Create offsets as torch.Tensor (required for PyTorch grouped_mm)
+        m_offsets_list = []
         cumsum = 0
         for size in m_sizes:
             cumsum += size
-            m_offsets.append(cumsum)
+            m_offsets_list.append(cumsum)
+
+        m_offsets = torch.tensor(
+            m_offsets_list, dtype=torch.int32, device=hidden_states.device
+        )
 
         # Store routing info for output reconstruction
         self._routing_info = {
@@ -223,6 +239,44 @@ class MoEBenchmark:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.bfloat16
 
+        # Set timing method
+        if HAS_TRITON_BENCH:
+            self.timing_method = "triton"
+        else:
+            self.timing_method = "cuda_events"
+
+        # Get GPU architecture info
+        self.gpu_arch_info = self._get_gpu_arch_info()
+
+    def _get_gpu_arch_info(self):
+        """Get GPU architecture information"""
+        if not torch.cuda.is_available():
+            return {
+                "compute_capability": None,
+                "is_hopper": False,
+                "is_blackwell": False,
+            }
+
+        cap = torch.cuda.get_device_capability()
+        compute_capability = f"{cap[0]}.{cap[1]}"
+
+        return {
+            "compute_capability": compute_capability,
+            "is_hopper": cap[0] == 9,
+            "is_blackwell": cap[0] == 10,
+        }
+
+    def _is_pytorch_grouped_mm_available(self):
+        """Check if PyTorch grouped_mm is available and supported on this architecture"""
+        if not hasattr(torch, "_grouped_mm"):
+            return False
+
+        # Currently grouped_mm is only optimized for Hopper
+        if self.gpu_arch_info["is_blackwell"]:
+            return False
+
+        return True
+
     def create_test_data(
         self, batch_size: int, seq_len: int, hidden_size: int
     ) -> torch.Tensor:
@@ -251,24 +305,46 @@ class MoEBenchmark:
                     contig_tokens, m_sizes, m_offsets, moe_layer
                 )
 
-        torch.cuda.synchronize()
+        # Use triton.do_bench if available
+        if self.timing_method == "triton":
 
-        # Benchmark
-        start_time = time.time()
-
-        for _ in range(iterations):
-            contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(hidden_states)
-            if sum(m_sizes) > 0:
-                expert_outputs = strategy.execute(
-                    contig_tokens, m_sizes, m_offsets, moe_layer
+            def bench_fn():
+                contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(
+                    hidden_states
                 )
-            else:
-                expert_outputs = torch.empty(
-                    0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
-                )
+                if sum(m_sizes) > 0:
+                    expert_outputs = strategy.execute(
+                        contig_tokens, m_sizes, m_offsets, moe_layer
+                    )
+                else:
+                    expert_outputs = torch.empty(
+                        0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
+                    )
+                torch.cuda.synchronize()
 
-        torch.cuda.synchronize()
-        end_time = time.time()
+            ms_times = triton.testing.do_bench(bench_fn, warmup=3, rep=iterations)
+            avg_time = ms_times
+        else:
+            # Fall back to CUDA events
+            torch.cuda.synchronize()
+            start_time = time.time()
+
+            for _ in range(iterations):
+                contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(
+                    hidden_states
+                )
+                if sum(m_sizes) > 0:
+                    expert_outputs = strategy.execute(
+                        contig_tokens, m_sizes, m_offsets, moe_layer
+                    )
+                else:
+                    expert_outputs = torch.empty(
+                        0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
+                    )
+
+            torch.cuda.synchronize()
+            end_time = time.time()
+            avg_time = (end_time - start_time) / iterations * 1000  # ms
 
         # Final forward pass for output
         contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(hidden_states)
@@ -282,7 +358,6 @@ class MoEBenchmark:
             )
 
         final_output = moe_layer.reconstruct_output(expert_outputs)
-        avg_time = (end_time - start_time) / iterations * 1000  # ms
 
         return final_output, avg_time
 
@@ -303,24 +378,46 @@ class MoEBenchmark:
                     contig_tokens, m_sizes, m_offsets, moe_layer
                 )
 
-        torch.cuda.synchronize()
+        # Use triton.do_bench if available
+        if self.timing_method == "triton":
 
-        # Benchmark
-        start_time = time.time()
-
-        for _ in range(iterations):
-            contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(hidden_states)
-            if sum(m_sizes) > 0:
-                expert_outputs = strategy.execute(
-                    contig_tokens, m_sizes, m_offsets, moe_layer
+            def bench_fn():
+                contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(
+                    hidden_states
                 )
-            else:
-                expert_outputs = torch.empty(
-                    0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
-                )
+                if sum(m_sizes) > 0:
+                    expert_outputs = strategy.execute(
+                        contig_tokens, m_sizes, m_offsets, moe_layer
+                    )
+                else:
+                    expert_outputs = torch.empty(
+                        0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
+                    )
+                torch.cuda.synchronize()
 
-        torch.cuda.synchronize()
-        end_time = time.time()
+            ms_times = triton.testing.do_bench(bench_fn, warmup=3, rep=iterations)
+            avg_time = ms_times
+        else:
+            # Fall back to CUDA events
+            torch.cuda.synchronize()
+            start_time = time.time()
+
+            for _ in range(iterations):
+                contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(
+                    hidden_states
+                )
+                if sum(m_sizes) > 0:
+                    expert_outputs = strategy.execute(
+                        contig_tokens, m_sizes, m_offsets, moe_layer
+                    )
+                else:
+                    expert_outputs = torch.empty(
+                        0, moe_layer.hidden_size, dtype=self.dtype, device=self.device
+                    )
+
+            torch.cuda.synchronize()
+            end_time = time.time()
+            avg_time = (end_time - start_time) / iterations * 1000  # ms
 
         # Final forward pass for output
         contig_tokens, m_sizes, m_offsets, _ = moe_layer.route_tokens(hidden_states)
@@ -334,7 +431,6 @@ class MoEBenchmark:
             )
 
         final_output = moe_layer.reconstruct_output(expert_outputs)
-        avg_time = (end_time - start_time) / iterations * 1000  # ms
 
         return final_output, avg_time
 
@@ -345,14 +441,7 @@ class MoEBenchmark:
         iterations: int = 10,
     ) -> Tuple[torch.Tensor, float]:
         """Benchmark PyTorch _grouped_mm if available"""
-        # Check if _grouped_mm exists and we're on a supported device
         if not hasattr(torch, "_grouped_mm"):
-            return None, float("inf")
-
-        # Check if we're on Blackwell (compute capability 9.0)
-        device_props = torch.cuda.get_device_properties(hidden_states.device)
-        if device_props.major != 9:
-            print("  Skipping torch._grouped_mm: requires compute capability 9.0")
             return None, float("inf")
 
         # Warmup and benchmark similar to other methods
@@ -399,20 +488,18 @@ class MoEBenchmark:
     def _pytorch_grouped_mm_forward(
         self, moe_layer: SimpleMoELayer, tokens: torch.Tensor, m_offsets: List[int]
     ) -> torch.Tensor:
-        # Convert m_offsets list to tensor
-        m_offsets_tensor = torch.tensor(m_offsets, device=tokens.device)
-
+        """Simulate PyTorch grouped_mm forward pass"""
         # Gate and up projections
         gate_proj = torch._grouped_mm(
             tokens,
             moe_layer.gate_weights.transpose(-2, -1),
-            m_offsets_tensor,  # Use tensor instead of list
+            m_offsets,
             out_dtype=self.dtype,
         )
         up_proj = torch._grouped_mm(
             tokens,
             moe_layer.up_weights.transpose(-2, -1),
-            m_offsets_tensor,  # Use tensor instead of list
+            m_offsets,
             out_dtype=self.dtype,
         )
 
@@ -423,7 +510,7 @@ class MoEBenchmark:
         final_outputs = torch._grouped_mm(
             hidden_outputs,
             moe_layer.down_weights.transpose(-2, -1),
-            m_offsets_tensor,  # Use tensor instead of list
+            m_offsets,
             out_dtype=self.dtype,
         )
 
@@ -520,6 +607,7 @@ class MoEBenchmark:
                         f"  Routing: {total_tokens} tokens across {active_experts}/{config['num_experts']} experts"
                     )
                     print(f"  Expert loads: {m_sizes}")
+                    print(f"  Offsets (tensor): {m_offsets.tolist()}")
 
                 results = {}
 
@@ -529,7 +617,7 @@ class MoEBenchmark:
                     moe_layer, hidden_states
                 )
                 results["manual"] = (manual_output, manual_time)
-                print(f"    Time: {manual_time:.2f} ms")
+                print(f"    Time: {manual_time:.3f} ms")
 
                 # Benchmark CUTLASS strategy
                 if HAS_CUTLASS:
@@ -538,7 +626,7 @@ class MoEBenchmark:
                         moe_layer, hidden_states
                     )
                     results["cutlass"] = (cutlass_output, cutlass_time)
-                    print(f"    Time: {cutlass_time:.2f} ms")
+                    print(f"    Time: {cutlass_time:.3f} ms")
 
                     # Validate
                     print(f"\n  Validating CUTLASS vs Manual...")
@@ -546,49 +634,123 @@ class MoEBenchmark:
                         print(f"    ✓ Validation passed")
                         speedup = manual_time / cutlass_time
                         print(f"    Speedup: {speedup:.2f}x")
+
+                        if speedup > 1.1:
+                            print(f"    🚀 CUTLASS is faster!")
+                        elif speedup < 0.9:
+                            print(f"    ⚠️  CUTLASS is slower - may indicate an issue")
+                        else:
+                            print(f"    ≈ Performance is similar")
                     else:
                         print(f"    ✗ Validation failed")
                         all_passed = False
 
-                # Benchmark PyTorch grouped_mm
-                if hasattr(torch, "_grouped_mm"):
+                # Benchmark PyTorch grouped_mm (if available and supported)
+                if self._is_pytorch_grouped_mm_available():
                     print(f"\n  Benchmarking PyTorch grouped_mm...")
                     pytorch_output, pytorch_time = self.benchmark_pytorch_grouped_mm(
                         moe_layer, hidden_states
                     )
-                    results["pytorch"] = (pytorch_output, pytorch_time)
-                    print(f"    Time: {pytorch_time:.2f} ms")
-
                     if pytorch_output is not None:
+                        results["pytorch"] = (pytorch_output, pytorch_time)
+                        print(f"    Time: {pytorch_time:.3f} ms")
+
                         print(f"\n  Validating PyTorch vs Manual...")
                         if self.validate_outputs(manual_output, pytorch_output):
                             print(f"    ✓ Validation passed")
+                            speedup_pytorch = manual_time / pytorch_time
+                            print(f"    Speedup vs Manual: {speedup_pytorch:.2f}x")
                         else:
                             print(f"    ✗ Validation failed")
+                else:
+                    # Explain why PyTorch grouped_mm is not available
+                    if not hasattr(torch, "_grouped_mm"):
+                        print(
+                            f"\n  PyTorch grouped_mm not available (requires PyTorch 2.4+)"
+                        )
+                    elif self.gpu_arch_info["is_blackwell"]:
+                        print(
+                            f"\n  PyTorch grouped_mm disabled on Blackwell (Hopper-only currently)"
+                        )
+                    else:
+                        print(
+                            f"\n  PyTorch grouped_mm not available on this architecture"
+                        )
 
-                # Summary
-                print(f"\n  Performance Summary:")
-                print(f"    Manual Loop:     {results['manual'][1]:.2f} ms")
+                # Performance summary with timing method info
+                print(f"\n  Performance Summary ({self.timing_method} timing):")
+                print(f"    Manual Loop:     {results['manual'][1]:.3f} ms")
                 if "cutlass" in results:
-                    print(f"    CUTLASS Grouped: {results['cutlass'][1]:.2f} ms")
+                    speedup = results["manual"][1] / results["cutlass"][1]
+                    print(
+                        f"    CUTLASS Grouped: {results['cutlass'][1]:.3f} ms ({speedup:.2f}x)"
+                    )
                 if "pytorch" in results:
-                    print(f"    PyTorch grouped: {results['pytorch'][1]:.2f} ms")
+                    speedup_pytorch = results["manual"][1] / results["pytorch"][1]
+                    print(
+                        f"    PyTorch grouped: {results['pytorch'][1]:.3f} ms ({speedup_pytorch:.2f}x)"
+                    )
+                else:
+                    print(f"    PyTorch grouped: Not available")
 
-                # Calculate FLOPS
+                # Calculate FLOPS (more detailed)
                 total_tokens = config["batch_size"] * config["seq_len"]
-                # Approximate FLOPs: 2 * (gate + up + down projections)
+                # More accurate FLOP counting:
+                # Gate: tokens * hidden * intermediate * 2 (FMA)
+                # Up: tokens * hidden * intermediate * 2 (FMA)
+                # Down: tokens * intermediate * hidden * 2 (FMA)
                 flops_per_token = 2 * (
-                    config["hidden_size"] * config["intermediate_size"] * 2  # gate + up
-                    + config["intermediate_size"] * config["hidden_size"]
-                )  # down
-                total_flops = total_tokens * flops_per_token
+                    config["hidden_size"] * config["intermediate_size"]  # gate
+                    + config["hidden_size"] * config["intermediate_size"]  # up
+                    + config["intermediate_size"] * config["hidden_size"]  # down
+                )
+                total_flops = (
+                    total_tokens
+                    * flops_per_token
+                    * sum(1 for s in m_sizes if s > 0)
+                    / config["num_experts"]
+                )  # Adjust for active experts
+
+                print(f"\n  FLOPS Analysis:")
+                print(f"    Total FLOPs: {total_flops/1e9:.2f} GFLOP")
 
                 manual_tflops = total_flops / (results["manual"][1] * 1e-3) / 1e12
-                print(f"    Manual TFLOPS:   {manual_tflops:.2f}")
+                print(f"    Manual TFLOPS:   {manual_tflops:.3f}")
 
                 if "cutlass" in results:
                     cutlass_tflops = total_flops / (results["cutlass"][1] * 1e-3) / 1e12
-                    print(f"    CUTLASS TFLOPS:  {cutlass_tflops:.2f}")
+                    efficiency = cutlass_tflops / manual_tflops * 100
+                    print(
+                        f"    CUTLASS TFLOPS:  {cutlass_tflops:.3f} ({efficiency:.1f}% of manual)"
+                    )
+
+                if "pytorch" in results:
+                    pytorch_tflops = total_flops / (results["pytorch"][1] * 1e-3) / 1e12
+                    print(f"    PyTorch TFLOPS:  {pytorch_tflops:.3f}")
+
+                # Memory bandwidth analysis
+                total_params = (
+                    config["num_experts"]
+                    * config["hidden_size"]
+                    * config["intermediate_size"]
+                    * 2  # gate + up
+                    + config["num_experts"]
+                    * config["intermediate_size"]
+                    * config["hidden_size"]  # down
+                )
+                param_size_gb = total_params * 2 / 1e9  # BF16 = 2 bytes
+
+                print(f"\n  Memory Analysis:")
+                print(
+                    f"    Total parameters: {total_params/1e6:.1f}M ({param_size_gb:.2f} GB)"
+                )
+
+                manual_bandwidth = param_size_gb / (results["manual"][1] * 1e-3)
+                print(f"    Manual bandwidth: {manual_bandwidth:.1f} GB/s")
+
+                if "cutlass" in results:
+                    cutlass_bandwidth = param_size_gb / (results["cutlass"][1] * 1e-3)
+                    print(f"    CUTLASS bandwidth: {cutlass_bandwidth:.1f} GB/s")
 
             except Exception as e:
                 print(f"✗ {config['name']} failed: {e}")
@@ -616,11 +778,33 @@ def main():
     """Run the MoE benchmark"""
     benchmark = MoEBenchmark()
 
-    print("MoE Performance Benchmark")
+    print("MoE Performance Benchmark with Accurate GPU Timing")
     print(f"Device: {benchmark.device}")
     print(f"Dtype: {benchmark.dtype}")
+    print(f"Timing Method: {benchmark.timing_method}")
     print(f"CUTLASS Available: {HAS_CUTLASS}")
-    print(f"PyTorch grouped_mm Available: {hasattr(torch, '_grouped_mm')}")
+    print(
+        f"PyTorch grouped_mm Available: {benchmark._is_pytorch_grouped_mm_available()}"
+    )
+
+    # Show architecture-specific information
+    if torch.cuda.is_available():
+        arch_info = benchmark.gpu_arch_info
+        if arch_info["is_blackwell"]:
+            print(
+                f"🚫 PyTorch grouped_mm disabled on Blackwell (compute capability {arch_info['compute_capability']})"
+            )
+        elif arch_info["is_hopper"]:
+            print(
+                f"✅ PyTorch grouped_mm available on Hopper (compute capability {arch_info['compute_capability']})"
+            )
+
+    if benchmark.timing_method == "triton":
+        print("🎯 Using Triton do_bench for most accurate GPU timing")
+    elif benchmark.timing_method == "cuda_events":
+        print("⏱️  Using CUDA events for accurate GPU timing")
+    else:
+        print("⚠️  Using CPU timing - results may be less accurate")
 
     success = benchmark.run_benchmark_suite()
     return 0 if success else 1
