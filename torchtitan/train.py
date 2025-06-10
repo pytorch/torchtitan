@@ -228,7 +228,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
-            model = model.to(torch.bfloat16)
             model.train()
 
             self.model_parts = [model]
