@@ -119,7 +119,7 @@ class Float8Converter(ModelConverter):
         # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
         if self.moe_fqns:
             from torchao.quantization.quant_api import quantize_
-            from torchao.prototype.scaled_grouped_mm.conversion_utils import (
+            from torchao.prototype.moe_training.conversion_utils import (
                 MoETrainingConfig,
             )
 
