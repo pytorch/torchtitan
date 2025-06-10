@@ -7,7 +7,7 @@
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -122,6 +122,26 @@ def _distribute_dtensor(
         ),
         requires_grad=tensor.requires_grad,
     )
+
+
+def _register_parametrization(
+    module: nn.Module, param_names: List[str], parametrization: nn.Module
+):
+    """
+    it works with state_dict without incurring parametrization calls because
+    state_dict accesses parameters directly from self._parameters, not from getters
+    https://github.com/pytorch/pytorch/blob/main/torch/nn/modules/module.py#L2141
+    """
+    param_name_to_property = {
+        param_name: property(lambda self: parametrization(self._parameters[param_name]))
+        for param_name in param_names
+    }
+    module_cls = type(
+        f"FSDP{module.__class__.__name__}",
+        (module.__class__,),
+        param_name_to_property,
+    )
+    module.__class__ = module_cls
 
 
 def fsdp_policy():
@@ -263,18 +283,32 @@ def data_parallel(
                         distribute_tensor_func(p, device_mesh, param_sharding)
                     ),
                 )
-                nn.utils.parametrize.register_parametrization(
-                    mod,
-                    p_name,
-                    ReplicateComputation(
-                        device_mesh,
-                        param_sharding,
-                        mode,
-                        regional_ac,
-                        mp_policy=mp_policy,
-                        tp_mesh=tp_mesh,
-                    ),
-                    unsafe=True,
-                )
+                # to be compatible with DCP, we use a customized _register_parametrization
+                # instead of nn.utils.parametrize.register_parametrization here
+                # nn.utils.parametrize.register_parametrization(
+                #     mod,
+                #     p_name,
+                #     ReplicateComputation(
+                #         device_mesh,
+                #         param_sharding,
+                #         mode,
+                #         regional_ac,
+                #         mp_policy=mp_policy,
+                #         tp_mesh=tp_mesh,
+                #     ),
+                #     unsafe=True,
+                # )
 
+        _register_parametrization(
+            mod,
+            list(params_dict.keys()),
+            ReplicateComputation(
+                device_mesh,
+                param_sharding,
+                mode,
+                regional_ac,
+                mp_policy=mp_policy,
+                tp_mesh=tp_mesh,
+            ),
+        )
     return model
