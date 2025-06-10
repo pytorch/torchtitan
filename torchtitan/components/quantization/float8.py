@@ -119,6 +119,7 @@ class Float8Converter(ModelConverter):
         # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
         if self.moe_fqns:
             from torchao.quantization.quant_api import quantize_
+
             try:
                 from torchao.prototype.moe_training.conversion_utils import (
                     MoETrainingConfig,
@@ -126,14 +127,14 @@ class Float8Converter(ModelConverter):
             except ImportError as e:
                 raise ImportError(
                     "torchao installation does not have MoE training support. Please install torchao nightly build."
-                )
+                ) from e
 
             def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
                 for target_fqn in self.moe_fqns:
                     if target_fqn in cur_fqn:
                         return True
                 return False
-            
+
             config = MoETrainingConfig()
             quantize_(model, config=config, filter_fn=moe_module_filter_fn)
             logger.info("Converted MoE to float8")
