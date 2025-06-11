@@ -126,8 +126,15 @@ class Optimizer:
     lr: float = 8e-4
     """Learning rate to use"""
 
+    beta1: float = 0.9
+    beta2: float = 0.95
+    """Exponential moving average hyperparameters to use"""
+
     eps: float = 1e-8
     """Epsilon value to use"""
+
+    weight_decay: float = 0.1
+    """Weight decay to use"""
 
     implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     """
