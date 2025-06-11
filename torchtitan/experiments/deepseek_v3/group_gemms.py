@@ -68,6 +68,10 @@ except ImportError as e:
     print(f"✗ Import failed: {e}")
     print("Using PyTorch fallback implementations only")
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # Strategy base class for GroupGEMM implementations
 class GroupGEMMStrategy:
@@ -184,6 +188,565 @@ class ManualLoopGroupGEMM(GroupGEMMStrategy):
 
 
 class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
+    """Fixed CUTLASS GroupedGemmKernel implementation"""
+
+    def __init__(self, custom_activation):
+        super().__init__(custom_activation)
+        self.dtype_torch = torch.bfloat16
+        self.dtype_cutlass = cutlass.BFloat16
+        self.acc_dtype = cutlass.Float32
+        self.mma_tiler_m = 128  # can only be 128 or 256
+        self.mma_tiler_n = 64  # can only be 64 or 128
+
+        print("Initializing CUTLASS GroupedGemmKernel")
+
+        # Kernel configuration
+        self.grouped_gemm = GroupedGemmKernel(
+            acc_dtype=self.acc_dtype,
+            use_2cta_instrs=False,
+            mma_tiler_mn=(self.mma_tiler_m, self.mma_tiler_n),
+            cluster_shape_mn=(1, 1),
+            tensormap_update_mode=utils.TensorMapUpdateMode.SMEM,
+        )
+
+        # Hardware info
+        self.hardware_info = utils.HardwareInfo()
+        self.max_active_clusters = self.hardware_info.get_max_active_clusters(1)
+
+        # Buffers
+        self._tensormap_buffers = {}
+        self._compiled_kernels = {}
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """Prepare expert weights for CUTLASS grouped GEMM"""
+        # Stack weights: [num_experts, out_dim, in_dim]
+        combined_weights = torch.stack(all_weights)
+        print(f"CUTLASS arranged weights {submod_name}: {combined_weights.shape}")
+        return combined_weights
+
+    def _create_tensor_metadata(self, tokens, w_gate, w_up, w_down, m_sizes, device):
+        """Create the metadata tensors required by CUTLASS GroupedGEMM"""
+        # Filter out empty groups and create contiguous data
+        valid_groups = []
+        problem_sizes = []
+        strides_abc = []
+        ptrs_abc = []
+        output_tensors = []
+
+        offset = 0
+        for expert_idx, size in enumerate(m_sizes):
+            if size > 0:
+                # Get input tokens for this expert
+                expert_tokens = tokens[offset : offset + size].contiguous()
+
+                # Get weights for this expert
+                gate_weight = w_gate[
+                    expert_idx
+                ].contiguous()  # [intermediate_size, hidden_size]
+                up_weight = w_up[expert_idx].contiguous()
+                down_weight = w_down[
+                    expert_idx
+                ].contiguous()  # [hidden_size, intermediate_size]
+
+                # Create tensors for each GEMM operation in MoE forward pass
+                M = size  # Number of tokens for this expert
+                K_in = expert_tokens.shape[1]  # hidden_size
+                N_intermediate = gate_weight.shape[0]  # intermediate_size
+                N_out = down_weight.shape[0]  # hidden_size (output)
+                L = 1  # Batch dimension
+
+                # Store group info
+                group_info = {
+                    "expert_idx": expert_idx,
+                    "tokens": expert_tokens,
+                    "gate_weight": gate_weight,
+                    "up_weight": up_weight,
+                    "down_weight": down_weight,
+                    "M": M,
+                    "K_in": K_in,
+                    "N_intermediate": N_intermediate,
+                    "N_out": N_out,
+                }
+                valid_groups.append(group_info)
+
+                # For gate projection: A=[M,K], B=[N,K], C=[M,N]
+                # CUTLASS expects B in [N,K] format (already correct)
+                gate_A = expert_tokens  # [M, K_in]
+                gate_B = gate_weight  # [N_intermediate, K_in]
+                gate_C = torch.empty(
+                    M, N_intermediate, dtype=self.dtype_torch, device=device
+                )
+
+                problem_sizes.append([M, N_intermediate, K_in, L])
+                strides_abc.append(
+                    [
+                        [gate_A.stride(0), gate_A.stride(1)],  # A strides
+                        [gate_B.stride(0), gate_B.stride(1)],  # B strides
+                        [gate_C.stride(0), gate_C.stride(1)],  # C strides
+                    ]
+                )
+                ptrs_abc.append(
+                    [gate_A.data_ptr(), gate_B.data_ptr(), gate_C.data_ptr()]
+                )
+                output_tensors.append(gate_C)
+
+                # For up projection: same dimensions as gate
+                up_A = expert_tokens  # [M, K_in]
+                up_B = up_weight  # [N_intermediate, K_in]
+                up_C = torch.empty(
+                    M, N_intermediate, dtype=self.dtype_torch, device=device
+                )
+
+                problem_sizes.append([M, N_intermediate, K_in, L])
+                strides_abc.append(
+                    [
+                        [up_A.stride(0), up_A.stride(1)],
+                        [up_B.stride(0), up_B.stride(1)],
+                        [up_C.stride(0), up_C.stride(1)],
+                    ]
+                )
+                ptrs_abc.append([up_A.data_ptr(), up_B.data_ptr(), up_C.data_ptr()])
+                output_tensors.append(up_C)
+
+            offset += size
+
+        if not valid_groups:
+            return None, None, None, None, None
+
+        # Convert to tensors
+        problem_sizes_tensor = torch.tensor(
+            problem_sizes, dtype=torch.int32, device=device
+        )
+        strides_tensor = torch.tensor(strides_abc, dtype=torch.int32, device=device)
+        ptrs_tensor = torch.tensor(ptrs_abc, dtype=torch.int64, device=device)
+
+        # Convert to CUTE tensors
+        problem_sizes_cute = from_dlpack(problem_sizes_tensor, assumed_align=16)
+        strides_cute = from_dlpack(strides_tensor, assumed_align=16)
+        ptrs_cute = from_dlpack(ptrs_tensor, assumed_align=16)
+
+        return problem_sizes_cute, strides_cute, ptrs_cute, valid_groups, output_tensors
+
+    def _create_initial_tensors(self, tokens, weights, device):
+        """Create initial tensors for tensormap setup"""
+        # Use smallest problem size for initial setup
+        M, K = 128, tokens.shape[1]  # TODO - this is hardcoded for now
+        N = weights.shape[1]
+
+        A_init = torch.randn(M, K, dtype=self.dtype_torch, device=device)
+        B_init = torch.randn(
+            N, K, dtype=self.dtype_torch, device=device
+        )  # Note: N,K format
+        C_init = torch.zeros(M, N, dtype=self.dtype_torch, device=device)
+
+        # Convert to MNKL format and mark dynamic
+        A_mnkl = A_init.unsqueeze(-1).contiguous()
+        B_mnkl = B_init.unsqueeze(-1).contiguous()
+        C_mnkl = C_init.unsqueeze(-1).contiguous()
+
+        A_cute = from_dlpack(A_mnkl, assumed_align=16)
+        B_cute = from_dlpack(B_mnkl, assumed_align=16)
+        C_cute = from_dlpack(C_mnkl, assumed_align=16)
+
+        # Set CUTLASS data types
+        A_cute.element_type = self.dtype_cutlass
+        B_cute.element_type = self.dtype_cutlass
+        C_cute.element_type = self.dtype_cutlass
+
+        # Mark layouts as dynamic
+        A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
+        B_cute = B_cute.mark_layout_dynamic(leading_dim=1)
+        C_cute = C_cute.mark_layout_dynamic(leading_dim=1)
+
+        return A_cute, B_cute, C_cute
+
+    def _setup_tensormap_buffer(self, num_groups, device):
+        """Setup tensormap buffer for CUTLASS"""
+        cache_key = (num_groups, device)
+
+        if cache_key not in self._tensormap_buffers:
+            sm_count = self.hardware_info.get_max_active_clusters(1)
+
+            tensormap_tensor = torch.zeros(
+                (sm_count, 3, 128 // 8),  # 3 tensormaps (A, B, C), 128 bytes each
+                dtype=torch.int64,
+                device=device,
+            )
+            self._tensormap_buffers[cache_key] = from_dlpack(
+                tensormap_tensor, assumed_align=16
+            )
+
+        return self._tensormap_buffers[cache_key]
+
+    def _compute_total_clusters(self, problem_sizes, cluster_shape_mn=(1, 1)):
+        """Compute total number of clusters needed"""
+        cluster_tile_m = self.mma_tiler_m  # mma_tiler_mn[0]
+        cluster_tile_n = self.mma_tiler_n  # mma_tiler_mn[1]
+
+        total = 0
+        for m, n, k, l in problem_sizes:
+            clusters_m = (m + cluster_tile_m - 1) // cluster_tile_m
+            clusters_n = (n + cluster_tile_n - 1) // cluster_tile_n
+            total += clusters_m * clusters_n
+
+        return total
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        """Execute the complete MoE forward pass using CUTLASS grouped GEMM"""
+        try:
+            # Get weights
+            w_gate = module.get_parameter("gate_proj_weight")
+            w_up = module.get_parameter("up_proj_weight")
+            w_down = module.get_parameter("down_proj_weight")
+
+            device = contig_tokens.device
+            num_valid_experts = len([s for s in m_sizes if s > 0])
+
+            if num_valid_experts == 0:
+                return torch.zeros_like(contig_tokens)
+
+            logger.info(f"CUTLASS executing with {num_valid_experts} experts")
+
+            # 1: Create metadata for gate and up projections (in theory, this can be batched)
+            gate_up_metadata = self._create_tensor_metadata(
+                contig_tokens, w_gate, w_up, w_down, m_sizes, device
+            )
+
+            if gate_up_metadata[0] is None:
+                return torch.zeros_like(contig_tokens)
+
+            (
+                problem_sizes_cute,
+                strides_cute,
+                ptrs_cute,
+                valid_groups,
+                gate_up_outputs,
+            ) = gate_up_metadata
+
+            # 2: Create initial tensors for tensormap setup
+            first_group = valid_groups[0]
+            initial_A, initial_B, initial_C = self._create_initial_tensors_from_group(
+                first_group, device
+            )
+
+            # 3: Setup tensormap buffer
+            num_operations = len(gate_up_outputs)  # gate + up operations
+            tensormap_cute = self._setup_tensormap_buffer(num_operations, device)
+
+            # 4: Compute total clusters and setup kernel
+            total_clusters = self._compute_total_clusters_from_metadata(
+                problem_sizes_cute
+            )
+
+            # 5: Execute gate and up projections
+            gate_up_results = self._execute_cutlass_grouped_gemm(
+                initial_A,
+                initial_B,
+                initial_C,
+                num_operations,
+                problem_sizes_cute,
+                strides_cute,
+                ptrs_cute,
+                total_clusters,
+                tensormap_cute,
+            )
+
+            if gate_up_results is None:
+                logger.warning(
+                    "CUTLASS kernel execution failed, falling back to manual"
+                )
+                return self._manual_fallback_full(
+                    contig_tokens, m_sizes, w_gate, w_up, w_down
+                )
+
+            # 6: Apply activation and combine gate/up results
+            intermediate_results = self._apply_activation_and_combine(
+                gate_up_outputs, valid_groups
+            )
+
+            # 7: Execute down projections
+            final_output = self._execute_down_projections(
+                intermediate_results, valid_groups, device
+            )
+
+            # 8: Reconstruct full output tensor
+            return self._reconstruct_output(final_output, m_sizes, contig_tokens)
+
+        except Exception as e:
+            print(f"CUTLASS execution failed: {e}")
+            assert (
+                False
+            ), "CUTLASS execution failed...could fall back to manual here but lets review first"
+            # Fall back to manual implementation
+            return self._manual_fallback_full(
+                contig_tokens, m_sizes, w_gate, w_up, w_down
+            )
+
+    def _create_initial_tensors_from_group(self, group_info, device):
+        """Create initial CUTE tensors from group information"""
+        M, K_in, N_intermediate = (
+            group_info["M"],
+            group_info["K_in"],
+            group_info["N_intermediate"],
+        )
+
+        # Create initial tensors with proper dimensions
+        A_init = torch.randn(M, K_in, dtype=self.dtype_torch, device=device)
+        B_init = torch.randn(
+            N_intermediate, K_in, dtype=self.dtype_torch, device=device
+        )
+        C_init = torch.zeros(M, N_intermediate, dtype=self.dtype_torch, device=device)
+
+        # Convert to MNKL format and mark dynamic
+        A_mnkl = A_init.unsqueeze(-1).contiguous()
+        B_mnkl = B_init.unsqueeze(-1).contiguous()
+        C_mnkl = C_init.unsqueeze(-1).contiguous()
+
+        A_cute = from_dlpack(A_mnkl, assumed_align=16)
+        B_cute = from_dlpack(B_mnkl, assumed_align=16)
+        C_cute = from_dlpack(C_mnkl, assumed_align=16)
+
+        # Set CUTLASS data types
+        A_cute.element_type = self.dtype_cutlass
+        B_cute.element_type = self.dtype_cutlass
+        C_cute.element_type = self.dtype_cutlass
+
+        # Mark layouts as dynamic
+        A_cute = A_cute.mark_layout_dynamic(leading_dim=1)
+        B_cute = B_cute.mark_layout_dynamic(leading_dim=1)
+        C_cute = C_cute.mark_layout_dynamic(leading_dim=1)
+
+        return A_cute, B_cute, C_cute
+
+    def _compute_total_clusters_from_metadata(self, problem_sizes_cute):
+        """Compute total clusters from problem sizes metadata"""
+        # Convert CUTE tensor back to Python list for computation
+        problem_sizes_data = (
+            problem_sizes_cute.data
+        )  # TODO - how to extract this directly from CUTE tensor
+        problem_sizes_torch = torch.tensor(
+            problem_sizes_data, dtype=torch.int32, device=device
+        )
+
+        problem_sizes_torch = problem_sizes_cute.to_torch_tensor()
+        total = 0
+
+        cluster_tile_m = 128  # From mma_tiler_mn[0]
+        cluster_tile_n = 64  # From mma_tiler_mn[1]
+
+        for i in range(problem_sizes_torch.shape[0]):
+            m, n, k, l = problem_sizes_torch[i].tolist()
+            clusters_m = (m + cluster_tile_m - 1) // cluster_tile_m
+            clusters_n = (n + cluster_tile_n - 1) // cluster_tile_n
+            total += clusters_m * clusters_n
+
+        return total
+
+    def _execute_cutlass_grouped_gemm(
+        self,
+        initial_A,
+        initial_B,
+        initial_C,
+        num_groups,
+        problem_sizes_cute,
+        strides_cute,
+        ptrs_cute,
+        total_clusters,
+        tensormap_cute,
+    ):
+        """Execute the CUTLASS grouped GEMM kernel"""
+        try:
+            # Setup CUDA stream
+            torch_stream = torch.cuda.current_stream()
+            stream = cuda.CUstream(torch_stream.cuda_stream)
+
+            # Compile kernel if not already cached
+            cache_key = (num_groups, total_clusters)
+            if cache_key not in self._compiled_kernels:
+                logger.info(
+                    f"Compiling CUTLASS kernel for {num_groups} groups, {total_clusters} clusters"
+                )
+
+                self._compiled_kernels[cache_key] = cute.compile(
+                    self.grouped_gemm,
+                    initial_A,
+                    initial_B,
+                    initial_C,
+                    num_groups,
+                    problem_sizes_cute,
+                    strides_cute,
+                    ptrs_cute,
+                    total_clusters,
+                    tensormap_cute,
+                    self.max_active_clusters,
+                    stream,
+                )
+
+                logger.info("CUTLASS kernel compilation successful")
+
+            compiled_kernel = self._compiled_kernels[cache_key]
+
+            # Execute kernel
+            logger.info(f"Executing CUTLASS grouped GEMM kernel")
+            compiled_kernel(
+                initial_A,
+                initial_B,
+                initial_C,
+                problem_sizes_cute,
+                strides_cute,
+                ptrs_cute,
+                tensormap_cute,
+                stream,
+            )
+
+            # Synchronize to ensure completion
+            torch.cuda.synchronize()
+            logger.info("CUTLASS kernel execution completed")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"CUTLASS kernel execution failed: {e}")
+            return None
+
+    def _apply_activation_and_combine(self, gate_up_outputs, valid_groups):
+        """Apply activation function and combine gate/up projection results"""
+        intermediate_results = []
+
+        # gate_up_outputs contains interleaved gate and up results
+        for i in range(0, len(gate_up_outputs), 2):
+            gate_output = gate_up_outputs[i]
+            up_output = gate_up_outputs[i + 1]
+
+            # Apply activation to gate output and multiply with up output
+            activated_gate = self.activation_function(gate_output)
+            combined = activated_gate * up_output
+
+            intermediate_results.append(combined)
+
+        return intermediate_results
+
+    def _execute_down_projection(self, hidden_states, w_down, m_sizes, device):
+        """Execute down projection using grouped GEMM"""
+        problem_sizes = []
+        strides_abc = []
+        ptrs_abc = []
+        down_outputs = []
+
+        expert_idx = 0
+        for size in m_sizes:
+            if size > 0 and expert_idx < len(hidden_states):
+                hidden = hidden_states[expert_idx]
+                down_weight = w_down[
+                    expert_idx
+                ].contiguous()  # [hidden_size, intermediate_size]
+
+                M, K = hidden.shape
+                N = down_weight.shape[0]  # hidden_size
+                L = 1
+
+                # Create output tensor
+                down_output = torch.empty(M, N, dtype=self.dtype_torch, device=device)
+
+                # Convert to MNKL format (following bench_group_gemm.py)
+                hidden_mnkl = hidden.unsqueeze(-1).contiguous()  # (M, K, 1)
+                down_weight_mnkl = down_weight.unsqueeze(-1).contiguous()  # (N, K, 1)
+                down_output_mnkl = down_output.unsqueeze(-1).contiguous()  # (M, N, 1)
+
+                # Extract 2D strides from MNKL tensors (following bench_group_gemm.py)
+                hidden_strides = hidden_mnkl.stride()[:2]
+                down_weight_strides = down_weight_mnkl.stride()[:2]
+                down_output_strides = down_output_mnkl.stride()[:2]
+
+                # Down projection metadata
+                problem_sizes.append([M, N, K, L])
+                strides_abc.append(
+                    [
+                        list(hidden_strides),  # A strides
+                        list(down_weight_strides),  # B strides
+                        list(down_output_strides),  # C strides
+                    ]
+                )
+                ptrs_abc.append(
+                    [hidden.data_ptr(), down_weight.data_ptr(), down_output.data_ptr()]
+                )
+
+                down_outputs.append(down_output)
+                expert_idx += 1
+
+        if not problem_sizes:
+            return []
+
+        # Execute grouped GEMM for down projection
+        self._execute_grouped_gemm(problem_sizes, strides_abc, ptrs_abc, device)
+
+        return down_outputs
+
+    def _reconstruct_output(self, final_outputs, m_sizes, contig_tokens):
+        """Reconstruct the full output tensor from expert results"""
+        total_tokens = sum(m_sizes)
+        hidden_size = (
+            final_outputs[0].shape[1] if final_outputs else contig_tokens.shape[1]
+        )
+
+        output = torch.zeros(
+            total_tokens,
+            hidden_size,
+            dtype=contig_tokens.dtype,
+            device=contig_tokens.device,
+        )
+
+        output_idx = 0
+        result_idx = 0
+
+        for size in m_sizes:
+            if size > 0:
+                if result_idx < len(final_outputs):
+                    output[output_idx : output_idx + size] = final_outputs[result_idx]
+                    result_idx += 1
+                output_idx += size
+
+        return output
+
+    def _manual_fallback_full(self, tokens, m_sizes, w_gate, w_up, w_down):
+        """Complete manual fallback implementation"""
+        total_tokens = sum(m_sizes)
+        hidden_size = w_gate.shape[2] if len(w_gate.shape) > 2 else w_gate.shape[1]
+
+        output = torch.zeros(
+            total_tokens, hidden_size, dtype=tokens.dtype, device=tokens.device
+        )
+
+        offset = 0
+        expert_idx = 0
+
+        for size in m_sizes:
+            if size > 0:
+                if expert_idx < w_gate.shape[0]:  # Check bounds
+                    expert_tokens = tokens[offset : offset + size]
+
+                    # Forward pass through expert
+                    gate_out = torch.mm(expert_tokens, w_gate[expert_idx].t())
+                    up_out = torch.mm(expert_tokens, w_up[expert_idx].t())
+                    hidden = self.activation_function(gate_out) * up_out
+                    expert_output = torch.mm(hidden, w_down[expert_idx].t())
+
+                    output[offset : offset + size] = expert_output
+                    expert_idx += 1
+
+            offset += size
+
+        return output
+
+    @staticmethod
+    def is_available() -> bool:
+        return CUTLASS_AVAILABLE
+
+
+# ========================= end of CUTLASSGroupedGemmStrategy =========================
+
+
+class CUTLASSGroupedGemmStrategy_prev(GroupGEMMStrategy):
     """
     Strategy using CUTLASS GroupedGemmKernel for group GEMM operations
 
