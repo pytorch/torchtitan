@@ -68,7 +68,7 @@ This parameter takes a list of string that should be excluded from loading.
 ```
 [checkpoint]
 enable_checkpoint = true
-exclude_from_loading = ["data_loader" , "lr_scheduler"]
+exclude_from_loading = ["data_loader", "lr_scheduler"]
 ```
 When used in command line, the parameter should be a comma-separated list of strings. For example: `--checkpoint.exclude_from_loading data_loader,lr_scheduler`.
 
