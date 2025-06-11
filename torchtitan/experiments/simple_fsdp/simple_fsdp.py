@@ -128,9 +128,11 @@ def _register_parametrization(
     module: nn.Module, param_names: List[str], parametrization: nn.Module
 ):
     """
-    it works with state_dict without incurring parametrization calls because
+    It works with state_dict without incurring parametrization calls because
     state_dict accesses parameters directly from self._parameters, not from getters
     https://github.com/pytorch/pytorch/blob/main/torch/nn/modules/module.py#L2141
+    TODO: In checkpoint saving/loading, avoid parametrization calls when calling
+    get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
     """
     param_name_to_property = {
         param_name: property(lambda self: parametrization(self._parameters[param_name]))
