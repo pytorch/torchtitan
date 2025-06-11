@@ -805,11 +805,11 @@ def main():
             )
         elif arch_info["is_hopper"]:
             print(
-                f"✅ PyTorch grouped_mm available on Hopper (compute capability {arch_info['compute_capability']})"
+                f" PyTorch grouped_mm available on Hopper (compute capability {arch_info['compute_capability']})"
             )
 
     if benchmark.timing_method == "triton":
-        print("🎯 Using Triton do_bench for most accurate GPU timing")
+        print("Using Triton do_bench for GPU timing")
     elif benchmark.timing_method == "cuda_events":
         print("⏱️  Using CUDA events for accurate GPU timing")
     else:

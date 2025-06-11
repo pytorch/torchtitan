@@ -225,9 +225,9 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         (4, 4),
     ]
 
-    SINGLE_CTA_M_SIZES = [64, 128]
-    DUAL_CTA_M_SIZES = [128, 256]
-    N_SIZE_RANGE = range(32, 257, 32)
+    SINGLE_CTA_M_SIZES = [128, 64]
+    DUAL_CTA_M_SIZES = [256, 128]
+    N_SIZE_RANGE = range(32, 257, 32)  # 32 - 256, step 32
 
     DTYPE_TORCH = torch.bfloat16
     DTYPE_CUTLASS = cutlass.BFloat16
@@ -239,16 +239,16 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
     def __init__(
         self,
         custom_activation,
-        use_2cta_instrs=False,
-        mma_tiler_mn=None,
-        cluster_shape_mn=None,
+        use_2cta_instrs=True,
+        mma_tiler_mn=(256, 128),
+        cluster_shape_mn=(2, 2),
     ):
         """
         Initialize the CUTLASS grouped GEMM strategy for Blackwell architecture.
 
         Args:
             custom_activation: The activation function to use
-            use_2cta_instrs (bool): Whether to use 2 CTA instructions for enhanced performance
+            use_2cta_instrs (bool): Whether to use 2 CTA instructions
             mma_tiler_mn (tuple, optional): MMA tile shape (M, N). If None, uses Blackwell-optimized defaults
             cluster_shape_mn (tuple, optional): Cluster shape (M, N). If None, uses optimized defaults
         """
@@ -260,7 +260,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         self.cluster_shape_mn = cluster_shape_mn or self._get_default_cluster_shape()
 
         # Validate configurations
-        self._validate_configurations()
+        # self._validate_configurations()
 
         # Initialize kernel and hardware info
         self._initialize_kernel()
@@ -270,11 +270,11 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         self._compiled_kernels = {}
         self._tensormap_buffers = {}
 
-        self._log_initialization()
+        # self._log_initialization()
 
     def _get_default_mma_tiler(self):
         """Get default MMA tiler configuration based on CTA mode."""
-        return (256, 128) if self.use_2cta_instrs else (128, 128)
+        return (256, 128) if self.use_2cta_instrs else (128, 64)
 
     def _get_default_cluster_shape(self):
         """Get default cluster shape based on CTA mode."""
@@ -345,7 +345,9 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
             )
 
     def _log_initialization(self):
-        """Log initialization information."""
+        """Log initialization information.
+        I'm using print instead of logger b/c of cross talk from the cute dsl compiler logging
+        """
         cluster_size = self.cluster_shape_mn[0] * self.cluster_shape_mn[1]
         print(f"Initialized CUTLASSGroupedGemmStrategy for Blackwell with:")
         print(f"  - 2 CTA instructions: {self.use_2cta_instrs}")
@@ -353,7 +355,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         print(f"  - Cluster shape (M, N): {self.cluster_shape_mn}")
         print(f"  - Cluster size: {cluster_size}")
         if cluster_size > 1:
-            print(f"  - Using multi-cluster parallelism for enhanced performance")
+            print(f"  - Using multi-CTA cluster parallelism ")
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
         """Store weights in stacked format."""
