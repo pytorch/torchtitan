@@ -64,12 +64,13 @@ python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outp
 
 7. EXCLUDING SPECIFIC KEYS FROM CHECKPOINT LOADING
 In some cases, you may want to partially load from a previous-trained checkpoint and modify certain settings, such as the number of GPUs or the current step. To achieve this, you can use the `exclude_from_loading` parameter to specify which keys should be excluded from loading.
-This parameter takes a comma-separated list of keys that should be excluded from loading.
+This parameter takes a list of string that should be excluded from loading.
 ```
 [checkpoint]
 enable_checkpoint = true
-exclude_from_loading = "data_loader,lr_scheduler"
+exclude_from_loading = ["data_loader", "lr_scheduler"]
 ```
+When used in command line, the parameter should be a comma-separated list of strings. For example: `--checkpoint.exclude_from_loading data_loader,lr_scheduler`.
 
 That's it. You have now successfully converted a sharded torchtitan checkpoint for use in torchtune.
 
