@@ -101,7 +101,7 @@ async def async_main(job_config: JobConfig):
         gpus=world_size,
         env={
             "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12358",
+            "MASTER_PORT": "12359",
         },
     )
     print(job_config)
