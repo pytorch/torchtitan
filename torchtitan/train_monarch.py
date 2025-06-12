@@ -59,6 +59,7 @@ class TrainerActorWrapper(Actor):
         self.job_config = job_config
         self.rank = current_rank().rank
         pretend_you_are_torchrun(self.rank)
+        self.trainer = Trainer(config)
 
     @endpoint
     def train(self):
@@ -66,9 +67,15 @@ class TrainerActorWrapper(Actor):
         pretend_you_are_torchrun(self.rank)
         config = self.job_config
         trainer: Optional[Trainer] = None
+        repro_bug = True
 
         try:
-            trainer = Trainer(config)
+            # This works fine if we run trainer = Trainer(config) here
+            # and comment out the one in __init__() above.
+            # However, with this change, you should get an error like this:
+            # KeyError: "Invalid mesh_dim_names ('dp_cp',) specified.
+            trainer = self.trainer
+
             # trainer = self.trainer
             tid = threading.get_native_id()
             logger.error(f"AHMAD tid in train: {tid=}")
