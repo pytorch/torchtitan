@@ -100,7 +100,6 @@ def build_lr_schedulers(
         optimizers (OptimizersContainer): The corresponding optimizers for the
             lr_schedulers.
     """
-
     training_steps = job_config.training.steps
     warmup_steps = int(job_config.lr_scheduler.warmup_steps)
 
@@ -162,7 +161,7 @@ def build_lr_schedulers(
         else:
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            progress = float(current_step - warmup_stable_steps) / (decay_steps)
+            progress = float(current_step - warmup_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress
