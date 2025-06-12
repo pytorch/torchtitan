@@ -140,20 +140,26 @@ def build_lr_schedulers(
 
         If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
         to ensure the learning rate does not drop below this minimum value.
+
+        NOTE: Since this is called before the step is taken, passing `current_step` returns the lr for the next step.
         """
+
         warmup_stable_steps = warmup_steps + stable_steps
+        if current_step >= warmup_stable_steps + decay_steps:
+            # edge case, this is the lr for the step which would take place after max_steps, which is undefined
+            current_step = warmup_stable_steps + decay_steps
         # if we are in the warmup phase, return the warmup progress
         # if warmup_steps is 0, we will go to the next phase
         if current_step < warmup_steps:
             # linear warmup
-            return float(current_step / warmup_steps)
+            return float((current_step + 1) / (warmup_steps + 1))
 
         # if we are in the stable phase or there is no decay, return 1.0
         if current_step < warmup_stable_steps or decay_steps == 0:
             return 1.0
 
         # if we are in the decay phase, calculate the decay progress
-        progress = float(current_step - warmup_stable_steps) / decay_steps
+        progress = float((current_step + 1) - warmup_stable_steps) / (decay_steps + 1)
 
         if lr_decay_type == "linear":
             curr_adjustment = 1 - progress
