@@ -19,10 +19,10 @@ if DEEPGEMM_AVAILABLE:
     import dsgemm_utils
 
 try:
-    from torchao.float8.config import ScalingGranularity
-    from torchao.float8.float8_utils import tensor_to_scale, to_fp8_saturated
+    # from torchao.float8.config import ScalingGranularity
+    # from torchao.float8.float8_utils import tensor_to_scale, to_fp8_saturated
 
-    TORCHAO_FP8_GG_AVAILABLE = True
+    TORCHAO_FP8_GG_AVAILABLE = False
 
 except ImportError:
     TORCHAO_FP8_GG_AVAILABLE = False
