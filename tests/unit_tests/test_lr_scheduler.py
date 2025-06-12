@@ -6,17 +6,13 @@
 
 import math
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import torch
 from torch.optim import Adam
 
-from torchtitan.components.lr_scheduler import (
-    build_lr_schedulers,
-    LRSchedulersContainer,
-)
+from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config_manager import JobConfig, LRScheduler, Training
 
 
 class TestLRScheduler(unittest.TestCase):
