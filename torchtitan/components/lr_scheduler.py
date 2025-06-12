@@ -155,12 +155,16 @@ def build_lr_schedulers(
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
+            assert (
+                warmup_steps != 0
+            ), "warmup_steps must not be zero to reach this branch"
             curr_adjustment = float(current_step / warmup_steps)
-        elif current_step < warmup_stable_steps or decay_steps == 0:
+        elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
+            assert decay_steps != 0, "decay_steps must not be zero to reach this branch"
             progress = float(current_step - warmup_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
