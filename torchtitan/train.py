@@ -92,6 +92,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
         )
+        print(f"AHMAD: Parallelism: {parallel_dims} {world_size=}")
+        logger.error(f" AHMAD: Parallelism: {parallel_dims} {world_size=}")
         dist_utils.init_distributed(job_config)
 
         # build meshes
@@ -442,6 +444,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
+        print(f" AHMAD: {parallel_dims.dp_replicate_enabled=} {parallel_dims.dp_shard_enabled=} {parallel_dims.cp_enabled=} {self.ft_manager.enabled=}")
+        print(f" AHMAD: {self.world_mesh=}")
         if (
             parallel_dims.dp_replicate_enabled
             or parallel_dims.dp_shard_enabled
@@ -455,6 +459,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 and self.job_config.fault_tolerance.semi_sync_method is None
             )
             ft_pg = self.ft_manager.replicate_pg if use_ft_pg else None
+            print(f" ==== > AHMAD {self.world_mesh=} {ft_pg=}")
+            # print(self.world_mesh["dp_cp"])
             global_avg_loss, global_max_loss = (
                 dist_utils.dist_mean(loss, self.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_max(loss, self.world_mesh["dp_cp"], ft_pg),
@@ -532,6 +538,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 
 if __name__ == "__main__":
+    print(os.environ)
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()

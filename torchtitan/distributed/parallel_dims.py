@@ -58,6 +58,7 @@ class ParallelDims:
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
         ):
             if d > 1:
+                # print(f"AHMAD HERE: {d} {name}")
                 dims.append(d)
                 names.append(name)
 
@@ -100,6 +101,7 @@ class ParallelDims:
                 mesh_dim_name="dp_shard_cp"
             )
         if dp_cp_mesh_dim_names != []:
+            print(f"    ==== *** AHMAD: dp_cp_mesh_dim_names {dp_cp_mesh_dim_names}")
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
 
         return mesh
