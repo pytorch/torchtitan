@@ -81,7 +81,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 * [torchtitan/models/llama3/parallelize_llama.py](torchtitan/models/llama3/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
 * [torchtitan/models/llama3/pipeline_llama.py](torchtitan/models/llama3/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/components/checkpoint.py](torchtitan/components/checkpoint.py) - utils for saving/loading distributed checkpoints
-* [torchtitan/components/float8.py](torchtitan/components/float8.py) - utils for applying Float8 techniques
+* [torchtitan/components/quantization/float8.py](torchtitan/components/quantization/float8.py) - utils for applying Float8 techniques
 
 
 ## Installation
