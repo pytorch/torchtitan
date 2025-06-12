@@ -32,6 +32,8 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+logger.info = logger.warn
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
@@ -92,6 +94,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
         )
+        print(os.environ)
+        logger.error(os.environ)
         print(f"AHMAD: Parallelism: {parallel_dims} {world_size=}")
         logger.error(f" AHMAD: Parallelism: {parallel_dims} {world_size=}")
         dist_utils.init_distributed(job_config)
@@ -99,15 +103,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # build meshes
         self.world_mesh = world_mesh = parallel_dims.build_mesh(device_type=device_type)
         if parallel_dims.dp_enabled:
+            print("AHMAD dp_enabled")
             dp_mesh = world_mesh["dp"]
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
+            print("AHMAD dp_disabled")
             dp_degree, dp_rank = 1, 0
+
+        print(self.world_mesh["dp_cp"])
 
         self.ft_manager = ft.init_ft_manager(job_config)
         # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
         # dataloader must be changed.
         if self.ft_manager.enabled:
+            print("AHMAD: ft_manager enabled")
             dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
 
         # take control of garbage collection to avoid stragglers
@@ -325,6 +334,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
         )
+        print(self.world_mesh["dp_cp"])
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
