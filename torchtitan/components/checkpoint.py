@@ -25,6 +25,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
 
@@ -96,43 +97,6 @@ class SaveDone:
 def save_with_gc(state, checkpoint_id):
     dcp.save(state, checkpoint_id=checkpoint_id)
     GarbageCollection.collect("GC collection invoked by checkpointer.")
-
-
-def checkpoint_mp(recv: mp.Queue, send: mp.Queue):
-    """Process to save the checkpoint in the background.
-
-    This is only used when async_checkpoint_with_pinned_memory is enabled.
-
-    Args:
-        recv (mp.Queue): The queue to receive the state_dict and Terminate signal.
-        send (mp.Queue): The queue to send the SaveDone signal.
-    """
-    init_logger()
-    os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
-    os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    dist.init_process_group()
-    try:
-        while True:
-            logger.debug("Checkpoint background process is done.")
-            send.put(SaveDone())
-            logger.debug("Wait for the new state_dict.")
-            obj = recv.get()
-            logger.debug("Received the new state_dict.")
-            if isinstance(obj, Terminate):
-                logger.info("Terminating the checkpoint background process.")
-                return
-            assert isinstance(obj, tuple)
-            begin = time.monotonic()
-            state, checkpoint_id = obj
-            save_with_gc(state, checkpoint_id=checkpoint_id)
-            logger.info(
-                "Finish saving the checkpoint in the background process in %.2f seconds.",
-                time.monotonic() - begin,
-            )
-    finally:
-        logger.info("Destroying the process group.")
-        dist.destroy_process_group()
 
 
 def purge_thread(purge_queue: queue.Queue):
@@ -275,7 +239,6 @@ class CheckpointManager:
         self.sending_to_checkpoint_mp = False
         self.staging_id = None
         self.cpu_offload_state_dict = None
-        self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
 
@@ -292,7 +255,7 @@ class CheckpointManager:
 
         # Async checkpoint related fields.
         async_mode = ckpt_config.async_mode.lower()
-        if async_mode == AsyncMode.ASYNC or self.ft_manager:
+        if async_mode == AsyncMode.ASYNC or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM or self.ft_manager:
             self.pg = dist.new_group(backend="gloo")
 
         self.keep_latest_k = ckpt_config.keep_latest_k
@@ -318,18 +281,6 @@ class CheckpointManager:
             self.async_mode = AsyncMode.ASYNC
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
-            ctx = mp.get_context("spawn")
-            self.mp_queue_send = ctx.Queue()
-            self.mp_queue_recv = ctx.Queue()
-            self.mp = ctx.Process(
-                target=checkpoint_mp,
-                args=(
-                    self.mp_queue_send,
-                    self.mp_queue_recv,
-                ),
-                daemon=True,
-            )
-            self.mp.start()
         else:
             raise ValueError(f"Unkown checkpoint async_mode {ckpt_config.async_mode}")
 
@@ -352,6 +303,9 @@ class CheckpointManager:
             ):
                 self.purge_queue.put(Terminate())
                 self.purge_thread.join()
+
+            if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+                dcp.close()
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -388,7 +342,9 @@ class CheckpointManager:
                 self._save_last_step(curr_step)
             elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
-                self._async_with_pinned_memory(checkpoint_id)
+                self.async_future = dcp.async_save(
+                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, block_on_staging=False,
+                ).staging_completion
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.async_future = dcp.async_save(
@@ -475,33 +431,7 @@ class CheckpointManager:
         with ``async_checkpoint_with_pinned_memory``.
         """
         if self.enable_staging and self.staging:
-            if not self.staging_stream.query():
-                begin = time.monotonic()
-                self.staging_stream.synchronize()
-                logger.info(
-                    "Checkpointer waited staging %.2f seconds.",
-                    time.monotonic() - begin,
-                )
-            self.staging = False
-
-            if self.sending_to_checkpoint_mp:
-                # Copy the sync staging result to another process.
-                def sync_func():
-                    self.mp_queue_send.put_nowait(
-                        (self.cpu_offload_state_dict, self.staging_id)
-                    )
-
-                # This may be a faster way to do zero-overhead checkpointing staging
-                # checkpointing but we need more thorough investigation before
-                # swithing to this method.
-                # self.my_thread = threading.Thread(target=func).start()
-                begin = time.monotonic()
-                sync_func()
-                logger.info(
-                    "Checkpointer sent staged state_dict to another process %.2f seconds",
-                    time.monotonic() - begin,
-                )
-                self.sending_to_checkpoint_mp = False
+            self.async_future.result()
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
@@ -633,12 +563,8 @@ class CheckpointManager:
 
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            logger.debug(
-                f"Waiting for the background process to finish, {time.monotonic()=}.:.2f"
-            )
-            if not self.mp.is_alive():
-                raise RuntimeError("The checkpoint background process is dead.")
-            _ = self.mp_queue_recv.get()
+            if self.async_future is not None:
+                self.async_future.result()
         elif self.async_mode == AsyncMode.ASYNC or self.ft_manager is not None:
             if self.async_future is not None:
                 self.async_future.result()
@@ -649,28 +575,6 @@ class CheckpointManager:
                 "and fault tolerance is not active."
             )
 
-    def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
-        self._cpu_staging(checkpoint_id)
-        self.sending_to_checkpoint_mp = True
-
-    def _cpu_staging(self, checkpoint_id: str | None) -> None:
-        """Offload state_dict to CPU memory"""
-        state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
-        if self.cpu_offload_state_dict is None:
-            logger.debug(f"Preparing the CPU memory, {time.monotonic()=}.:.2f")
-            self.cpu_offload_state_dict = _create_cpu_state_dict(
-                state_dict, pin_memory=True, share_memory=True
-            )
-
-        logger.debug(f"Staging the state_dict, {time.monotonic()=}.:.2f")
-        with torch.cuda.stream(self.staging_stream):
-            self.cpu_offload_state_dict = _copy_state_dict(
-                state_dict,
-                self.cpu_offload_state_dict,
-                non_blocking=True,
-            )
-            self.staging = True
-            self.staging_id = checkpoint_id
 
     def _purge_stale_checkpoints(self):
         if (
