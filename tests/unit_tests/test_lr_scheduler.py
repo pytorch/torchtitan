@@ -274,6 +274,45 @@ class TestLRScheduler(unittest.TestCase):
             )
             lr_scheduler.step()
 
+    def test_warmup_stable_only(self):
+        """Test warmup followed by stable phase only, with no decay phase."""
+        # Create a job config with 10 steps, 2 warmup steps, and no decay phase
+        config = self.create_job_config(
+            training_steps=10,
+            warmup_steps=2,
+            decay_ratio=0.0,  # 0% of steps for decay (no decay)
+            decay_type="linear",
+            lr_min=0.0,
+        )
+
+        # Build the lr scheduler
+        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+
+        # Expected adjustment factors for each step
+        expected_factors = [
+            0.5,  # Step 0: 50% of max LR (warmup)
+            1.0,  # Step 1: 100% of max LR (warmup complete)
+            1.0,  # Step 2: We maunally added step of stable phase, to prevent LR from dropping to 0 at last step
+            1.0,  # Step 3: Stable phase
+            1.0,  # Step 4: Stable phase
+            1.0,  # Step 5: Stable phase
+            1.0,  # Step 6: Stable phase
+            1.0,  # Step 7: Stable phase
+            1.0,  # Step 8: Stable phase
+            1.0,  # Step 9: Stable phase
+        ]
+
+        # Check the learning rate at each step
+        for i, factor in enumerate(expected_factors):
+            expected_lr = 0.1 * factor
+            self.assertAlmostEqual(
+                self.optimizer.param_groups[0]["lr"],
+                expected_lr,
+                places=6,
+                msg=f"Step {i}: Expected LR {expected_lr}, got {self.optimizer.param_groups[0]['lr']}",
+            )
+            lr_scheduler.step()
+
     def test_warmup_plus_decay_exceeds_training(self):
         """Test when warmup + decay steps exceed training steps."""
         # Create a job config where warmup + decay steps > training steps
