@@ -235,6 +235,9 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
 
     def _initialize_hardware(self):
         """Initialize hardware information and stream."""
+        # TODO - this is a workaround for dsl cuda context requirement
+        dummy_tensor = torch.zeros(1, device="cuda")
+        dummy_tensor.cpu()
         self.hardware_info = utils.HardwareInfo()
         self.max_active_clusters = self.hardware_info.get_max_active_clusters(
             self.cluster_shape_mn[0] * self.cluster_shape_mn[1]
@@ -915,6 +918,7 @@ class CUTLASSBackwardGroupGemm(torch.autograd.Function):
                 m_offsets_gpu,
                 valid_indices,
                 output.device,
+                strategy,
             )
         )
 
@@ -952,6 +956,7 @@ class CUTLASSBackwardGroupGemm(torch.autograd.Function):
                 m_offsets_gpu,
                 valid_indices,
                 grad_input.device,
+                strategy,
             )
         )
 
@@ -1005,7 +1010,13 @@ class CUTLASSBackwardGroupGemm(torch.autograd.Function):
 
     @staticmethod
     def _prepare_forward_metadata(
-        input_tokens, weight_stack, m_sizes_gpu, m_offsets_gpu, valid_indices, device
+        input_tokens,
+        weight_stack,
+        m_sizes_gpu,
+        m_offsets_gpu,
+        valid_indices,
+        device,
+        strategy,
     ):
         """Prepare metadata for forward pass: Y_i = X_i @ W_i^T"""
         problem_sizes = []
@@ -1062,7 +1073,13 @@ class CUTLASSBackwardGroupGemm(torch.autograd.Function):
 
     @staticmethod
     def _prepare_input_grad_metadata(
-        grad_output, weight_stack, m_sizes_gpu, m_offsets_gpu, valid_indices, device
+        grad_output,
+        weight_stack,
+        m_sizes_gpu,
+        m_offsets_gpu,
+        valid_indices,
+        device,
+        strategy,
     ):
         """Prepare metadata for input gradient: dX_i = dY_i @ W_i"""
         problem_sizes = []
@@ -1186,13 +1203,17 @@ class CUTLASSBackwardGroupGemm(torch.autograd.Function):
     def _add_gemm_to_metadata(A, B, C, problem_sizes, strides_abc, ptrs_abc):
         """Add a single GEMM operation to metadata lists."""
         M, K = A.shape
-        K_b, N = B.shape
+        # Check if B is [N, K] or [K, N] and handle accordingly
+        if B.shape[1] == K:  # B is [N, K]
+            N, K_b = B.shape
+        else:  # B is [K, N]
+            K_b, N = B.shape
+            # Transpose B for the computation
+            B = B.t().contiguous()
+
         assert K == K_b, f"Inner dimension mismatch: {K} != {K_b}"
 
-        # CUTLASS expects B to be [N, K] for A @ B^T, but we have B as [K, N]
-        # So we need to transpose B or adjust our computation
-        # For A @ B -> C where A is [M, K] and B is [K, N], we need B^T which is [N, K]
-        B_transposed = B.t().contiguous()  # [N, K]
+        B_transposed = B  # .t().contiguous()  # [N, K]
 
         L = 1
 
@@ -1414,6 +1435,41 @@ class CUTLASSGroupedLinear(nn.Module):
     def extra_repr(self) -> str:
         """Return string representation of module parameters."""
         return f"num_experts={self.num_experts}, in_features={self.in_features}, out_features={self.out_features}"
+
+
+def _initialize_hardware_test(self):
+    """Initialize hardware information and stream."""
+    # Force CUDA context creation by performing a simple operation
+    # This ensures the context exists before HardwareInfo queries it
+    dummy_tensor = torch.zeros(1, device="cuda")
+    dummy_tensor.cpu()  # Force synchronization to establish context
+
+    # Now it's safe to create HardwareInfo
+    hardware_info = utils.HardwareInfo()
+    max_active_clusters = self.hardware_info.get_max_active_clusters(
+        self.cluster_shape_mn[0] * self.cluster_shape_mn[1]
+    )
+
+    torch_stream = torch.cuda.current_stream()
+    self.stream = cuda.CUstream(torch_stream.cuda_stream)
+
+
+def _debug_cuda_context(self):
+    """Debug CUDA context state."""
+    try:
+        import cuda.bindings.driver as cuda_driver
+
+        try:
+            current_context = cuda_driver.cuCtxGetCurrent()
+            print(f"CUDA context exists: {current_context is not None}")
+        except:
+            print("No CUDA context found")
+
+        print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
+        print(f"PyTorch CUDA initialized: {torch.cuda.is_initialized()}")
+
+    except Exception as e:
+        print(f"Debug failed: {e}")
 
 
 # Example usage and testing functions
