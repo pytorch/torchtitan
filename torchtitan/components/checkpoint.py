@@ -275,6 +275,7 @@ class CheckpointManager:
 
         self.mp = None
         self.async_future = None
+        self.upload_future = None
         if async_mode == AsyncMode.DISABLED:
             self.async_mode = AsyncMode.DISABLED
         elif async_mode == AsyncMode.ASYNC:
@@ -343,6 +344,9 @@ class CheckpointManager:
             elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.async_future = dcp.async_save(
+                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, block_on_staging=False,
+                ).staging_completion
+                self.upload_future = dcp.async_save(
                     self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, block_on_staging=False,
                 ).upload_completion
             elif self.async_mode == AsyncMode.ASYNC:
@@ -563,8 +567,8 @@ class CheckpointManager:
 
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            if self.async_future is not None:
-                self.async_future.result()
+            if self.upload_future is not None:
+                self.upload_future.result()
         elif self.async_mode == AsyncMode.ASYNC or self.ft_manager is not None:
             if self.async_future is not None:
                 self.async_future.result()
