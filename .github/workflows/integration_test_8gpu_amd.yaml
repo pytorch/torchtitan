@@ -22,7 +22,6 @@ jobs:
       runner: linux.rocm.gpu.mi300.8
       gpu-arch-type: rocm
       gpu-arch-version: "6.3"
-      repository: pytorch/torchtitan
       upload-artifact: outputs
       script: |
         set -eux
