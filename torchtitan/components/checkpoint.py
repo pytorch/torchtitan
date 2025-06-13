@@ -297,7 +297,7 @@ class CheckpointManager:
         else:
             self.purge_thread = None
 
-        self.save_model_weights_only = ckpt_config.save_model_weights_only
+        self.last_save_model_weights_only = ckpt_config.last_save_model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
         self.exclude_from_loading = ckpt_config.exclude_from_loading
 
@@ -586,7 +586,7 @@ class CheckpointManager:
         # dtype conversion when we are checkpoint model weights only and the
         # current dtype is not the same as the export dtype at the end of the training.
 
-        if self.save_model_weights_only:
+        if self.last_save_model_weights_only:
             # We update self.states to keep the model only.
             # After this update, self.states = {
             #      'tok_embeddings.weight':...,
