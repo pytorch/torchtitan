@@ -20,7 +20,7 @@ jobs:
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.rocm.gpu.mi300.8
-      gpu-arch-type: cuda
+      gpu-arch-type: rocm
       gpu-arch-version: "12.6"
       # This image is faster to clone than the default, but it lacks CC needed by triton
       # (1m25s vs 2m37s).
