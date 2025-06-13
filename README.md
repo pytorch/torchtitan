@@ -17,7 +17,7 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 
 ## Latest News
-- [2025/04] Our paper has been accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620). The poster will be presented on Friday April 25th.
+- [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
 - [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
 - [2025/04] Training the diffusion model [FLUX](torchtitan/experiments/flux/) with FSDP/HSDP is available as an experiment.
 - [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
@@ -71,7 +71,7 @@ To accelerate contributions to and innovations around torchtitan, we are hosting
     - estimate FSDP/HSDP memory usage without materializing the model
     - run distributed inference with Tensor Parallel
 
-We report [performance](docs/performance.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
+We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
 
 ### Dive into the code
 
