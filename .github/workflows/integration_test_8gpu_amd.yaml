@@ -22,9 +22,6 @@ jobs:
       runner: linux.rocm.gpu.mi300.8
       gpu-arch-type: rocm
       gpu-arch-version: "6.3"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
-      docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
       script: |
