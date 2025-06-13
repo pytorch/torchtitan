@@ -10,6 +10,7 @@ class DefaultTokenDispatcher:
         self.num_experts = num_experts
         self.ep_size = ep_size
         self.experts_per_rank = num_experts // ep_size
+        self.ep_group = None
 
     def token_permutation(
         self,
