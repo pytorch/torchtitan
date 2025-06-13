@@ -345,7 +345,7 @@ class CheckpointManager:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 result = dcp.async_save(
                     self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, block_on_staging=False,
-                ).staging_completion
+                )
                 self.upload_future = result.upload_completion
                 self.async_future = result.staging_completion
             elif self.async_mode == AsyncMode.ASYNC:
