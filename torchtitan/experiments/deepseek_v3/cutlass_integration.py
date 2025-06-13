@@ -1,6 +1,63 @@
 #!/usr/bin/env python3
 """
-Integration example showing how to use the CUTLASS test driver with the actual strategy.
+Integration testing
+
+current errors:
+============================================================
+Initializing CUTLASSGroupedGemmStrategy for Blackwell
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+Initialized CUTLASSGroupedGemmStrategy for Blackwell with:
+  - 2 CTA instructions: False
+  - MMA tiler (M, N): (128, 128)
+  - Cluster shape (M, N): (1, 1)
+  - Cluster size: 1
+🔍 Testing Forward Pass...
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Kernel compilation successful
+   Forward max difference: 0.00e+00
+   Forward outputs close: ✓
+🔍 Testing Backward Pass...
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Kernel compilation successful
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Kernel compilation successful
+   Input grad max difference: 2.21e+02
+   Input gradients close: ❌
+   Weight grad max difference: 8.55e+01
+   Weight gradients close: ❌
+
+🎯 Overall Result: ❌ FAIL
+
+🚀 Benchmarking CUTLASS vs Manual Implementation
+============================================================
+
+📊 Medium: 8 experts, 1024 tokens
+Initializing CUTLASSGroupedGemmStrategy for Blackwell
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+Initialized CUTLASSGroupedGemmStrategy for Blackwell with:
+  - 2 CTA instructions: False
+  - MMA tiler (M, N): (128, 128)
+  - Cluster shape (M, N): (1, 1)
+  - Cluster size: 1
+Traceback (most recent call last):
+  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 319, in <module>
+    main()
+  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 309, in main
+    benchmark_cutlass_vs_manual()
+  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 211, in benchmark_cutlass_vs_manual
+    cutlass_layer = CUTLASSGroupedLinear(
+                    ^^^^^^^^^^^^^^^^^^^^^
+  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_backwards.py", line 1356, in __init__
+    raise NotImplementedError(
+NotImplementedError: Bias not yet implemented for CUTLASS grouped linear
 """
 
 import os
