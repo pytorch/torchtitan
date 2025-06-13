@@ -4,475 +4,775 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import enum
+import functools
 import os
+import queue
+import re
 import shutil
-import tempfile
+import threading
 import time
-import unittest
-from types import SimpleNamespace
-from unittest import mock
+from typing import Any
 
 import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+import torch.multiprocessing as mp
 import torch.nn as nn
+from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+    StateDictOptions,
+)
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import CheckpointManager, MODEL
+
+from torchtitan.components.ft import FTManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.utils import GarbageCollection
 
 
-class FakeOptimizersContainer:
-    """A fake OptimizersContainer that returns fake state dicts."""
-
-    def __init__(self):
-        self._fake_param = torch.tensor([1.0], dtype=torch.float32)
-
-    def state_dict(self):
-        return {"fake_param": self._fake_param}
-
-    def load_state_dict(self, sd: dict):
-        if "fake_param" in sd:
-            self._fake_param = sd["fake_param"]
-
-    def init_cache_state_dict(self):
-        pass
+# Component keys for checkpoint state dictionaries
+MODEL = "model"
+OPTIMIZER = "optimizer"
+LR_SCHEDULER = "lr_scheduler"
+DATALOADER = "dataloader"
+TRAIN_STATE = "train_state"
 
 
-class FakeLRSchedulersContainer:
-    """A fake LRSchedulersContainer that does nothing."""
+class AsyncMode(str, enum.Enum):
+    """Enum for different checkpoint async modes."""
 
-    def __init__(self):
-        pass
-
-    def state_dict(self):
-        return {}
-
-    def load_state_dict(self, sd: dict):
-        pass
+    DISABLED = "disabled"
+    ASYNC = "async"
+    ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-class FakeDataLoader(DataLoader):
-    """A fake DataLoader that returns a fake batch."""
+class ModelWrapper(Stateful):
+    """Wrapper for model(s) that implements the Stateful interface for checkpointing."""
 
-    def __init__(self):
-        super().__init__(dataset=[], batch_size=1)
+    def __init__(self, model: nn.Module | list[nn.Module]) -> None:
+        """Initialize the model wrapper.
 
-    def state_dict(self):
-        return {}
+        Args:
+            model (nn.Module | list[nn.Module]): Single model or list of models to be wrapped.
+        """
+        self.model = [model] if isinstance(model, nn.Module) else model
+        self._update_cache_state_dict()
 
-    def load_state_dict(self, sd: dict):
-        pass
+    def _update_cache_state_dict(self) -> None:
+        """Update the cached state dictionary from the model(s)."""
+        self.cache_state_dict = {
+            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+        }
 
+    def state_dict(self) -> dict[str, Any]:
+        """Return the state dictionary of the model(s).
 
-class DummyFTManager:
-    """A fake FTManager-like object with enabled=False."""
+        Returns:
+            dict[str, Any]: The cached state dictionary.
+        """
+        return self.cache_state_dict
 
-    def __init__(self):
-        self.enabled = False
-        self.manager = None
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load the state dictionary into the model(s).
 
-
-class DummyFuture:
-    def __init__(self):
-        self.result = mock.Mock()
-
-    def __await__(self):
-        # to support awaiting if needed
-        if False:
-            yield
-
-
-def fake_async_save(*args, **kwargs):
-    return DummyFuture()
-
-
-class DummyJobConfig:
-    def __init__(self, job):
-        self.job = job
-        self.checkpoint = SimpleNamespace(
-            enable_checkpoint=True,
-            async_mode="disabled",
-            folder="",
-            interval=1,
-            keep_latest_k=0,
-            last_save_model_weights_only=False,
-            export_dtype="float32",
-            exclude_from_loading=[],
-            initial_load_path=None,
-            initial_load_model_weights_only=False,
+        Args:
+            state_dict (dict[str, Any]): The state dictionary to load.
+        """
+        func = functools.partial(
+            set_model_state_dict,
+            model_state_dict=state_dict,
+            options=StateDictOptions(strict=False),
         )
-        self.fault_tolerance = SimpleNamespace(replica_id=0)
+        list(map(func, self.model))
+        # `set_model_state_dict()` does change the keys of the input state_dict,
+        # we will need to reinitialize the cache_state_dict.
+        self._update_cache_state_dict()
 
 
-class TestCheckpointManager(unittest.TestCase):
-    def setUp(self):
-        self.base_temp_dir = tempfile.mkdtemp()
-        self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
-        os.makedirs(self.test_folder, exist_ok=True)
+class Terminate:
+    """Signal class to terminate background processes."""
 
-        self.model_part = nn.Linear(2, 2)
-        self.model_parts = [self.model_part]
-        # TODO: Use a real OptimizerContainer here so that we can actually verify
-        # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
-        self.optimizers = FakeOptimizersContainer()
-        self.lr_schedulers = FakeLRSchedulersContainer()
-        self.states = {}
-        self.data_loader = FakeDataLoader()
-        self.ft_manager = DummyFTManager()
+    pass
 
-        ckpt_cfg = SimpleNamespace(
-            enable_checkpoint=True,
-            async_mode="DISABLED",
-            folder="",
-            interval=1,
-            keep_latest_k=2,
-            last_save_model_weights_only=False,
-            export_dtype="float32",
-            exclude_from_loading=[],
-            initial_load_path=None,
-            initial_load_model_weights_only=False,
-        )
-        ft_ns = SimpleNamespace(replica_id=0)
-        job_ns = SimpleNamespace(dump_folder=self.test_folder)
-        self.job_config = SimpleNamespace(
-            checkpoint=ckpt_cfg,
-            fault_tolerance=ft_ns,
-            job=job_ns,
-        )
 
-        # Patch process group creation
-        self.patcher_group = mock.patch(
-            "torch.distributed.new_group", return_value="pg"
-        )
-        self.patcher_group.start()
+class SaveDone:
+    """Signal class to indicate checkpoint save completion."""
 
-    def tearDown(self):
-        self.patcher_group.stop()
-        shutil.rmtree(self.base_temp_dir)
-        time.sleep(0.1)
+    pass
 
-    def fake_save(self, state_dict: dict, checkpoint_id: str):
-        os.makedirs(checkpoint_id, exist_ok=True)
-        sd_to_save = {}
-        for key, val in state_dict.items():
-            if hasattr(val, "state_dict"):
-                sd_to_save[key] = val.state_dict()
-            elif isinstance(val, torch.Tensor):
-                sd_to_save[key] = val
-        torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
-        path = os.path.join(checkpoint_id, "state_dict.pt")
-        loaded = torch.load(path)
-        for key, val in loaded.items():
-            if key in states and hasattr(states[key], "load_state_dict"):
-                states[key].load_state_dict(val)
-            elif key in states and isinstance(states[key], torch.Tensor):
-                states[key] = val
+@torch.no_grad()
+def save_with_gc(state: dict[str, Any], checkpoint_id: str) -> None:
+    """Save checkpoint and perform garbage collection.
 
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_save_load_restores_state(self, mock_load, mock_save, mock_rank):
-        mock_save.side_effect = self.fake_save
-        mock_load.side_effect = self.fake_load
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
+    Args:
+        state (dict[str, Any]): The state to save.
+        checkpoint_id (str): The checkpoint identifier.
+    """
+    dcp.save(state, checkpoint_id=checkpoint_id)
+    GarbageCollection.collect("GC collection invoked by checkpointer.")
 
-        w0 = self.model_part.weight.clone()
-        b0 = self.model_part.bias.clone()
-        p0 = self.optimizers._fake_param.clone()
-        manager.save(curr_step=1)
-        with torch.no_grad():
-            self.model_part.weight.zero_()
-            self.model_part.bias.zero_()
-        self.optimizers._fake_param = torch.tensor([42.0], dtype=torch.float32)
-        manager.load(step=1)
 
-        self.assertTrue(torch.equal(self.model_part.weight, w0))
-        self.assertTrue(torch.equal(self.model_part.bias, b0))
-        self.assertTrue(torch.equal(self.optimizers._fake_param, p0))
-        manager.close()
+def checkpoint_mp(recv: mp.Queue, send: mp.Queue) -> None:
+    """Process to save the checkpoint in the background.
 
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_save_and_purge_keeps_last_k_checkpoints(
-        self, mock_load, mock_save, mock_rank
-    ):
-        mock_save.side_effect = self.fake_save
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
+    This is only used when async_checkpoint_with_pinned_memory is enabled.
 
-        manager.save(curr_step=1)
-        manager.save(curr_step=2)
-        manager.save(curr_step=3)
-        deadline = time.time() + 5.0
-
+    Args:
+        recv (mp.Queue): The queue to receive the state_dict and Terminate signal.
+        send (mp.Queue): The queue to send the SaveDone signal.
+    """
+    init_logger()
+    os.environ["MASTER_PORT"] = str(int(os.environ["MASTER_PORT"]) + 2)
+    os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group()
+    try:
         while True:
-            exist = sorted(os.listdir(self.test_folder))
-            if exist == ["step-2", "step-3"]:
-                break
-            if time.time() > deadline:
-                self.fail(f"Purge timed out; found {exist}")
-            time.sleep(0.05)
+            logger.debug("Checkpoint background process is done.")
+            send.put(SaveDone())
+            logger.debug("Wait for the new state_dict.")
+            obj = recv.get()
+            logger.debug("Received the new state_dict.")
+            if isinstance(obj, Terminate):
+                logger.info("Terminating the checkpoint background process.")
+                return
+            assert isinstance(obj, tuple)
+            begin = time.monotonic()
+            state, checkpoint_id = obj
+            save_with_gc(state, checkpoint_id=checkpoint_id)
+            logger.info(
+                "Finish saving the checkpoint in the background process in %.2f seconds.",
+                time.monotonic() - begin,
+            )
+    finally:
+        logger.info("Destroying the process group.")
+        dist.destroy_process_group()
 
-        self.assertListEqual(sorted(os.listdir(self.test_folder)), ["step-2", "step-3"])
-        calls = [c.kwargs.get("checkpoint_id") for c in mock_save.call_args_list]
-        expected = [os.path.join(self.test_folder, f"step-{i}") for i in (1, 2, 3)]
-        self.assertListEqual(calls, expected)
-        sd = torch.load(os.path.join(self.test_folder, "step-3", "state_dict.pt"))
-        self.assertIn("optimizer", sd)
-        torch.testing.assert_close(sd["optimizer"]["fake_param"], torch.tensor([1.0]))
-        manager.close()
 
-    @mock.patch("torch.distributed.get_rank", return_value=1)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_nonzero_rank_does_not_purge_or_save(self, mock_load, mock_save, mock_rank):
-        mock_save.side_effect = self.fake_save
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        manager.save(curr_step=1)
-        manager.save(curr_step=2)
-        manager.save(curr_step=3)
-        time.sleep(1)
-        self.assertListEqual(
-            sorted(os.listdir(self.test_folder)), ["step-1", "step-2", "step-3"]
-        )
-        self.assertEqual(len(mock_save.call_args_list), 3)
-        manager.close()
+def purge_thread(purge_queue: queue.Queue) -> None:
+    """Thread to purge the old checkpoints.
 
-    def test_load_returns_false_when_no_checkpoint_folder(self):
-        cfg = self.job_config.checkpoint
-        cfg.folder = "nonexistent"
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        self.assertFalse(manager.load(step=-1))
-        manager.close()
+    This is only used when keep_latest_k > 0.
 
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_load_finds_latest_and_calls_dcp_load(self, mock_load, mock_rank):
-        ckpt_folder = os.path.join(self.test_folder, "checkpoints")
-        os.makedirs(ckpt_folder, exist_ok=True)
-        for s in (2, 5):
-            d = os.path.join(ckpt_folder, f"step-{s}")
-            os.makedirs(d, exist_ok=True)
-            open(os.path.join(d, ".metadata"), "w").close()
-        cfg = self.job_config.checkpoint
-        cfg.folder = "checkpoints"
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        res = manager.load(step=-1)
-        expected = os.path.join(ckpt_folder, "step-5")
-        mock_load.assert_called_once()
-        args, kwargs = mock_load.call_args
-        self.assertEqual(args[0], manager._states_to_load(model_only=False))
-        self.assertEqual(kwargs.get("checkpoint_id"), expected)
-        self.assertTrue(res)
-        manager.close()
+    Args:
+        purge_queue (queue.Queue): The queue to receive the path to purge and Terminate signal.
+    """
+    try:
+        while True:
+            path = purge_queue.get()
+            if isinstance(path, Terminate):
+                return
+            assert isinstance(path, str)
+            logger.info("Checkpointer is deleting %s.", path)
+            begin = time.monotonic()
+            shutil.rmtree(path, ignore_errors=True)
+            logger.info(
+                "Checkpointer deleted %s in %.2f seconds.",
+                path,
+                time.monotonic() - begin,
+            )
+    finally:
+        logger.info("Destroying the purge thread.")
 
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
-        """
-        Test that save() only triggers on step 1 and multiples of interval, skipping others,
-        but respects force flag to override interval.
-        """
-        cfg = self.job_config.checkpoint
-        cfg.interval = 3
-        cfg.keep_latest_k = 0
-        mock_save.side_effect = self.fake_save
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=self.states,
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        manager.save(curr_step=1)
-        self.assertEqual(mock_save.call_count, 1)
-        manager.save(curr_step=2)
-        self.assertEqual(mock_save.call_count, 1)
-        manager.save(curr_step=2, force=True)
-        self.assertEqual(mock_save.call_count, 2)
-        manager.save(curr_step=3)
-        self.assertEqual(mock_save.call_count, 3)
-        manager.save(curr_step=4)
-        self.assertEqual(mock_save.call_count, 3)
-        manager.save(curr_step=4, force=True)
-        self.assertEqual(mock_save.call_count, 4)
-        manager.close()
 
-    @mock.patch("torch.distributed.get_rank", return_value=0)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_last_save_model_weights_only_and_initial_load_model_weights_only(
-        self, mock_load, mock_save, mock_rank
-    ):
-        mock_save.side_effect = self.fake_save
-        mock_load.side_effect = self.fake_load
-        # Phase 1: save model weights only
-        self.job_config.checkpoint.last_save_model_weights_only = True
-        manager1 = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={MODEL: self.model_part},
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        manager1.save(curr_step=1, force=True)
-        path1 = os.path.join(self.test_folder, "step-1")
-        self.assertTrue(os.path.isdir(path1))
-        # Phase 2: initial load from step-1
-        cfg = self.job_config.checkpoint
-        cfg.last_save_model_weights_only = False
-        cfg.initial_load_model_weights_only = True
-        cfg.initial_load_path = path1
-        cfg.folder = ""
-        self.job_config.job.dump_folder = self.test_folder
-        manager2 = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={MODEL: self.model_part},
-            job_config=self.job_config,
-            ft_manager=self.ft_manager,
-        )
-        r1 = manager2.load(step=1)
-        self.assertTrue(r1)
-        mock_load.assert_called_once()
-        args1, kwargs1 = mock_load.call_args
-        self.assertEqual(kwargs1.get("checkpoint_id"), path1)
-        # Phase 3: save new step under default folder, then load that
-        manager2.save(curr_step=2, force=True)
-        # Default folder is test_folder, so step-2 under that
-        step2_dir = os.path.join(self.test_folder, "step-2")
-        self.assertTrue(os.path.isdir(step2_dir))
-        r2 = manager2.load(step=2)
-        self.assertTrue(r2)
-        self.assertEqual(mock_load.call_count, 2)
-        args2, kwargs2 = mock_load.call_args_list[1]
-        self.assertEqual(kwargs2.get("checkpoint_id"), step2_dir)
-        manager1.close()
-        manager2.close()
+class CheckpointManager:
+    """This class manages the checkpointing logic for the TorchTitan trainer.
 
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
-    @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
-    )
-    def test_async_save_calls_async_wait(self, mock_async_save, mock_new_group):
-        """
-        Test that in AsyncMode.ASYNC, save() waits on previous async future.
-        """
-        # Configure async mode
-        job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "async"
-        ft_manager = DummyFTManager()
-        states = {"trainer": torch.tensor([0])}
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=states,
-            job_config=job_config,
-            ft_manager=ft_manager,
-        )
 
-        # First save schedules async
-        manager.save(curr_step=10, force=False)
-        future = manager.async_future
-        future.result.assert_not_called()
+    Note: Pipeline Parallelism and Virtual Stages
 
-        # Second save should wait
-        manager.save(curr_step=20, force=False)
-        future.result.assert_called_once()
+    1. even for simple PP schedules, there is a separate optimizer each PP rank.
+    rank0's optimizer would have a param_group[0] which refers to layers.0 in the original
+    model.  rank1's would _also_ have a param_group[0], since it's index based, but
+    referring to layers.1.  When saving, these collide and one of them is lost.  Then when
+    reloading, only one stage can restore its optimizer states, others will error.
 
-        # New future created
-        new_future = manager.async_future
-        new_future.result.assert_not_called()
+        The solution to this problem is optimizer flattening: it landed in #127071 and is
+        enabled in TorchTitan by passing the 'flatten_optimizer_state_dict' kwarg to DCP
+        functions called in the OptimizerContainer.
+        See PR #127071 (https://github.com/pytorch/pytorch/pull/127071) for the example of
+        a flattening state_dict.
 
-    @mock.patch("torch.cuda.Stream")
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
-    @mock.patch(
-        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
-    )
-    def test_ft_async_save_calls_async_wait(
+    2. With complex PP schedules, we have multiple model chunks per pp rank. This compounds
+    challenge (1) by also requiring us to reason about multiple 'optim' objects locally.
+
+        We solve this in the Model and Optimizer wrapper classes by flattening the state dicts
+        from each object into one state dict before saving/loading. We rely on the individual
+        state_dicts to not collide, which is gauranteed for the model by correct pipeline
+        splitting and for the optimizer by the flattening support described in (1).
+
+    3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
+    with the assumption that all lr_schedulers have the same state_dict.
+
+    Note: TorchFT checkpointing flow
+
+    There are two types of checkpoints: when TorchFT is enabled: 1) the full perisistent
+    checkpoint, 2) the per-replica checkpoint.
+
+    The full perisistent checkpoint is saved by the replica with
+    ``ft_manager.participating_rank() == 0``. It contains everything including the model,
+    optimizer, lr_scheduler, dataloader, and train_state. Right now the full perisistent
+    checkpoint is loaded by all replicas. However, we can optimize it to only load if
+    there are no other alive replicas.
+
+    The per-replica checkpoint contains only the dataloader and is saved/loaded by all
+    replicas to/from the its own folder. The folder name is prefixed with the ft_replica_id.
+
+    Args:
+        dataloader (DataLoader): The dataloader used to load the data.
+        model_parts (List[nn.Module]): List of model parts to be optimized.
+        optimizers (OptimizersContainer): The optimizers used to optimize the model.
+        lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
+        states (Dict[str, Any]): The states that need to be saved, other than the
+            previous 4 components.
+        job_config (JobConfig): The job config used to configure the checkpointing.
+        ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
+    """
+
+    def __init__(
         self,
-        mock_async_save,
-        mock_new_group,
-        mock_cuda_stream,
-    ):
-        """
-        Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
-        """
-        job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "disabled"
-        ft_manager = mock.Mock()
-        ft_manager.enabled = True
-        states = {"trainer": torch.tensor([0])}
-        manager = CheckpointManager(
-            dataloader=self.data_loader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states=states,
-            job_config=job_config,
-            ft_manager=ft_manager,
+        dataloader: DataLoader,
+        model_parts: list[nn.Module],
+        optimizers: OptimizersContainer,
+        lr_schedulers: LRSchedulersContainer,
+        states: dict[str, Any],
+        job_config: JobConfig,
+        ft_manager: FTManager,
+    ) -> None:
+        ckpt_config = job_config.checkpoint
+        self.enable_checkpoint = ckpt_config.enable_checkpoint
+        self.ft_manager = ft_manager.manager if ft_manager.enabled else None
+
+        if self.ft_manager:
+            optimizers.init_cache_state_dict()
+
+            def state_dict() -> dict[str, Any]:
+                """Get state dictionary for fault tolerance manager.
+
+                Returns:
+                    dict[str, Any]: State dictionary containing model, optimizer, lr_scheduler, and train_state.
+                """
+                ret = {}
+                for k, v in self.states.items():
+                    if k in {
+                        MODEL,
+                        OPTIMIZER,
+                        LR_SCHEDULER,
+                        TRAIN_STATE,
+                    }:
+                        ret[k] = v.state_dict()
+                return ret
+
+            def load_state_dict(state_dict: dict[str, Any]) -> None:
+                """Load state dictionary for fault tolerance manager.
+
+                Args:
+                    state_dict (dict[str, Any]): The state dictionary to load.
+                """
+                assert state_dict is not None, "State dict cannot be None"
+                for k, v in state_dict.items():
+                    self.states[k].load_state_dict(v)
+
+            self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+        self.ft_replica_id = job_config.fault_tolerance.replica_id
+
+        async_mode = ckpt_config.async_mode.lower()
+        self.enable_staging = (
+            self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        ) or self.ft_manager
+
+        if not self.enable_checkpoint and self.ft_manager is None:
+            return
+
+        self.states = states
+        self.states.update(
+            {
+                MODEL: ModelWrapper(model_parts),
+                OPTIMIZER: optimizers,
+                DATALOADER: dataloader,
+                LR_SCHEDULER: lr_schedulers,
+            }
+        )
+        self.ft_states = {DATALOADER: dataloader}
+
+        self.staging = False
+        self.sending_to_checkpoint_mp = False
+        self.staging_id = None
+        self.cpu_offload_state_dict = None
+        self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
+
+        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.initial_load_path = ckpt_config.initial_load_path
+        self.initial_load_full_checkpoint = ckpt_config.initial_load_full_checkpoint
+        self.interval = ckpt_config.interval
+        async_mode = ckpt_config.async_mode.lower()
+        if async_mode == AsyncMode.ASYNC or self.ft_manager:
+            self.pg = dist.new_group(backend="gloo")
+
+        self.keep_latest_k = ckpt_config.keep_latest_k
+        if self.keep_latest_k > 0:
+            if self.keep_latest_k == 1:
+                raise ValueError(
+                    "We need to maintain at least 2 checkpoint replicas, "
+                    "as the last one may be in the process of being saved."
+                )
+            self.purge_queue = queue.Queue()
+            self.purge_thread = threading.Thread(
+                target=purge_thread, args=(self.purge_queue,), daemon=True
+            )
+            self.purge_thread.start()
+        else:
+            self.purge_thread = None
+
+        self.model_weights_only = ckpt_config.model_weights_only
+        self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
+        self.exclude_from_loading = ckpt_config.exclude_from_loading
+
+        self.mp = None
+        self.async_future = None
+        if async_mode == AsyncMode.DISABLED:
+            self.async_mode = AsyncMode.DISABLED
+        elif async_mode == AsyncMode.ASYNC:
+            self.async_mode = AsyncMode.ASYNC
+        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
+            ctx = mp.get_context("spawn")
+            self.mp_queue_send = ctx.Queue()
+            self.mp_queue_recv = ctx.Queue()
+            self.mp = ctx.Process(
+                target=checkpoint_mp,
+                args=(
+                    self.mp_queue_send,
+                    self.mp_queue_recv,
+                ),
+                daemon=True,
+            )
+            self.mp.start()
+        else:
+            raise ValueError(f"Unkown checkpoint async_mode {ckpt_config.async_mode}")
+
+        logger.info(
+            f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
 
-        # Initially no future
-        self.assertIsNone(manager.async_future)
-        manager.save(curr_step=5, force=False)
-        self.assertIsNotNone(manager.async_future)
+    def __del__(self) -> None:
+        """Clean up resources when the object is deleted."""
+        self.close()
 
-        manager.async_future.result.assert_not_called()
-        prev_future = manager.async_future
-        manager.save(curr_step=6, force=False)
-        prev_future.result.assert_called_once()
-        self.assertIsNotNone(manager.async_future)
-        manager.async_future.result.assert_not_called()
+    def close(self) -> None:
+        """Close and clean up resources used by the checkpoint manager."""
+        if hasattr(self, "enable_checkpoint") and self.enable_checkpoint:
+            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
+                self.mp_queue_send.put(Terminate())
+                self.mp.join()
+            if (
+                hasattr(self, "purge_thread")
+                and self.purge_thread
+                and self.purge_thread.is_alive()
+            ):
+                self.purge_queue.put(Terminate())
+                self.purge_thread.join()
 
+    @torch.no_grad()
+    def save(self, curr_step: int, force: bool = False) -> None:
+        """Save the checkpoint for the current step.
 
-if __name__ == "__main__":
-    unittest.main()
+        This function will save the checkpoint for the current step. If ``force`` is
+        true, it will save the checkpoint even if the interval has not been reached.
+        This only happens when train_state.step == job_config.training.steps, or
+        for initial seed checkpoint.
+
+        Args:
+            curr_step (int): The current step.
+            force (bool): Whether to force save the checkpoint. Defaults to False.
+        """
+
+        if self.ft_manager:
+            self._ft_save(curr_step)
+
+        if not self._should_save(curr_step, force):
+            return
+
+        begin = time.monotonic()
+        if not self.ft_manager or self.ft_manager.participating_rank() == 0:
+            logger.info("Saving the checkpoint (or staging if async is enabled).")
+            checkpoint_id = self._create_checkpoint_id(curr_step)
+            self._async_wait()
+            # This GC is called for async checkpoint as it is useless to do
+            # GC right after async_save -- the CPU memory is not able to be
+            # freed until _async_wait()
+            if force:
+                self._save_last_step(curr_step)
+            elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+                GarbageCollection.collect("GC collection invoked by checkpointer.")
+                self._async_with_pinned_memory(checkpoint_id)
+            elif self.async_mode == AsyncMode.ASYNC:
+                GarbageCollection.collect("GC collection invoked by checkpointer.")
+                self.async_future = dcp.async_save(
+                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg
+                )
+                GarbageCollection.collect("GC collection invoked by checkpointer.")
+            else:
+                save_with_gc(self.states, checkpoint_id=checkpoint_id)
+            self._purge_stale_checkpoints()
+
+            logger.info(
+                "Finished saving the checkpoint (or staging if async is enabled)"
+                f"in {time.monotonic() - begin:.2f} seconds."
+            )
+        elif self.ft_manager:
+            logger.info(
+                "Replica %d doesn't save checkpoint.",
+                self.ft_manager.participating_rank(),
+            )
+
+    @torch.no_grad()
+    def load(self, step: int = -1) -> bool:
+        """Load the checkpoint for the given step.
+
+        This function will load the checkpoint for the given step. If ``step`` is -1, it
+        will load the latest checkpoint. If the checkpoint does not exist, it will return
+        False and load nothing.
+
+        Args:
+            step (int): The step to load the checkpoint for. Defaults to -1 (latest).
+
+        Returns:
+            bool: Whether the checkpoint was loaded successfully.
+        """
+
+        if self.ft_manager:
+            self._ft_load()
+
+        if not self.enable_checkpoint:
+            return False
+
+        model_only = False
+        if not os.path.exists(self.folder):
+            if self.initial_load_path:
+                checkpoint_id = self.initial_load_path
+                if not os.path.isdir(checkpoint_id):
+                    raise ValueError(
+                        "initial_load_full_checkpoint is specified but the path is not valid."
+                    )
+                model_only = not self.initial_load_full_checkpoint
+            else:
+                return False
+        else:
+            if self.initial_load_path:
+                logger.info(
+                    "`initial_load_path` is provided but the checkpoint folder exists. "
+                    "Checkpointer will use the checkpoints from the checkpoint folder."
+                )
+            step = self._find_load_step() if step == -1 else step
+            if step == -1:
+                return False
+            model_only = step == 0
+            checkpoint_id = self._create_checkpoint_id(step)
+
+            if not os.path.isdir(checkpoint_id):
+                return False
+
+        logger.info(f"Loading the checkpoint from {checkpoint_id}.")
+        begin = time.monotonic()
+        states = self._states_to_load(model_only)
+        dcp.load(states, checkpoint_id=checkpoint_id)
+        GarbageCollection.collect("GC collection for checkpoint loading.")
+        logger.info(
+            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
+        )
+        return True
+
+    def maybe_wait_for_staging(self) -> None:
+        """Wait for the staging to finish if it is enabled.
+
+        This function will wait for staging to finish. The staging is only enabled
+        with ``async_checkpoint_with_pinned_memory``.
+        """
+        if self.enable_staging and self.staging:
+            if not self.staging_stream.query():
+                begin = time.monotonic()
+                self.staging_stream.synchronize()
+                logger.info(
+                    "Checkpointer waited staging %.2f seconds.",
+                    time.monotonic() - begin,
+                )
+            self.staging = False
+
+            if self.sending_to_checkpoint_mp:
+                # Copy the sync staging result to another process.
+                def sync_func():
+                    self.mp_queue_send.put_nowait(
+                        (self.cpu_offload_state_dict, self.staging_id)
+                    )
+
+                # This may be a faster way to do zero-overhead checkpointing staging
+                # checkpointing but we need more thorough investigation before
+                # swithing to this method.
+                # self.my_thread = threading.Thread(target=func).start()
+                begin = time.monotonic()
+                sync_func()
+                logger.info(
+                    "Checkpointer sent staged state_dict to another process %.2f seconds",
+                    time.monotonic() - begin,
+                )
+                self.sending_to_checkpoint_mp = False
+
+    def _find_load_step(self, folder: str = "") -> int:
+        """Find the step to load the checkpoint for.
+
+        Args:
+            folder (str): The folder to find the checkpoint for. If empty,
+                   then ``self.folder`` will be used.
+
+        Returns:
+            int: The step to load the checkpoint for, or -1 if no checkpoint is found.
+        """
+        folder = folder if folder else self.folder
+        pattern = r"step-(\d+)"
+        step_counts = []
+
+        if not os.path.isdir(folder):
+            return -1
+
+        for filename in os.listdir(folder):
+            match = re.search(pattern, filename)
+            metadata_probe = os.path.join(folder, filename, ".metadata")
+            if match and os.path.isfile(metadata_probe):
+                step_counts.append(int(match.group(1)))
+        if not step_counts:
+            return -1
+        return max(step_counts)
+
+    def _ft_folder(self) -> str:
+        """Get the fault tolerance folder path.
+
+        Returns:
+            str: Path to the fault tolerance folder for the current replica.
+        """
+        return os.path.join(self.folder, f"ft-replica-{self.ft_replica_id}")
+
+    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
+        """Create a checkpoint ID for the given step.
+
+        Args:
+            step (int): The step number.
+            folder (str): The folder to create the checkpoint ID in. If empty,
+                   then ``self.folder`` will be used.
+
+        Returns:
+            str: The checkpoint ID path.
+        """
+        folder = folder if folder else self.folder
+        return os.path.join(folder, f"step-{step}")
+
+    def _ft_save(self, step: int) -> None:
+        """Save the fault tolerance checkpoint.
+
+        Args:
+            step (int): The current step.
+        """
+        begin = time.monotonic()
+        self._async_wait()
+        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        self.async_future = dcp.async_save(
+            self.ft_states, checkpoint_id=checkpoint_id, process_group=self.pg
+        )
+        logger.info(f"Staging ft checkpoint took {time.monotonic() - begin:.2f} secs.")
+
+    def _ft_load(self) -> None:
+        """Load the fault tolerance checkpoint."""
+        step = self._find_load_step(folder=self._ft_folder())
+        if step == -1:
+            return
+
+        begin = time.monotonic()
+        logger.info(f"Loading the FT checkpoint at step {step}.")
+        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        dcp.load(self.ft_states, checkpoint_id=checkpoint_id)
+        GarbageCollection.collect("GC collection for checkpoint loading.")
+        logger.info(
+            f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
+        )
+
+    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
+        """Determines which states to load for the given step.
+
+        This method determines which states to load based on the
+        configurations.
+
+        Args:
+            model_only (bool): Whether to load the model only.
+
+        Returns:
+            dict[str, Any]: The states to load for the given step.
+
+        Raises:
+            ValueError: If an excluded key is not found in the state dictionary.
+        """
+        # For the first step, we will only load the model weights.
+        if model_only:
+            return {MODEL: self.states[MODEL]}
+
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in self.states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
+
+        states_to_load = {
+            k: v for k, v in self.states.items() if k not in self.exclude_from_loading
+        }
+
+        if self.ft_manager:
+            states_to_load.pop(DATALOADER)
+
+        return states_to_load
+
+    def _save_last_step(self, curr_step: int) -> None:
+        """Save the checkpoint for the last step.
+
+        This method handles special processing for the final checkpoint,
+        including model-weights-only saving and dtype conversion if configured.
+
+        Args:
+            curr_step (int): The current step.
+        """
+        # We only consider saving weights only at the end of the training. So
+        # this won't affect preemption and training resume. We also only allow
+        # dtype conversion when we are checkpoint model weights only and the
+        # current dtype is not the same as the export dtype at the end of the training.
+
+        if self.model_weights_only:
+            # We update self.states to keep the model only.
+            # After this update, self.states = {
+            #      'tok_embeddings.weight':...,
+            #      'layers.0.attention.wq.weight': ...
+            # }.
+            self.states = self.states[MODEL].state_dict()
+
+            # For now, we will manually pop the freqs_cis buffer, as we made this permanent
+            # temporarily and we don't want to include it in the exported state_dict.
+            # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
+            self.states.pop("freqs_cis", None)
+
+            if self.export_dtype != torch.float32:
+                self.states = {
+                    k: v.to(self.export_dtype) for k, v in self.states.items()
+                }
+            logger.info(
+                f"Saving a model weights only checkpoint in {self.export_dtype} "
+                f"at last step, step {curr_step}."
+            )
+        else:
+            logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
+
+        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+
+    def _should_save(self, curr_step: int, force: bool = False) -> bool:
+        """Determine if a checkpoint should be saved at the current step.
+
+        Args:
+            curr_step (int): The current step.
+            force (bool): Whether to force save the checkpoint.
+
+        Returns:
+            bool: Whether a checkpoint should be saved.
+        """
+        if not self.enable_checkpoint:
+            return False
+
+        # Force saving a checkpoint at step 1 to fail fast if checkpointer is not
+        # compatible with the cluster.
+        if curr_step == 1:
+            return True
+
+        if force:
+            return True
+
+        if curr_step % self.interval == 0:
+            return True
+
+        return False
+
+    def _async_wait(self) -> None:
+        """Wait for any asynchronous checkpoint operations to complete."""
+        if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            logger.debug(
+                f"Waiting for the background process to finish, {time.monotonic()=}.:.2f"
+            )
+            if not self.mp.is_alive():
+                raise RuntimeError("The checkpoint background process is dead.")
+            _ = self.mp_queue_recv.get()
+        elif self.async_mode == AsyncMode.ASYNC or self.ft_manager is not None:
+            if self.async_future is not None:
+                self.async_future.result()
+                self.async_future = None
+        elif self.async_future is not None:
+            raise RuntimeError(
+                "self.async_future is not None, but self.async_mode is not enabled "
+                "and fault tolerance is not active."
+            )
+
+    def _async_with_pinned_memory(self, checkpoint_id: str) -> None:
+        """Set up asynchronous checkpoint with pinned memory.
+
+        Args:
+            checkpoint_id (str): The checkpoint identifier.
+        """
+        self._cpu_staging(checkpoint_id)
+        self.sending_to_checkpoint_mp = True
+
+    def _cpu_staging(self, checkpoint_id: str | None) -> None:
+        """Offload state_dict to CPU memory.
+
+        Args:
+            checkpoint_id (str | None): The checkpoint identifier.
+        """
+        state_dict = dcp.state_dict_saver._stateful_to_state_dict(self.states)
+        if self.cpu_offload_state_dict is None:
+            logger.debug(f"Preparing the CPU memory, {time.monotonic()=}.:.2f")
+            self.cpu_offload_state_dict = _create_cpu_state_dict(
+                state_dict, pin_memory=True, share_memory=True
+            )
+
+        logger.debug(f"Staging the state_dict, {time.monotonic()=}.:.2f")
+        with torch.cuda.stream(self.staging_stream):
+            self.cpu_offload_state_dict = _copy_state_dict(
+                state_dict,
+                self.cpu_offload_state_dict,
+                non_blocking=True,
+            )
+            self.staging = True
+            self.staging_id = checkpoint_id
+
+    def _purge_stale_checkpoints(self) -> None:
+        """Delete old checkpoints, keeping only the latest k checkpoints.
+
+        This method is only called when keep_latest_k > 0 and the current process
+        is the main process (rank 0).
+        """
+        if (
+            self.keep_latest_k > 0
+            and dist.get_rank() == 0
+            and os.path.isdir(self.folder)
+            and (not self.ft_manager or self.ft_manager.participating_rank() == 0)
+        ):
+            discovered_checkpoints = []
+            for filename in os.listdir(self.folder):
+                match = re.search(r"step-(\d+)", filename)
+                if match:  # Add check to ensure match is not None
+                    path = os.path.join(self.folder, filename)
+                    discovered_checkpoints.append((int(match.group(1)), path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+
+            for _, path in to_delete:
+                assert self.purge_thread is not None
+                self.purge_queue.put(path)
