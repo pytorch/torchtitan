@@ -354,7 +354,7 @@ class MetricsProcessor:
         global_max_loss: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
-        assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
+        # assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
 
@@ -365,8 +365,8 @@ class MetricsProcessor:
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
-        mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
-        tflops = self.num_flops_per_token * tps / 1e12
+        # mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+        # tflops = self.num_flops_per_token * tps / 1e12
 
         time_end_to_end = time_delta / self.job_config.metrics.log_freq
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
@@ -378,8 +378,8 @@ class MetricsProcessor:
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
             "throughput(tps)": tps,
-            "tflops": tflops,
-            "mfu(%)": mfu,
+            # "tflops": tflops,
+            # "mfu(%)": mfu,
             "time_metrics/end_to_end(s)": time_end_to_end,
             "time_metrics/data_loading(s)": time_data_loading,
             "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -403,8 +403,8 @@ class MetricsProcessor:
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
-            f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            # f"{color.cyan}tflops: {tflops:,.2f}  "
+            # f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
         )
 
         self.ntokens_since_last_log = 0
