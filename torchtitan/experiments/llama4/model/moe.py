@@ -313,7 +313,7 @@ class MoE(nn.Module):
                         group=self.token_dispatcher.ep_group,
                     )
                 # will be used to update the expert bias for load balancing
-                self.tokens_per_expert += num_local_tokens_per_expert_detached
+                self.tokens_per_expert.add_(num_local_tokens_per_expert_detached)
 
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
