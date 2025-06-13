@@ -220,7 +220,7 @@ def init_distributed(job_config):
             backend = f"{device_type}:{backend},cpu:gloo"
         return backend
 
-    TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
+    TRACE_BUFFER_SIZE = "TORCH_FR_BUFFER_SIZE"
     TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
     DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
     ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
