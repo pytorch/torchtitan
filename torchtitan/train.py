@@ -12,6 +12,7 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
@@ -116,6 +117,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
         )
 
+        # TODO(whc)
+        # I do this becuase otherwise sometimes inductor will skip re-running passes like comms reordering
+        torch._inductor.config.force_disable_caches = True
+
+        # allow configuring inductor comms optimizations from torchtitan commandline
+        torch._inductor.config.reorder_for_compute_comm_overlap = (
+            job_config.experimental.reorder_for_compute_comm_overlap
+        )
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = (
+            job_config.experimental.reorder_for_compute_comm_overlap_passes
+        )
+        torch._inductor.config.reorder_prefetch_limit = (
+            job_config.experimental.reorder_prefetch_limit
+        )
+
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
@@ -141,20 +157,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # build model (using meta init)
-        model_cls = self.train_spec.cls
         model_args = self.train_spec.config[job_config.model.flavor]
+        model_cls = self.train_spec.cls
         # set the model args from training job configs
         model_args.update_from_config(job_config, tokenizer)
-
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
+
         with torch.device("meta"):
             model = model_cls(model_args)
-
-        # Build the collection of model converters. No-op if `model.converters` empty
-        model_converters = build_model_converters(job_config, parallel_dims)
-        model_converters.convert(model)
+            # Build the collection of model converters. No-op if `model.converters` empty
+            model_converters = build_model_converters(job_config, parallel_dims)
+            model_converters.convert(model)
 
         # metrics logging
         build_metrics_processor_fn = (
