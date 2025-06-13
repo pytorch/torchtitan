@@ -118,13 +118,15 @@ def parallelize_llama(
         )
 
     # for MoE auxiliary-loss-free load balancing
-    if dp_mesh is not None:
+    if parallel_dims.dp_cp_enabled is not None:
         # NOTE: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
+        dp_cp_mesh = world_mesh["dp_cp"]
+
         def _sync_tokens_per_expert(module, *_):
             assert isinstance(module, MoE)
             torch.distributed.all_reduce(
-                module.tokens_per_expert, group=dp_mesh.get_group()
+                module.tokens_per_expert, group=dp_cp_mesh.get_group()
             )
 
         for transformer_block in model.layers.values():
