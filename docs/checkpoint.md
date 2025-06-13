@@ -25,11 +25,11 @@ interval = 500
 
 
 2. SAVE ONLY MODEL WEIGHTS
-By setting `model_weights_only` to `True`, the checkpoint will only contain the model weights and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
+By setting `last_save_model_weights_only` to `True`, the checkpoint will only contain the model weights and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
 ```
 [checkpoint]
 enable_checkpoint = true
-model_weights_only = true
+last_save_model_weights_only = true
 ```
 
 3. CHOOSE DESIRED EXPORT PRECISION
@@ -37,7 +37,7 @@ The default model states are in `float32`. You can choose to export the checkpoi
 ```
 [checkpoint]
 enable_checkpoint = true
-model_weights_only = true
+last_save_model_weights_only = true
 export_dtype = "bfloat16"
 ```
 
@@ -48,7 +48,7 @@ enable_checkpoint = true
 folder = "checkpoint"
 interval = 10
 load_step = 5
-model_weights_only = true
+last_save_model_weights_only = true
 export_dtype = "bfloat16"
 ```
 
