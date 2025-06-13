@@ -224,7 +224,7 @@ def generate(
     tokenizer,
     dist_config,
     messages: list[dict],
-    n_tokens: int = 200,
+    n_tokens: int = 50,
 ):
     rank = dist.get_rank()
     device = dist_config.device
