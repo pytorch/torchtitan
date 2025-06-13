@@ -55,7 +55,7 @@ class DummyCheckpointConfig:
     interval: int = 10
     async_mode: str = "disabled"
     keep_latest_k: int = 0
-    save_model_weights_only: bool = False
+    first_save_model_weights_only: bool = False
     export_dtype: str = "float32"
     exclude_from_loading = []
     initial_load_model_weights_only: bool = False
