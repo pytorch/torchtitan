@@ -119,6 +119,7 @@ class PyTorchManualGroupedLinear(nn.Module):
         num_experts: int,
         in_features: int,
         out_features: int,
+        bias: bool = False,
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()

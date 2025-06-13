@@ -9,61 +9,37 @@ cute hardware - device_id 0
 cute hardware - driver_version 12080
 max_dynamic_shared_memory: 232448
 max_active_blocks: 1
+max_active_blocks: 33
 Initialized CUTLASSGroupedGemmStrategy for Blackwell with:
-  - 2 CTA instructions: False
-  - MMA tiler (M, N): (128, 128)
-  - Cluster shape (M, N): (1, 1)
-  - Cluster size: 1
+  - 2 CTA instructions: True
+  - MMA tiler (M, N): (256, 128)
+  - Cluster shape (M, N): (2, 2)
+  - Cluster size: 4
 🔍 Testing Forward Pass...
 max_dynamic_shared_memory: 232448
 max_active_blocks: 1
-Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=True, cluster=(2, 2)
 Kernel compilation successful
    Forward max difference: 0.00e+00
    Forward outputs close: ✓
 🔍 Testing Backward Pass...
-Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=True, cluster=(2, 2)
 Kernel compilation successful
-Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=False, cluster=(1, 1)
+Compiling CUTLASS grouped GEMM kernel: 8 groups, 2CTA=True, cluster=(2, 2)
 Kernel compilation successful
-   Input grad max difference: 2.21e+02
+   Input grad max difference: 2.34e+02
    Input gradients close: ❌
-   Weight grad max difference: 8.55e+01
+   Weight grad max difference: 9.10e+01
    Weight gradients close: ❌
 
-🎯 Overall Result: ❌ FAIL
 
-🚀 Benchmarking CUTLASS vs Manual Implementation
-============================================================
-
-📊 Medium: 8 experts, 1024 tokens
-Initializing CUTLASSGroupedGemmStrategy for Blackwell
-cute hardware - device_id 0
-cute hardware - driver_version 12080
-max_dynamic_shared_memory: 232448
-max_active_blocks: 1
-Initialized CUTLASSGroupedGemmStrategy for Blackwell with:
-  - 2 CTA instructions: False
-  - MMA tiler (M, N): (128, 128)
-  - Cluster shape (M, N): (1, 1)
-  - Cluster size: 1
-Traceback (most recent call last):
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 319, in <module>
-    main()
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 309, in main
-    benchmark_cutlass_vs_manual()
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_integration.py", line 211, in benchmark_cutlass_vs_manual
-    cutlass_layer = CUTLASSGroupedLinear(
-                    ^^^^^^^^^^^^^^^^^^^^^
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/cutlass_backwards.py", line 1356, in __init__
-    raise NotImplementedError(
-NotImplementedError: Bias not yet implemented for CUTLASS grouped linear
 """
 
 import os
 import sys
 
 import torch
+import torch.nn as nn
 
 
 try:
@@ -90,14 +66,14 @@ from cutlass_test_driver import GroupGemmTestDriver, PyTorchManualGroupedLinear
 
 
 def create_cutlass_strategy(
-    use_2cta_instrs=False, mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1)
+    use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
 ):
     """Create a CUTLASS strategy with specified configuration."""
     if not CUTLASS_AVAILABLE:
         raise RuntimeError("CUTLASS not available")
 
     strategy = CUTLASSGroupedGemmStrategy(
-        custom_activation=lambda x: x,  # Identity for linear layers
+        custom_activation=nn.SiLU(),  # Identity for linear layers
         use_2cta_instrs=use_2cta_instrs,
         mma_tiler_mn=mma_tiler_mn,
         cluster_shape_mn=cluster_shape_mn,
@@ -134,6 +110,7 @@ def test_cutlass_vs_manual():
             in_features=in_features,
             out_features=out_features,
             strategy=strategy,
+            bias=False,
             dtype=dtype,
         ).to(device)
     else:
@@ -144,6 +121,7 @@ def test_cutlass_vs_manual():
         num_experts=num_experts,
         in_features=in_features,
         out_features=out_features,
+        bias=False,
         dtype=dtype,
     ).to(device)
 
