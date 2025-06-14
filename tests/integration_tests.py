@@ -20,6 +20,8 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
+test_with_rocm = os.getenv("TEST_WITH_ROCM", "0")
+
 
 @dataclass
 class OverrideDefinitions:
@@ -139,28 +141,34 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Weights Only bf16",
             "last_save_model_weights_only_bf16",
         ),
-        OverrideDefinitions(
-            [
+    ]
+    # check test_with_rocm
+    if test_with_rocm != "1":
+        integration_tests_flavors["debug_model.toml"].extend([
+            OverrideDefinitions(
                 [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    [
+                        "--parallelism.pipeline_parallel_degree 4",
+                        "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                    ],
                 ],
-            ],
-            "PP looped zero bubble test",
-            "pp_looped_zero_bubble",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
+                "PP looped zero bubble test",
+                "pp_looped_zero_bubble",
+                ngpu=4,
+            ),
+            OverrideDefinitions(
                 [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    [
+                        "--parallelism.pipeline_parallel_degree 2",
+                        "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                    ],
                 ],
-            ],
-            "PP zero bubble test (v shaped)",
-            "pp_zbv",
-            ngpu=2,
-        ),
+                "PP zero bubble test (v shaped)",
+                "pp_zbv",
+                ngpu=2,
+            ),
+        ])
+    integration_tests_flavors["debug_model.toml"].extend([
         OverrideDefinitions(
             [
                 [
@@ -272,18 +280,24 @@ def build_test_list():
             "pp_looped_1f1b",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
+    ])
+    # check test_with_rocm
+    if test_with_rocm != "1":
+        integration_tests_flavors["debug_model.toml"].extend(
+            OverrideDefinitions(
                 [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-                    "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                    [
+                        "--parallelism.pipeline_parallel_degree 2",
+                        "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
+                        "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                    ],
                 ],
-            ],
-            "PP with custom pipeline schedule loaded from CSV file",
-            "pp_custom_csv",
-            ngpu=2,
-        ),
+                "PP with custom pipeline schedule loaded from CSV file",
+                "pp_custom_csv",
+                ngpu=2,
+            ),
+        )
+    integration_tests_flavors["debug_model.toml"].extend([
         OverrideDefinitions(
             [
                 [
@@ -509,7 +523,7 @@ def build_test_list():
             "gradient_accumulation",
             ngpu=2,
         ),
-    ]
+    ])
     return integration_tests_flavors
 
 
