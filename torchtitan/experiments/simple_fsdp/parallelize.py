@@ -11,7 +11,7 @@ from torch.distributed import DeviceMesh
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3.parallelize_llama import apply_ac, apply_tp
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_tp
 from torchtitan.tools.logging import logger
 
 from .simple_fsdp import data_parallel, MixedPrecisionPolicy

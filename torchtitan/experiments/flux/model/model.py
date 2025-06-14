@@ -159,17 +159,3 @@ class FluxModel(nn.Module, ModelProtocol):
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
-
-    @classmethod
-    def from_model_args(cls, model_args: FluxModelArgs) -> "FluxModel":
-        """
-        Initialize a Flux model from a FluxModelArgs object.
-
-        Args:
-            model_args (FluxModelArgs): Model configuration arguments.
-
-        Returns:
-            FluxModel: FluxModel model.
-
-        """
-        return cls(model_args)

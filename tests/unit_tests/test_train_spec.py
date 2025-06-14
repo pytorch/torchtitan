@@ -26,10 +26,16 @@ from torchtitan.protocols.train_spec import (
 )
 
 
-class FakeModel(ModelProtocol):
-    @classmethod
-    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
-        return nn.Linear(8, 8)
+class FakeModel(nn.Module, ModelProtocol):
+    def __init__(self, model_args: BaseModelArgs) -> None:
+        super().__init__()
+        self.linear = nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
 
 
 def fake_build_optimizers(
@@ -117,7 +123,7 @@ class TestTrainSpec:
 
         apply_to_train_specs(register_optimizer_hook_to_spec)
 
-        model = new_spec.cls.from_model_args(BaseModelArgs())
+        model = new_spec.cls(BaseModelArgs())
         model_parts = [model]
         optimizers = new_spec.build_optimizers_fn(model_parts, JobConfig())
         assert optimizers.optimizers[0].__class__.__name__ == "Adam"

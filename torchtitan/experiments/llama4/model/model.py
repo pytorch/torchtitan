@@ -473,17 +473,3 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         return output
-
-    @classmethod
-    def from_model_args(cls, model_args: TransformerModelArgs) -> "Transformer":
-        """
-        Initialize a Transformer model from a TransformerModelArgs object.
-
-        Args:
-            model_args (TransformerModelArgs): Model configuration arguments.
-
-        Returns:
-            Transformer: Transformer model.
-
-        """
-        return cls(model_args)
