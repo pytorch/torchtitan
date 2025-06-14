@@ -52,12 +52,15 @@ class ModelProtocol(Protocol):
     """Defines the interface for a model class.
 
     This is used to enforce that all model classes have some methods that are
-    required by the TorchTitan trainer.
+    required by the trainer.
     """
 
-    @classmethod
-    def from_model_args(cls, args: BaseModelArgs) -> nn.Module:
-        ...
+    def __init__(self, model_args: BaseModelArgs) -> None:
+        pass
+
+    @abstractmethod
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        pass
 
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]

@@ -12,19 +12,20 @@ from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
-from torchtitan.experiments.flux.model.autoencoder import load_ae
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.experiments.flux.parallelize_flux import parallelize_encoders
-from torchtitan.experiments.flux.sampling import generate_image, save_image
-from torchtitan.experiments.flux.utils import (
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.train import Trainer
+
+from .dataset.tokenizer import build_flux_tokenizer
+from .infra.parallelize import parallelize_encoders
+from .model.autoencoder import load_ae
+from .model.hf_embedder import FluxEmbedder
+from .sampling import generate_image, save_image
+from .utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
     unpack_latents,
 )
-from torchtitan.tools.logging import init_logger, logger
-from torchtitan.train import Trainer
 
 
 class FluxTrainer(Trainer):
