@@ -1,70 +1,7 @@
 #!/usr/bin/env python3
 """
-Standalone CUTLASS backward pass test.
-Self-contained with no external dependencies beyond basic CUTLASS.
-
-
-current:
-
-CUTLASS computation:
-  Executing backward_input: Atorch.Size([32, 64]) @ B^Ttorch.Size([64, 128]) = Ctorch.Size([32, 128])
-    Problem: [32, 128, 64, 1]
-    Strides: [[64, 1], [128, 1], [128, 1]]
-max_dynamic_shared_memory: 232448
-max_active_blocks: 1
-    Compiling kernel for backward_input...
-    ✅ Kernel compiled
-    ✅ backward_input executed
-❌ Complete Backward crashed: Inner dimension mismatch: 32 != 128
-Traceback (most recent call last):
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 576, in main
-    success = test_func()
-              ^^^^^^^^^^^
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 409, in test_complete_backward
-    strategy.execute_cutlass_gemm(dY_T, X, dW_cutlass, "backward_weight")
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 123, in execute_cutlass_gemm
-    assert K == K_B, f"Inner dimension mismatch: {K} != {K_B}"
-           ^^^^^^^^
-AssertionError: Inner dimension mismatch: 32 != 128
-
-============================================================
-
-🔍 Testing Grouped Backward (2 experts)
-=============================================
-🔧 Initializing standalone CUTLASS strategy...
-cute hardware - device_id 0
-cute hardware - driver_version 12080
-max_dynamic_shared_memory: 232448
-max_active_blocks: 1
-✅ Strategy initialized (max_active_clusters: 148)
-Setup: 2 experts, 16 tokens each
-X: torch.Size([32, 64]), W: torch.Size([2, 128, 64]), dY: torch.Size([32, 128])
-Reference dX norm: 520.0000
-Reference dW norm: 520.0000
-
-Expert 0:
-❌ Grouped Backward crashed: Inner dimension mismatch: 128 != 16
-Traceback (most recent call last):
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 576, in main
-    success = test_func()
-              ^^^^^^^^^^^
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 509, in test_grouped_backward
-    strategy.execute_cutlass_gemm(W_T, dY_T, dX_T, f"expert_{expert_idx}_input")
-  File "/data/users/less/torchtitan/torchtitan/experiments/deepseek_v3/dsl_back_standalone.py", line 123, in execute_cutlass_gemm
-    assert K == K_B, f"Inner dimension mismatch: {K} != {K_B}"
-           ^^^^^^^^
-AssertionError: Inner dimension mismatch: 128 != 16
-
-============================================================
-📊 FINAL RESULTS
-============================================================
-Basic CUTLASS GEMM   ✅ PASS
-Input Gradient       ✅ PASS
-Weight Gradient      ✅ PASS
-Complete Backward    💥 CRASH
-Grouped Backward     💥 CRASH
-
-Overall: 3/5 tests passed
+Fixed standalone CUTLASS backward pass test.
+Corrects the dimensional issues in the matrix operations.
 """
 
 import torch
@@ -88,11 +25,11 @@ except ImportError as e:
     exit(1)
 
 
-class StandaloneCutlassStrategy:
-    """Self-contained CUTLASS strategy for testing"""
+class FixedCutlassStrategy:
+    """Fixed CUTLASS strategy with correct dimension handling"""
 
     def __init__(self):
-        print("🔧 Initializing standalone CUTLASS strategy...")
+        print("🔧 Initializing fixed CUTLASS strategy...")
 
         # Force CUDA context creation
         dummy = torch.zeros(1, device="cuda")
@@ -169,19 +106,10 @@ class StandaloneCutlassStrategy:
 
         return cute_tensors
 
-    def execute_cutlass_gemm(self, A, B, C, operation_name="gemm"):
-        """Execute a single CUTLASS GEMM: C = A @ B^T"""
+    def execute_cutlass_gemm_basic(self, A, B, C, operation_name="gemm"):
+        """Execute basic CUTLASS GEMM: C = A @ B^T"""
         M, K = A.shape
         N, K_B = B.shape
-
-        # For input gradient computation: dX = dY @ W
-        # dY is [M, N] and W is [N, K], so we need to handle this special case
-        if operation_name == "backward_input":
-            # For backward_input, we expect A=dY [M,N] and B=W [N,K]
-            # The inner dimensions should match (N == N)
-            assert K == N, f"Inner dimension mismatch for backward_input: {K} != {N}"
-            # Swap K_B and N for the assertion below
-            K_B, N = N, K_B
 
         assert K == K_B, f"Inner dimension mismatch: {K} != {K_B}"
         assert C.shape == (
@@ -189,10 +117,10 @@ class StandaloneCutlassStrategy:
             N,
         ), f"Output shape mismatch: expected ({M}, {N}), got {C.shape}"
 
+        print(f"  Executing {operation_name}: A{A.shape} @ B^T{B.shape} = C{C.shape}")
+
         L = 1
         device = A.device
-
-        print(f"  Executing {operation_name}: A{A.shape} @ B^T{B.shape} = C{C.shape}")
 
         # Convert to MNKL format
         A_mnkl = A.unsqueeze(-1).contiguous()
@@ -219,6 +147,84 @@ class StandaloneCutlassStrategy:
         )
 
         return C
+
+    def compute_input_gradient(self, grad_output, weight, operation_name="input_grad"):
+        """
+        Compute input gradient: dX = dY @ W
+
+        Args:
+            grad_output: [M, N] - upstream gradient
+            weight: [N, K] - weight matrix
+
+        Returns:
+            grad_input: [M, K] - input gradient
+        """
+        M, N = grad_output.shape
+        N_w, K = weight.shape
+
+        assert N == N_w, f"Dimension mismatch: grad_output has {N}, weight has {N_w}"
+
+        print(
+            f"  Computing input gradient: dY{grad_output.shape} @ W{weight.shape} = dX[{M}, {K}]"
+        )
+
+        # Since CUTLASS computes A @ B^T, and we want dY @ W:
+        # We can compute this directly as dY @ W where CUTLASS treats W as B^T
+        # So A = dY [M, N], B = W^T [K, N] (so B^T = W [N, K])
+        weight_for_cutlass = (
+            weight.t().contiguous()
+        )  # [K, N] - this will be transposed to [N, K]
+        grad_input = torch.zeros(
+            M, K, dtype=self.DTYPE_TORCH, device=grad_output.device
+        )
+
+        print(
+            f"    CUTLASS setup: dY{grad_output.shape} @ (W^T)^T{weight_for_cutlass.shape} = dX{grad_input.shape}"
+        )
+
+        return self.execute_cutlass_gemm_basic(
+            grad_output, weight_for_cutlass, grad_input, operation_name
+        )
+
+    def compute_weight_gradient(
+        self, grad_output, input_tokens, operation_name="weight_grad"
+    ):
+        """
+        Compute weight gradient: dW = dY^T @ X
+
+        Args:
+            grad_output: [M, N] - upstream gradient
+            input_tokens: [M, K] - input tokens
+
+        Returns:
+            grad_weight: [N, K] - weight gradient
+        """
+        M, N = grad_output.shape
+        M_i, K = input_tokens.shape
+
+        assert M == M_i, f"Dimension mismatch: grad_output has {M}, input has {M_i}"
+
+        print(
+            f"  Computing weight gradient: dY^T{grad_output.shape} @ X{input_tokens.shape} = dW[{N}, {K}]"
+        )
+
+        # Since CUTLASS computes A @ B^T, and we want dY^T @ X:
+        # A = dY^T [N, M], B = X^T [K, M] (so B^T = X [M, K])
+        grad_output_T = grad_output.t().contiguous()  # [N, M]
+        input_for_cutlass = (
+            input_tokens.t().contiguous()
+        )  # [K, M] - this will be transposed to [M, K]
+        grad_weight = torch.zeros(
+            N, K, dtype=self.DTYPE_TORCH, device=grad_output.device
+        )
+
+        print(
+            f"    CUTLASS setup: dY^T{grad_output_T.shape} @ (X^T)^T{input_for_cutlass.shape} = dW{grad_weight.shape}"
+        )
+
+        return self.execute_cutlass_gemm_basic(
+            grad_output_T, input_for_cutlass, grad_weight, operation_name
+        )
 
     def _execute_kernel(
         self, problem_sizes, strides_abc, ptrs_abc, device, operation_name
@@ -286,7 +292,7 @@ def test_basic_cutlass_gemm():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    strategy = StandaloneCutlassStrategy()
+    strategy = FixedCutlassStrategy()
 
     # Test matrices
     M, N, K = 64, 128, 256
@@ -301,7 +307,7 @@ def test_basic_cutlass_gemm():
     print(f"Reference norm: {C_ref.norm().item():.4f}")
 
     # CUTLASS result
-    strategy.execute_cutlass_gemm(A, B, C, "basic_test")
+    strategy.execute_cutlass_gemm_basic(A, B, C, "basic_test")
     print(f"CUTLASS norm: {C.norm().item():.4f}")
 
     # Compare
@@ -327,7 +333,7 @@ def test_input_gradient():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    strategy = StandaloneCutlassStrategy()
+    strategy = FixedCutlassStrategy()
 
     # Problem: dX = dY @ W where dY:[M,N], W:[N,K] -> dX:[M,K]
     M, N, K = 32, 64, 128
@@ -340,21 +346,8 @@ def test_input_gradient():
     dX_ref = torch.mm(dY, W)  # [M,N] @ [N,K] = [M,K]
     print(f"Reference dX: {dX_ref.shape}, norm: {dX_ref.norm().item():.4f}")
 
-    # CUTLASS approach: reformulate as dX^T = W^T @ dY^T
-    print("CUTLASS approach: dX^T = W^T @ dY^T")
-
-    W_T = W.t().contiguous()  # [K, N]
-    dY_T = dY.t().contiguous()  # [N, M]
-    dX_T = torch.zeros(K, M, dtype=dtype, device=device)  # [K, M]
-
-    print(f"  W^T{W_T.shape} @ (dY^T)^T{dY_T.shape} = dX^T{dX_T.shape}")
-    print(f"  Note: CUTLASS computes W^T @ dY^T^T = W^T @ dY")
-
-    # Execute: W^T @ dY^T^T (CUTLASS transposes second operand)
-    strategy.execute_cutlass_gemm(W_T, dY, dX_T, "input_gradient")
-
-    # Transpose back to get dX
-    dX_cutlass = dX_T.t()  # [M, K]
+    # CUTLASS computation
+    dX_cutlass = strategy.compute_input_gradient(dY, W, "input_gradient")
     print(f"CUTLASS dX: {dX_cutlass.shape}, norm: {dX_cutlass.norm().item():.4f}")
 
     # Compare
@@ -382,7 +375,7 @@ def test_weight_gradient():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    strategy = StandaloneCutlassStrategy()
+    strategy = FixedCutlassStrategy()
 
     # Problem: dW = dY^T @ X where dY:[M,N], X:[M,K] -> dW:[N,K]
     M, N, K = 32, 64, 128
@@ -395,21 +388,8 @@ def test_weight_gradient():
     dW_ref = torch.mm(dY.t(), X)  # [N,M] @ [M,K] = [N,K]
     print(f"Reference dW: {dW_ref.shape}, norm: {dW_ref.norm().item():.4f}")
 
-    # CUTLASS approach: dW = dY^T @ X
-    # Since CUTLASS computes A @ B^T, we use A = dY^T, B^T = X^T
-    # So CUTLASS computes dY^T @ (X^T)^T = dY^T @ X = dW
-    print("CUTLASS approach: dY^T @ X using A @ B^T format")
-
-    dY_T = dY.t().contiguous()  # [N, M]
-    X_T = X.t().contiguous()  # [K, M]
-    dW_cutlass = torch.zeros(N, K, dtype=dtype, device=device)  # [N, K]
-
-    print(f"  dY^T{dY_T.shape} @ (X^T)^T{X_T.shape} = dW{dW_cutlass.shape}")
-    print(f"  Note: CUTLASS computes dY^T @ X^T^T = dY^T @ X")
-
-    # Execute: dY^T @ X^T^T (CUTLASS transposes second operand)
-    strategy.execute_cutlass_gemm(dY_T, X_T, dW_cutlass, "weight_gradient")
-
+    # CUTLASS computation
+    dW_cutlass = strategy.compute_weight_gradient(dY, X, "weight_gradient")
     print(f"CUTLASS dW: {dW_cutlass.shape}, norm: {dW_cutlass.norm().item():.4f}")
 
     # Compare
@@ -437,7 +417,7 @@ def test_complete_backward():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    strategy = StandaloneCutlassStrategy()
+    strategy = FixedCutlassStrategy()
 
     # Problem setup: Y = X @ W^T, given dY, compute dX and dW
     M, N, K = 32, 64, 128
@@ -460,16 +440,10 @@ def test_complete_backward():
     print("\nCUTLASS computation:")
 
     # Input gradient: dX = dY @ W
-    dX_cutlass = torch.zeros(M, K, dtype=dtype, device=device)
-
-    # For input gradient, we need to handle the special case in execute_cutlass_gemm
-    strategy.execute_cutlass_gemm(dY, W, dX_cutlass, "backward_input")
+    dX_cutlass = strategy.compute_input_gradient(dY, W, "backward_input")
 
     # Weight gradient: dW = dY^T @ X
-    dY_T = dY.t().contiguous()  # [N, M]
-    dW_cutlass = torch.zeros(N, K, dtype=dtype, device=device)
-
-    strategy.execute_cutlass_gemm(dY_T, X, dW_cutlass, "backward_weight")
+    dW_cutlass = strategy.compute_weight_gradient(dY, X, "backward_weight")
 
     print(f"CUTLASS dX: {dX_cutlass.shape}, norm: {dX_cutlass.norm().item():.4f}")
     print(f"CUTLASS dW: {dW_cutlass.shape}, norm: {dW_cutlass.norm().item():.4f}")
@@ -507,7 +481,7 @@ def test_grouped_backward():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    strategy = StandaloneCutlassStrategy()
+    strategy = FixedCutlassStrategy()
 
     # Setup: 2 experts, simple token distribution
     num_experts = 2
@@ -564,23 +538,15 @@ def test_grouped_backward():
 
         print(f"\nExpert {expert_idx}:")
 
-        # Input gradient: dX^T = W^T @ dY^T
-        W_T = expert_W.t().contiguous()
-        dY_T = expert_dY.t().contiguous()
-        dX_T = torch.zeros(in_features, tokens_per_expert, dtype=dtype, device=device)
-
-        strategy.execute_cutlass_gemm(W_T, dY_T, dX_T, f"expert_{expert_idx}_input")
-        dX_cutlass[start_idx:end_idx] = dX_T.t()
+        # Input gradient: dX = dY @ W
+        expert_dX_cutlass = strategy.compute_input_gradient(
+            expert_dY, expert_W, f"expert_{expert_idx}_input"
+        )
+        dX_cutlass[start_idx:end_idx] = expert_dX_cutlass
 
         # Weight gradient: dW = dY^T @ X
-        dY_T = expert_dY.t().contiguous()
-        X_T = expert_X.t().contiguous()
-        expert_dW_cutlass = torch.zeros(
-            out_features, in_features, dtype=dtype, device=device
-        )
-
-        strategy.execute_cutlass_gemm(
-            dY_T, X_T, expert_dW_cutlass, f"expert_{expert_idx}_weight"
+        expert_dW_cutlass = strategy.compute_weight_gradient(
+            expert_dY, expert_X, f"expert_{expert_idx}_weight"
         )
         dW_cutlass[expert_idx] = expert_dW_cutlass
 
@@ -610,8 +576,8 @@ def test_grouped_backward():
 
 def main():
     """Main test sequence"""
-    print("🧪 Standalone CUTLASS Backward Test")
-    print("=" * 50)
+    print("🧪 Fixed Standalone CUTLASS Backward Test")
+    print("=" * 55)
 
     if not torch.cuda.is_available():
         print("❌ CUDA not available")
