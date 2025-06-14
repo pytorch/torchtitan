@@ -1,7 +1,112 @@
 #!/usr/bin/env python3
 """
 Fixed standalone CUTLASS backward pass test.
-Corrects the dimensional issues in the matrix operations.
+
+current:
+Initializing fixed CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+✅ Strategy initialized (max_active_clusters: 148)
+Forward was: Y = Xtorch.Size([32, 128]) @ W^Ttorch.Size([64, 128])
+Given upstream grad dYtorch.Size([32, 64])
+Computing dX and dW...
+Reference dX: torch.Size([32, 128]), norm: 494.0000
+Reference dW: torch.Size([64, 128]), norm: 492.0000
+
+CUTLASS computation:
+  Computing input gradient: dYtorch.Size([32, 64]) @ Wtorch.Size([64, 128]) = dX[32, 128]
+    CUTLASS setup: dYtorch.Size([32, 64]) @ (W^T)^Ttorch.Size([128, 64]) = dXtorch.Size([32, 128])
+  Executing backward_input: Atorch.Size([32, 64]) @ B^Ttorch.Size([128, 64]) = Ctorch.Size([32, 128])
+    Problem: [32, 128, 64, 1]
+    Strides: [[64, 1], [64, 1], [128, 1]]
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+    Compiling kernel for backward_input...
+    ✅ Kernel compiled
+    ✅ backward_input executed
+  Computing weight gradient: dY^Ttorch.Size([32, 64]) @ Xtorch.Size([32, 128]) = dW[64, 128]
+    CUTLASS setup: dY^Ttorch.Size([64, 32]) @ (X^T)^Ttorch.Size([128, 32]) = dWtorch.Size([64, 128])
+  Executing backward_weight: Atorch.Size([64, 32]) @ B^Ttorch.Size([128, 32]) = Ctorch.Size([64, 128])
+    Problem: [64, 128, 32, 1]
+    Strides: [[32, 1], [32, 1], [128, 1]]
+    Compiling kernel for backward_weight...
+    ✅ Kernel compiled
+    ✅ backward_weight executed
+CUTLASS dX: torch.Size([32, 128]), norm: 494.0000
+CUTLASS dW: torch.Size([64, 128]), norm: 492.0000
+
+Comparison:
+dX max diff: 0.00e+00 (relative: 0.00e+00)
+dW max diff: 0.00e+00 (relative: 0.00e+00)
+✅ Complete backward pass works!
+
+============================================================
+
+🔍 Testing Grouped Backward (2 experts)
+=============================================
+🔧 Initializing fixed CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+✅ Strategy initialized (max_active_clusters: 148)
+Setup: 2 experts, 16 tokens each
+X: torch.Size([32, 64]), W: torch.Size([2, 128, 64]), dY: torch.Size([32, 128])
+Reference dX norm: 516.0000
+Reference dW norm: 524.0000
+
+Expert 0:
+  Computing input gradient: dYtorch.Size([16, 128]) @ Wtorch.Size([128, 64]) = dX[16, 64]
+    CUTLASS setup: dYtorch.Size([16, 128]) @ (W^T)^Ttorch.Size([64, 128]) = dXtorch.Size([16, 64])
+  Executing expert_0_input: Atorch.Size([16, 128]) @ B^Ttorch.Size([64, 128]) = Ctorch.Size([16, 64])
+    Problem: [16, 64, 128, 1]
+    Strides: [[128, 1], [128, 1], [64, 1]]
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+    Compiling kernel for expert_0_input...
+    ✅ Kernel compiled
+    ✅ expert_0_input executed
+  Computing weight gradient: dY^Ttorch.Size([16, 128]) @ Xtorch.Size([16, 64]) = dW[128, 64]
+    CUTLASS setup: dY^Ttorch.Size([128, 16]) @ (X^T)^Ttorch.Size([64, 16]) = dWtorch.Size([128, 64])
+  Executing expert_0_weight: Atorch.Size([128, 16]) @ B^Ttorch.Size([64, 16]) = Ctorch.Size([128, 64])
+    Problem: [128, 64, 16, 1]
+    Strides: [[16, 1], [16, 1], [64, 1]]
+    Compiling kernel for expert_0_weight...
+    ✅ Kernel compiled
+    ✅ expert_0_weight executed
+
+Expert 1:
+  Computing input gradient: dYtorch.Size([16, 128]) @ Wtorch.Size([128, 64]) = dX[16, 64]
+    CUTLASS setup: dYtorch.Size([16, 128]) @ (W^T)^Ttorch.Size([64, 128]) = dXtorch.Size([16, 64])
+  Executing expert_1_input: Atorch.Size([16, 128]) @ B^Ttorch.Size([64, 128]) = Ctorch.Size([16, 64])
+    Problem: [16, 64, 128, 1]
+    Strides: [[128, 1], [128, 1], [64, 1]]
+    ✅ expert_1_input executed
+  Computing weight gradient: dY^Ttorch.Size([16, 128]) @ Xtorch.Size([16, 64]) = dW[128, 64]
+    CUTLASS setup: dY^Ttorch.Size([128, 16]) @ (X^T)^Ttorch.Size([64, 16]) = dWtorch.Size([128, 64])
+  Executing expert_1_weight: Atorch.Size([128, 16]) @ B^Ttorch.Size([64, 16]) = Ctorch.Size([128, 64])
+    Problem: [128, 64, 16, 1]
+    Strides: [[16, 1], [16, 1], [64, 1]]
+    ✅ expert_1_weight executed
+
+CUTLASS dX norm: 516.0000
+CUTLASS dW norm: 524.0000
+
+Comparison:
+dX max diff: 0.00e+00 (relative: 0.00e+00)
+dW max diff: 0.00e+00 (relative: 0.00e+00)
+✅ Grouped backward pass works!
+
+============================================================
+📊 FINAL RESULTS
+============================================================
+Basic CUTLASS GEMM   ✅ PASS
+Input Gradient       ✅ PASS
+Weight Gradient      ✅ PASS
+Complete Backward    ✅ PASS
+Grouped Backward     ✅ PASS
 """
 
 import torch

@@ -1,6 +1,24 @@
 """
 Stride-optimized CUTLASS Group GEMM implementation.
 Uses stride manipulation instead of tensor transpositions for better performance.
+
+errors:
+
+BACKWARD PASS RESULTS:
+------------------------------------------------------------------------------------------
+Config          PyTorch (ms) CUTLASS (ms) Speedup  Correct  Max Diff
+----------------------------------------------------------------------
+Small-4E        1.15         1.53         0.75x    ❌        6.4e+01
+Small-8E        1.69         1.63         1.04x    ❌        6.0e+01
+MoE-7B-Gate     5.84         3.98         1.47x    ❌        1.0e+02
+MoE-7B-Down     5.83         3.86         1.51x    ❌        9.9e+01
+Large-16E       19.65        5.96         3.30x    ❌        7.5e+01
+XLarge-32E      69.61        7.72         9.02x    ❌        7.2e+01
+DeepSeek-64E    813.77       29.82        27.29x   ❌        6.4e+01
+
+📊 Backward Speedup Summary:
+   Average: 6.34x
+   Range: 0.75x - 27.29x
 """
 
 from typing import List, Tuple
@@ -38,11 +56,7 @@ class StrideOptimizedCUTLASSStrategy:
         if not HAS_CUTLASS:
             raise RuntimeError("CUTLASS not available")
 
-        print(f"🚀 Initializing Stride-Optimized CUTLASS strategy...")
-
-        # Force CUDA context creation
-        dummy = torch.zeros(1, device="cuda")
-        dummy.cpu()
+        print(f" Initializing Stride-Optimized CUTLASS strategy...")
 
         self.use_2cta_instrs = use_2cta_instrs
         self.mma_tiler_mn = mma_tiler_mn
@@ -76,10 +90,16 @@ class StrideOptimizedCUTLASSStrategy:
         self._compiled_kernels = {}
         self._tensormap_buffers = {}
 
-        print(f"✅ Stride-optimized strategy initialized:")
-        print(f"   - Zero-copy transpose operations")
-        print(f"   - Stride-based layout manipulation")
         print(f"   - Max active clusters: {self.max_active_clusters}")
+        print(
+            f"kernel params: {self.ACC_DTYPE=}, {use_2cta_instrs=}, {mma_tiler_mn=}, {cluster_shape_mn=}"
+        )
+
+    def _set_cuda_context(self):
+        # Force CUDA context creation
+        dummy = torch.zeros(1, device="cuda")
+        dummy.cpu()
+        del dummy
 
     def _get_tensormap_buffer(self, device):
         """Get or create tensormap buffer"""

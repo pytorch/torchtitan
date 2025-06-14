@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# torch.cuda.use_t
+torch.backends.cuda.matmul.allow_tf32 = True
 
 # Import triton for benchmarking
 try:
@@ -187,9 +187,9 @@ class GroupGemmBenchmark:
         cutlass_layer = None
         if HAS_CUTLASS:
             strategy = create_cutlass_strategy(
-                use_2cta_instrs=False,
-                mma_tiler_mn=(128, 128),
-                cluster_shape_mn=(1, 1),
+                use_2cta_instrs=True,
+                mma_tiler_mn=(256, 128),
+                cluster_shape_mn=(2, 2),
             )
             cutlass_layer = CUTLASSGroupedLinear(
                 config["num_experts"],
@@ -288,9 +288,9 @@ class GroupGemmBenchmark:
         cutlass_layer = None
         if HAS_CUTLASS:
             strategy = create_cutlass_strategy(
-                use_2cta_instrs=False,
-                mma_tiler_mn=(128, 128),
-                cluster_shape_mn=(1, 1),
+                use_2cta_instrs=True,
+                mma_tiler_mn=(256, 128),
+                cluster_shape_mn=(2, 2),
             )
             cutlass_layer = CUTLASSGroupedLinear(
                 config["num_experts"],
