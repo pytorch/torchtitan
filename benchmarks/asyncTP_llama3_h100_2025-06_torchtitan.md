@@ -15,105 +15,25 @@ We ran our performance benchmarks on the [Grand Teton platform](https://engineer
 
 ### Results
 
-Detailed performance results and training configurations can be found in the table below:
+Detailed performance results and training configurations can be found in the tables below:
 
 #### Llama3 70b on 256 H100s with FSDP=32, TP=8, torch.compile, full AC,  local batch size 16
 
-| TP type | Quantization | Average TPS | Speedup over vanilla TP baseline |
-| :--- | :--- | :--- | :--- |
-| Vanilla TP | None (bfloat16) | 597.3 | 1.00 |
-| Async TP | None (bfloat16) | 652.4 | 1.09 |
-| Vanilla TP | float8 tensorwise | 809.8 | 1.00 |
-| Async TP | float8 tensorwise | 942.4 | 1.16 |
-| Vanilla TP | float8 rowwise | 599.6 | 1.00 |
-| Async TP | float8 rowwise | 624.8 | 1.04 |
+| Quantization      | Vanilla TP tokens/sec | Async TP tokens/sec |  Async TP speedup
+| :---------------- | :---- | :---- | :--- |
+| None (bfloat16)   | 597.3 | 652.4 | 1.09 |
+| float8 tensorwise | 809.8 | 942.4 | 1.16 |
+| float8 rowwise    | 599.6 | 624.8 | 1.04 |
 
 #### Llama3 8b on 64 H100s with FSDP=8, TP=8, torch.compile, per op SAC, local batch size 12
 
-| TP type | Quantization | Average TPS | Speedup over vanilla TP baseline |
-| :--- | :--- | :--- | :--- |
-| Vanilla TP | None (bfloat16) | 4378 | 1.00 |
-| Async TP | None (bfloat16) | 4809.4 | 1.10 |
-| Vanilla TP | float8 tensorwise | 5078.1 | 1.00 |
-| Async TP | float8 tensorwise | 5570.1 | 1.10 |
-| Vanilla TP | float8 rowwise | 3708.5 | 1.00 |
-| Async TP | float8 rowwise | 3914.9 | 1.06 |
+| Quantization      | Vanilla TP tokens/sec | Async TP tokens/sec |  Async TP speedup
+| :---------------- | :----- | :----- | :--- |
+| None (bfloat16)   | 4378   | 4809.4 | 1.10 |
+| float8 tensorwise | 5078.1 | 5570.1 | 1.10 |
+| float8 rowwise    | 3708.5 | 3914.9 | 1.06 |
 
 **Note**: the low baseline performance of the vanilla TP float8 rowwise training is being addressed here: https://github.com/pytorch/torchtitan/issues/1207
-
-### Commands
-
-#### Llama 3.1 70b with bfloat16, torch.compile, full AC, local batch size 16, FSDP=32, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=200
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --parallelism.enable_async_tensor_parallel
-```
-
-#### Llama 3.1 70b with float8 tensorwise, torch.compile, full AC, local batch size 16, FSDP=32, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=200 --model.converters="float8"
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=200 --model.converters="float8" --parallelism.enable_async_tensor_parallel
-```
-
-#### Llama 3.1 70b with float8 rowwise, torch.compile, full AC, local batch size 16, FSDP=32, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8" --float8.recipe_name="rowwise"
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_70b.toml --activation_checkpoint.mode="full" --training.local-batch-size=16 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8" --float8.recipe_name="rowwise" --parallelism.enable_async_tensor_parallel
-```
-
-#### Llama 3.1 8b with bfloat16, per op SAC, torch.compile, local batch size 12, FSDP=8, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --parallelism.enable_async_tensor_parallel
-```
-
-#### Llama 3.1 8b with float8 tensorwise, per op SAC, torch.compile, local batch size 12, FSDP=8, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8"
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8" --parallelism.enable_async_tensor_parallel
-```
-
-#### Llama 3.1 8b with float8 rowwise, per op SAC, torch.compile, local batch size 12, FSDP=8, TP=8
-
-**Vanilla TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8" --float8.recipe_name="rowwise"
-```
-
-**Async TP**
-```bash
-torchtitan/models/llama3/train_configs/llama3_8b.toml --activation_checkpoint.mode="selective" --activation_checkpoint.selective_ac_option="op" --training.local-batch-size=12 --training.compile --parallelism.tensor_parallel_degree=8 --training.steps=100 --model.converters="float8" --float8.recipe_name="rowwise" --parallelism.enable_async_tensor_parallel
-```
 
 ### Versions and Dates
 
