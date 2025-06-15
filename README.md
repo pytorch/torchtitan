@@ -119,6 +119,7 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_trai
 You first need to download the Llama checkpoint. Here are the commands:
 
 ```bash
+export HF_TOKEN=... # get your HF token from https://huggingface.co/settings/tokens
 # Download the tokenizer and model weights
 rm -rf tmp
 uv run huggingface-cli download meta-llama/Llama-3.1-8B original/tokenizer.model --local-dir tmp
