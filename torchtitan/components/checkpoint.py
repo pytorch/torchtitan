@@ -572,21 +572,13 @@ class CheckpointManager:
             Dict[str, Any]: The states to load for the given step.
         """
         # For the first step, we will only load the model weights.
-        if model_only:
-            sd = self.states[MODEL].state_dict()
-            # @vwxyzjn: commented out because otherwise I get `TypeError: cannot pickle code objects`
-            # for k in excluded_parameters_for_model_only:
-            #     sd.pop(k, None)
-            return sd
-
-        for exclude_key in self.exclude_from_loading:
-            if exclude_key not in self.states:
-                raise ValueError(f"{exclude_key} not found in state_dict.")
-
+        states = {MODEL: self.states[MODEL]} if model_only else self.states
         states_to_load = {
-            k: v for k, v in self.states.items() if k not in self.exclude_from_loading
+            k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
-
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
 
