@@ -2,23 +2,128 @@
 Stride-optimized CUTLASS Group GEMM implementation.
 Uses stride manipulation instead of tensor transpositions for better performance.
 
+
 errors:
 
-BACKWARD PASS RESULTS:
-------------------------------------------------------------------------------------------
-Config          PyTorch (ms) CUTLASS (ms) Speedup  Correct  Max Diff
-----------------------------------------------------------------------
-Small-4E        1.15         1.53         0.75x    ❌        6.4e+01
-Small-8E        1.69         1.63         1.04x    ❌        6.0e+01
-MoE-7B-Gate     5.84         3.98         1.47x    ❌        1.0e+02
-MoE-7B-Down     5.83         3.86         1.51x    ❌        9.9e+01
-Large-16E       19.65        5.96         3.30x    ❌        7.5e+01
-XLarge-32E      69.61        7.72         9.02x    ❌        7.2e+01
-DeepSeek-64E    813.77       29.82        27.29x   ❌        6.4e+01
 
-📊 Backward Speedup Summary:
-   Average: 6.34x
-   Range: 0.75x - 27.29x
+🔍 Benchmarking Backward Pass: Small-8E
+   8 experts, 1024 tokens, 2048→2048
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+❌ Error benchmarking Small-8E: Dimension mismatch: K=135 vs K_B=2048. A: torch.Size([135, 2048]), B: torch.Size([135, 2048]), transpose_A=True, transpose_B=True
+
+======================================================================
+📊 Configuration: MoE-7B-Gate
+   Experts: 8, Tokens: 2048
+   Dimensions: 4096 → 11008
+   Problem size: ~92341.8M operations
+
+🔍 Benchmarking Forward Pass: MoE-7B-Gate
+   8 experts, 2048 tokens, 4096→11008
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   PyTorch:  0.73 ms
+   CUTLASS:  1.06 ms
+   Speedup:  0.69x
+   Correct:  ✅ (max diff: 0.00e+00)
+
+🔍 Benchmarking Backward Pass: MoE-7B-Gate
+   8 experts, 2048 tokens, 4096→11008
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+❌ Error benchmarking MoE-7B-Gate: Dimension mismatch: K=11008 vs K_B=4096. A: torch.Size([261, 11008]), B: torch.Size([11008, 4096]), transpose_A=False, transpose_B=True
+
+======================================================================
+📊 Configuration: MoE-7B-Down
+   Experts: 8, Tokens: 2048
+   Dimensions: 11008 → 4096
+   Problem size: ~92341.8M operations
+
+🔍 Benchmarking Forward Pass: MoE-7B-Down
+   8 experts, 2048 tokens, 11008→4096
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   PyTorch:  0.69 ms
+   CUTLASS:  1.02 ms
+   Speedup:  0.68x
+   Correct:  ✅ (max diff: 0.00e+00)
+
+🔍 Benchmarking Backward Pass: MoE-7B-Down
+   8 experts, 2048 tokens, 11008→4096
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+❌ Error benchmarking MoE-7B-Down: Dimension mismatch: K=4096 vs K_B=11008. A: torch.Size([260, 4096]), B: torch.Size([4096, 11008]), transpose_A=False, transpose_B=True
+
+======================================================================
+📊 Configuration: Large-16E
+   Experts: 16, Tokens: 4096
+   Dimensions: 4096 → 11008
+   Problem size: ~184683.6M operations
+
+🔍 Benchmarking Forward Pass: Large-16E
+   16 experts, 4096 tokens, 4096→11008
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   PyTorch:  1.27 ms
+   CUTLASS:  1.64 ms
+   Speedup:  0.77x
+   Correct:  ✅ (max diff: 0.00e+00)
+
+🔍 Benchmarking Backward Pass: Large-16E
+   16 experts, 4096 tokens, 4096→11008
+ Initializing Stride-Optimized CUTLASS strategy...
+cute hardware - device_id 0
+cute hardware - driver_version 12080
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+   - Max active clusters: 33
+kernel params: self.ACC_DTYPE=<class 'cutlass.base_dsl.typing.Float32'>, use_2cta_instrs=True, mma_tiler_mn=(256, 128), cluster_shape_mn=(2, 2)
+max_dynamic_shared_memory: 232448
+max_active_blocks: 1
+❌ Error benchmarking Large-16E: Dimension mismatch: K=11008 vs K_B=4096. A: torch.Size([269, 11008]), B: torch.Size([11008, 4096]), transpose_A=False, transpose_B=True
+
 """
 
 from typing import List, Tuple
@@ -172,68 +277,64 @@ class StrideOptimizedCUTLASSStrategy:
     ):
         """
         Execute grouped GEMM with stride-based layout control.
+        CUTLASS always computes A @ B^T.
 
-        Args:
-            operations: List of operation dictionaries with keys:
-                - 'A': tensor A
-                - 'B': tensor B
-                - 'C': output tensor C
-                - 'transpose_A': bool, whether to logically transpose A
-                - 'transpose_B': bool, whether to logically transpose B
-            operation_name: Name for debugging
+        The transpose flags indicate whether to logically transpose the tensor
+        before CUTLASS applies its own B^T operation.
         """
         if not operations:
             return
 
         device = operations[0]["A"].device
-
-        # Prepare metadata for all operations using stride manipulation
         problem_sizes = []
         strides_abc = []
         ptrs_abc = []
 
         for op in operations:
-            A = op["A"].contiguous()  # Ensure contiguous for safe stride manipulation
+            A = op["A"].contiguous()
             B = op["B"].contiguous()
             C = op["C"].contiguous()
             transpose_A = op.get("transpose_A", False)
             transpose_B = op.get("transpose_B", False)
 
-            # Get logical shapes after transpose
+            # Apply logical transposes using stride manipulation
+            # (This mimics what the simple test does with .t().contiguous())
+
             if transpose_A:
-                M, K = A.shape[1], A.shape[0]  # Logical shape after transpose
+                # Logically transpose A: [M,K] -> [K,M]
+                M, K = A.shape[1], A.shape[0]
                 A_strides = self._get_transpose_strides(A)
             else:
-                M, K = A.shape
+                M, K = A.shape[0], A.shape[1]
                 A_strides = list(A.stride())
 
             if transpose_B:
-                N, K_B = B.shape[0], B.shape[1]  # B^T shape
-                # For CUTLASS B^T operation, we need to handle this specially
-                # CUTLASS will transpose B, so if we want B^T, we pass original B
-                B_strides = list(B.stride())
-            else:
-                K_B, N = B.shape
-                # For CUTLASS B^T operation with no logical transpose
-                # We need to pass B with swapped strides to get B^T effect
+                # Logically transpose B: [N,K] -> [K,N]
+                # After this logical transpose, CUTLASS will do [K,N]^T = [N,K]
+                K_B, N = B.shape[1], B.shape[0]
                 B_strides = self._get_transpose_strides(B)
+            else:
+                # No logical transpose, CUTLASS does [N,K]^T = [K,N]
+                N, K_B = B.shape[0], B.shape[1]
+                B_strides = list(B.stride())
 
-            # Validate dimensions
-            assert K == K_B, f"Inner dimension mismatch: {K} != {K_B}"
+            # Validate
+            assert (
+                K == K_B
+            ), f"Dimension mismatch: K={K} vs K_B={K_B}. A: {A.shape}, B: {B.shape}, transpose_A={transpose_A}, transpose_B={transpose_B}"
             assert C.shape == (
                 M,
                 N,
             ), f"Output shape mismatch: expected ({M}, {N}), got {C.shape}"
 
+            # Add to batch
             L = 1
             C_strides = list(C.stride())
-
-            # Add to batch
             problem_sizes.append([M, N, K, L])
             strides_abc.append([A_strides, B_strides, C_strides])
             ptrs_abc.append([A.data_ptr(), B.data_ptr(), C.data_ptr()])
 
-        # Execute grouped kernel
+        # Execute
         self._execute_kernel(
             problem_sizes, strides_abc, ptrs_abc, device, operation_name
         )
@@ -379,23 +480,7 @@ class StrideOptimizedGroupGemm(torch.autograd.Function):
 
         # Convert to CPU for iteration (minimal sync)
         valid_sizes = m_sizes[valid_indices].cpu().tolist()
-        valid_offsets = (
-            (
-                m_offsets[valid_indices]
-                if len(m_offsets) > len(valid_indices)
-                else torch.cumsum(
-                    torch.cat(
-                        [
-                            torch.tensor([0], device=input_tokens.device),
-                            m_sizes[valid_indices][:-1],
-                        ]
-                    ),
-                    dim=0,
-                )
-            )
-            .cpu()
-            .tolist()
-        )
+        valid_offsets = m_offsets[valid_indices].cpu().tolist()
         valid_indices_cpu = valid_indices.cpu().tolist()
 
         for expert_idx, size, offset in zip(
@@ -410,15 +495,17 @@ class StrideOptimizedGroupGemm(torch.autograd.Function):
                 expert_output = output[offset : offset + size]  # [M, N]
 
                 # Forward: expert_input @ expert_weight^T
-                # A = expert_input [M, K], B = expert_weight [N, K]
-                # CUTLASS computes A @ B^T = expert_input @ expert_weight^T ✅
+                # Mathematical: expert_input[M, K] @ expert_weight^T[K, N] = expert_output[M, N]
+                # CUTLASS computes: A @ B^T where A = expert_input[M, K], B = expert_weight[N, K]
+                # CUTLASS does: expert_input[M, K] @ expert_weight[N, K]^T = expert_input[M, K] @ expert_weight^T[K, N] ✓
+                # So no logical transpose needed - CUTLASS's built-in transpose gives us what we want
                 operations.append(
                     {
                         "A": expert_input,
                         "B": expert_weight,
                         "C": expert_output,
                         "transpose_A": False,  # No transpose needed
-                        "transpose_B": True,  # CUTLASS will transpose B automatically
+                        "transpose_B": False,  # Let CUTLASS do the transpose naturally
                     }
                 )
 
@@ -437,38 +524,21 @@ class StrideOptimizedGroupGemm(torch.autograd.Function):
         grad_weight,
         strategy,
     ):
-        """Execute backward pass with stride optimization"""
+        """Execute backward pass with stride optimization - COMPLETELY REWRITTEN"""
         # Convert to CPU for iteration (minimal sync)
         valid_sizes = m_sizes[valid_indices].cpu().tolist()
-        valid_offsets = (
-            (
-                m_offsets[valid_indices]
-                if len(m_offsets) > len(valid_indices)
-                else torch.cumsum(
-                    torch.cat(
-                        [
-                            torch.tensor([0], device=grad_output.device),
-                            m_sizes[valid_indices][:-1],
-                        ]
-                    ),
-                    dim=0,
-                )
-            )
-            .cpu()
-            .tolist()
-        )
+        valid_offsets = m_offsets[valid_indices].cpu().tolist()
         valid_indices_cpu = valid_indices.cpu().tolist()
 
-        # Prepare input gradient operations: dX = dY @ W
+        # Prepare operations based on the exact same logic as the working simple test
         input_operations = []
-        # Prepare weight gradient operations: dW = dY^T @ X
         weight_operations = []
 
         for expert_idx, size, offset in zip(
             valid_indices_cpu, valid_sizes, valid_offsets
         ):
             if size > 0:
-                # Get expert data (all contiguous)
+                # Get expert data
                 expert_grad_output = grad_output[
                     offset : offset + size
                 ].contiguous()  # [M, N]
@@ -479,31 +549,46 @@ class StrideOptimizedGroupGemm(torch.autograd.Function):
                 expert_grad_input = grad_input[offset : offset + size]  # [M, K]
                 expert_grad_weight = grad_weight[expert_idx]  # [N, K]
 
-                # Input gradient: dX = dY @ W
-                # We need: grad_output[M,N] @ weight[N,K] = grad_input[M,K]
-                # CUTLASS: A @ B^T, so we need B^T = weight^T = [K,N]
-                # Use stride manipulation: tell CUTLASS to interpret weight as [K,N]
+                # INPUT GRADIENT: dX = dY @ W
+                # Mathematical: expert_grad_output[M, N] @ expert_weight[N, K] = expert_grad_input[M, K]
+                # CUTLASS computes: A @ B^T
+                # We need: expert_grad_output[M, N] @ expert_weight[N, K]
+                # So: A = expert_grad_output[M, N], B^T = expert_weight[N, K]
+                # Therefore: B = expert_weight^T[K, N]
+                #
+                # In the simple test: weight_for_cutlass = weight.t().contiguous() makes [K, N]
+                # In stride optimization: we need expert_weight[N, K] to be seen as [K, N]
+                # So we use transpose_B=True to make CUTLASS transpose it first
                 input_operations.append(
                     {
                         "A": expert_grad_output,  # [M, N]
-                        "B": expert_weight,  # [N, K] - will be stride-interpreted as [K, N]
+                        "B": expert_weight,  # [N, K] -> will be transposed to [K, N] by transpose_B=True
                         "C": expert_grad_input,  # [M, K]
                         "transpose_A": False,
-                        "transpose_B": False,  # Use stride manipulation instead of transpose
+                        "transpose_B": True,  # Transpose expert_weight[N,K] to [K,N], then CUTLASS does [K,N]^T = [N,K]
                     }
                 )
 
-                # Weight gradient: dW = dY^T @ X
-                # We need: grad_output^T[N,M] @ input[M,K] = grad_weight[N,K]
-                # CUTLASS: A @ B^T, so A = grad_output^T[N,M], B^T = input^T[K,M]
-                # Use stride manipulation for both A transpose and B transpose
+                # WEIGHT GRADIENT: dW = dY^T @ X
+                # Mathematical: expert_grad_output^T[N, M] @ expert_input[M, K] = expert_grad_weight[N, K]
+                # CUTLASS computes: A @ B^T
+                # We need: expert_grad_output^T[N, M] @ expert_input[M, K]
+                # So: A = expert_grad_output^T[N, M], B^T = expert_input[M, K]
+                # Therefore: B = expert_input^T[K, M]
+                #
+                # In the simple test:
+                # - grad_output_T = grad_output.t().contiguous() makes [N, M]
+                # - input_for_cutlass = input_tokens.t().contiguous() makes [K, M]
+                # In stride optimization:
+                # - expert_grad_output[M, N] needs to be seen as [N, M] -> transpose_A=True
+                # - expert_input[M, K] needs to be seen as [K, M] -> transpose_B=True
                 weight_operations.append(
                     {
-                        "A": expert_grad_output,  # [M, N] - will be stride-interpreted as [N, M]
-                        "B": expert_input,  # [M, K] - will be stride-interpreted as [K, M]
+                        "A": expert_grad_output,  # [M, N] -> will be transposed to [N, M] by transpose_A=True
+                        "B": expert_input,  # [M, K] -> will be transposed to [K, M] by transpose_B=True
                         "C": expert_grad_weight,  # [N, K]
-                        "transpose_A": True,  # Use stride manipulation for transpose
-                        "transpose_B": False,  # CUTLASS handles B^T
+                        "transpose_A": True,  # Transpose expert_grad_output[M,N] to [N,M]
+                        "transpose_B": True,  # Transpose expert_input[M,K] to [K,M], then CUTLASS does [K,M]^T = [M,K]
                     }
                 )
 
