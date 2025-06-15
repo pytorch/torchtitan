@@ -10,8 +10,8 @@ import torch
 
 from torch import Tensor
 
-from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
+from .model.autoencoder import AutoEncoder
+from .model.hf_embedder import FluxEmbedder
 
 
 def preprocess_data(

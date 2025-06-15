@@ -15,7 +15,7 @@ from torchtitan.models.llama3 import llama3_configs, pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .model import SimpleFSDPTransformer
-from .parallelize_llama import parallelize_llama
+from .parallelize import parallelize_llama
 
 register_train_spec(
     TrainSpec(
