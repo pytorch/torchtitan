@@ -170,15 +170,15 @@ def ft_clip_grad_norm_util(total_norm: DTensor) -> torch.Tensor:
 def maybe_semi_sync_training(
     config: JobConfig,
     ft_manager: FTManager,
-    model: torch.nn.Module,
+    model_parts: list[torch.nn.Module],
     optimizer: torch.optim.Optimizer,
-    sync_every: int,
 ) -> ContextManager[Union["local_sgd.DiLoCo", "local_sgd.LocalSGD", None]]:
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
-    semi_sync_method = config.fault_tolerance.semi_sync_method
-    torchft_enabled = config.fault_tolerance.enable
+    ft_config = config.fault_tolerance
+    semi_sync_method = ft_config.semi_sync_method
+    torchft_enabled = ft_config.enable
     if torchft_enabled and semi_sync_method is not None:
         from torchft import local_sgd
 
@@ -195,17 +195,21 @@ def maybe_semi_sync_training(
 
             return local_sgd.DiLoCo(
                 manager=ft_manager._manager,
-                model=model,
+                model_fragments=model_parts,
                 inner_optimizer=optimizer,
                 outer_optimizer=outer_optimizer,
-                sync_every=sync_every,
+                sync_every=ft_config.sync_steps,
+                should_quantize=ft_config.should_quantize,
+                fragment_sync_delay=ft_config.fragment_sync_delay,
+                fragment_update_alpha=ft_config.fragment_update_alpha,
             )
         elif semi_sync_method.lower() == "local_sgd":
+            assert len(model_parts) == 1
             return local_sgd.LocalSGD(
                 manager=ft_manager._manager,
-                model=model,
+                model=model_parts[0],
                 optimizer=optimizer,
-                sync_every=sync_every,
+                sync_every=ft_config.sync_steps,
             )
         else:
             raise ValueError(
