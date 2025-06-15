@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as DCP
-from torchtitan.models.llama.model import precompute_freqs_cis
+from torchtitan.models.llama3.model import precompute_freqs_cis
 from torchtitan.tools.logging import init_logger, logger
 
 

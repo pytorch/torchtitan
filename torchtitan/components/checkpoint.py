@@ -252,9 +252,6 @@ class CheckpointManager:
             self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.ft_manager
 
-        if not self.enable_checkpoint and self.ft_manager is None:
-            return
-
         self.states = states
         self.states.update(
             {
@@ -265,6 +262,14 @@ class CheckpointManager:
             }
         )
         self.ft_states = {DATALOADER: dataloader}
+        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.exclude_from_loading = ckpt_config.exclude_from_loading
+        self.initial_load_path = ckpt_config.initial_load_path
+        self.initial_load_model_weights_only = (
+            ckpt_config.initial_load_model_weights_only
+        )
+        if not self.enable_checkpoint and self.ft_manager is None:
+            return
 
         self.staging = False
         self.sending_to_checkpoint_mp = False
@@ -272,11 +277,6 @@ class CheckpointManager:
         self.cpu_offload_state_dict = None
         self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
 
-        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
-        self.initial_load_path = ckpt_config.initial_load_path
-        self.initial_load_model_weights_only = (
-            ckpt_config.initial_load_model_weights_only
-        )
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.ASYNC or self.ft_manager:
@@ -299,7 +299,6 @@ class CheckpointManager:
 
         self.last_save_model_weights_only = ckpt_config.last_save_model_weights_only
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
-        self.exclude_from_loading = ckpt_config.exclude_from_loading
 
         self.mp = None
         self.async_future = None
@@ -418,21 +417,11 @@ class CheckpointManager:
         if self.ft_manager:
             self._ft_load()
 
-        if not self.enable_checkpoint:
-            return False
-
         model_only = False
-        if not os.path.exists(self.folder):
-            if self.initial_load_path:
-                checkpoint_id = self.initial_load_path
-                if not os.path.isdir(checkpoint_id):
-                    raise ValueError(
-                        "initial_load_full_checkpoint is specified but the path is not valid."
-                    )
-                model_only = self.initial_load_model_weights_only
-            else:
+        # 1. Try load from checkpoint folder first if it exists
+        if os.path.exists(self.folder):
+            if not self.enable_checkpoint:
                 return False
-        else:
             if self.initial_load_path:
                 logger.info(
                     "`initial_load_path` is provided but the checkpoint folder exists. "
@@ -446,11 +435,33 @@ class CheckpointManager:
 
             if not os.path.isdir(checkpoint_id):
                 return False
+            return self.load_from_path(checkpoint_id, model_only)
 
-        logger.info(f"Loading the checkpoint from {checkpoint_id}.")
+        # Then try `initial_load_path`
+        if self.initial_load_path:
+            checkpoint_id = self.initial_load_path
+            if not os.path.isdir(checkpoint_id):
+                raise ValueError(
+                    "initial_load_full_checkpoint is specified but the path is not valid."
+                )
+            model_only = self.initial_load_model_weights_only
+            return self.load_from_path(checkpoint_id, model_only)
+
+        return False
+
+    def load_from_path(self, path: str, model_only: bool = False) -> bool:
+        """Load the checkpoint from the given path.
+
+        This function will load the checkpoint from the given path. If ``model_only`` is
+        True, it will load the model only.
+        """
+        if not os.path.isdir(path):
+            raise ValueError(f"The path {path} is not a valid checkpoint folder.")
+
+        logger.info(f"Loading the checkpoint from {path}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
-        dcp.load(states, checkpoint_id=checkpoint_id)
+        dcp.load(states, checkpoint_id=path)
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
@@ -561,20 +572,13 @@ class CheckpointManager:
             Dict[str, Any]: The states to load for the given step.
         """
         # For the first step, we will only load the model weights.
-        if model_only:
-            sd = self.states[MODEL].state_dict()
-            for k in excluded_parameters_for_model_only:
-                sd.pop(k, None)
-            return sd
-
-        for exclude_key in self.exclude_from_loading:
-            if exclude_key not in self.states:
-                raise ValueError(f"{exclude_key} not found in state_dict.")
-
+        states = {MODEL: self.states[MODEL]} if model_only else self.states
         states_to_load = {
-            k: v for k, v in self.states.items() if k not in self.exclude_from_loading
+            k: v for k, v in states.items() if k not in self.exclude_from_loading
         }
-
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
 
