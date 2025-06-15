@@ -17,7 +17,27 @@ We ran our performance benchmarks on the [Grand Teton platform](https://engineer
 
 Detailed performance results and training configurations can be found in the table below:
 
-![image](../assets/images/async-tp-perf-06-14-2025.png)
+#### Llama3 70b on 256 H100s with FSDP=32, TP=8, torch.compile, full AC,  local batch size 16
+
+| TP type | Quantization | Average TPS | Speedup over vanilla TP baseline |
+| :--- | :--- | :--- | :--- |
+| Vanilla TP | None (bfloat16) | 597.3 | 1.00 |
+| Async TP | None (bfloat16) | 652.4 | 1.09 |
+| Vanilla TP | float8 tensorwise | 809.8 | 1.00 |
+| Async TP | float8 tensorwise | 942.4 | 1.16 |
+| Vanilla TP | float8 rowwise | 599.6 | 1.00 |
+| Async TP | float8 rowwise | 624.8 | 1.04 |
+
+#### Llama3 8b on 64 H100s with FSDP=8, TP=8, torch.compile, per op SAC, local batch size 12
+
+| TP type | Quantization | Average TPS | Speedup over vanilla TP baseline |
+| :--- | :--- | :--- | :--- |
+| Vanilla TP | None (bfloat16) | 4378 | 1.00 |
+| Async TP | None (bfloat16) | 4809.4 | 1.10 |
+| Vanilla TP | float8 tensorwise | 5078.1 | 1.00 |
+| Async TP | float8 tensorwise | 5570.1 | 1.10 |
+| Vanilla TP | float8 rowwise | 3708.5 | 1.00 |
+| Async TP | float8 rowwise | 3914.9 | 1.06 |
 
 **Note**: the low baseline performance of the vanilla TP float8 rowwise training is being addressed here: https://github.com/pytorch/torchtitan/issues/1207
 
