@@ -114,6 +114,35 @@ Llama 3 8B model locally on 8 GPUs
 CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh
 ```
 
+### Fine-tuning from an existing checkpoint
+
+You first need to download the Llama checkpoint. Here are the commands:
+
+```bash
+# Download the tokenizer and model weights
+rm -rf tmp
+uv run huggingface-cli download meta-llama/Llama-3.1-8B original/tokenizer.model --local-dir tmp
+uv run huggingface-cli download meta-llama/Llama-3.1-8B original/consolidated.00.pth --local-dir tmp
+uv run huggingface-cli download meta-llama/Llama-3.1-8B original/params.json --local-dir tmp
+# Convert the model weights to the DCP format and move it and the tokenizer to the assets folder
+mkdir -p assets/tokenizer && cp tmp/original/tokenizer.model assets/tokenizer/Meta-Llama-3.1-8B-tokenizer.model
+uv run python -m scripts.convert_llama_to_dcp tmp/original/ assets/models/dcp/llama3.1-8B
+```
+
+Then you can fine-tune from the checkpoint:
+
+```bash
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" uv run ./run_train.sh \
+  --model.tokenizer_path assets/tokenizer/Meta-Llama-3.1-8B-tokenizer.model \
+  --training.max_seq_len 131072 \
+  --checkpoint.initial_load_path "assets/models/dcp/llama3.1-8B" \
+  --profiling.no_enable_profiling \
+  --activation_checkpoint.mode full \
+  --training.global_batch_size 64 \
+  --lr_scheduler.warmup_steps 40 \
+  --optimizer.lr 1e-5
+```
+
 ### Multi-Node Training
 For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
 
