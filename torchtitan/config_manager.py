@@ -207,6 +207,12 @@ class Training:
     seq_len: int = 2048
     """Sequence length"""
 
+    max_seq_len: int | None = None
+    """
+    Maximum sequence length (defaults to the `seq_len`, but could be
+    used for loading pre-trained model. E.g., 131072 for llama3.1-8B)
+    """
+
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
 
