@@ -584,6 +584,29 @@ class FaultTolerance:
     is set.
     """
 
+    should_quantize: bool = False
+    """
+    Whether to quantize the gradients before allreduce.
+
+    This is only used when "semi_sync_method" is set.
+    """
+
+    fragment_sync_delay: int = 0
+    """
+    Controls the number of inner steps to wait before blocking on a
+    model fragment's synchronization. This is the "tao" parameter in
+    the Streaming DiLoCo paper.
+
+    This is only used when "semi_sync_method" is set.
+    """
+
+    fragment_update_alpha: float = 0.0
+    """
+    Determines how to mix the local and global optimized parameters
+
+    This is only used when "semi_sync_method" is set.
+    """
+
 
 @dataclass
 class Experimental:
