@@ -380,7 +380,8 @@ class MoE(nn.Module):
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(gathered_tokens, tokens_per_expert_group)
         if not self.scoring_before_experts:
-            routed_output = (routed_output * gathered_top_scores.reshape(-1, 1)).to(x.dtype)
+            routed_output = (routed_output.to(torch.float32) *
+                             gathered_top_scores.reshape(-1, 1)).to(x.dtype)
 
         if self.use_grouped_mm:
             gathered_tokens_buffer = routed_output.new_empty(buffer_shape)
