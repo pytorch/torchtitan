@@ -11,7 +11,7 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = false
+enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
@@ -27,15 +27,22 @@ eps = 1e-15
 
 [lr_scheduler]
 warmup_steps = 600
+# warmup_steps = 20
 lr_min = 0.1
 
 [training]
 local_batch_size = 8
 seq_len = 8192
+# seq_len = 16384
+# seq_len = 32768
+# seq_len = 65536
 max_norm = 1.0  # grad norm clipping
 steps = 3000
+# steps = 100
 compile = false
+# compile = true
 dataset = "c4"
+deterministic = true
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -43,7 +50,7 @@ data_parallel_shard_degree = -1
 tensor_parallel_degree = 8
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
-context_parallel_degree = 1
+context_parallel_degree = 4
 
 [checkpoint]
 enable_checkpoint = false
