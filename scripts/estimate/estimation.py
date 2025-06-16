@@ -99,7 +99,7 @@ def estimate_memory(job_config: JobConfig):
             f"Building {train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_args)
+            model = model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -130,13 +130,13 @@ def estimate_memory(job_config: JobConfig):
             torch.randint(
                 0,
                 model_args.vocab_size,
-                (job_config.training.batch_size, model_args.max_seq_len),
+                (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
             torch.randint(
                 0,
                 model_args.vocab_size,
-                (job_config.training.batch_size, model_args.max_seq_len),
+                (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
         )

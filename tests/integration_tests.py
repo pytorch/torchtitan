@@ -122,46 +122,45 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.model_weights_only",
+                    "--checkpoint.last_save_model_weights_only",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "model_weights_only_fp32",
+            "last_save_model_weights_only_fp32",
         ),
         OverrideDefinitions(
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.model_weights_only",
+                    "--checkpoint.last_save_model_weights_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Weights Only bf16",
-            "model_weights_only_bf16",
+            "last_save_model_weights_only_bf16",
         ),
-        # TODO: enable the following tests once they are fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 4",
-        #             "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-        #         ],
-        #     ],
-        #     "PP looped zero bubble test",
-        #     "pp_looped_zero_bubble",
-        #     ngpu=4,
-        # ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-        #         ],
-        #     ],
-        #     "PP zero bubble test (v shaped)",
-        #     "pp_zbv",
-        #     ngpu=2,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+                ],
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+                ],
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -273,18 +272,18 @@ def build_test_list():
             "pp_looped_1f1b",
             ngpu=4,
         ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-        #             "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-        #         ],
-        #     ],
-        #     "PP with custom pipeline schedule loaded from CSV file",
-        #     "pp_custom_csv",
-        #     ngpu=2,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
+                    "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+                ],
+            ],
+            "PP with custom pipeline schedule loaded from CSV file",
+            "pp_custom_csv",
+            ngpu=2,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -382,7 +381,7 @@ def build_test_list():
                     "--parallelism.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP (with dp_shard)",
+            "HSDP+CP (without dp_shard)",
             "hsdp+cp_without_dp_shard",
             ngpu=4,
         ),
@@ -394,7 +393,7 @@ def build_test_list():
                     "--parallelism.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP (without dp_shard)",
+            "HSDP+CP (with dp_shard)",
             "hsdp+cp_with_dp_shard",
             ngpu=8,
         ),
@@ -481,6 +480,34 @@ def build_test_list():
             ],
             "Optional checkpoint",
             "optional_checkpoint",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--float8.force_recompute_fp8_weight_in_bwd",
+                    "--float8.emulate",
+                ],
+            ],
+            "Float8 emulation test",
+            "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    # Local batch size = 8, and `ngpu=2`, so default
+                    # global batch size = 8 * 2 = 16.
+                    # To achieve 2 gradient accumulation steps, multiply
+                    # default global batch size by 2. 16 * 2 = 32.
+                    "--training.local_batch_size 8",
+                    "--training.global_batch_size 32",
+                ],
+            ],
+            "Gradient accumulation",
+            "gradient_accumulation",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors

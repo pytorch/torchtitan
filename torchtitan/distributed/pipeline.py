@@ -150,11 +150,11 @@ def build_pipeline_schedule(
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     microbatch_size = job_config.parallelism.pipeline_parallel_microbatch_size
-    batch_size = job_config.training.batch_size
+    batch_size = job_config.training.local_batch_size
     # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
     if batch_size % microbatch_size != 0:
         raise ValueError(
-            f"Batch size {job_config.training.batch_size} must be divisible by number of microbatches {n_microbatches}. "
+            f"Batch size {job_config.training.local_batch_size} must be divisible by number of microbatches {n_microbatches}. "
             "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
         )
     n_microbatches = batch_size // microbatch_size

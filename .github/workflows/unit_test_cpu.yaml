@@ -3,7 +3,11 @@ name: CPU Unit Test
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -25,4 +29,7 @@ jobs:
         pip config --user set global.progress_bar off
 
         pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cpu
+
         pytest tests/unit_tests --cov=. --cov-report=xml --durations=20 -vv

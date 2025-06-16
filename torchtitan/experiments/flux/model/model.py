@@ -4,13 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
-
 import torch
-
 from torch import nn, Tensor
 
-from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -20,31 +16,9 @@ from torchtitan.experiments.flux.model.layers import (
     timestep_embedding,
 )
 
-from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
-from torchtitan.tools.logging import logger
+from torchtitan.protocols.train_spec import ModelProtocol
 
-
-@dataclass
-class FluxModelArgs(BaseModelArgs):
-    in_channels: int = 64
-    out_channels: int = 64
-    vec_in_dim: int = 768
-    context_in_dim: int = 512
-    hidden_size: int = 3072
-    mlp_ratio: float = 4.0
-    num_heads: int = 24
-    depth: int = 19
-    depth_single_blocks: int = 38
-    axes_dim: tuple = (16, 56, 56)
-    theta: int = 10_000
-    qkv_bias: bool = True
-    autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
-
-    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        # TODO(jianiw): Add the number of flops for the autoencoder
-        nparams = sum(p.numel() for p in model.parameters())
-        logger.warning("FLUX model haven't implement get_nparams_and_flops() function")
-        return nparams, 1
+from .args import FluxModelArgs
 
 
 class FluxModel(nn.Module, ModelProtocol):
@@ -159,17 +133,3 @@ class FluxModel(nn.Module, ModelProtocol):
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         return img
-
-    @classmethod
-    def from_model_args(cls, model_args: FluxModelArgs) -> "FluxModel":
-        """
-        Initialize a Flux model from a FluxModelArgs object.
-
-        Args:
-            model_args (FluxModelArgs): Model configuration arguments.
-
-        Returns:
-            FluxModel: FluxModel model.
-
-        """
-        return cls(model_args)

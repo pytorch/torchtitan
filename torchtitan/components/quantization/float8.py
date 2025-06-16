@@ -26,11 +26,15 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config: Float8 = job_config.float8
-        if not has_cuda_capability(8, 9):
-            logger.warning(
-                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later",
+        if has_cuda_capability(8, 9) or (
+            float8_config.emulate and not job_config.training.compile
+        ):
+            pass
+        else:
+            raise ValueError(
+                "Failed to swap to Float8Linear because float8 is only supported on SM89 or later."
+                "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
-            return
         try:
             from torchao.float8 import Float8LinearConfig
         except ImportError as e:
@@ -79,6 +83,7 @@ class Float8Converter(ModelConverter):
             self.config = Float8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
                 force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
+                emulate=float8_config.emulate,
             )
             # for precompute_float8_dynamic_scale_for_fsdp
             self.precompute_scale = (

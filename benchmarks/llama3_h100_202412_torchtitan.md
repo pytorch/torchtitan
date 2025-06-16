@@ -1,10 +1,20 @@
+The following performance benchmarks were done by the `torchtitan` team at the end of 2024 using the latest `torch`, `torchao`, and `torchtitan` versions.
+
+### Models
+
+Llama 3.1 8B, 70B, 405B
+
 We demonstrate the effectiveness of elastic distributed training using torchtitan, via experiments on Llama 3.1 8B, 70B, and 405B models, from 1D parallelism to 4D parallelism, at the scale from 8 GPUs to 512 GPUs.
+
+### Hardware
 
 We ran our performance benchmarks on the [Grand Teton platform](https://engineering.fb.com/2022/10/18/open-source/ocp-summit-2022-grand-teton/), where
 - Each host has 8 NVIDIA H100 GPUs fully connected with NVLink.
 - Each H100 GPU is equipped with 96GB HBM2e with 2.4 TB/sec peak memory bandwidth.
 - Hosts are inter-connected with backend RDMA network with 400 Gb/s per GPU.
 - We used the default 500W power limit, although tuning it up to 700W TDP can potentially provide further speedups.
+
+### Results
 
 We note that, throughout our experimentation, memory readings are stable across the whole training process[^1], whereas throughput numbers (TPS/GPU) are calculated and logged every 10 iterations, and always read at the (arbitrarily determined) 90th iteration.
 
@@ -58,8 +68,8 @@ We do not report Model FLOPS Utilization (MFU) because when Float8 is enabled (o
 | FSDP 2, CP 4 | 131072 | 31 | 77.1 |
 | FSDP 1, CP 8 | 262144 | 16 | 84.9 |
 
+### Versions and Dates
 
-#### Versions used for performance testing
 | repo | commit | date |
 | --- | --- | --- |
 | torch | [1963fc8](https://github.com/pytorch/pytorch/commit/1963fc83a1c32e162162e2414f78b043f0674bae) | 2024/12/23 |

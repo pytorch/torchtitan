@@ -16,18 +16,18 @@ from torch import Tensor
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
+from torchtitan.tools.logging import logger
 
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.experiments.flux.model.model import FluxModel
-from torchtitan.experiments.flux.utils import (
+from .model.autoencoder import AutoEncoder
+from .model.hf_embedder import FluxEmbedder
+from .model.model import FluxModel
+from .utils import (
     create_position_encoding_for_latents,
     generate_noise_latent,
     pack_latents,
     preprocess_data,
     unpack_latents,
 )
-from torchtitan.tools.logging import logger
 
 
 # ----------------------------------------

@@ -6,6 +6,7 @@ This directory contains tests for the TorchTitan project, including unit tests a
 
 - `unit_tests/`: Contains unit tests for individual components
 - `integration_tests.py`: Contains integration tests that test multiple components together
+- `integration_tests_h100.py`: Contains integration tests specifically designed for H100 GPUs, which utilize symmetric memory and float8.
 - `assets/`: Contains test assets and fixtures used by the tests
 
 ## Running Tests
