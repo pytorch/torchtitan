@@ -125,6 +125,10 @@ class ParallelDims:
         return self.dp_enabled or self.cp_enabled
 
     @property
+    def fsdp_enabled(self):
+        return self.dp_shard_enabled or self.cp_enabled
+
+    @property
     def tp_enabled(self):
         return self.tp > 1
 

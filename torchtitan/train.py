@@ -313,6 +313,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallel_dims.loss_parallel_enabled,
             parallelism_config.enable_compiled_autograd,
         )
+        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
+            parallel_dims,
+            job_config.training.mixed_precision_param,
+            device_type,
+        )
 
         logger.info(
             "Trainer is initialized with "
@@ -400,8 +405,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
-                loss = self.loss_fn(pred, labels)
+                with self.maybe_enable_amp:
+                    pred = model_parts[0](inputs)
+                    loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
