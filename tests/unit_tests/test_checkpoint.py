@@ -9,340 +9,467 @@ import shutil
 import tempfile
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
-
-from torchtitan.components.checkpoint import CheckpointManager
-
-
-def fake_dcp_save(state, checkpoint_id):
-    state = {k: v.state_dict() for k, v in state.items()}
-    os.makedirs(checkpoint_id, exist_ok=True)
-    torch.save(state, os.path.join(checkpoint_id, "state.pt"))
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchtitan.components.checkpoint import CheckpointManager, MODEL
 
 
-def fake_dcp_load(state, checkpoint_id):
-    state["trainer"].dcp_load_is_called = 7312
+class FakeOptimizersContainer:
+    """A fake OptimizersContainer that returns fake state dicts."""
+
+    def __init__(self):
+        self._fake_param = torch.tensor([1.0], dtype=torch.float32)
+
+    def state_dict(self):
+        return {"fake_param": self._fake_param}
+
+    def load_state_dict(self, sd: dict):
+        if "fake_param" in sd:
+            self._fake_param = sd["fake_param"]
+
+    def init_cache_state_dict(self):
+        pass
 
 
-def fake_async_save(state, checkpoint_id, process_group):
-    def run_save():
-        fake_dcp_save(state, checkpoint_id)
+class FakeLRSchedulersContainer:
+    """A fake LRSchedulersContainer that does nothing."""
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        f = executor.submit(run_save)
+    def __init__(self):
+        pass
 
-    mock_future = mock.Mock()
-    mock_future.result = mock.Mock(side_effect=f.result)
-    return mock_future
+    def state_dict(self):
+        return {}
 
-
-def fake_get_model_state_dict(model, *args, **kwargs):
-    return model.state_dict()
+    def load_state_dict(self, sd: dict):
+        pass
 
 
-# TODO: The unittest is not well structured and does not cover enough paths.
-# It should be refactored.
+class FakeDataLoader(DataLoader):
+    """A fake DataLoader that returns a fake batch."""
+
+    def __init__(self):
+        super().__init__(dataset=[], batch_size=1)
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, sd: dict):
+        pass
 
 
-@dataclass
-class DummyCheckpointConfig:
-    enable_checkpoint: bool = True
-    folder: str = "dummy_folder"
-    interval: int = 10
-    async_mode: str = "disabled"
-    keep_latest_k: int = 0
-    last_save_model_weights_only: bool = False
-    export_dtype: str = "float32"
-    exclude_from_loading = []
-    initial_load_model_weights_only: bool = False
-    initial_load_path: str = ""
+class DummyFTManager:
+    """A fake FTManager-like object with enabled=False."""
+
+    def __init__(self):
+        self.enabled = False
+        self.manager = None
 
 
-@dataclass
-class DummyJob:
-    dump_folder: str = "dummy_folder"
+class DummyFuture:
+    def __init__(self):
+        self.result = mock.Mock()
 
 
-@dataclass
-class DummyFaultTolerance:
-    replica_id = 0
-    group_size = 1
+def fake_async_save(*args, **kwargs):
+    return DummyFuture()
 
 
-@dataclass
 class DummyJobConfig:
-    checkpoint: DummyCheckpointConfig = field(default_factory=DummyCheckpointConfig)
-    job: DummyJob = field(default_factory=DummyJob)
-    fault_tolerance: DummyFaultTolerance = field(default_factory=DummyFaultTolerance)
-    ft_manager = None
-
-
-# Dummy instances to supply as constructor arguments.
-dummy_dataloader = mock.Mock()
-dummy_dataloader.state_dict = mock.Mock(side_effect=lambda: {"dataloader": 1})
-dummy_model_parts = [mock.Mock()]
-dummy_model_parts[0].state_dict = mock.Mock(side_effect=lambda: {"model": 2})
-dummy_optimizers = mock.Mock()
-dummy_optimizers.state_dict = mock.Mock(side_effect=lambda: {"optimizer": 3})
-dummy_lr_schedulers = mock.Mock()
-dummy_lr_schedulers.state_dict = mock.Mock(side_effect=lambda: {"lr_scheduler": 4})
+    def __init__(self, job):
+        self.job = job
+        self.checkpoint = SimpleNamespace(
+            enable_checkpoint=True,
+            async_mode="disabled",
+            folder="",
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_weights_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_weights_only=False,
+        )
+        self.fault_tolerance = SimpleNamespace(replica_id=0)
 
 
 class TestCheckpointManager(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
+        self.base_temp_dir = tempfile.mkdtemp()
+        self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
+        os.makedirs(self.test_folder, exist_ok=True)
 
-        self.dummy_job = DummyJob(dump_folder=self.temp_dir)
-        self.job_config = DummyJobConfig(job=self.dummy_job)
-        self.checkpoint_folder = os.path.join(
-            self.dummy_job.dump_folder, self.job_config.checkpoint.folder
+        self.model_part = nn.Linear(2, 2)
+        self.model_parts = [self.model_part]
+        # TODO: Use a real OptimizerContainer here so that we can actually verify
+        # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
+        self.optimizers = FakeOptimizersContainer()
+        self.lr_schedulers = FakeLRSchedulersContainer()
+        self.states = {}
+        self.data_loader = FakeDataLoader()
+        self.ft_manager = DummyFTManager()
+
+        ckpt_cfg = SimpleNamespace(
+            enable_checkpoint=True,
+            async_mode="DISABLED",
+            folder="",
+            interval=1,
+            keep_latest_k=2,
+            last_save_model_weights_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_weights_only=False,
         )
-        os.makedirs(self.checkpoint_folder, exist_ok=True)
-        self.trainer_state = mock.Mock()
-        self.trainer_state.state_dict = mock.Mock(side_effect=lambda: {"my_state": 765})
+        ft_ns = SimpleNamespace(replica_id=0)
+        job_ns = SimpleNamespace(dump_folder=self.test_folder)
+        self.job_config = SimpleNamespace(
+            checkpoint=ckpt_cfg,
+            fault_tolerance=ft_ns,
+            job=job_ns,
+        )
+
+        # Patch process group creation
+        self.patcher_group = mock.patch(
+            "torch.distributed.new_group", return_value="pg"
+        )
+        self.patcher_group.start()
 
     def tearDown(self):
-        # Remove the temporary directory after each test.
-        shutil.rmtree(self.temp_dir)
+        self.patcher_group.stop()
+        shutil.rmtree(self.base_temp_dir)
+        time.sleep(0.1)
 
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
-    def test_save(self, *_):
-        """Test that calling save() writes a checkpoint file to disk."""
-        job_config = DummyJobConfig(job=self.dummy_job)
-        ft_manager = mock.Mock()
-        ft_manager.enabled = False
+    def fake_save(self, state_dict: dict, checkpoint_id: str):
+        os.makedirs(checkpoint_id, exist_ok=True)
+        sd_to_save = {}
+        for key, val in state_dict.items():
+            if hasattr(val, "state_dict"):
+                sd_to_save[key] = val.state_dict()
+            elif isinstance(val, torch.Tensor):
+                sd_to_save[key] = val
+        torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
+
+    def fake_load(self, states: dict, checkpoint_id=None):
+        path = os.path.join(checkpoint_id, "state_dict.pt")
+        loaded = torch.load(path, weights_only="False")
+        for key, val in loaded.items():
+            if key in states and hasattr(states[key], "load_state_dict"):
+                states[key].load_state_dict(val)
+            elif key in states and isinstance(states[key], torch.Tensor):
+                states[key] = val
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_save_load_restores_state(self, mock_load, mock_save, mock_rank):
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
         manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
-        )
-        step = 20
-        manager.save(curr_step=step, force=True)
-        state_file = self._checkpoint_id(step)
-        self.assertTrue(
-            os.path.exists(state_file), "The checkpoint file was not created on disk."
-        )
-        loaded_state = torch.load(state_file, weights_only=False)
-        self.assertEqual(
-            loaded_state["trainer"]["my_state"],
-            765,
-            "Saved state does not match expected value.",
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
         )
 
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch("torchtitan.components.checkpoint.dcp.load", side_effect=fake_dcp_load)
-    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
-    def test_load(self, *_):
-        """Test that load() properly reads the checkpoint file from disk and restores state."""
-        job_config = DummyJobConfig(job=self.dummy_job)
-        ft_manager = mock.Mock()
-        ft_manager.enabled = False
+        w0 = self.model_part.weight.clone()
+        b0 = self.model_part.bias.clone()
+        p0 = self.optimizers._fake_param.clone()
+        manager.save(curr_step=1)
+        with torch.no_grad():
+            self.model_part.weight.zero_()
+            self.model_part.bias.zero_()
+        self.optimizers._fake_param = torch.tensor([42.0], dtype=torch.float32)
+        manager.load(step=1)
+
+        self.assertTrue(torch.equal(self.model_part.weight, w0))
+        self.assertTrue(torch.equal(self.model_part.bias, b0))
+        self.assertTrue(torch.equal(self.optimizers._fake_param, p0))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_save_and_purge_keeps_last_k_checkpoints(
+        self, mock_load, mock_save, mock_rank
+    ):
+        mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
-        )
-        step = 30
-        manager.save(curr_step=step, force=True)
-        # Simulate a state change.
-        manager.states["test"] = 999
-        success = manager.load(step=step)
-        self.assertTrue(
-            success,
-            "The load() method should have returned True for an existing checkpoint.",
-        )
-        self.assertTrue(hasattr(manager.states["trainer"], "dcp_load_is_called"))
-
-        self.assertEqual(
-            manager.states["trainer"].dcp_load_is_called,
-            7312,
-            "The state was not correctly restored after loading.",
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
         )
 
-    @mock.patch("torchtitan.components.checkpoint.dist.get_rank", return_value=0)
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
-    def test_purge_stale_checkpoints_rank_zero(self, *_):
-        """
-        Test that when keep_latest_k is 3 and dist.get_rank() returns 0, stale checkpoints
-        are purged by placing the correct paths into the purge queue.
-        """
-        job_config = DummyJobConfig(job=self.dummy_job)
-        job_config.checkpoint.keep_latest_k = 3
-        ft_manager = mock.Mock()
-        ft_manager.enabled = False
+        manager.save(curr_step=1)
+        manager.save(curr_step=2)
+        manager.save(curr_step=3)
+        deadline = time.time() + 5.0
+
+        while True:
+            exist = sorted(os.listdir(self.test_folder))
+            if exist == ["step-2", "step-3"]:
+                break
+            if time.time() > deadline:
+                self.fail(f"Purge timed out; found {exist}")
+            time.sleep(0.05)
+
+        self.assertListEqual(sorted(os.listdir(self.test_folder)), ["step-2", "step-3"])
+        calls = [c.kwargs.get("checkpoint_id") for c in mock_save.call_args_list]
+        expected = [os.path.join(self.test_folder, f"step-{i}") for i in (1, 2, 3)]
+        self.assertListEqual(calls, expected)
+        sd = torch.load(
+            os.path.join(self.test_folder, "step-3", "state_dict.pt"),
+            weights_only=False,
+        )
+        self.assertIn("optimizer", sd)
+        torch.testing.assert_close(sd["optimizer"]["fake_param"], torch.tensor([1.0]))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=1)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_nonzero_rank_does_not_purge_or_save(self, mock_load, mock_save, mock_rank):
+        mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
         )
-        steps = [10, 20, 30, 40, 50]
-        for s in steps:
-            manager.save(curr_step=s, force=False)
-        while not manager.purge_queue.empty():
-            time.sleep(1)
+        manager.save(curr_step=1)
+        manager.save(curr_step=2)
+        manager.save(curr_step=3)
         time.sleep(1)
-        os.sync()
-        expected_paths = [
-            os.path.join(self.checkpoint_folder, "step-30"),
-            os.path.join(self.checkpoint_folder, "step-40"),
-            os.path.join(self.checkpoint_folder, "step-50"),
-        ]
-        for step in [10, 20]:
-            self.assertFalse(
-                os.path.exists(self._checkpoint_id(step)),
-                "The checkpoint is not purged.",
-            )
-
-        for step in [30, 40, 50]:
-            self.assertTrue(
-                os.path.exists(self._checkpoint_id(step)), "The checkpointis purged."
-            )
-
-    @mock.patch("torchtitan.components.checkpoint.dist.get_rank", return_value=1)
-    @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch("torchtitan.components.checkpoint.dcp.save", side_effect=fake_dcp_save)
-    def test_purge_stale_checkpoints_rank_nonzero(self, *_):
-        """
-        Test that when dist.get_rank() returns a non-zero value, the purge logic does not
-        place any paths in the purge queue.
-        """
-        job_config = DummyJobConfig(job=self.dummy_job)
-        job_config.checkpoint.keep_latest_k = 3
-        ft_manager = mock.Mock()
-        ft_manager.enabled = False
-        manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
+        self.assertListEqual(
+            sorted(os.listdir(self.test_folder)), ["step-1", "step-2", "step-3"]
         )
-        steps = [10, 20, 30, 40, 50]
-        for s in steps:
-            manager.save(curr_step=s, force=False)
-        while not manager.purge_queue.empty():
-            time.sleep(1)
-        time.sleep(1)
-        os.sync()
+        self.assertEqual(len(mock_save.call_args_list), 3)
+        manager.close()
 
-        for step in [10, 20, 30, 40, 50]:
-            self.assertTrue(
-                os.path.exists(self._checkpoint_id(step)), "The checkpointis purged."
-            )
+    def test_load_returns_false_when_no_checkpoint_folder(self):
+        cfg = self.job_config.checkpoint
+        cfg.folder = "nonexistent"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+        self.assertFalse(manager.load(step=-1))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_load_finds_latest_and_calls_dcp_load(self, mock_load, mock_rank):
+        ckpt_folder = os.path.join(self.test_folder, "checkpoints")
+        os.makedirs(ckpt_folder, exist_ok=True)
+        for s in (2, 5):
+            d = os.path.join(ckpt_folder, f"step-{s}")
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, ".metadata"), "w").close()
+        cfg = self.job_config.checkpoint
+        cfg.folder = "checkpoints"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+        res = manager.load(step=-1)
+        expected = os.path.join(ckpt_folder, "step-5")
+        mock_load.assert_called_once()
+        args, kwargs = mock_load.call_args
+        self.assertEqual(args[0], manager._states_to_load(model_only=False))
+        self.assertEqual(kwargs.get("checkpoint_id"), expected)
+        self.assertTrue(res)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
+        """
+        Test that save() only triggers on step 1 and multiples of interval, skipping others,
+        but respects force flag to override interval.
+        """
+        cfg = self.job_config.checkpoint
+        cfg.interval = 3
+        cfg.keep_latest_k = 0
+        mock_save.side_effect = self.fake_save
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+        manager.save(curr_step=1)
+        self.assertEqual(mock_save.call_count, 1)
+        manager.save(curr_step=2)
+        self.assertEqual(mock_save.call_count, 1)
+        manager.save(curr_step=2, force=True)
+        self.assertEqual(mock_save.call_count, 2)
+        manager.save(curr_step=3)
+        self.assertEqual(mock_save.call_count, 3)
+        manager.save(curr_step=4)
+        self.assertEqual(mock_save.call_count, 3)
+        manager.save(curr_step=4, force=True)
+        self.assertEqual(mock_save.call_count, 4)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_last_save_model_weights_only_and_initial_load_model_weights_only(
+        self, mock_load, mock_save, mock_rank
+    ):
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+        # Phase 1: save model weights only
+        self.job_config.checkpoint.last_save_model_weights_only = True
+        manager1 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={MODEL: self.model_part},
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+        manager1.save(curr_step=1, force=True)
+        path1 = os.path.join(self.test_folder, "step-1")
+        self.assertTrue(os.path.isdir(path1))
+        # Phase 2: initial load from step-1
+        cfg = self.job_config.checkpoint
+        cfg.last_save_model_weights_only = False
+        cfg.initial_load_model_weights_only = True
+        cfg.initial_load_path = path1
+        cfg.folder = ""
+        self.job_config.job.dump_folder = self.test_folder
+        manager2 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={MODEL: self.model_part},
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+        r1 = manager2.load(step=1)
+        self.assertTrue(r1)
+        mock_load.assert_called_once()
+        args1, kwargs1 = mock_load.call_args
+        self.assertEqual(kwargs1.get("checkpoint_id"), path1)
+        # Phase 3: save new step under default folder, then load that
+        manager2.save(curr_step=2, force=True)
+        # Default folder is test_folder, so step-2 under that
+        step2_dir = os.path.join(self.test_folder, "step-2")
+        self.assertTrue(os.path.isdir(step2_dir))
+        r2 = manager2.load(step=2)
+        self.assertTrue(r2)
+        self.assertEqual(mock_load.call_count, 2)
+        args2, kwargs2 = mock_load.call_args_list[1]
+        self.assertEqual(kwargs2.get("checkpoint_id"), step2_dir)
+        manager1.close()
+        manager2.close()
 
     @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_async_save_calls_async_wait(self, *_):
+    def test_async_save_calls_async_wait(self, mock_async_save, mock_new_group):
         """
-        Test that in async mode (AsyncMode.ASYNC), calling save() twice correctly waits
-        on the previous async future via _async_wait().
+        Test that in AsyncMode.ASYNC, save() waits on previous async future.
         """
-        # Set async_mode to "async" in the job configuration.
-        job_config = DummyJobConfig(job=self.dummy_job)
+        # Configure async mode
+        job_config = DummyJobConfig(job=self.job_config.job)
         job_config.checkpoint.async_mode = "async"
-        ft_manager = mock.Mock()
-        ft_manager.enabled = False
+        ft_manager = DummyFTManager()
+        states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=states,
+            job_config=job_config,
+            ft_manager=ft_manager,
         )
-        # First save: should schedule an async save.
+
+        # First save schedules async
         manager.save(curr_step=10, force=False)
-        f = manager.async_future
-        f.result.assert_not_called()
+        future = manager.async_future
+        future.result.assert_not_called()
+
+        # Second save should wait
         manager.save(curr_step=20, force=False)
-        f.result.assert_called_once()
-        f = manager.async_future
-        f.result.assert_not_called()
+        future.result.assert_called_once()
+
+        # New future created
+        new_future = manager.async_future
+        new_future.result.assert_not_called()
 
     @mock.patch("torch.cuda.Stream")
     @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
-        "torchtitan.components.checkpoint.get_model_state_dict",
-        side_effect=fake_get_model_state_dict,
-    )
-    @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_ft_async_save_calls_async_wait(self, *_):
+    def test_ft_async_save_calls_async_wait(
+        self,
+        mock_async_save,
+        mock_new_group,
+        mock_cuda_stream,
+    ):
         """
-        Test that in async mode (AsyncMode.ASYNC), calling save() twice correctly waits
-        on the previous async future via _async_wait().
+        Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
-        # Set async_mode to "async" in the job configuration.
-        job_config = DummyJobConfig(job=self.dummy_job)
+        job_config = DummyJobConfig(job=self.job_config.job)
         job_config.checkpoint.async_mode = "disabled"
         ft_manager = mock.Mock()
         ft_manager.enabled = True
+        states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
-            dummy_dataloader,
-            dummy_model_parts,
-            dummy_optimizers,
-            dummy_lr_schedulers,
-            {"trainer": self.trainer_state},
-            job_config,
-            ft_manager,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=states,
+            job_config=job_config,
+            ft_manager=ft_manager,
         )
-        # First save: should schedule an async save.
-        self.assertTrue(manager.async_future is None)
+
+        # Initially no future
+        self.assertIsNone(manager.async_future)
         manager.save(curr_step=5, force=False)
-        self.assertTrue(manager.async_future is not None)
-        manager.async_future.result.assert_not_called()
+        self.assertIsNotNone(manager.async_future)
 
-        # Keep the previous future as it will be waited and replaced.
-        async_future = manager.async_future
+        manager.async_future.result.assert_not_called()
+        prev_future = manager.async_future
         manager.save(curr_step=6, force=False)
-        async_future.result.assert_called_once()
-        self.assertTrue(manager.async_future is not None)
+        prev_future.result.assert_called_once()
+        self.assertIsNotNone(manager.async_future)
         manager.async_future.result.assert_not_called()
-
-    def _checkpoint_id(self, step):
-        checkpoint_id = os.path.join(self.checkpoint_folder, f"step-{step}")
-        state_file = os.path.join(checkpoint_id, "state.pt")
-        return state_file
 
 
 if __name__ == "__main__":
