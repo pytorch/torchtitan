@@ -37,7 +37,7 @@ class TestGenerateImage:
         classifier_free_guidance_scale = 5.0
 
         # Contracting JobConfig
-        path = "torchtitan.experiments.flux.flux_argparser"
+        path = "torchtitan.experiments.flux.job_config"
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [

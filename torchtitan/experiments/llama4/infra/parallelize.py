@@ -12,7 +12,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
-from torchtitan.models.llama3.parallelize_llama import (
+from torchtitan.models.llama3.infra.parallelize import (
     apply_ac,
     apply_compile,
     apply_ddp,
