@@ -220,8 +220,10 @@ class Training:
 
     mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
     """
-    torch dtype to use for parameters when applying mixed precision via FSDP.
-    This feature only takes effect when data_parallel_shard_degree > 1
+    torch dtype to use for parameters when applying mixed precision via fully_shard or torch.autocast.
+    This feature takes effect via fully_shard when data_parallel_shard_degree > 1 or
+    context_parallel_degree > 1; it takes effect via torch.autocast when data_replicate_degree >= 1
+    and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
     mixed_precision_reduce: Literal["float32"] = "float32"
