@@ -21,6 +21,7 @@ from torchtitan.tools.logging import logger
 
 def parallelize_llama(
     model_fn,
+    init_fn,  # TODO(whc) hack to pass stuff to autoparallel
     world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
@@ -32,9 +33,14 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # model = model.to_empty(device="cuda")
-
     # TODO: make auto-p work with already created model object?
+    # wherever the auto-parallel code that creates a FakeTensorMode is...
+    # fake_mode = ...
+    # for k, v in m.named_parameters():
+    #     # swap each param in your model with a fake tensor version
+    #     # warning - we probably need to do this before initializing the optimizer?
+    #     setattr(m, k, fake_mode.from_tensor(v))
+    # # also do the same for named_buffers
 
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
@@ -56,6 +62,10 @@ def parallelize_llama(
     assert parallel_dims.cp_enabled is False, "CP not supported yet"
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
+    # bail out
+    # model = model_fn()
+    # return model
+
     autop = AutoParallel(model_fn, input_fn, world_mesh)
     autop.add_parameter_memory_constraint(low=None, high=None)
 
@@ -73,4 +83,5 @@ def parallelize_llama(
         torch._inductor.config.reorder_for_peak_memory = False
         parallel_mod = torch.compile(parallel_mod, fullgraph=True)
 
+    init_fn(parallel_mod)
     return parallel_mod

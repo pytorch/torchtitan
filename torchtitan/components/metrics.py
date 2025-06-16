@@ -405,6 +405,7 @@ class MetricsProcessor:
             f"{color.blue}tps: {round(tps):,}  "
             # f"{color.cyan}tflops: {tflops:,.2f}  "
             # f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            f"{color.reset}"
         )
 
         self.ntokens_since_last_log = 0
