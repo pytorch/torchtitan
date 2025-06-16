@@ -73,11 +73,6 @@ class DummyFuture:
     def __init__(self):
         self.result = mock.Mock()
 
-    def __await__(self):
-        # to support awaiting if needed
-        if False:
-            yield
-
 
 def fake_async_save(*args, **kwargs):
     return DummyFuture()
@@ -160,7 +155,7 @@ class TestCheckpointManager(unittest.TestCase):
 
     def fake_load(self, states: dict, checkpoint_id=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
-        loaded = torch.load(path)
+        loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
             if key in states and hasattr(states[key], "load_state_dict"):
                 states[key].load_state_dict(val)
@@ -232,7 +227,10 @@ class TestCheckpointManager(unittest.TestCase):
         calls = [c.kwargs.get("checkpoint_id") for c in mock_save.call_args_list]
         expected = [os.path.join(self.test_folder, f"step-{i}") for i in (1, 2, 3)]
         self.assertListEqual(calls, expected)
-        sd = torch.load(os.path.join(self.test_folder, "step-3", "state_dict.pt"))
+        sd = torch.load(
+            os.path.join(self.test_folder, "step-3", "state_dict.pt"),
+            weights_only=False,
+        )
         self.assertIn("optimizer", sd)
         torch.testing.assert_close(sd["optimizer"]["fake_param"], torch.tensor([1.0]))
         manager.close()
