@@ -15,9 +15,6 @@ import torch
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor.experimental._attention import (
-    _FlexAttentionSequentialSharder,
-)
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
@@ -394,9 +391,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-                sharder=_FlexAttentionSequentialSharder(
-                    mesh=world_mesh["cp"], block_mask=block_mask
-                ),
             )
             if parallel_dims.cp_enabled
             else None
