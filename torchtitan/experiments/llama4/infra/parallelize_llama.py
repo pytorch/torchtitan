@@ -171,7 +171,7 @@ def get_updated_expert_bias(
     """
 
     with torch.no_grad():
-        # All Reduce Across TPxCPxDP group
+        # All Reduce Across DPxCPxTP2EP group
         if reduce_mesh is not None:
             torch.distributed.all_reduce(
                 tokens_per_expert,
