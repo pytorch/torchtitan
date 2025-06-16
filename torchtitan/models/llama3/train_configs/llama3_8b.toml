@@ -6,11 +6,11 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 # profile_freq = 100
 profile_freq = 10
-enable_memory_snapshot = true
+enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
@@ -35,27 +35,34 @@ eps = 1e-8
 warmup_steps = 600
 
 [training]
-batch_size = 4
+<<<<<<< HEAD
+local_batch_size = 1
 seq_len = 8192
+=======
+# batch_size = 4
+batch_size = 1
+# seq_len = 8192
+seq_len = 32768
+>>>>>>> 1c74703 ([cp][flex_attention] integration test trial)
 max_norm = 1.0  # grad norm clipping
 # steps = 1000
-steps = 20
-compile = false
+steps = 3000
+compile = true
 dataset = "c4"
-deterministic = false
+deterministic = true
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
-context_parallel_degree = 4
+context_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false
 folder = "checkpoint"
 interval = 500
-model_weights_only = false
+last_save_model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 

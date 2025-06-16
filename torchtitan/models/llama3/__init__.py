@@ -13,9 +13,10 @@ from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .model import Transformer, TransformerModelArgs
-from .parallelize_llama import parallelize_llama
-from .pipeline_llama import pipeline_llama
+from .infra.parallelize import parallelize_llama
+from .infra.pipeline import pipeline_llama
+from .model.args import TransformerModelArgs
+from .model.model import Transformer
 
 __all__ = [
     "parallelize_llama",

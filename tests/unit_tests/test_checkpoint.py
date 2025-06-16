@@ -44,6 +44,10 @@ def fake_get_model_state_dict(model, *args, **kwargs):
     return model.state_dict()
 
 
+# TODO: The unittest is not well structured and does not cover enough paths.
+# It should be refactored.
+
+
 @dataclass
 class DummyCheckpointConfig:
     enable_checkpoint: bool = True
@@ -51,9 +55,11 @@ class DummyCheckpointConfig:
     interval: int = 10
     async_mode: str = "disabled"
     keep_latest_k: int = 0
-    model_weights_only: bool = False
+    last_save_model_weights_only: bool = False
     export_dtype: str = "float32"
     exclude_from_loading = []
+    initial_load_model_weights_only: bool = False
+    initial_load_path: str = ""
 
 
 @dataclass

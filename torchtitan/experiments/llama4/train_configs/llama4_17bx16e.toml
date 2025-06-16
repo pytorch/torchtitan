@@ -31,8 +31,7 @@ warmup_steps = 600
 lr_min = 0.1
 
 [training]
-# batch_size = 8
-batch_size = 4
+local_batch_size = 8
 seq_len = 8192
 # seq_len = 16384
 # seq_len = 32768
@@ -57,7 +56,7 @@ context_parallel_degree = 4
 enable_checkpoint = false
 folder = "checkpoint"
 interval = 500
-model_weights_only = false
+last_save_model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 

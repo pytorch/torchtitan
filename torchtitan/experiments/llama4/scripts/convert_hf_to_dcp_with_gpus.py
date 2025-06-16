@@ -322,7 +322,6 @@ class CheckpointConverter:
     def _reshard_receive(
         self, assignment: _Assignment, state_dict: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
-
         flatten_tensor = torch.empty(
             sum(math.prod(s) for s, d in zip(assignment.shapes, assignment.dtypes)),
             dtype=assignment.dtypes[0],
@@ -535,7 +534,7 @@ if __name__ == "__main__":
             # oh, this is pretty bad, when can we get rid of the freqs_cis issue?
             state_dict["freqs_cis"] = None
             trainer.checkpointer.states[MODEL] = DummyModel(state_dict)
-            trainer.checkpointer.model_weights_only = True
+            trainer.checkpointer.last_save_model_weights_only = True
             trainer.checkpointer.export_dtype = next(iter(state_dict.values())).dtype
             trainer.checkpointer.save(curr_step=0, force=True)
             time.sleep(2)

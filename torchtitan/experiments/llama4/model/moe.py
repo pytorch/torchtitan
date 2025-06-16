@@ -237,7 +237,7 @@ class MoE(nn.Module):
             self.tokens_per_expert.mean() - self.tokens_per_expert
         )
         expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-        self.expert_bias = self.expert_bias + expert_bias_delta
+        self.expert_bias.add_(expert_bias_delta)
 
         self.tokens_per_expert.zero_()
 
@@ -295,7 +295,6 @@ class MoE(nn.Module):
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
-                    token_indices.shape[0] + self.experts.num_experts * ALIGN_SIZE_M,
                     ALIGN_SIZE_M,
                 )
             token_indices = torch.vstack(

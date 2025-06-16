@@ -64,7 +64,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
             [
                 "--training.dataset",
                 dataset_name,
-                "--training.batch_size",
+                "--training.local_batch_size",
                 str(batch_size),
                 "--training.seq_len",
                 str(seq_len),

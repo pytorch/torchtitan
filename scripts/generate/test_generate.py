@@ -113,7 +113,7 @@ def test_generate(
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
-        model = model_cls.from_model_args(model_args)
+        model = model_cls(model_args)
 
     world_mesh = None
     # Init distributed env

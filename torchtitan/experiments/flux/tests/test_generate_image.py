@@ -37,7 +37,7 @@ class TestGenerateImage:
         classifier_free_guidance_scale = 5.0
 
         # Contracting JobConfig
-        path = "torchtitan.experiments.flux.flux_argparser"
+        path = "torchtitan.experiments.flux.job_config"
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
@@ -47,7 +47,7 @@ class TestGenerateImage:
                 "--training.seed",
                 "0",
                 "--training.classifer_free_guidance_prob",
-                "0.1",
+                "0.447",
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-base",
                 "--encoder.clip_encoder",

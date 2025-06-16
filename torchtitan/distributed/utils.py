@@ -21,6 +21,8 @@ from torch.distributed.tensor.experimental._attention import _FlexAttentionShard
 from torch.nn.attention import SDPBackend
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.config_manager import TORCH_DTYPE_MAP
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -219,6 +221,29 @@ def get_train_context(
     return context
 
 
+def maybe_enable_amp(
+    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: torch.device
+) -> Generator[None, None, None]:
+    if parallel_dims.fsdp_enabled:
+        # FSDP handles mixed precision internally
+        logger.info("Mixed precision training is handled by fully_shard")
+        return contextlib.nullcontext()
+    else:
+        if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
+            logger.warning(
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
+            )
+            logger.info("Mixed precision training is disabled")
+            return contextlib.nullcontext()
+        else:
+            # the following code will only be executed for DDP or single-device training
+            logger.info("Mixed precision training is handled by AMP")
+            return torch.autocast(
+                device_type,
+                dtype=TORCH_DTYPE_MAP[mixed_precision_param],
+            )
+
+
 def init_distributed(job_config):
     def _warn_overwrite_env(env, val):
         if env in os.environ:
@@ -237,7 +262,7 @@ def init_distributed(job_config):
             backend = f"{device_type}:{backend},cpu:gloo"
         return backend
 
-    TRACE_BUFFER_SIZE = "TORCH_NCCL_TRACE_BUFFER_SIZE"
+    TRACE_BUFFER_SIZE = "TORCH_FR_BUFFER_SIZE"
     TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
     DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
     ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
@@ -326,6 +351,11 @@ def clip_grad_norm_(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    else:
+        # prevent generators from being exhausted
+        parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
     total_norm = torch.nn.utils.get_total_norm(
         grads, norm_type, error_if_nonfinite, foreach

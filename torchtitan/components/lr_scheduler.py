@@ -102,6 +102,14 @@ def build_lr_schedulers(
     """
     training_steps = job_config.training.steps
     warmup_steps = int(job_config.lr_scheduler.warmup_steps)
+
+    if warmup_steps > training_steps:
+        logger.warning(
+            f"Warmup steps ({warmup_steps}) exceed total training steps ({training_steps}). "
+            f"Adjusting warmup steps to {training_steps}."
+        )
+        warmup_steps = training_steps
+
     if job_config.lr_scheduler.decay_ratio is not None:
         decay_steps = round(training_steps * job_config.lr_scheduler.decay_ratio)
         if warmup_steps + decay_steps > training_steps:
@@ -113,7 +121,8 @@ def build_lr_schedulers(
             decay_steps = training_steps - warmup_steps
     else:
         decay_steps = training_steps - warmup_steps
-    stable_steps = training_steps - warmup_steps - decay_steps
+    # Add a vitual last step to prevent the learning rate from dropping to 0
+    stable_steps = training_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = job_config.lr_scheduler.decay_type
     lr_min = job_config.lr_scheduler.lr_min
 
@@ -146,13 +155,17 @@ def build_lr_schedulers(
             # linear warmup
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            curr_adjustment = float(current_step / (warmup_steps + 1))
+            assert (
+                warmup_steps != 0
+            ), "warmup_steps must not be zero to reach this branch"
+            curr_adjustment = float(current_step / warmup_steps)
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
             # 0-indexed step, hence + 1 adjustments
             current_step += 1
-            progress = float(current_step - warmup_stable_steps) / (decay_steps + 1)
+            assert decay_steps != 0, "decay_steps must not be zero to reach this branch"
+            progress = float(current_step - warmup_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress

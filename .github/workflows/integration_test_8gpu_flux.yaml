@@ -31,6 +31,7 @@ jobs:
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
+      # delete the checkpoints in the artifacts to save CI uploading time
       script: |
         set -eux
 
@@ -44,3 +45,4 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
         python -m torchtitan.experiments.flux.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
