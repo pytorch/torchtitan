@@ -588,6 +588,11 @@ class FaultTolerance:
     """
     Whether to quantize the gradients before allreduce.
 
+    Disabled by default since the quantization does utilize the GPU
+    and uses more collectives. Enabling this requires knowing about
+    the tradeoffs between GPU utilization and communication.
+
+
     This is only used when "semi_sync_method" is set.
     """
 
@@ -597,12 +602,21 @@ class FaultTolerance:
     model fragment's synchronization. This is the "tao" parameter in
     the Streaming DiLoCo paper.
 
+    By default, each model fragment will be synced at the same step
+    at which the allreduce is issued. Enabling delay can improve
+    communication and computation overlap, but at the cost of compromising
+    model quality
+
     This is only used when "semi_sync_method" is set.
     """
 
     fragment_update_alpha: float = 0.0
     """
     Determines how to mix the local and global optimized parameters
+
+    By default, we just use the global parameters. This ensures all
+    DDP replicas have the same parameters after syncrhonizing on
+    the fragment. Tuning this can also affect the model quality.
 
     This is only used when "semi_sync_method" is set.
     """
