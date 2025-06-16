@@ -91,6 +91,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             pp=parallelism_config.pipeline_parallel_degree,
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
+            enable_tp2ep=parallelism_config.enable_tp2ep,
         )
         dist_utils.init_distributed(job_config)
 
@@ -424,6 +425,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
+
+        # TODO: this can be placed inside PP but might break gradient accumulation
+        if self.train_spec.finalize_model_grads_func is not None:
+            for m in self.model_parts:
+                self.train_spec.finalize_model_grads_func(
+                    m, self.world_mesh)
 
         dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],

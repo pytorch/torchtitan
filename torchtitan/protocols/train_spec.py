@@ -13,6 +13,7 @@ from typing import Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -74,6 +75,7 @@ LRSchedulersBuilder: TypeAlias = Callable[
     [OptimizersContainer, JobConfig], LRSchedulersContainer
 ]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
+FinalizeModelGradsFunc: TypeAlias = Callable[[nn.Module, DeviceMesh], None]
 
 
 @dataclass
@@ -89,6 +91,7 @@ class TrainSpec:
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
+    finalize_model_grads_func: FinalizeModelGradsFunc | None = None
 
 
 _train_specs = {}

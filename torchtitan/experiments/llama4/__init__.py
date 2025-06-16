@@ -12,7 +12,7 @@ from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize_llama import parallelize_llama
+from .infra.parallelize_llama import parallelize_llama, update_router_expert_bias
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 
@@ -103,5 +103,5 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_tiktoken_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-    )
-)
+        finalize_model_grads_func=update_router_expert_bias,
+    ))

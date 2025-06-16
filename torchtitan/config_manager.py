@@ -361,6 +361,9 @@ class Parallelism:
     The default value is 'allgather'.
     """
 
+    enable_tp2ep: bool = False
+    """Whether to use expert parallelism instead of tensor parallelism for shared experts."""
+
 
 @dataclass
 class Checkpoint:

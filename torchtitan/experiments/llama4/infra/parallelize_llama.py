@@ -117,28 +117,6 @@ def parallelize_llama(
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
-    # for MoE auxiliary-loss-free load balancing
-    if dp_mesh is not None:
-        # NOTE: Currently this sync is blocking (thus exposed) and happens on the
-        # default compute stream. Need to assess if this is OK performance-wise.
-        def _sync_tokens_per_expert(module, *_):
-            assert isinstance(module, MoE)
-            torch.distributed.all_reduce(
-                module.tokens_per_expert, group=dp_mesh.get_group()
-            )
-
-        for transformer_block in model.layers.values():
-            if transformer_block.moe_enabled:
-                load_balance_coeff = transformer_block.moe.load_balance_coeff
-                if load_balance_coeff is not None and load_balance_coeff > 0:
-                    # prepend=True so that the sync runs before
-                    # the _update_expert_bias hook in MoE
-                    transformer_block.moe.register_full_backward_hook(
-                        _sync_tokens_per_expert, prepend=True
-                    )
-                else:
-                    break
-
     return model
 
 
@@ -176,3 +154,94 @@ def apply_moe_tp(
             device_mesh=tp_mesh,
             parallelize_plan=moe_layer_plan,
         )
+
+
+def get_updated_expert_bias(
+    tokens_per_expert,
+    expert_bias,
+    expert_bias_update_rate,
+    reduce_mesh: DeviceMesh | None,
+):
+    """Update expert bias for biased expert routing. See https://arxiv.org/abs/2408.15664v1#
+
+    Args:
+        tokens_per_expert (torch.Tensor): The number of tokens assigned to each expert.
+        expert_bias (torch.Tensor): The bias for each expert.
+        expert_bias_udpate_rate (float): The update rate for the expert bias.
+    """
+
+    with torch.no_grad():
+        # All Reduce Across TPxCPxDP group
+        if reduce_mesh is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert,
+                group=reduce_mesh.get_group(),
+            )
+        average_tokens = tokens_per_expert.sum(
+            dim=-1, keepdim=True) / tokens_per_expert.shape[-1]
+        offset = average_tokens - tokens_per_expert
+        updated_expert_bias = expert_bias + torch.sign(
+            offset) * expert_bias_update_rate
+        return updated_expert_bias
+
+
+# for MoE auxiliary-loss-free load balancing
+def update_router_expert_bias(model: torch.nn.Module,
+                              world_mesh: DeviceMesh):
+    """
+    Update the expert bias of the router for a global batch.
+    This requires all-reduce of tokens_per_expert across DPxCPxTP2EP ranks
+    """
+    tokens_per_expert_list = []
+    expert_bias_list = []
+    global_load_balance_coeff = None
+
+    if hasattr(model, "layers"):
+        layers = model.layers
+    elif hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+    else:
+        raise NotImplementedError(
+            "Model structure not recognized for MoE expert bias update."
+        )
+    for transformer_block in layers.values():
+        if transformer_block.moe_enabled:
+            load_balance_coeff = transformer_block.moe.load_balance_coeff
+            if load_balance_coeff is not None and load_balance_coeff > 0:
+                if global_load_balance_coeff is None:
+                    global_load_balance_coeff = load_balance_coeff
+                else:
+                    assert (
+                        global_load_balance_coeff == load_balance_coeff
+                    ), "All MoE layers must have the same load balance coefficient."
+                tokens_per_expert_list.append(
+                    transformer_block.moe.tokens_per_expert)
+                expert_bias_list.append(transformer_block.moe.expert_bias)
+            else:
+                break
+
+    if len(expert_bias_list) == 0:
+        return
+
+    if world_mesh is not None and world_mesh.size() > 1:
+        try:
+            load_balance_reduce_mesh = world_mesh["dp_cp_tp2ep"]
+        except KeyError:
+            load_balance_reduce_mesh = None
+    else:
+        load_balance_reduce_mesh = None
+
+    stacked_tokens_per_expert = torch.stack(tokens_per_expert_list, dim=0)
+    stacked_expert_bias = torch.stack(expert_bias_list, dim=0)
+    stacked_updated_expert_bias = get_updated_expert_bias(
+        stacked_tokens_per_expert,
+        stacked_expert_bias,
+        global_load_balance_coeff,
+        load_balance_reduce_mesh,
+    )
+
+    for tokens_per_expert, expert_bias, updated_expert_bias in zip(
+            tokens_per_expert_list, expert_bias_list,
+            stacked_updated_expert_bias):
+        tokens_per_expert.zero_()
+        expert_bias.copy_(updated_expert_bias)

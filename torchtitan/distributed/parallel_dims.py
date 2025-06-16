@@ -25,6 +25,7 @@ class ParallelDims:
     pp: int
     world_size: int
     enable_loss_parallel: bool
+    enable_tp2ep: bool
 
     def __post_init__(self):
         self._validate()
@@ -81,17 +82,23 @@ class ParallelDims:
         dp_shard_cp_mesh_dim_names = []
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
+        dp_cp_tp2ep_mesh_dim_names = []
 
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
+            dp_cp_tp2ep_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
             dp_shard_cp_mesh_dim_names.append("dp_shard")
             dp_cp_mesh_dim_names.append("dp_shard")
+            dp_cp_tp2ep_mesh_dim_names.append("dp_shard")
         if self.cp_enabled:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
+            dp_cp_tp2ep_mesh_dim_names.append("cp")
+        if self.tp_enabled and self.enable_tp2ep:
+            dp_cp_tp2ep_mesh_dim_names.append("tp")
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
@@ -101,6 +108,8 @@ class ParallelDims:
             )
         if dp_cp_mesh_dim_names != []:
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+        if dp_cp_tp2ep_mesh_dim_names != []:
+            mesh[tuple(dp_cp_tp2ep_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp2ep")
 
         return mesh
 
