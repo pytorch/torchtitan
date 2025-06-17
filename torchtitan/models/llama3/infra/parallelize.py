@@ -47,6 +47,13 @@ def parallelize_llama(
     """
 
     if parallel_dims.tp_enabled:
+        assert job_config.training.seq_len % parallel_dims.tp == 0, (
+            f"Sequence length {job_config.training.seq_len} must be divisible by "
+            f"tensor parallel degree {parallel_dims.tp} because of numerical "
+            f"issue in the computation of complex numbers with DTensors. "
+            f"See https://github.com/pytorch/pytorch/issues/130646 and "
+            f"https://github.com/pytorch/torchtitan/issues/1306 for details. "
+        )
         if (
             job_config.parallelism.enable_async_tensor_parallel
             and not job_config.training.compile
