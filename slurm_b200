@@ -1,0 +1,80 @@
+#!/bin/bash
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# --- This script is optimized for AWS with EFA
+# --- adjust NCCL_BUFFSIZE if you encounter memory
+# --- constraint issues or to tune for improved performance.
+# ---
+
+#SBATCH --job-name=ahmads_titan1
+
+#SBATCH --ntasks=2
+
+#SBATCH --nodes=2
+
+#SBATCH --cpus-per-task=96
+#use this to run with specific nodes:
+#  --nodelist=slurm-compute-node-[3-8,22-31,33-55,57-74,76-80,82-92,94,96,98,187,193-194,200,202-203,205,207-212,214-215,217-225,227-234,236,238-248]
+# and --exclude=slurm-compute-node-[node ids list here]
+
+# not needed for b200 .... export NCCL_IB_HCA=^mlx5_0:1
+# export NCCL_TOPO_FILE=/etc/crusoe/nccl_topo/h200-141gb-sxm-ib-cloud-hypervisor.xml
+export UCX_NET_DEVICES=ens7
+
+nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
+nodes_array=($nodes)
+head_node=${nodes_array[0]}
+head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+
+echo All nodes: ${nodes[@]}
+echo Node IP: $head_node_ip
+export LOGLEVEL=INFO
+
+# export NCCL_TOPO_FILE=/etc/crusoe/nccl_topo/h200-141gb-sxm-ib-cloud-hypervisor.xml
+# Enable for A100
+# export FI_PROVIDER="efa"
+# Ensure that P2P is available
+# export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=0
+
+# debugging flags (optional)
+export NCCL_DEBUG=WARN
+export PYTHONFAULTHANDLER=1
+# optional debug settings
+# export NCCL_DEBUG=INFO
+# NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV
+
+#export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
+#export LD_LIBRARY_PATH=/usr/local/lib/:$LD_LIBRARY_PATH
+export CUDA_LAUNCH_BLOCKING=0
+export WANDB_PROJECT="b200_titan"
+# on your cluster you might need these:
+# set the network interface
+export NCCL_SOCKET_IFNAME="eth0,en,eth,em,bond"
+export NCCL_BUFFSIZE=2097152
+#export TORCH_DIST_INIT_BARRIER=1
+export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
+
+TITAN_CONFIG_FILE=${TITAN_CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/llama3_8b.toml"}
+
+# dcgmi profile --pause
+# adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
+# to your specific node count, and update target launch file.
+# This works with multiple nodes now:
+#srun conda run -n ahmads_titan torchrun --nnodes 2 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" -m torchtitan.train --job.config_file ${TITAN_CONFIG_FILE}
+#exit
+
+# This is the baseline and it works.
+#export NGPU=8
+#srun conda run -n ahmads_titan ./run_train.sh
+
+export LOCAL_WORLD_SIZE=8
+export NUM_HOSTS=8
+export MASTER_ADDR=$head_node_ip
+export MASTER_PORT=12347
+
+srun --nodes=$NUM_HOSTS --ntasks=$NUM_HOSTS conda run -n ahmads_titan python -m torchtitan.train_monarch --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml

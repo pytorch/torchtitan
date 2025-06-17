@@ -32,6 +32,8 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+logger.info = logger.error
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     job_config: JobConfig
@@ -536,6 +538,9 @@ if __name__ == "__main__":
     config_manager = ConfigManager()
     config = config_manager.parse_args()
     trainer: Optional[Trainer] = None
+    rank = int(os.environ["RANK"])
+    if rank == 15:
+        print(os.environ)
 
     try:
         trainer = Trainer(config)
