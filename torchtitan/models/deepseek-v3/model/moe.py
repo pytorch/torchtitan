@@ -114,13 +114,11 @@ class TokenChoiceTopKRouter(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
         self.use_sigmoid = use_sigmoid
-        self.route_sclaing_factor
+        self.route_sclaing_factor = route_sclaing_factor
 
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.gating_dim))
         )
-        # TODO: is this needed? This is not "Complementary Sequence-Wise Auxiliary Loss"
-        # self.e_score_correction_bias = nn.Parameter(torch.rand((self.num_experts)))
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor = None
