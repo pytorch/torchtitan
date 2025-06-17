@@ -178,28 +178,23 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         bsz, seqlen, _ = x.size()
+
+        # Query projection
         if self.q_lora_rank == 0:
             q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
         else:
-            q = self.wq_b(
-                self.q_norm(self.wq_a(x))
-            )  # (bsz, seqlen, n_heads * qk_head_dim)
+            q = self.wq_b(self.q_norm(self.wq_a(x)))
 
-        q = q.view(
-            bsz, seqlen, self.n_heads, self.qk_head_dim
-        )  # (bsz, seqlen, n_heads, qk_head_dim)
+        q = q.view(bsz, seqlen, self.n_heads, self.qk_head_dim)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        # q_nope: (bsz, seqlen, n_heads, qk_nope_head_dim)
-        # q_pe: (bsz, seqlen, n_heads, qk_rope_head_dim)
         q_pe = apply_rotary_emb(q_pe, freqs_cis)
         q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
-        kv = self.wkv_a(x)  # kv: (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
+        # Key-value projection
+        kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        # kv: (bsz, seqlen, kv_lora_rank)
-        # k_pe: (bsz, seqlen, qk_rope_head_dim)
         k_pe = apply_rotary_emb(
             k_pe.unsqueeze(2), freqs_cis
         )  # (bsz, seqlen, 1, qk_rope_head_dim)
@@ -207,12 +202,8 @@ class Attention(nn.Module):
         kv = self.wkv_b(
             self.kv_norm(kv)
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
-        kv = kv.view(
-            bsz, seqlen, self.n_heads, self.qk_nope_head_dim + self.v_head_dim
-        )  # (bsz, seqlen, n_heads, qk_nope_head_dim + v_head_dim)
+        kv = kv.view(bsz, seqlen, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        # k_nope: (bsz, seqlen, n_heads, qk_nope_head_dim)
-        # v: (bsz, seqlen, n_heads, v_head_dim)
         k = torch.cat(
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
@@ -222,10 +213,9 @@ class Attention(nn.Module):
         # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L17
         output = self.sdpa(q, k, v)
 
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_heads, v_head_dim)
-        output = output.view(bsz, seqlen, -1)  # (bs, seqlen, n_heads * v_head_dim)
+        # Reshape and project output
+        output = output.transpose(1, 2)  # (bsz, seqlen, n_heads, v_head_dim)
+        output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
 
@@ -327,11 +317,6 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         h = self.tok_embeddings(tokens)
-        # # This is casual mask, which is already handled in sdpa
-        # if seqlen > 1:
-        #     mask = torch.full(
-        #         (seqlen, seqlen), float("-inf"), device=tokens.device
-        #     ).triu_(1)
         for layer in self.layers:
             h = layer(h, self.freqs_cis)
         h = self.norm(h)[:, -1]
