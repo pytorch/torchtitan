@@ -7,9 +7,11 @@
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
-
 from torchtitan.models.attention import build_attention
+from torchtitan.models.llama3 import model
+from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepseekV3ModelArgs
 
@@ -88,7 +90,10 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
         ramp_func = torch.clamp(linear_func, 0, 1)
         return ramp_func
 
+    # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+
+    # YaRN scaling for extended context
     if seqlen > args.original_seq_len:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, args.original_seq_len
@@ -222,3 +227,116 @@ class Attention(nn.Module):
         ).contiguous()  # (bs, seqlen, n_heads, v_head_dim)
         output = output.view(bsz, seqlen, -1)  # (bs, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
+
+
+class FeedForward(nn.Module):
+    """
+    FeedForward module
+
+    Args:
+        dim (int): Input dimension.
+        hidden_dim (int): Hidden dimension of the feedforward layer.
+        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+
+    Attributes:
+        w1 (Linear): Linear transformation for the first layer.
+        w2 (Linear): Linear transformation for the second layer.
+        w3 (Linear): Linear transformation for the third layer.
+
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
+class TransformerBlock(nn.Module):
+    """
+    Transformer block with attention and feed-forward layers.
+    """
+
+    def __init__(self, model_args: DeepseekV3ModelArgs):
+        super().__init__()
+        self.attention = Attention(model_args)
+        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn = FeedForward(model_args.dim, model_args.inter_dim)
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
+        """
+        Forward pass for the Transformer block.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+
+        Returns:
+            torch.Tensor: Output tensor with the same shape as the input.
+        """
+        x = x + self.attention(self.attention_norm(x), freqs_cis)
+        x = x + self.ffn(self.ffn_norm(x))
+        return x
+
+
+class Transformer(nn.Module, ModelProtocol):
+    """
+    Deepseek-V3 Transformer model with attention and feed-forward layers.
+    """
+
+    def __init__(self, model_args: DeepseekV3ModelArgs):
+        super().__init__()
+        self.max_seq_len = model_args.max_seq_len
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.register_buffer(
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+        )
+
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(model_args.n_layers):
+            self.layers.append(TransformerBlock(model_args))
+        self.norm = nn.RMSNorm(model_args.dim)
+        self.output = nn.Linear(
+            model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
+        )
+        self.init_weights()
+
+    def forward(self, tokens: torch.Tensor):
+        """
+        Forward pass for the Transformer model.
+
+        Args:
+            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
+
+        Returns:
+            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
+        """
+        h = self.tok_embeddings(tokens)
+        # # This is casual mask, which is already handled in sdpa
+        # if seqlen > 1:
+        #     mask = torch.full(
+        #         (seqlen, seqlen), float("-inf"), device=tokens.device
+        #     ).triu_(1)
+        for layer in self.layers:
+            h = layer(h, self.freqs_cis)
+        h = self.norm(h)[:, -1]
+        output = self.output(h)
+        return output
+
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        pass
