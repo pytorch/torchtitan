@@ -177,12 +177,6 @@ class TokenChoiceTopKRouter(nn.Module):
 class MoE(nn.Module):
     def __init__(self, model_args: DeepseekV3ModelArgs):
 
-        # n_routed_experts: int = 64
-        # n_shared_experts: int = 2
-        # n_activated_experts: int = 6
-        # score_func: Literal["softmax", "sigmoid"] = "softmax"
-        # route_scale: float = 1.0
-
         super().__init__()
         dim = model_args.dim
 
