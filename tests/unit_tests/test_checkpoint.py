@@ -482,9 +482,8 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Test with enable_fail_fast=False (default case)
         cfg = self.job_config.checkpoint
-        cfg.enable_fail_fast = False
         cfg.interval = 10  # Set interval to 10 so step 1 wouldn't normally trigger save
-        cfg.keep_latest_k = 0  # Disable purging for simpler test
+        cfg.keep_latest_k = 0  # Disable purging to avoid confusion
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
