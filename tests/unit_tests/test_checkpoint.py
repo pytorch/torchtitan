@@ -480,9 +480,9 @@ class TestCheckpointManager(unittest.TestCase):
         """
         mock_save.side_effect = self.fake_save
 
-        # Test with enable_fail_fast=True
+        # Test with enable_fail_fast=False (default case)
         cfg = self.job_config.checkpoint
-        cfg.enable_fail_fast = True
+        cfg.enable_fail_fast = False
         cfg.interval = 10  # Set interval to 10 so step 1 wouldn't normally trigger save
         cfg.keep_latest_k = 0  # Disable purging for simpler test
 
@@ -496,23 +496,19 @@ class TestCheckpointManager(unittest.TestCase):
             ft_manager=self.ft_manager,
         )
 
-        # Step 1 should trigger save due to enable_fail_fast=True
+        # Step 1 should not trigger save when enable_fail_fast=False and not at interval
         manager.save(curr_step=1)
-        self.assertEqual(mock_save.call_count, 1)
-
-        # Step 2 should not trigger save (not at interval and not forced)
-        manager.save(curr_step=2)
-        self.assertEqual(mock_save.call_count, 1)
+        self.assertEqual(mock_save.call_count, 0)
 
         # Step 10 should trigger save due to interval
         manager.save(curr_step=10)
-        self.assertEqual(mock_save.call_count, 2)
+        self.assertEqual(mock_save.call_count, 1)
 
         manager.close()
 
-        # Test with enable_fail_fast=False
+        # Test with enable_fail_fast=True
         mock_save.reset_mock()
-        cfg.enable_fail_fast = False
+        cfg.enable_fail_fast = True
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
@@ -524,13 +520,17 @@ class TestCheckpointManager(unittest.TestCase):
             ft_manager=self.ft_manager,
         )
 
-        # Step 1 should not trigger save when enable_fail_fast=False and not at interval
+        # Step 1 should trigger save due to enable_fail_fast=True
         manager2.save(curr_step=1)
-        self.assertEqual(mock_save.call_count, 0)
-
-        # Step 10 should still trigger save due to interval
-        manager2.save(curr_step=10)
         self.assertEqual(mock_save.call_count, 1)
+
+        # Step 2 should not trigger save (not at interval and not forced)
+        manager2.save(curr_step=2)
+        self.assertEqual(mock_save.call_count, 1)
+
+        # Step 10 should trigger save due to interval
+        manager2.save(curr_step=10)
+        self.assertEqual(mock_save.call_count, 2)
 
         manager2.close()
 
