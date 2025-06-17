@@ -41,6 +41,8 @@ class DeepseekV3ModelArgs(BaseModelArgs):
         n_limited_groups (int): Number of limited groups for MoE routing.
         score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
         route_scale (float): Scaling factor for routing scores.
+        use_grouped_mm (bool): Whether to use grouped matrix multiplication for MoE layers.
+        load_balance_coeff (float | None): Auxiliary-Loss-Free Load balancing coefficient for MoE layers.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
@@ -73,6 +75,8 @@ class DeepseekV3ModelArgs(BaseModelArgs):
     n_limited_groups: int = 1
     score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.0
+    use_grouped_mm: bool = False
+    load_balance_coeff: float | None = 1e-3
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
