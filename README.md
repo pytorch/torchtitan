@@ -140,6 +140,8 @@ export DATAROOT=<path_to_data>; export MODELROOT=<path_to_saved_encoders>; expor
 By default, checkpointing is disabled. You may enable it with ENABLE_CHECKPOINTING=True and set the checkpointing interval
 with `--checkpoint.interval=<steps>`.
 
+Additionally, by default, the model will run with HSDP (sharding over gpus in the same node, and using DDP across different nodes).
+You may modify this with `--parallelism.data_parallel_replicate_degree` and `--parallelism.data_parallel_shard_degree`.
 Given the substantial variability among Slurm clusters, users are encouraged to review and adapt these scripts to fit their specific cluster specifications.
 
 In any case, the dataset and checkpoints are expected to be available to all the nodes.
