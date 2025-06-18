@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-
 import torch
 import torch.nn as nn
 
@@ -17,8 +15,6 @@ from torchtitan.protocols.model_converter import (
 )
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
-
-from .utils import module_filter_fn
 
 
 class Float8Converter(ModelConverter):
@@ -54,13 +50,19 @@ class Float8Converter(ModelConverter):
         self.enabled = True
 
         if self.float8_config.recipe_name is not None:
-            assert (
-                not self.float8_config.enable_fsdp_float8_all_gather
-            ), "using `self.float8_config.enable_fsdp_float8_all_gather` together with `self.float8_config.recipe_name` is not supported"
-            assert (
-                not self.float8_config.force_recompute_fp8_weight_in_bwd
-            ), "using `self.float8_config.force_recompute_fp8_weight_in_bwd` together with `self.float8_config.recipe_name` is not supported"
-            self.config = Float8LinearConfig.from_recipe_name(self.float8_config.recipe_name)
+            assert not self.float8_config.enable_fsdp_float8_all_gather, (
+                "using `self.float8_config.enable_fsdp_float8_all_gather` together "
+                "with `self.float8_config.recipe_name` is not supported"
+            )
+
+            assert not self.float8_config.force_recompute_fp8_weight_in_bwd, (
+                "using `self.float8_config.force_recompute_fp8_weight_in_bwd` together "
+                "with `self.float8_config.recipe_name` is not supported"
+            )
+
+            self.config = Float8LinearConfig.from_recipe_name(
+                self.float8_config.recipe_name
+            )
             self.precompute_scale = False
             logger.info(
                 f"Float8 training active with recipe {self.float8_config.recipe_name}"
@@ -103,7 +105,9 @@ class Float8Converter(ModelConverter):
         from torchao.float8.float8_linear_utils import auto_filter_for_recipe
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        filter_fn = auto_filter_for_recipe(self.float8_config.recipe_name, filter_fqns=self.float8_config.filter_fqns)
+        filter_fn = auto_filter_for_recipe(
+            self.float8_config.recipe_name, filter_fqns=self.float8_config.filter_fqns
+        )
         convert_to_float8_training(
             model,
             config=self.config,
