@@ -283,7 +283,7 @@ class CheckpointManager:
         self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
         self.exclude_from_loading = ckpt_config.exclude_from_loading
         self.interval = ckpt_config.interval
-        self.enable_fail_fast = ckpt_config.enable_fail_fast
+        self.enable_first_step_checkpoint = ckpt_config.enable_first_step_checkpoint
 
         # Async checkpoint related fields.
         async_mode = ckpt_config.async_mode.lower()
@@ -618,7 +618,7 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return False
 
-        if curr_step == 1 and self.enable_fail_fast:
+        if curr_step == 1 and self.enable_first_step_checkpoint:
             return True
 
         if force:

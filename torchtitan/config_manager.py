@@ -459,12 +459,12 @@ class Checkpoint:
     This will load the model only, excluding the specified keys.
     """
 
-    enable_fail_fast: bool = False
+    enable_first_step_checkpoint: bool = False
     """
-    Enable fail-fast mode. This will save a checkpoint immediately after the first step
-    to ensure checkpointing functions correctly. This is useful when running on a new
-    cluster or storage to verify checkpointing without waiting for many steps or
-    checkpointing too frequently. The default value is False.
+    Enable the checkpoint save at first step. This will save a checkpoint immediately
+    after the first step to ensure checkpointing functions correctly. This is useful
+    when running on a new cluster or storage to verify checkpointing without waiting
+    for many steps or checkpointing too frequently. The default value is False.
     """
 
 
