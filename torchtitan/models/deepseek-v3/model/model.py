@@ -5,15 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.attention import build_attention
-from torchtitan.models.llama3 import model
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepseekV3ModelArgs
+from .moe import MoE
 
 
 # Adopted from https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -34,7 +35,9 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
     base = args.rope_theta
     factor = args.rope_factor
 
-    def find_correction_dim(num_rotations, dim, base, max_seq_len):
+    def find_correction_dim(
+        num_rotations: float, dim: int, base: float, max_seq_len: int
+    ) -> float:
         """
         Computes the correction dimension for a given number of rotations in the rotary positional embedding.
 
@@ -53,7 +56,9 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
             / (2 * math.log(base))
         )
 
-    def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
+    def find_correction_range(
+        low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
+    ) -> Tuple[int, int]:
         """
         Computes the range of correction dimensions for rotary positional embeddings.
 
@@ -71,7 +76,7 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
         high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
         return max(low, 0), min(high, dim - 1)
 
-    def linear_ramp_factor(min, max, dim):
+    def linear_ramp_factor(min: float, max: float, dim: int) -> torch.Tensor:
         """
         Computes a linear ramp function used to smooth values between a minimum and maximum range.
 
@@ -172,7 +177,6 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
-            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -246,7 +250,7 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
@@ -260,12 +264,23 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, layer_id: int, model_args: DeepseekV3ModelArgs):
+        """
+        Initializes the Transformer block.
+
+        Args:
+            layer_id (int): Layer index in the transformer.
+            args (ModelArgs): Model arguments containing block parameters.
+        """
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn = FeedForward(model_args.dim, model_args.inter_dim)
+        self.ffn = (
+            FeedForward(model_args.dim, model_args.inter_dim)
+            if layer_id < model_args.n_dense_layers
+            else MoE(model_args)
+        )
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
@@ -298,7 +313,9 @@ class Transformer(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(model_args.n_layers):
-            self.layers.append(TransformerBlock(model_args))
+            self.layers.append(
+                TransformerBlock(layer_id=layer_id, model_args=model_args)
+            )
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
             model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
@@ -311,7 +328,6 @@ class Transformer(nn.Module, ModelProtocol):
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
-            start_pos (int, optional): Starting position in the sequence for rotary embeddings. Defaults to 0.
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
