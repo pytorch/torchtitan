@@ -20,9 +20,9 @@ These files plug in to the rest of torchtitan.
 ### Steps to configure machine
 To use this repository, please ensure your system can run docker containers and has appropriate GPU support (e.g. for CUDA GPUs, please make sure the appropriate drivers are set up)
 
-**For all instructions that follow, make sure you are in the `flux/torchtitan` directory.**
+**For all instructions that follow, make sure you are in the `/workspace/flux/torchtitan` directory when in the docker container.**
 
-Without docker, follow the instructions to install torchtitan and additionally install `requirements-mlperf.txt` and `torchtitan/experiments/flux/requirements.txt`.
+Without docker, follow the [instructions](https://github.com/pytorch/torchtitan?tab=readme-ov-file#installation) to install torchtitan and additionally install `requirements-mlperf.txt` and `torchtitan/experiments/flux/requirements.txt`.
 
 ### Container setup
 To build the container:
@@ -95,15 +95,13 @@ For the validation dataset:
 ```bash
 NGPU=1 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.dataset=coco --training.dataset_path=/dataset/coco --eval.dataset= --training.batch_size=128 --preprocessing.output_dataset_path=/dataset/coco_preprocessed
 ```
-Additionally, this script will generate encodings representing empty encodings which are using for guidance.
+Additionally, this script will generate encodings representing empty encodings which are used for guidance.
 
 
-To make use of the preprocessed data, set `--training.dataset=cc12m-preprocessed` and `--training.dataset_path=/dataset/cc12m_preprocessed/*`
-for the training data, and `--eval.dataset=coco-preprocessed`, `--eval.dataset_path=/dataset/coco_preprocessed/*` for the eval data.
-
-When using preprocessed data, we don't need to load any of the encoders. To do this, pass `--encoder.autoencoder_path= --encoder.t5_encoder= --encoder.clip_encoder=`.
-
-Alternatively, switch to the config file `flux_schnell_mlperf_preprocessed.toml` to automatically set the above flags
+To make use of the preprocessed data, switch to the config file `flux_schnell_mlperf_preprocessed.toml`.
+This sets `--training.dataset=cc12m-preprocessed` and `--training.dataset_path=/dataset/cc12m_preprocessed/*`
+for the training data, and `--eval.dataset=coco-preprocessed`, `--eval.dataset_path=/dataset/coco_preprocessed/*` for the eval data,
+while also avoiding loading encoders with `--encoder.autoencoder_path= --encoder.t5_encoder= --encoder.clip_encoder=`.
 
 ### Steps to run and time
 All steps below are assumed to be run inside the container. 
@@ -125,7 +123,7 @@ docker run -it --rm \
 ```
 
 #### Basic run
-`CONFIG=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml NGPU=<number of GPUs> bash torchtitan/experiments/flux/run_train.sh --training.dataset=cc12m-disk --eval.dataset=coco --training.batch_size=1`
+`CONFIG=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml NGPU=<number of GPUs> bash torchtitan/experiments/flux/run_train.sh --training.batch_size=1`
 
 #### Longer run
 **For longer runs, we expect a system with a slurm-based cluster.**
@@ -133,10 +131,14 @@ docker run -it --rm \
 Make sure to edit the headers for the run.sub script to match the requirements of your cluster (in particular the account field).
 
 ```bash
-export LOGDIR=<output directory>; export CONFIG_FILE=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml; export CONT=<tag>; export DATAROOT=<path for dataset storage>; sbatch -N <number of nodes> -t <time> run.sub <additional parameters here. e.g. --training.dataset_path=/dataset/...>
+export DATAROOT=<path_to_data>; export MODELROOT=<path_to_saved_encoders>; export LOGDIR=<output directory>; export CONFIG_FILE=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml; export CONT=<tag>; export DATAROOT=<path for dataset storage>; sbatch -N <number of nodes> -t <time> run.sub <additional parameters here. e.g. --training.dataset_path=/dataset/...>
 ```
 
 `DATAROOT` should be set to the path where data resides. e.g. `${DATAROOT}/cc12m_disk` should point to the CC12M training dataset. This will be mounted under `/dataset/`.
+`MODELROOT` should be set to the point where the previously downloaded encoders reside.
+
+By default, checkpointing is disabled. You may enable it with ENABLE_CHECKPOINTING=True and set the checkpointing interval
+with `--checkpoint.interval=<steps>`.
 
 Given the substantial variability among Slurm clusters, users are encouraged to review and adapt these scripts to fit their specific cluster specifications.
 
