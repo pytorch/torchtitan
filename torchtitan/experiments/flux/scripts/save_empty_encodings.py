@@ -5,14 +5,16 @@
 
 import os
 
-from torch import dist
+import numpy as np
+
+import torch.distributed as dist
+from torchtitan.config_manager import ConfigManager
 
 from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
-import numpy as np
-from torchtitan.config_manager import ConfigManager
-from torchtitan.experiments.flux.train import FluxTrainer
 
 from torchtitan.experiments.flux.sampling import generate_empty_batch
+from torchtitan.experiments.flux.train import FluxTrainer
+
 
 def generate_empty_encodings(trainer, output_path: str):
     """Generate empty encodings for classifier-free guidance."""
@@ -26,12 +28,24 @@ def generate_empty_encodings(trainer, output_path: str):
         t5_encoder=trainer.t5_encoder,
     )
     os.makedirs(output_path, exist_ok=True)
-    np.save(os.path.join(output_path, "t5_empty.npy"), batch["t5_encodings"].cpu().numpy().astype(np.float16))
-    np.save(os.path.join(output_path, "clip_empty.npy"), batch["clip_encodings"].cpu().numpy().astype(np.float16))
+    np.save(
+        os.path.join(output_path, "t5_empty.npy"),
+        batch["t5_encodings"].cpu().numpy().astype(np.float16),
+    )
+    np.save(
+        os.path.join(output_path, "clip_empty.npy"),
+        batch["clip_encodings"].cpu().numpy().astype(np.float16),
+    )
+
 
 def main():
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+    if os.path.exists(config.preprocessing.output_dataset_path):
+        print(
+            f"Output path {config.preprocessing.output_dataset_path} already exists. Skipping."
+        )
+        return
     trainer = FluxTrainer(config)
     del trainer.model_parts
 
@@ -45,5 +59,6 @@ def main():
         if dist.is_initialized():
             dist.destroy_process_group()
 
+
 if __name__ == "__main__":
-    main() 
+    main()

@@ -5,20 +5,22 @@
 
 import io
 from typing import Any
-from datasets import load_dataset, Dataset
+
+import numpy as np
+import PIL
 import torch
+from datasets import Dataset, load_dataset, load_from_disk
 
 from torchtitan.experiments.flux.dataset.flux_dataset import (
+    _process_cc12m_image,
     DATASETS,
     TextToImageDatasetConfig,
-    _process_cc12m_image
 )
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer
-import PIL
-import numpy as np
 
 # Avoid PIL.Image.DecompressionBombError
 PIL.Image.MAX_IMAGE_PIXELS = 933120000
+
 
 def _coco_data_processor(
     sample: dict[str, Any],
@@ -36,9 +38,11 @@ def _coco_data_processor(
         output_size: The output image size
 
     """
-    
+
     img_key = "png" if "png" in sample else "jpg"
-    img = _process_cc12m_image(sample[img_key], output_size=output_size, skip_low_resolution=False)
+    img = _process_cc12m_image(
+        sample[img_key], output_size=output_size, skip_low_resolution=False
+    )
     t5_tokens = t5_tokenizer.encode(sample["txt"])
     clip_tokens = clip_tokenizer.encode(sample["txt"])
 
@@ -51,18 +55,18 @@ def _coco_data_processor(
         except (KeyError, AttributeError):
             # If metadata access fails or id is not found, fall back to None
             pass
-    
+
     result = {
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
         "txt": sample["txt"],
     }
-    
+
     # Add id if available
     if sample_id is not None:
         result["id"] = sample_id
-    
+
     return result
 
 
@@ -77,11 +81,13 @@ DATASETS["coco"] = TextToImageDatasetConfig(
     data_processor=_coco_data_processor,
 )
 
+
 def deserialize_numpy_array(data: bytes) -> torch.Tensor:
     """Deserialize numpy array from bytes."""
     buffer = io.BytesIO(data)
     uint16_data = np.load(buffer)
     return torch.from_numpy(uint16_data).view(torch.bfloat16)
+
 
 def _coco_data_processor_from_encodings(
     sample: dict[str, Any],
@@ -108,7 +114,7 @@ def _coco_data_processor_from_encodings(
     """
     # important to copy the sample as we are modifying it in place
     sample = sample.copy()
-    
+
     sample["t5_encodings"] = deserialize_numpy_array(sample["t5_encodings"])
     sample["clip_encodings"] = deserialize_numpy_array(sample["clip_encodings"])
     sample["mean"] = deserialize_numpy_array(sample["mean"])
@@ -119,11 +125,13 @@ def _coco_data_processor_from_encodings(
 
     return sample
 
+
 DATASETS["coco-preprocessed"] = TextToImageDatasetConfig(
-    path="/dataset/coco_preprocessed/*",
-    loader=lambda path: Dataset.from_parquet(path, streaming=True),
+    path="/dataset/coco_preprocessed_hf",
+    loader=lambda path: load_from_disk(path),
     data_processor=_coco_data_processor_from_encodings,
 )
+
 
 def create_dummy_dataset(num_samples: int = 10000):
     """Create a dummy Hugging Face Dataset for testing."""
@@ -133,9 +141,10 @@ def create_dummy_dataset(num_samples: int = 10000):
 
     data = {
         "txt": ["A photo of a cat"] * num_samples,
-        "png": [dummy_image] * num_samples
+        "png": [dummy_image] * num_samples,
     }
     return Dataset.from_dict(data)
+
 
 DATASETS["dummy"] = TextToImageDatasetConfig(
     path="dummy",

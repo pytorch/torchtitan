@@ -97,6 +97,7 @@ NGPU=1 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.datas
 ```
 Additionally, this script will generate encodings representing empty encodings which are used for guidance.
 
+(Optional) Remove the intermediate parquet files to reclaim space: `rm -r /dataset/cc12m_preprocessed /dataset/coco_preprocessed`
 
 To make use of the preprocessed data, switch to the config file `flux_schnell_mlperf_preprocessed.toml`.
 This sets `--training.dataset=cc12m-preprocessed` and `--training.dataset_path=/dataset/cc12m_preprocessed/*`

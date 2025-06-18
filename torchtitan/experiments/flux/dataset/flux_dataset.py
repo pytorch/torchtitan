@@ -6,35 +6,39 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
 import io
 import math
 import random
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Optional
 
 import numpy as np
 import PIL
 
 import torch
-from datasets import Dataset, load_dataset, load_from_disk, disable_caching
+from datasets import Dataset, load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
+
+from PIL import ImageFile
 
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torch.utils.data import IterableDataset
+
 from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer, FluxTokenizer
+from torchtitan.experiments.flux.dataset.tokenizer import (
+    build_flux_tokenizer,
+    FluxTokenizer,
+)
 
 from torchtitan.tools.logging import logger
 
-from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-disable_caching()
 
 def _process_cc12m_image(
     img: PIL.Image.Image,
@@ -123,13 +127,15 @@ def _cc12m_wds_data_processor(
 
     return result
 
+
 def deserialize_numpy_array(data: bytes) -> torch.Tensor:
     """Deserialize numpy array from bytes."""
     buffer = io.BytesIO(data)
-    
+
     # Load uint16 view and convert back to bf16
     uint16_data = np.load(buffer)
     return torch.from_numpy(uint16_data).view(torch.bfloat16)
+
 
 def _cc12m_data_processor_from_encodings(
     sample: dict[str, Any],
@@ -156,7 +162,7 @@ def _cc12m_data_processor_from_encodings(
     """
     # important to copy the sample as we are modifying it in place
     sample = sample.copy()
-    
+
     sample["t5_encodings"] = deserialize_numpy_array(sample["t5_encodings"])
     sample["clip_encodings"] = deserialize_numpy_array(sample["clip_encodings"])
     sample["mean"] = deserialize_numpy_array(sample["mean"])
@@ -188,12 +194,16 @@ DATASETS = {
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
         path="/dataset/cc12m_preprocessed/*",
-        loader=lambda path: Dataset.from_parquet(path, streaming=True),  # Reads all .parquet files in the directory
+        loader=lambda path: Dataset.from_parquet(
+            path, streaming=True
+        ),  # Reads all .parquet files in the directory
         data_processor=_cc12m_data_processor_from_encodings,
     ),
     "cc12m-wds-30k": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
-        loader=lambda path: load_dataset(path, split="train", streaming=True).take(30_000),
+        loader=lambda path: load_dataset(path, split="train", streaming=True).take(
+            30_000
+        ),
         data_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-test": TextToImageDatasetConfig(
@@ -204,6 +214,7 @@ DATASETS = {
         data_processor=_cc12m_wds_data_processor,
     ),
 }
+
 
 def _validate_dataset(
     dataset_name: str, dataset_path: Optional[str] = None
@@ -294,14 +305,14 @@ class FluxDataset(IterableDataset, Stateful):
     def __iter__(self):
         # Initialize the dataset iterator
         iterator = self._get_data_iter()
-        
+
         # Skip samples if we're resuming from a checkpoint
         if self._restored_checkpoint:
             logger.info(f"Restoring dataset state: skipping {self._sample_idx} samples")
             for _ in range(self._sample_idx):
                 next(iterator)
             self._restored_checkpoint = False
-        
+
         while True:
             try:
                 sample = next(iterator)
@@ -318,10 +329,10 @@ class FluxDataset(IterableDataset, Stateful):
                 if not self.infinite:
                     logger.warning(f"Dataset {self.dataset_name} has run out of data")
                     break
-                else:    
+                else:
                     logger.warning(f"Dataset {self.dataset_name} is being re-looped")
                     iterator = self._get_data_iter()
-            
+
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
                 sample,
@@ -353,11 +364,13 @@ class FluxDataset(IterableDataset, Stateful):
                     sample_dict["drop_encodings"] = False
             self._sample_idx += 1
 
-            labels = sample_dict.pop("image") if "image" in sample_dict else (sample_dict.pop("mean"), sample_dict.pop("logvar"))
+            labels = (
+                sample_dict.pop("image")
+                if "image" in sample_dict
+                else (sample_dict.pop("mean"), sample_dict.pop("logvar"))
+            )
 
             yield sample_dict, labels
-            
-                
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict.get("sample_idx", 0)
@@ -397,7 +410,7 @@ def build_flux_val_dataloader(
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
     if job_config.eval.dataset is None:
-        return None 
+        return None
     return _build_flux_dataloader(
         dataset_name=job_config.eval.dataset,
         dataset_path=job_config.eval.dataset_path,
