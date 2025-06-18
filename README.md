@@ -20,13 +20,13 @@ These files plug in to the rest of torchtitan.
 ### Steps to configure machine
 To use this repository, please ensure your system can run docker containers and has appropriate GPU support (e.g. for CUDA GPUs, please make sure the appropriate drivers are set up)
 
-**For all instructions that follow, make sure you are in the `/workspace/flux/torchtitan` directory when in the docker container.**
-
 Without docker, follow the [instructions](https://github.com/pytorch/torchtitan?tab=readme-ov-file#installation) to install torchtitan and additionally install `requirements-mlperf.txt` and `torchtitan/experiments/flux/requirements.txt`.
 
 ### Container setup
 To build the container:
-```docker build -t <tag> -f Dockerfile .```
+```bash
+docker build -t <tag> -f Dockerfile .
+```
 
 Before entering the container, create a directory for the models to be downloaded, and a directory to be used as huggingface cache (necessary for some operations):
 

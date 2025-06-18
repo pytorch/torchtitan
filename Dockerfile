@@ -1,5 +1,5 @@
 # Start with CUDA runtime base (no PyTorch preinstalled)
-FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-devel
+FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
