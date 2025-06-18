@@ -265,13 +265,7 @@ class TransformerBlock(nn.Module):
     """
 
     def __init__(self, layer_id: int, model_args: DeepseekV3ModelArgs):
-        """
-        Initializes the Transformer block.
 
-        Args:
-            layer_id (int): Layer index in the transformer.
-            args (ModelArgs): Model arguments containing block parameters.
-        """
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
