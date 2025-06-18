@@ -28,7 +28,7 @@ lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 0
 decay_ratio = 0.0  # no decay
 
 [training]

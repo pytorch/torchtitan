@@ -255,7 +255,7 @@ RETURN validation_loss
 ```
 
 ### Quality target
-0.596
+0.591
 ### Evaluation frequency
 Every 614400 training samples.
 ### Evaluation thoroughness
