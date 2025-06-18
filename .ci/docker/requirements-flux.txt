@@ -1,4 +1,5 @@
-transformers>=4.51.1
+transformers
+accelerate
 einops
 sentencepiece
 pillow

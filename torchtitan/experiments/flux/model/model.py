@@ -10,6 +10,8 @@ import torch
 
 from torch import nn, Tensor
 
+from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 from torchtitan.experiments.flux.model.layers import (
     DoubleStreamBlock,
@@ -40,6 +42,10 @@ class FluxModelArgs(BaseModelArgs):
     qkv_bias: bool = True
     autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
+    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+        # context_in_dim is the same as the T5 embedding dimension
+        self.context_in_dim = job_config.encoder.context_in_dim
+        
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
         nparams = sum(p.numel() for p in model.parameters())
@@ -141,6 +147,14 @@ class FluxModel(nn.Module, ModelProtocol):
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
+        model_dtype = next(self.parameters()).dtype
+        img = img.to(model_dtype)
+        img_ids = img_ids.to(model_dtype)
+        txt = txt.to(model_dtype)
+        txt_ids = txt_ids.to(model_dtype)
+        timesteps = timesteps.to(model_dtype)
+        y = y.to(model_dtype)
+
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         vec = vec + self.vector_in(y)

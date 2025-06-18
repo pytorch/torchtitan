@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config_manager import ConfigManager
-from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
+from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_train_dataloader
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
@@ -90,7 +90,7 @@ class TestFluxDataLoader:
         world_size,
         rank,
     ):
-        return build_flux_dataloader(
+        return build_flux_train_dataloader(
             dp_world_size=world_size,
             dp_rank=rank,
             job_config=job_config,

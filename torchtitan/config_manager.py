@@ -91,6 +91,12 @@ class Metrics:
     enable_wandb: bool = False
     """Whether to log metrics to Weights & Biases"""
 
+    log_to_console: bool = False
+    """Whether to log metrics to console"""
+
+    mlperf_logging: bool = True
+    """Whether to log metrics with mlperf logger"""
+
 
 @dataclass
 class Model:
@@ -237,6 +243,11 @@ class Training:
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
+
+    subset_size: int | None = None
+    """
+    If provided, only a subset of the dataset will be used.
+    """
 
 
 @dataclass

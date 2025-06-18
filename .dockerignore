@@ -1,0 +1,15 @@
+.venv
+.git
+.gitignore
+.gitmodules
+.github
+.vscode
+autoencoder
+checkpoints
+clip_checkpoint
+img
+subset
+hf_cache
+.devcontainer
+.vscode
+*.egg-info

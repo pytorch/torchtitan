@@ -343,10 +343,62 @@ class MetricsProcessor:
         self.num_flops_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
+        self.log_to_console = job_config.metrics.log_to_console
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
 
+    def val_log(
+        self,
+        step: int,
+        loss: float,
+        extra_metrics: dict[str, Any] | None = None,
+    ):
+
+        time_delta = time.perf_counter() - self.time_last_log
+
+        # tokens per second per device, abbreviated as tps
+        tps = self.ntokens_since_last_log / (
+            time_delta * self.parallel_dims.non_data_parallel_size
+        )
+
+        time_end_to_end = time_delta / self.job_config.metrics.log_freq
+
+        device_mem_stats = self.device_memory_monitor.get_peak_stats()
+
+        metrics = {
+            "val_loss_metrics/avg_loss": loss,
+            "val_throughput(tps)": tps,
+            "val_time_metrics/end_to_end(s)": time_end_to_end,
+            "val_memory/max_active(GiB)": device_mem_stats.max_active_gib,
+            "val_memory/max_active(%)": device_mem_stats.max_active_pct,
+            "val_memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+            "val_memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+            "val_memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
+            "val_memory/num_ooms": device_mem_stats.num_ooms,
+        }
+
+
+        if extra_metrics:
+            metrics.update(extra_metrics)
+
+        self.logger.log(metrics, step)
+
+        color = self.color
+        if self.log_to_console:
+            logger.info(
+                f"{color.magenta}val: {step:2}  "
+                f"{color.green}val loss: {loss:7.4f}  "
+                f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                f"{color.blue}tps: {round(tps):,} {color.reset}"
+            )
+
+        self.ntokens_since_last_log = 0
+        self.data_loading_times.clear()
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+    
     def log(
         self,
         step: int,
@@ -393,11 +445,12 @@ class MetricsProcessor:
 
         if extra_metrics:
             metrics.update(extra_metrics)
-
         self.logger.log(metrics, step)
 
         color = self.color
-        logger.info(
+        
+        if self.log_to_console:
+            logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"

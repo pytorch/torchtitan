@@ -1,141 +1,10 @@
-<div align="center">
+# 1. Problem 
 
-# torchtitan
+## Text to Image - Flux.1-schnell.
 
-#### A PyTorch native platform for training generative AI models
+[Torchtitan](https://github.com/pytorch/torchtitan) provides an implementation of the Flux model from [Black Forest Labs](https://bfl.ai/). We adapt this for MLPerf Training. The relevant files are under `torchtitan/experiments/flux`.
+These files plug in to the rest of torchtitan.
 
-[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
-[![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
-[![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
-[![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
-[![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
-
-</div>
-
-`torchtitan` is currently in a pre-release state and under extensive development. We showcase training Llama 3.1 LLMs at scale, and are working on other types of generative AI models, including LLMs with MoE architectures, multimodal LLMs, and diffusion models, in the [`experiments`](torchtitan/experiments) folder.
-To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
-
-
-## Latest News
-- [2025/04] Our paper has been accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620). The poster will be presented on Friday April 25th.
-- [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
-- [2025/04] Training the diffusion model [FLUX](torchtitan/experiments/flux/) with FSDP/HSDP is available as an experiment.
-- [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
-- [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
-- [2024/11] [Presentation](https://www.alluxio.io/videos/ai-ml-infra-meetup-torchtitan-one-stop-pytorch-native-solution-for-production-ready-llm-pre-training) at an AI/ML Infra Meetup.
-- [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
-- [2024/04] [Intro video](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE) - learn more about `torchtitan` in under 4 minutes.
-
-
-## Overview
-
-`torchtitan` is a PyTorch native platform designed for **rapid experimentation and large-scale training** of generative AI models. As a minimal clean-room implementation of PyTorch native scaling techniques, `torchtitan` provides a flexible foundation for developers to build upon. With `torchtitan` [extension points](docs/extension.md), one can easily create custom extensions tailored to specific needs.
-
-Our mission is to accelerate innovation in the field of generative AI by empowering researchers and developers to explore new modeling architectures and infrastructure techniques.
-
-The guiding principles when building `torchtitan`
-* Designed to be easy to understand, use and extend for different training purposes.
-* Minimal changes to the model code when applying multi-dimensional parallelism.
-* Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
-
-`torchtitan` has been showcasing PyTorch's latest distributed training features, via pretraining Llama 3.1 LLMs of various sizes.
-To accelerate contributions to and innovations around torchtitan, we are hosting a new [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
-
-
-## Llama 3.1 pretraining
-
-### Key features available
-
-1. Multi-dimensional composable parallelisms
-   - [FSDP2](docs/fsdp.md) with per-parameter sharding
-   - [Tensor Parallel](https://pytorch.org/docs/stable/distributed.tensor.parallel.html) (including [async TP](https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487))
-   - [Pipeline Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-training-with-zero-bubble-pipeline-parallelism/214420)
-   - [Context Parallel](https://discuss.pytorch.org/t/distributed-w-torchtitan-breaking-barriers-training-long-context-llms-with-1m-sequence-length-in-pytorch-using-context-parallel/215082)
-2. [Meta device](https://pytorch.org/docs/stable/meta.html) initialization
-3. Selective (layer or operator) and full activation checkpointing
-4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
-   - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
-5. `torch.compile` support
-6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
-7. DDP and HSDP
-8. [TorchFT](https://github.com/pytorch/torchft) integration
-9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-10. Flexible learning rate scheduler (warmup-stable-decay)
-11. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-12. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-13. All options easily configured via [toml files](torchtitan/models/llama3/train_configs/)
-14. [Helper scripts](scripts/) to
-    - download tokenizers from Hugging Face
-    - convert original Llama 3 checkpoints into the expected DCP format
-    - estimate FSDP/HSDP memory usage without materializing the model
-    - run distributed inference with Tensor Parallel
-
-We report [performance](docs/performance.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
-
-### Dive into the code
-
-You may want to see how the model is defined or how parallelism techniques are applied. For a guided tour, see these files first:
-* [torchtitan/train.py](torchtitan/train.py) - the main training loop and high-level setup code
-* [torchtitan/models/llama3/model.py](torchtitan/models/llama3/model.py) - the Llama 3.1 model definition
-* [torchtitan/models/llama3/parallelize_llama.py](torchtitan/models/llama3/parallelize_llama.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
-* [torchtitan/models/llama3/pipeline_llama.py](torchtitan/models/llama3/pipeline_llama.py) - helpers for applying Pipeline Parallel to the model
-* [torchtitan/components/checkpoint.py](torchtitan/components/checkpoint.py) - utils for saving/loading distributed checkpoints
-* [torchtitan/components/float8.py](torchtitan/components/float8.py) - utils for applying Float8 techniques
-
-
-## Installation
-
-```bash
-git clone https://github.com/pytorch/torchtitan
-cd torchtitan
-pip install -r requirements.txt
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-[For AMD GPU] pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --force-reinstall
-```
-
-### Downloading a tokenizer
-
-`torchtitan` currently supports training Llama 3.1 (8B, 70B, 405B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Llama-3.1-8B) repository to ensure you have access to the Llama model weights.
-
-Once you have confirmed access, you can run the following command to download the Llama 3.1 tokenizer to your local machine.
-
-```bash
-# Get your HF token from https://huggingface.co/settings/tokens
-
-# Llama 3.1 tokenizer.model
-python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
-```
-
-### Start a training run
-Llama 3 8B model locally on 8 GPUs
-
-```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh
-```
-
-### Multi-Node Training
-For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
-
-To get started adjust the number of nodes and GPUs
-```
-#SBATCH --ntasks=2
-#SBATCH --nodes=2
-```
-
-Then start a run where `nnodes` is your total node count, matching the sbatch node count above.
-
-```
-srun torchrun --nnodes 2
-```
-
-If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
-
-
-## Citation
-
-We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
-
-[TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training](https://openreview.net/forum?id=SFN6Wm7YBI)
 ```
 @inproceedings{
    liang2025torchtitan,
@@ -147,7 +16,242 @@ We provide a detailed look into the parallelisms and optimizations available in 
 }
 ```
 
+# 2. Directions
+### Steps to configure machine
+To use this repository, please ensure your system can run docker containers and has appropriate GPU support (e.g. for CUDA GPUs, please make sure the appropriate drivers are set up)
 
-## License
+**For all instructions that follow, make sure you are in the `flux/torchtitan` directory.**
 
-Source code is made available under a [BSD 3 license](./LICENSE), however you may have other legal obligations that govern your use of other content linked in this repository, such as the license or terms of service for third-party data and models.
+Without docker, follow the instructions to install torchtitan and additionally install `requirements-mlperf.txt` and `torchtitan/experiments/flux/requirements.txt`.
+
+### Container setup
+To build the container:
+```docker build -t <tag> -f Dockerfile .```
+
+Before entering the container, create a directory for the models to be downloaded, and a directory to be used as huggingface cache (necessary for some operations):
+
+```bash
+mkdir models
+mkdir hf_cache
+```
+
+```
+docker run -it --rm \
+--gpus all --ulimit memlock=-1 --ulimit stack=67108864 \
+--network=host --ipc=host \
+-v ~/.ssh:/root/.ssh \
+-v hf_cache:/root/.cache \
+-v <path for dataset storage>:/dataset \
+-v <path for model storage>:/models \
+<tag> bash
+```
+Note: it's recommended to map your .ssh folder to inside the container, so that it's easier for the code to set up remote cluster access.
+
+### Steps to download and verify data
+For all steps below, they are assumed to run inside the container
+
+#### CC12M dataset
+Download the dataset with
+```bash
+HF_TRANSFER=1 huggingface-cli download --repo-type dataset pixparse/cc12m-wds --local-dir /dataset/cc12m-wds
+```
+Then, we remove problematic indices and keep only the first 10% of this data (rounded to 1,099,776 samples so it is nicely divisible by large powers of 2).
+Depending on your CPU, you may wish to change `--num_workers` and `--batch_size`. This only impacts the runtime of this script,
+the final result will be not be affected by these parameters.
+
+```bash
+python torchtitan/experiments/flux/scripts/clean_cc12m.py --input_dir /dataset/cc12m-wds --output_dir /dataset/cc12m_disk --filter_file torchtitan/experiments/flux/scripts/problematic_indices.txt --num_workers=16 --batch_size 1000
+```
+(Optional) Remove the downloaded dataset to reclaim space: `rm -r /dataset/cc12m-wds`
+
+The filter file is included in this repository. It was generated using `torchtitan/experiments/flux/scripts/find_problematic_indices.py`.
+
+#### COCO-2014 subset
+The number of samples is taken from the previous stable diffusion benchmark, but rounded slightly to be divisible by large powers of 2.
+
+1. download coco-2014 validation dataset: `DOWNLOAD_PATH=/dataset/coco2014_raw bash torchtitan/experiments/flux/scripts/coco-2014-validation-download.sh`
+2. create the validation subset, and resize the images to 256x256: `bash torchtitan/experiments/flux/scripts/coco-2014-validation-split-resize.sh --input-images-path /dataset/coco2014_raw/val2014 --input-coco-captions /dataset/coco2014_raw/annotations/captions_val2014.json --output-images-path /dataset/coco2014 --output-tsv-file /dataset/val2014_30k.tsv --num-samples 29696`
+3. convert to webdataset: `python torchtitan/experiments/flux/scripts/coco_to_webdataset.py --tsv_file /dataset/val2014_30k.tsv --image_dir /dataset/coco2014 --output_dir /dataset/coco`
+4. (optional) remove intermediate datasets to reclaim space: `rm -r /dataset/coco2014_raw /dataset/coco2014`
+
+#### Download the encoders
+Download the autoencoder, t5 and clip models from HuggingFace. For the autoencoder, you must acquire your own access token from hf
+with access rights to https://huggingface.co/black-forest-labs/FLUX.1-schnell.
+
+```bash
+python torchtitan/experiments/flux/scripts/download_encoders.py --local_dir /models --hf_token <your_access_token>
+```
+#### Preprocessing
+Since the encoders are frozen during training, it is possible to do additional preprocessing to avoid having to repeatedly encode data on the fly.
+To do this, run:
+
+```bash
+NGPU=8 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.dataset_path=/dataset/cc12m_disk --training.dataset=cc12m-disk --eval.dataset= --training.batch_size=256 --preprocessing.output_dataset_path=/dataset/cc12m_preprocessed
+```
+
+The above may take a few hours and will require approximately 2.5TB of storage.
+
+For the validation dataset:
+```bash
+NGPU=1 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.dataset=coco --training.dataset_path=/dataset/coco --eval.dataset= --training.batch_size=128 --preprocessing.output_dataset_path=/dataset/coco_preprocessed
+```
+Additionally, this script will generate encodings representing empty encodings which are using for guidance.
+
+
+To make use of the preprocessed data, set `--training.dataset=cc12m-preprocessed` and `--training.dataset_path=/dataset/cc12m_preprocessed/*`
+for the training data, and `--eval.dataset=coco-preprocessed`, `--eval.dataset_path=/dataset/coco_preprocessed/*` for the eval data.
+
+When using preprocessed data, we don't need to load any of the encoders. To do this, pass `--encoder.autoencoder_path= --encoder.t5_encoder= --encoder.clip_encoder=`.
+
+Alternatively, switch to the config file `flux_schnell_mlperf_preprocessed.toml` to automatically set the above flags
+
+### Steps to run and time
+All steps below are assumed to be run inside the container. 
+
+The first time this is executed, checkpoints for the text encoders will automatically be downloaded from HF.
+To prevent this from happening every time, we encourage users to create a directory to be used as the HF cache and mount
+it to the container, as below.
+
+```
+docker run -it --rm \
+--gpus all --ipc=host --ulimit memlock=-1 \
+--ulimit stack=67108864 \
+--network=host --ipc=host \
+-v ~/.ssh:/root/.ssh \
+-v hf_cache:/root/.cache \
+-v <path for dataset storage>:/dataset/ \
+-v <path for model storage>/coco:/model \
+<tag> bash
+```
+
+#### Basic run
+`CONFIG=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml NGPU=<number of GPUs> bash torchtitan/experiments/flux/run_train.sh --training.dataset=cc12m-disk --eval.dataset=coco --training.batch_size=1`
+
+#### Longer run
+**For longer runs, we expect a system with a slurm-based cluster.**
+
+Make sure to edit the headers for the run.sub script to match the requirements of your cluster (in particular the account field).
+
+```bash
+export LOGDIR=<output directory>; export CONFIG_FILE=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml; export CONT=<tag>; export DATAROOT=<path for dataset storage>; sbatch -N <number of nodes> -t <time> run.sub <additional parameters here. e.g. --training.dataset_path=/dataset/...>
+```
+
+`DATAROOT` should be set to the path where data resides. e.g. `${DATAROOT}/cc12m_disk` should point to the CC12M training dataset. This will be mounted under `/dataset/`.
+
+Given the substantial variability among Slurm clusters, users are encouraged to review and adapt these scripts to fit their specific cluster specifications.
+
+In any case, the dataset and checkpoints are expected to be available to all the nodes.
+
+# 3. Dataset/Environment
+### Publication/Attribution
+We use the CC12M dataset available at https://huggingface.co/datasets/pixparse/cc12m-wds
+
+```
+@inproceedings{changpinyo2021cc12m,
+  title = {{Conceptual 12M}: Pushing Web-Scale Image-Text Pre-Training To Recognize Long-Tail Visual Concepts},
+  author = {Changpinyo, Soravit and Sharma, Piyush and Ding, Nan and Soricut, Radu},
+  booktitle = {CVPR},
+  year = {2021},
+}
+```
+We use the COCO2014 dataset for validation.
+
+```
+@inproceedings{lin2014microsoft,
+  title={Microsoft coco: Common objects in context},
+  author={Lin, Tsung-Yi and Maire, Michael and Belongie, Serge and Hays, James and Perona, Pietro and Ramanan, Deva and Doll{\'a}r, Piotr and Zitnick, C Lawrence},
+  booktitle={Computer vision--ECCV 2014: 13th European conference, zurich, Switzerland, September 6-12, 2014, proceedings, part v 13},
+  pages={740--755},
+  year={2014},
+  organization={Springer}
+}
+```
+
+### Data preprocessing
+For both datasets, images are resized to 256x256 using a bicubic interpolation.
+
+The ~10% of the CC12M dataset is used (1,099,776 samples).
+The COCO-2014-validation dataset consists of 40,504 images and 202,654 annotations. 
+However, our benchmark uses only a subset of 29,696 images and annotations chosen at random with a preset seed.
+
+Optionally, the training and validation datasets are preprocessed by running the encoders offline before training.
+
+# 4. Model
+### Publication/Attribution
+This model largely follows the Flux.1-schnell model, as implemented by torchtitan.
+In turn, the model code is largely based on the model open-sourced in [huggingface](https://huggingface.co/black-forest-labs/FLUX.1-schnell) by [Black Forest Labs](https://bfl.ai/).
+
+```
+@inproceedings{esser2024scaling,
+  title={Scaling rectified flow transformers for high-resolution image synthesis},
+  author={Esser, Patrick and Kulal, Sumith and Blattmann, Andreas and Entezari, Rahim and M{\"u}ller, Jonas and Saini, Harry and Levi, Yam and Lorenz, Dominik and Sauer, Axel and Boesel, Frederic and others},
+  booktitle={Forty-first international conference on machine learning},
+  year={2024}
+}
+```
+
+### List of layers 
+
+| **Component** | **Architecture** | **Parameters** | **Technical Details** |
+|---------------|------------------|----------------|----------------------|
+| **Text Encoders (Frozen)** | | | |
+| └ [VIT-L CLIP text encoder](https://huggingface.co/openai/clip-vit-large-patch14) | Transformer | ~123M | Max sequence length: 77 tokens |
+| | | | Output dimension: 768 |
+| └ [T5-XXL](https://huggingface.co/google/t5-v1_1-xxl) | Transformer | ~11B | Max sequence length: 256 tokens |
+| | |  | Output dimension: 4096 |
+| **Image Encoder (Frozen)** | | | |
+| └ [VAE (Variational AutoEncoder)](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | CNN | ~84M | Downscaling factor: 8 (256→32) |
+| | | | Channel depth: 16 |
+| **Diffusion Transformer** | | | |
+| └ [Flux Diffusion Transformer](https://github.com/black-forest-labs/flux/) | Multimodal Diffusion Transformer (MMDiT) | ~11.9B |
+| | **Double Stream Blocks** | | **19 layers** |
+| | **Single Stream Blocks** | | **38 layers** |
+| | | | 24 attention heads per layer | 
+| | | | Hidden dimension: 3072 |
+| | | | MLP ratio: 4.0 | | Processes 64 input channels |
+
+### Loss function
+The MSE calculated over latents is used for the loss
+### Optimizer
+AdamW
+### Precision
+Without FSDP enabled, only FP32 is supported. With FSDP enabled, the default becomes BF16. This can be changed using `--training.mixed_precision_param=float32`.
+### Weight initialization
+The weight initialization strategy is taken from torchtitan. It consists of a mixture of constant, Xavier and Normal initialization.
+For precise details, we encourage the consultation of the code at `torchtitan/experiments/flux/model/model.py:init_weights`.
+
+# 5. Quality
+### Quality metric
+Validation loss averaged over 8 equidistant time steps [0, 7/8], as described in [Scaling Rectified Flow Transformers for High-Resolution Image Synthesis](https://arxiv.org/pdf/2403.03206).
+The algorithm is as follows:
+
+```pseudocode
+ALGORITHM: Validation Loss Computation
+
+INPUT:
+  - validation_samples: set of validation data samples
+  - num_timesteps: 8 (number of equidistant time steps)
+
+INITIALIZE:
+  - sum[8]: array of zeros for accumulating losses
+  - count[8]: array of zeros for counting samples per timestep
+  - t: 0 (current timestep index)
+
+FOR each sample in validation_samples:
+    loss = forward_pass(sample, timestamp=t/8)
+    sum[t] += loss
+    count[t] += 1
+    t = (t + 1) % num_timesteps
+
+mean_per_timestep = sum / count
+validation_loss = mean(mean_per_timestep)
+
+RETURN validation_loss
+```
+
+### Quality target
+0.6
+### Evaluation frequency
+Every 614400 training samples.
+### Evaluation thoroughness
+29,696 samples

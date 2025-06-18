@@ -1,0 +1,4 @@
+huggingface_hub[hf_xet]==0.32.6
+hf_transfer==0.1.9
+git+https://github.com/mlperf/logging.git@44b4810e65e8c0a7d9e4e207c60e51d9458a3fb8
+git+https://github.com/NVIDIA/mlperf-common.git@bcd4b5a78fd5c7e85069ed3afe44ff4f837c311d

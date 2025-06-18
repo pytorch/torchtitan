@@ -1,3 +1,4 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -12,7 +13,7 @@ from torch import Tensor
 
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
 from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-
+from torchtitan.experiments.flux.model.autoencoder_utils import encode_with_mean_logvar
 
 def preprocess_data(
     # arguments from the recipe
@@ -24,6 +25,7 @@ def preprocess_data(
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],
+    return_mean_logvar: bool = False,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and encoder as input and return a batch of preprocessed data.
@@ -48,8 +50,13 @@ def preprocess_data(
 
     if autoencoder is not None:
         images = batch["image"].to(device=device, dtype=dtype)
-        img_encodings = autoencoder.encode(images)
-        batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
+        if return_mean_logvar:
+            mean, logvar = encode_with_mean_logvar(autoencoder, images)
+            batch["mean"] = mean.to(device=device, dtype=dtype)
+            batch["logvar"] = logvar.to(device=device, dtype=dtype)
+        else:
+            img_encodings = autoencoder.encode(images)
+            batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)

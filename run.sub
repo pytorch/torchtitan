@@ -1,0 +1,119 @@
+#!/bin/bash
+#SBATCH -A <account> #account
+#SBATCH -p batch         #partition
+#SBATCH -t 04:00:00    #wall time limit, hr:min:sec
+#SBATCH -N4            #number of nodes
+#SBATCH --gres=gpu:8
+#SBATCH --exclusive
+#SBATCH -J mlperf_training:flux #job name
+
+# Usage: sbatch run.sub [torchrun_overrides...]
+# 
+# Required Environment Variables:
+#   DATAROOT              - Path to data directory. Will be mounted in the container at /dataset. Dataset paths should be relative to this.
+#   LOGDIR                - Path to log output directory. Will be created if it doesn't exist and mounted in the container at /logdir.
+#   CONFIG_FILE           - Path to training config TOML file.
+#   CONT                  - Container image to use
+#
+# Optional Environment Variables:
+#   NGPU=8                - GPUs per node
+#   LOG_RANK=0            - Which rank to log from
+#   ENABLE_TB=True        - Enable TensorBoard
+#   MOUNT_CURRENT_DIR=False - Mount current directory in container
+#   ENABLE_CHECKPOINTING=True - Enable checkpointing
+#   CHECKPOINT_FREQ=100   - Checkpoint frequency
+#
+# Example:
+#   export DATAROOT=/path/to/data LOGDIR=/path/to/logs CONFIG_FILE=config.toml
+#   export CONT=<tag>
+#   sbatch run.sub <additional parameters here. e.g. --training.steps=1000>
+
+set -ex
+
+export SBATCH_NETWORK=sharp
+export SLURM_MPI_TYPE=pmi2
+export NCCL_IB_SL=1
+export ENABLE_IB_BINDING=1
+
+# Validate required environment variables
+required_vars=("MODELROOT" "DATAROOT" "LOGDIR" "CONFIG_FILE" "CONT")
+for var in "${required_vars[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "Error: Required environment variable $var is not set"
+        echo "Run '$0 --help' for usage information"
+        exit 1
+    fi
+done
+
+NGPU=${NGPU:-"8"}
+export LOG_RANK=${LOG_RANK:-0}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml"}
+ENABLE_TB=${ENABLE_TB:-False}
+if [[ ${ENABLE_TB} = True ]]; then
+    TB_FLAG="--metrics.enable_tensorboard"
+else
+    TB_FLAG=""
+fi
+
+MOUNT_CURRENT_DIR=${MOUNT_CURRENT_DIR:-False}
+if [[ ${MOUNT_CURRENT_DIR} = True ]]; then
+    MOUNT_CURRENT_DIR_FLAG=".:/workspace/flux,"
+else
+    MOUNT_CURRENT_DIR_FLAG=""
+fi
+
+ENABLE_CHECKPOINTING=${ENABLE_CHECKPOINTING:-True}
+if [[ ${ENABLE_CHECKPOINTING} = True ]]; then
+    CKPT_FLAG="--checkpoint.enable_checkpoint --checkpoint.folder=checkpoint --checkpoint.interval=${CHECKPOINT_FREQ:-100}"
+else
+    CKPT_FLAG=""
+fi
+
+mkdir -p ${LOGDIR}
+overrides=""
+if [ $# -ne 0 ]; then
+    overrides="$*"
+fi
+
+mapfile -t nodes < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+# Echo the node list
+echo "Node list:"
+for node in "${nodes[@]}"; do
+    echo "  - $node"
+done
+echo "Total nodes: ${#nodes[@]}"
+
+head_node=${nodes[0]}
+head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+
+echo Node IP: $head_node_ip
+export LOGLEVEL=INFO
+# Ensure that P2P is available
+# export NCCL_P2P_DISABLE=1
+# export NCCL_IB_DISABLE=1
+
+# debugging flags (optional)
+export NCCL_DEBUG=WARN
+export PYTHONFAULTHANDLER=1
+# optional debug settings
+# export NCCL_DEBUG=INFO
+# NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV
+
+export CUDA_LAUNCH_BLOCKING=0
+
+# on your cluster you might need these:
+# set the network interface
+#export NCCL_SOCKET_IFNAME="eth0,en,eth,em,bond"
+export NCCL_BUFFSIZE=2097152
+#export TORCH_DIST_INIT_BARRIER=1
+#export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
+# to your specific node count, and update target launch file.
+srun --ntasks-per-node=1 --output=${LOGDIR}/slurm-%j.out --container-image=${CONT} \
+--container-mounts="${MOUNT_CURRENT_DIR_FLAG}, ${MODELROOT}:/models,${DATAROOT}:/dataset,${LOGDIR}:/logdir,./hf_cache:/root/.cache" \
+torchrun --nnodes ${#nodes[@]} --nproc_per_node ${NGPU} --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" --local-ranks-filter ${LOG_RANK} \
+--role rank --tee 3 -m torchtitan.experiments.flux.train --job.config_file ${CONFIG_FILE} ${TB_FLAG} ${CKPT_FLAG} --job.dump_folder=/logdir \
+--parallelism.data_parallel_replicate_degree=${#nodes[@]} --parallelism.data_parallel_shard_degree=${NGPU} \
+$overrides

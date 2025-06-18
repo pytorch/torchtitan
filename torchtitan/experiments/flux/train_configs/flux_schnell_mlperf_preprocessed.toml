@@ -1,9 +1,8 @@
 
 [job]
 dump_folder = "./outputs"
-description = "Flux debug model"
+description = "Flux-schnell model"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -13,49 +12,52 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 1
-disable_color_printing = false
+log_freq = 10
+disable_color_printing = true
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
 name = "flux"
-flavor = "flux-debug"
+flavor = "flux-schnell"
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
+lr = 1e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 1  # 10% warmup steps
-decay_ratio = 0.0  # no decay, stay stable during training
+warmup_steps = 3_000  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.0  # no decay
 
 [training]
-batch_size = 4
+batch_size = 16
 seq_len = 256
-max_norm = 2.0  # grad norm clipping
-steps = 10
+max_norm = 1.0  # grad norm clipping
+steps = 30_000
 compile = false
-dataset = "cc12m-test"
+dataset = "cc12m-preprocessed"
 classifer_free_guidance_prob = 0.1
 img_size = 256
 
 [encoder]
-t5_encoder = "/models/t5"
-context_in_dim = 512
-clip_encoder = "/models/clip"
+t5_encoder = ""
+context_in_dim = 4096
+clip_encoder = ""
 max_t5_encoding_len = 256
-autoencoder_path = "/models/autoencoder/ae.safetensors"  # Autoencoder to use for image
+autoencoder_path = ""
+autoencoder_shift = 0.1159
+autoencoder_scale = 0.3611
+empty_encodings_path = "/dataset/empty_encodings"
 
 [eval]
 enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
-denoising_steps = 4
+denoising_steps = 50
 save_img_folder = "img"
-eval_freq = 20
-dataset = "coco"
+eval_freq = 614400
+dataset = "coco-preprocessed"
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -70,7 +72,7 @@ mode = "full"
 [checkpoint]
 enable_checkpoint = false
 folder = "checkpoint"
-interval = 5
+interval = 30_000
 model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]

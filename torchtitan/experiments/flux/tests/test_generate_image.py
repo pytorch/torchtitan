@@ -123,7 +123,6 @@ class TestGenerateImage:
                 config.job.dump_folder, config.eval.save_img_folder
             ),
             x=image,
-            add_sampling_metadata=True,
             prompt=prompt,
         )
 

@@ -14,9 +14,13 @@ from torchtitan.tools.logging import logger
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def mse_loss(
+    pred: torch.Tensor, labels: torch.Tensor, reduction: str = "mean"
+) -> torch.Tensor:
     """Common MSE loss function for Transformer models training."""
-    return torch.nn.functional.mse_loss(pred.float(), labels.float().detach())
+    return torch.nn.functional.mse_loss(
+        pred.float(), labels.float().detach(), reduction=reduction
+    )
 
 
 def build_mse_loss(job_config: JobConfig):

@@ -136,14 +136,17 @@ def parallelize_encoders(
         }
         if job_config.training.enable_cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
-        # FSDP for encoder blocks
-        for block in clip_model.hf_module.text_model.encoder.layers:
-            fully_shard(block, **fsdp_config)
-        fully_shard(clip_model, **fsdp_config)
 
-        for block in t5_model.hf_module.encoder.block:
-            fully_shard(block, **fsdp_config)
-        fully_shard(t5_model.hf_module, **fsdp_config)
+        # FSDP for encoder blocks
+        if clip_model is not None:
+            for block in clip_model.hf_module.text_model.encoder.layers:
+                fully_shard(block, **fsdp_config)
+            fully_shard(clip_model, **fsdp_config)
+
+        if t5_model is not None:
+            for block in t5_model.hf_module.encoder.block:
+                fully_shard(block, **fsdp_config)
+            fully_shard(t5_model.hf_module, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied FSDP to the T5 and CLIP model")
