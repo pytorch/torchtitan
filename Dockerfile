@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir \
     -r requirements.txt \
     -r torchtitan/experiments/flux/requirements-flux.txt \
     -r requirements-mlperf.txt \
-    sentencepiece hf_xet
 
-RUN pip install -e .
+    RUN pip install -e .
 
