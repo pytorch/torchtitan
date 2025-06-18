@@ -55,8 +55,8 @@ class MLPerfLogger:
             constants.SUBMISSION_POC_NAME: "reference",
             constants.SUBMISSION_POC_EMAIL: "reference",
             constants.SUBMISSION_STATUS: "onprem",
-            constants.TRAIN_SAMPLES: 0,  # TODO: get from dataset
-            constants.EVAL_SAMPLES: 30_000,
+            constants.TRAIN_SAMPLES: 1_099_776,
+            constants.EVAL_SAMPLES: 29_696,
         }
 
     def log_run_start(
