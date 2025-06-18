@@ -193,10 +193,8 @@ DATASETS = {
         data_processor=partial(_cc12m_wds_data_processor, include_sample_id=True),
     ),
     "cc12m-preprocessed": TextToImageDatasetConfig(
-        path="/dataset/cc12m_preprocessed/*",
-        loader=lambda path: Dataset.from_parquet(
-            path, streaming=True
-        ),  # Reads all .parquet files in the directory
+        path="/dataset/cc12m_preprocessed_hf",
+        loader=lambda path: load_from_disk(path),
         data_processor=_cc12m_data_processor_from_encodings,
     ),
     "cc12m-wds-30k": TextToImageDatasetConfig(
