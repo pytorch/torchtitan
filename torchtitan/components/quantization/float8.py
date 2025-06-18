@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from functools import partial
+
 import torch
 import torch.nn as nn
 
@@ -15,7 +16,9 @@ from torchtitan.protocols.model_converter import (
 )
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
 from .utils import module_filter_fn
+
 
 class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
@@ -102,17 +105,26 @@ class Float8Converter(ModelConverter):
             return
 
         from torchao.float8 import convert_to_float8_training
+
         try:
             from torchao.float8.float8_linear_utils import auto_filter_for_recipe
 
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
             filter_fn = auto_filter_for_recipe(
-                self.float8_config.recipe_name, filter_fqns=self.float8_config.filter_fqns
+                self.float8_config.recipe_name,
+                filter_fqns=self.float8_config.filter_fqns,
             )
             logger.info("Using auto_filter_for_recipe for float8 model conversion.")
         except ImportError:
-            logger.info("Using default modlue_filter_fn for float8 model conversion. To use auto_filter_for_recipe, please install torchao nightly build.")
-            filter_fn = partial(module_filter_fn, filter_fqns=self.float8_config.filter_fqns)
+            logger.info(
+                (
+                    "Using default modlue_filter_fn for float8 model conversion. "
+                    "To use auto_filter_for_recipe, please install torchao nightly build."
+                )
+            )
+            filter_fn = partial(
+                module_filter_fn, filter_fqns=self.float8_config.filter_fqns
+            )
 
         convert_to_float8_training(
             model,
