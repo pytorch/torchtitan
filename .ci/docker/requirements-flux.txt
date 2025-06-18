@@ -1,5 +1,5 @@
-transformers
-accelerate
-einops
-sentencepiece
-pillow
+transformers==4.52.4
+accelerate==1.7.0
+einops==0.8.1
+sentencepiece==0.2.0
+pillow==11.2.1
