@@ -118,7 +118,7 @@ def parallelize_llama(
         )
 
     # for MoE auxiliary-loss-free load balancing
-    if parallel_dims.dp_cp_enabled is not None:
+    if parallel_dims.dp_cp_enabled:
         # NOTE: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         dp_cp_mesh = world_mesh["dp_cp"]
