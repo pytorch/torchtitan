@@ -7,7 +7,6 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.llama3 import model
 
 from .args import DeepseekV3ModelArgs
 
@@ -124,7 +123,9 @@ class TokenChoiceTopKRouter(nn.Module):
         self, x: torch.Tensor, expert_bias: torch.Tensor = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        TODO: We haven't implement the group-based routing (node limit routing) yet, and currently EP is not supporting node limit routing yet.
+        TODO: We haven't implement the group-based routing (node limit routing),
+        and currently EP is not supporting node limit routing yet.
+
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
 
