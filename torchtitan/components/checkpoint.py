@@ -273,11 +273,19 @@ class CheckpointManager:
         self.staging_stream = torch.cuda.Stream() if self.enable_staging else None
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+
+        # Checkpoint policy related fields.
         self.initial_load_path = ckpt_config.initial_load_path
         self.initial_load_model_weights_only = (
             ckpt_config.initial_load_model_weights_only
         )
+        self.last_save_model_weights_only = ckpt_config.last_save_model_weights_only
+        self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
+        self.exclude_from_loading = ckpt_config.exclude_from_loading
         self.interval = ckpt_config.interval
+        self.enable_first_step_checkpoint = ckpt_config.enable_first_step_checkpoint
+
+        # Async checkpoint related fields.
         async_mode = ckpt_config.async_mode.lower()
         if async_mode == AsyncMode.ASYNC or self.ft_manager:
             self.pg = dist.new_group(backend="gloo")
@@ -296,10 +304,6 @@ class CheckpointManager:
             self.purge_thread.start()
         else:
             self.purge_thread = None
-
-        self.last_save_model_weights_only = ckpt_config.last_save_model_weights_only
-        self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
-        self.exclude_from_loading = ckpt_config.exclude_from_loading
 
         self.mp = None
         self.async_future = None
@@ -616,9 +620,7 @@ class CheckpointManager:
         if not self.enable_checkpoint:
             return False
 
-        # Force saving a checkpoint at step 1 to fail fast if checkpointer is not
-        # compatible with the cluster.
-        if curr_step == 1:
+        if curr_step == 1 and self.enable_first_step_checkpoint:
             return True
 
         if force:

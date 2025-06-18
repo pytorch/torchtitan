@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager, MODEL
+from torchtitan.config_manager import Checkpoint as CheckpointConfig
 
 
 class FakeOptimizersContainer:
@@ -81,7 +82,7 @@ def fake_async_save(*args, **kwargs):
 class DummyJobConfig:
     def __init__(self, job):
         self.job = job
-        self.checkpoint = SimpleNamespace(
+        self.checkpoint = CheckpointConfig(
             enable_checkpoint=True,
             async_mode="disabled",
             folder="",
@@ -112,7 +113,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager()
 
-        ckpt_cfg = SimpleNamespace(
+        ckpt_cfg = CheckpointConfig(
             enable_checkpoint=True,
             async_mode="DISABLED",
             folder="",
@@ -325,17 +326,17 @@ class TestCheckpointManager(unittest.TestCase):
             ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
-        self.assertEqual(mock_save.call_count, 1)
+        self.assertEqual(mock_save.call_count, 0)
         manager.save(curr_step=2)
-        self.assertEqual(mock_save.call_count, 1)
+        self.assertEqual(mock_save.call_count, 0)
         manager.save(curr_step=2, force=True)
-        self.assertEqual(mock_save.call_count, 2)
+        self.assertEqual(mock_save.call_count, 1)
         manager.save(curr_step=3)
-        self.assertEqual(mock_save.call_count, 3)
+        self.assertEqual(mock_save.call_count, 2)
         manager.save(curr_step=4)
-        self.assertEqual(mock_save.call_count, 3)
+        self.assertEqual(mock_save.call_count, 2)
         manager.save(curr_step=4, force=True)
-        self.assertEqual(mock_save.call_count, 4)
+        self.assertEqual(mock_save.call_count, 3)
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
@@ -470,6 +471,68 @@ class TestCheckpointManager(unittest.TestCase):
         prev_future.result.assert_called_once()
         self.assertIsNotNone(manager.async_future)
         manager.async_future.result.assert_not_called()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_enable_first_step_checkpoint(self, mock_save, mock_rank):
+        """
+        Test that enable_first_step_checkpoint triggers checkpoint save at step 1.
+        """
+        mock_save.side_effect = self.fake_save
+
+        # Test with enable_first_step_checkpoint=False (default case)
+        cfg = self.job_config.checkpoint
+        cfg.interval = 10  # Set interval to 10 so step 1 wouldn't normally trigger save
+        cfg.keep_latest_k = 0  # Disable purging to avoid confusion
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+
+        # Step 1 should not trigger save when enable_first_step_checkpoint=False
+        # and not at interval
+        manager.save(curr_step=1)
+        self.assertEqual(mock_save.call_count, 0)
+
+        # Step 10 should trigger save due to interval
+        manager.save(curr_step=10)
+        self.assertEqual(mock_save.call_count, 1)
+
+        manager.close()
+
+        # Test with enable_first_step_checkpoint=True
+        mock_save.reset_mock()
+        cfg.enable_first_step_checkpoint = True
+
+        manager2 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+
+        # Step 1 should trigger save due to enable_first_step_checkpoint=True
+        manager2.save(curr_step=1)
+        self.assertEqual(mock_save.call_count, 1)
+
+        # Step 2 should not trigger save (not at interval and not forced)
+        manager2.save(curr_step=2)
+        self.assertEqual(mock_save.call_count, 1)
+
+        # Step 10 should trigger save due to interval
+        manager2.save(curr_step=10)
+        self.assertEqual(mock_save.call_count, 2)
+
+        manager2.close()
 
 
 if __name__ == "__main__":
