@@ -45,6 +45,7 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from group_gemms import (
+    CuteDenseLoopingGroupGEMM,
     DSGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
@@ -474,7 +475,8 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "cute"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg", "cute"]
+    print(f"Using group gemm strategy: {group_mm}")
 
     def __init__(self, config):
         super().__init__()
@@ -548,6 +550,11 @@ class MoE(nn.Module):
                     MLP.act_fn,
                 )
                 if TritonCGBF16GroupGEMM.is_available()
+                else None
+            ),
+            "cute": (
+                CuteDenseLoopingGroupGEMM(MLP.act_fn)
+                if CuteDenseLoopingGroupGEMM.is_available()
                 else None
             ),
         }
