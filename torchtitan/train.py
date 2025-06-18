@@ -12,7 +12,6 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -25,7 +24,7 @@ from torchtitan.components.metrics import (
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 
-# from torchtitan.protocols.model_converter import build_model_converters
+from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
@@ -147,12 +146,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
 
-        def model_fn():
-            # WHC - allow auto_p to construct the model object under its own fake_mode.
-            # TODO: let us pass in meta model, and internally hook it up to the auto_p fake mode
-            return model_cls.from_model_args(model_args).cuda()
 
-        def init_fn(model):
+        def llama3_autoparallel_init_fn(model):
             # WHC - horrible hack to make auto-parallel work. basically, create a bespoke init_fn for llama3 by copying
             # code from the llama3 init_weights functions throughout the model components, and adjusting them to use
             # the new FQN structures in autoparallel.
@@ -221,11 +216,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     b=cutoff_factor * final_out_std,
                 )
 
-        # with torch.device("meta"):
-        # model = model_fn()
-        # Build the collection of model converters. No-op if `model.converters` empty
-        # model_converters = build_model_converters(job_config, parallel_dims)
-        # model_converters.convert(model)
+        with torch.device("meta"):
+            model = model_cls.from_model_args(model_args)
+            # Build the collection of model converters. No-op if `model.converters` empty
+            model_converters = build_model_converters(job_config, parallel_dims)
+            model_converters.convert(model)
 
         # metrics logging
         build_metrics_processor_fn = (
@@ -239,15 +234,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         color = self.metrics_processor.color
 
         # calculate model size and flops per token
-        # (
-        #     model_param_count,
-        #     self.metrics_processor.num_flops_per_token,
-        # ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        (
+            model_param_count,
+            self.metrics_processor.num_flops_per_token,
+        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
-        # logger.info(
-        #     f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
-        #     f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
-        # )
+        logger.info(
+            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
+        )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if job_config.checkpoint.create_seed_checkpoint:
@@ -325,12 +320,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(
-                model_fn, init_fn, world_mesh, parallel_dims, job_config
+                model, world_mesh, parallel_dims, job_config
             )
 
-            # model.to_empty(device=init_device)
-            # with torch.no_grad():
-            #     model.init_weights(buffer_device=buffer_device)
+            model.to_empty(device=init_device)
+            with torch.no_grad():
+                # TODO(whc) make model.init_weights work with autoparallel
+                llama3_autoparallel_init_fn(model)
+                # model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -362,11 +359,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
         # where it issues a single all-reduce for all parameters at once for better performance
-        # self.optimizers.register_step_post_hook(
-        #     lambda *args, **kwargs: model_converters.post_optimizer_hook(
-        #         self.model_parts
-        #     )
-        # )
+        self.optimizers.register_step_post_hook(
+            lambda *args, **kwargs: model_converters.post_optimizer_hook(
+                self.model_parts
+            )
+        )
         self.metrics_processor.optimizers = self.optimizers
 
         # Initialize trainer states that will be saved in checkpoint.
