@@ -138,7 +138,7 @@ class TokenChoiceTopKRouter(nn.Module):
                 Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = F.linear(x.type, self.weight, None)
+        scores = F.linear(x, self.weight, bias=None)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.use_sigmoid:

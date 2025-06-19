@@ -28,8 +28,8 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
     """
-    dim = args.qk_rope_head_dim
-    seqlen = args.max_seq_len
+    dim = args.qk_rope_head_dim  # 64
+    seqlen = args.max_seq_len  # 2048
     beta_fast = args.beta_fast
     beta_slow = args.beta_slow
     base = args.rope_theta
@@ -98,7 +98,7 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
 
-    # YaRN scaling for extended context
+    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
     if seqlen > args.original_seq_len:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, args.original_seq_len
@@ -106,9 +106,14 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
+    # Create position indices
     t = torch.arange(seqlen)
+
+    # Outer product: [positions] × [frequencies]
     freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+
+    # Convert to complex exponentials: e^(i*freq*pos)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # torch.Size([16384, 32])
     return freqs_cis
 
 
@@ -327,10 +332,13 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         h = self.tok_embeddings(tokens)
+
+        layer_id = 0
         for layer in self.layers:
+            layer_id += 1
             h = layer(h, self.freqs_cis)
-        h = self.norm(h)[:, -1]
-        output = self.output(h)
+        h = self.norm(h)
+        output = self.output(h)  # (batch_size, seq_len, dim)
         return output
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
