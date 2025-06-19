@@ -31,5 +31,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
-
+        python TEST_WITH_ROCM=1 ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8

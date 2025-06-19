@@ -283,7 +283,7 @@ def build_test_list():
     ])
     # check test_with_rocm
     if test_with_rocm != "1":
-        integration_tests_flavors["debug_model.toml"].extend(
+        integration_tests_flavors["debug_model.toml"].extend([
             OverrideDefinitions(
                 [
                     [
@@ -296,7 +296,7 @@ def build_test_list():
                 "pp_custom_csv",
                 ngpu=2,
             ),
-        )
+        ])
     integration_tests_flavors["debug_model.toml"].extend([
         OverrideDefinitions(
             [
