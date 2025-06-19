@@ -126,8 +126,8 @@ def _coco_data_processor_from_encodings(
     return sample
 
 
-DATASETS["coco-preprocessed"] = TextToImageDatasetConfig(
-    path="/dataset/coco_preprocessed_hf",
+DATASETS["coco_preprocessed"] = TextToImageDatasetConfig(
+    path="/dataset/coco_preprocessed",
     loader=lambda path: load_from_disk(path),
     data_processor=_coco_data_processor_from_encodings,
 )

@@ -37,7 +37,7 @@ seq_len = 256
 max_norm = 1.0  # grad norm clipping
 steps = 30_000
 compile = false
-dataset = "cc12m-preprocessed"
+dataset = "cc12m_preprocessed"
 classifer_free_guidance_prob = 0.1
 img_size = 256
 
@@ -57,7 +57,7 @@ classifer_free_guidance_scale = 5.0
 denoising_steps = 50
 save_img_folder = "img"
 eval_freq = 614400
-dataset = "coco-preprocessed"
+dataset = "coco_preprocessed"
 
 [parallelism]
 data_parallel_replicate_degree = 1

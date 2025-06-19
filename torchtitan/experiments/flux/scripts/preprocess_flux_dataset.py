@@ -5,6 +5,7 @@
 
 import io
 import os
+import shutil
 
 import numpy as np
 
@@ -26,13 +27,15 @@ from tqdm import tqdm
 
 
 def merge_datasets(path):
-    dataset = Dataset.from_parquet(os.path.join(path, "*"), num_proc=16)
-    dataset.save_to_disk(path + "_hf", num_proc=8)
+    dataset = Dataset.from_parquet(os.path.join(path + "_temp", "*"), num_proc=16)
+    dataset.save_to_disk(path, num_proc=8)
+    shutil.rmtree(path + "_temp")
 
 
 def process_with_streaming(trainer, global_id: int):
     print(f"Reading data from {trainer.job_config.training.dataset_path}")
-    print(f"Writing data to {trainer.job_config.preprocessing.output_dataset_path}")
+    temp_path = trainer.job_config.preprocessing.output_dataset_path + "_temp"
+    print(f"Writing data temporarily to {temp_path}")
 
     schema = pa.schema(
         [
@@ -78,7 +81,9 @@ def process_with_streaming(trainer, global_id: int):
                         )
 
                     # Start new file
-                    parquet_path = f"{trainer.job_config.preprocessing.output_dataset_path}/data_{global_id}_{file_idx:04d}.parquet"
+                    parquet_path = (
+                        f"{temp_path}/data_{global_id}_{file_idx:04d}.parquet"
+                    )
                     writer = pq.ParquetWriter(parquet_path, schema)
                     current_file_samples = 0
                     print(

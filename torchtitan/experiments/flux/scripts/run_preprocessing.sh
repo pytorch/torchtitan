@@ -26,7 +26,7 @@ torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost
 -m torchtitan.experiments.flux.scripts.preprocess_flux_dataset --job.config_file ${CONFIG_FILE} \
 --experimental.custom_args_module torchtitan.experiments.flux.preprocessing_config \
 --eval.dataset= \
---checkpoint.no_enable_checkpoint --training.batch_size 256 --training.dataset=cc12m-disk --training.dataset_path=/dataset/cc12m_disk \
+--checkpoint.no_enable_checkpoint --training.batch_size 256 --training.dataset=cc12m_disk --training.dataset_path=/dataset/cc12m_disk \
 --parallelism.data_parallel_replicate_degree=${NGPU} \
 --training.classifer_free_guidance_prob=0.0 \
 --model.flavor=flux-debug $overrides

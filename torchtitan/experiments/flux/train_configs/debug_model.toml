@@ -43,7 +43,7 @@ classifer_free_guidance_prob = 0.1
 img_size = 256
 
 [encoder]
-t5_encoder = "/models/t5"
+t5_encoder = "google/t5-v1_1-small"
 context_in_dim = 512
 clip_encoder = "/models/clip"
 max_t5_encoding_len = 256

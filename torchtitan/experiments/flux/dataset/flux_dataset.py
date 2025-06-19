@@ -182,29 +182,29 @@ class TextToImageDatasetConfig:
 
 
 DATASETS = {
-    "cc12m-wds": TextToImageDatasetConfig(
+    "cc12m_wds": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         data_processor=_cc12m_wds_data_processor,
     ),
-    "cc12m-disk": TextToImageDatasetConfig(
+    "cc12m_disk": TextToImageDatasetConfig(
         path="/dataset/cc12m_disk",
         loader=lambda path: load_from_disk(path),
         data_processor=partial(_cc12m_wds_data_processor, include_sample_id=True),
     ),
-    "cc12m-preprocessed": TextToImageDatasetConfig(
-        path="/dataset/cc12m_preprocessed_hf",
+    "cc12m_preprocessed": TextToImageDatasetConfig(
+        path="/dataset/cc12m_preprocessed",
         loader=lambda path: load_from_disk(path),
         data_processor=_cc12m_data_processor_from_encodings,
     ),
-    "cc12m-wds-30k": TextToImageDatasetConfig(
+    "cc12m_wds_30k": TextToImageDatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True).take(
             30_000
         ),
         data_processor=_cc12m_wds_data_processor,
     ),
-    "cc12m-test": TextToImageDatasetConfig(
+    "cc12m_test": TextToImageDatasetConfig(
         path="torchtitan/experiments/flux/tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
