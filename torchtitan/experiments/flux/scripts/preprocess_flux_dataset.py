@@ -203,12 +203,9 @@ def main():
     global_id = int(os.environ["RANK"])
     trainer.dataloader.dataset.infinite = False
 
-    print("about to build tokenizers")
-
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(trainer.job_config)
     trainer.t5_tokenizer = t5_tokenizer
     trainer.clip_tokenizer = clip_tokenizer
-    print("built tokenizers")
     if global_id == 0:
         os.makedirs(config.preprocessing.output_dataset_path, exist_ok=False)
 
