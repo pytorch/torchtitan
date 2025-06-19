@@ -72,15 +72,7 @@ class FluxTrainer(Trainer):
             distinct_seed_mesh_dim="dp_shard",
         )
 
-        # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
-        # We cast the encoders and it's input/output to this dtype.  If FSDP with mixed precision training is not used,
-        # the dtype for encoders is torch.float32 (default dtype for Flux Model).
-        # Otherwise, we use the same dtype as mixed precision training process.
-        self._dtype = (
-            TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
-            if self.parallel_dims.dp_shard_enabled
-            else torch.float32
-        )
+        self._dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
 
         model_config = self.train_spec.config[job_config.model.flavor]
 
@@ -170,6 +162,12 @@ class FluxTrainer(Trainer):
             self.empty_t5_encodings = empty_encodings["t5_encodings"][0]
             self.empty_clip_encodings = empty_encodings["clip_encodings"][0]
 
+        assert len(self.model_parts) == 1
+        self.model = self.model_parts[0]
+        if self.job_config.training.compile:
+            logger.info("Compiling model...")
+            self.model = torch.compile(self.model)
+
         self.cancelled_soon = False
         signal.signal(signal.SIGUSR1, self.cancelled_signal_handler)
 
@@ -253,9 +251,6 @@ class FluxTrainer(Trainer):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        model_parts = self.model_parts
-        assert len(self.model_parts) == 1
-        model = self.model_parts[0]
 
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
@@ -285,7 +280,7 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        latent_noise_pred = model(
+        latent_noise_pred = self.model(
             img=latents,
             img_ids=latent_pos_enc.to(latents),
             txt=t5_encodings.to(latents),
@@ -304,7 +299,7 @@ class FluxTrainer(Trainer):
         loss.backward()
 
         dist_utils.clip_grad_norm_(
-            [p for m in model_parts for p in m.parameters()],
+            [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
@@ -387,11 +382,6 @@ class FluxTrainer(Trainer):
                 batch=input_dict,
             )
             labels = input_dict["img_encodings"]
-        # Keep these variables local to shorten the code as these are
-        # the major variables that are used in the training loop.
-        model_parts = self.model_parts
-        assert len(self.model_parts) == 1
-        model = model_parts[0]
 
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
@@ -420,7 +410,7 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-            latent_noise_pred = model(
+            latent_noise_pred = self.model(
                 img=latents,
                 img_ids=latent_pos_enc.to(latents),
                 txt=t5_encodings.to(latents),
@@ -626,8 +616,7 @@ class FluxTrainer(Trainer):
 
         if self.mlperf_logger:
             self.mlperf_logger.log_eval_start(self.step)
-        model = self.model_parts[0]
-        model.eval()
+        self.model.eval()
 
         # Follow procedure set out in Flux paper of stratified timestep sampling
         cur_val_timestep = 0
@@ -659,7 +648,7 @@ class FluxTrainer(Trainer):
         avg_loss_per_timestep = sum_loss_per_timestep / sum_timestep_counts
         avg_loss = (avg_loss_per_timestep * timestep_counts_proportions).sum()
         self.metrics_processor.val_log(self.step, avg_loss)
-        model.train()
+        self.model.train()
 
         # Reshard after run forward pass in eval_step.
         # This is to ensure the model weights are sharded the same way for checkpoint saving.
