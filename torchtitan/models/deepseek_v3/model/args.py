@@ -19,7 +19,7 @@ from torchtitan.protocols.train_spec import BaseModelArgs
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
 @dataclass
-class DeepseekV3ModelArgs(BaseModelArgs):
+class DeepSeekV3ModelArgs(BaseModelArgs):
     """
     Data class for defining model arguments and hyperparameters.
 
@@ -53,7 +53,6 @@ class DeepseekV3ModelArgs(BaseModelArgs):
         rope_factor (float): Scaling factor for extended sequence lengths.
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
-        mscale (float): Scaling factor for extended attention.
     """
 
     max_batch_size: int = 8

@@ -13,17 +13,17 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import DeepseekV3ModelArgs
+from .args import DeepSeekV3ModelArgs
 from .moe import MoE
 
 
-# Adopted from https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
+# Adopted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
-        args (DeepseekV3ModelArgs): Model arguments containing positional embedding parameters.
+        args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
@@ -135,7 +135,7 @@ class Attention(nn.Module):
     Multi-head attention (MLA) module.
     """
 
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
@@ -264,7 +264,7 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepseekV3ModelArgs):
+    def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
 
         super().__init__()
         self.attention = Attention(model_args)
@@ -292,12 +292,12 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class Transformer(nn.Module, ModelProtocol):
+class DeepSeekV3Model(nn.Module, ModelProtocol):
     """
-    Deepseek-V3 Transformer model with attention and feed-forward layers.
+    DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs):
         super().__init__()
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
