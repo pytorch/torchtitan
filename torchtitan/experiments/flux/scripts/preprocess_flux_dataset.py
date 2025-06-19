@@ -208,6 +208,7 @@ def main():
     trainer.clip_tokenizer = clip_tokenizer
     if global_id == 0:
         os.makedirs(config.preprocessing.output_dataset_path, exist_ok=False)
+        os.makedirs(config.preprocessing.output_dataset_path + "_temp", exist_ok=False)
 
     try:
         print(f"Rank {global_id}: Starting preprocessing...")
