@@ -118,7 +118,7 @@ class Float8Converter(ModelConverter):
         except ImportError:
             logger.info(
                 (
-                    "Using default modlue_filter_fn for float8 model conversion. "
+                    "Using default module_filter_fn for float8 model conversion. "
                     "To use auto_filter_for_recipe, please install torchao nightly build."
                 )
             )
