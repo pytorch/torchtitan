@@ -31,21 +31,19 @@ docker build -t <tag> -f Dockerfile .
 Before entering the container, create a directory for the models to be downloaded, and a directory to be used as huggingface cache (necessary for some operations):
 
 ```bash
-mkdir models
-mkdir hf_cache
+mkdir <models directory>
+mkdir <hf_cache_directory>
 ```
 
 ```
 docker run -it --rm \
 --gpus all --ulimit memlock=-1 --ulimit stack=67108864 \
 --network=host --ipc=host \
--v ~/.ssh:/root/.ssh \
--v hf_cache:/root/.cache \
+-v <hf_cache_directory>:/root/.cache \
 -v <path for dataset storage>:/dataset \
--v <path for model storage>:/models \
+-v <models directory>:/models \
 <tag> bash
 ```
-Note: it's recommended to map your .ssh folder to inside the container, so that it's easier for the code to set up remote cluster access.
 
 ### Steps to download and verify data
 For all steps below, they are assumed to run inside the container
@@ -81,6 +79,8 @@ python torchtitan/experiments/flux/scripts/download_encoders.py --local_dir /mod
 ```
 #### Preprocessing
 Since the encoders are frozen during training, it is possible to do additional preprocessing to avoid having to repeatedly encode data on the fly.
+We reccomend doing this over multiple GPUs. Depending on the GPU memory, you may need to adjust the batch size.
+**Due to the dataset size, using a different number of GPUs or batch size may result in hangs. Please make sure the number of samples is divisible by batch_size x NGPUs**
 To do this, run:
 
 ```bash
@@ -91,7 +91,7 @@ The above may take a few hours and will require approximately 2.5TB of storage.
 
 For the validation dataset:
 ```bash
-NGPU=1 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.dataset=coco --training.dataset_path=/dataset/coco --eval.dataset= --training.batch_size=128 --preprocessing.output_dataset_path=/dataset/coco_preprocessed
+NGPU=4 torchtitan/experiments/flux/scripts/run_preprocessing.sh --training.dataset=coco --training.dataset_path=/dataset/coco --eval.dataset= --training.batch_size=128 --preprocessing.output_dataset_path=/dataset/coco_preprocessed
 ```
 Additionally, this script will generate encodings representing empty encodings which are used for guidance.
 
@@ -105,9 +105,13 @@ while also avoiding loading encoders with `--encoder.autoencoder_path= --encoder
 ### Steps to run and time
 All steps below are assumed to be run inside the container. 
 
-The first time this is executed, checkpoints for the text encoders will automatically be downloaded from HF.
-To prevent this from happening every time, we encourage users to create a directory to be used as the HF cache and mount
-it to the container, as below.
+The training script uses config files to pass parameters. You can find these in `torchtitan/experiments/flux/train_configs`.
+Additionally, parameters can be set or overridden in the cli.
+For example, passing `--optimizer.lr=1e-3` will set the learning rate to `1e-3`.
+An exhaustive list of all these parameters can be seen by running the training by running `CONFIG=torchtitan/experiments/flux/train_configs/flux_schnell_mlperf.toml NGPU=1 bash torchtitan/experiments/flux/run_train.sh --help` with the desired config file.
+
+Finally, the launch scripts rely on environment variables. These are explained below.
+
 
 ```
 docker run -it --rm \
@@ -146,14 +150,19 @@ sbatch -N <number of nodes> -t <time> run.sub <optional additional parameters he
 
 `MODELROOT` should be set to the point where the previously downloaded encoders reside.
 
-By default, checkpointing is disabled. You may enable it with ENABLE_CHECKPOINTING=True and set the checkpointing interval
+Any additional parameters may be passed after the run.sub, and will be forwarded to the training script, overriding those in the config.
+e.g. if the datasets were saved with different names from those in the instructions above, you may explicitly set the dataset paths with `--training.dataset_path=/dataset/...` and `--eval.dataset_path=`.
+
+By default, checkpointing is disabled. You may enable it by setting the env var ENABLE_CHECKPOINTING=True. You can set the checkpointing interval.
 with `--checkpoint.interval=<steps>`.
 
 Additionally, by default, the model will run with HSDP (sharding over gpus in the same node, and using DDP across different nodes).
-You may modify this with `--parallelism.data_parallel_replicate_degree` and `--parallelism.data_parallel_shard_degree`.
-Given the substantial variability among Slurm clusters, users are encouraged to review and adapt these scripts to fit their specific cluster specifications.
 
-To enable torch.compile, pass `--training.compile`.
+You may modify this by passing `--parallelism.data_parallel_replicate_degree` and `--parallelism.data_parallel_shard_degree`.
+
+Finally, torch.compile is disabled by default. To enable it, pass `--training.compile`.
+
+Given the substantial variability among Slurm clusters, users are encouraged to review and adapt these scripts to fit their specific cluster specifications.
 
 In any case, the dataset and checkpoints are expected to be available to all the nodes.
 
@@ -230,7 +239,7 @@ The MSE calculated over latents is used for the loss
 ### Optimizer
 AdamW
 ### Precision
-The model runs with BF16 by default. This can be changed using `--training.mixed_precision_param=float32`.
+The model runs with BF16 by default. This can be changed by setting `--training.mixed_precision_param=float32`.
 ### Weight initialization
 The weight initialization strategy is taken from torchtitan. It consists of a mixture of constant, Xavier and Normal initialization.
 For precise details, we encourage the consultation of the code at `torchtitan/experiments/flux/model/model.py:init_weights`.
