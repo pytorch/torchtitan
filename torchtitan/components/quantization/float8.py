@@ -3,7 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-
 from functools import partial
 
 import torch
@@ -25,9 +24,9 @@ class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
-        float8_config: Float8 = job_config.float8
+        self.float8_config: Float8 = job_config.float8
         if has_cuda_capability(8, 9) or (
-            float8_config.emulate and not job_config.training.compile
+            self.float8_config.emulate and not job_config.training.compile
         ):
             pass
         else:
@@ -42,7 +41,7 @@ class Float8Converter(ModelConverter):
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
-        if float8_config.recipe_name is not None and not hasattr(
+        if self.float8_config.recipe_name is not None and not hasattr(
             Float8LinearConfig, "from_recipe_name"
         ):
             logger.warning(
@@ -52,43 +51,47 @@ class Float8Converter(ModelConverter):
             return
 
         self.enabled = True
-        self.filter_fqns = float8_config.filter_fqns
 
-        if float8_config.recipe_name is not None:
-            assert (
-                not float8_config.enable_fsdp_float8_all_gather
-            ), "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
-            assert (
-                not float8_config.force_recompute_fp8_weight_in_bwd
-            ), "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
-            self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
+        if self.float8_config.recipe_name is not None:
+            assert not self.float8_config.enable_fsdp_float8_all_gather, (
+                "using `self.float8_config.enable_fsdp_float8_all_gather` together "
+                "with `self.float8_config.recipe_name` is not supported"
+            )
+
+            assert not self.float8_config.force_recompute_fp8_weight_in_bwd, (
+                "using `self.float8_config.force_recompute_fp8_weight_in_bwd` together "
+                "with `self.float8_config.recipe_name` is not supported"
+            )
+
+            self.config = Float8LinearConfig.from_recipe_name(
+                self.float8_config.recipe_name
+            )
             self.precompute_scale = False
             logger.info(
-                f"Float8 training active with recipe {float8_config.recipe_name}"
+                f"Float8 training active with recipe {self.float8_config.recipe_name}"
             )
 
             # short-term solution for https://github.com/pytorch/pytorch/issues/150859
-            if float8_config.recipe_name == "rowwise":
+            if self.float8_config.recipe_name == "rowwise":
                 torch._inductor.config.emulate_precision_casts = True
                 logger.debug(
                     "Set torch._inductor.config.emulate_precision_casts to True"
                 )
-
         else:
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
             enable_fsdp_float8_all_gather = (
                 parallel_dims.dp_shard_enabled
-                and float8_config.enable_fsdp_float8_all_gather
+                and self.float8_config.enable_fsdp_float8_all_gather
             )
             self.config = Float8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-                force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
-                emulate=float8_config.emulate,
+                force_recompute_fp8_weight_in_bwd=self.float8_config.force_recompute_fp8_weight_in_bwd,
+                emulate=self.float8_config.emulate,
             )
             # for precompute_float8_dynamic_scale_for_fsdp
             self.precompute_scale = (
                 enable_fsdp_float8_all_gather
-                and float8_config.precompute_float8_dynamic_scale_for_fsdp
+                and self.float8_config.precompute_float8_dynamic_scale_for_fsdp
             )
             logger.info("Float8 tensorwise scaled training active")
 
@@ -103,11 +106,30 @@ class Float8Converter(ModelConverter):
 
         from torchao.float8 import convert_to_float8_training
 
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+        try:
+            from torchao.float8.float8_linear_utils import auto_filter_for_recipe
+
+            # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+            filter_fn = auto_filter_for_recipe(
+                self.float8_config.recipe_name,
+                filter_fqns=self.float8_config.filter_fqns,
+            )
+            logger.info("Using auto_filter_for_recipe for float8 model conversion.")
+        except ImportError:
+            logger.info(
+                (
+                    "Using default module_filter_fn for float8 model conversion. "
+                    "To use auto_filter_for_recipe, please install torchao nightly build."
+                )
+            )
+            filter_fn = partial(
+                module_filter_fn, filter_fqns=self.float8_config.filter_fqns
+            )
+
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+            module_filter_fn=filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
