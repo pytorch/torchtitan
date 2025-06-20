@@ -289,9 +289,7 @@ class GroupedGemmTensorManager:
             # For CUTLASS, we often need weights in specific layout
             # This handles the common case where PyTorch weights are [out_features, in_features]
             # but CUTLASS expects [in_features, out_features] or specific stride pattern
-            print(
-                f"Warning: weight transposition not supported...recommend using strides for this case"
-            )
+
             pass  # Keep original - handle via strides in CUTLASS
 
         # Convert to CUTE tensors
