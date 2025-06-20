@@ -28,8 +28,8 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
     """
-    dim = args.qk_rope_head_dim  # 64
-    seqlen = args.max_seq_len  # 2048
+    dim = args.qk_rope_head_dim
+    seqlen = args.max_seq_len
     beta_fast = args.beta_fast
     beta_slow = args.beta_slow
     base = args.rope_theta
