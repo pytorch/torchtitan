@@ -17,7 +17,7 @@ from .args import DeepSeekV3ModelArgs
 from .moe import MoE
 
 
-# Adopted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+# Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
 def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
@@ -28,8 +28,8 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
     """
-    dim = args.qk_rope_head_dim  # 64
-    seqlen = args.max_seq_len  # 2048
+    dim = args.qk_rope_head_dim
+    seqlen = args.max_seq_len
     beta_fast = args.beta_fast
     beta_slow = args.beta_slow
     base = args.rope_theta
@@ -113,7 +113,7 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     freqs = torch.outer(t, freqs)
 
     # Convert to complex exponentials: e^(i*freq*pos)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # torch.Size([16384, 32])
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
 
 
@@ -274,8 +274,8 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn = (
+        self.moe_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.moe = (
             FeedForward(model_args.dim, model_args.inter_dim)
             if layer_id < model_args.n_dense_layers
             else MoE(model_args)
@@ -293,7 +293,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.moe(self.moe_norm(x))
         return x
 
 
@@ -333,9 +333,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         """
         h = self.tok_embeddings(tokens)
 
-        layer_id = 0
         for layer in self.layers:
-            layer_id += 1
             h = layer(h, self.freqs_cis)
         h = self.norm(h)
         output = self.output(h)  # (batch_size, seq_len, dim)

@@ -111,6 +111,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         nparams_dense = 0
 
         for name, p in model.named_parameters():
+            print(name)
             if "embedding" in name:
                 nparams_embedding += p.numel()
                 nparams_dense += p.numel()
