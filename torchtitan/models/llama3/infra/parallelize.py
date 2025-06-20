@@ -47,6 +47,14 @@ def parallelize_llama(
     """
 
     if parallel_dims.tp_enabled:
+        assert job_config.training.seq_len / parallel_dims.cp % parallel_dims.tp == 0, (
+            f"Sequence length {job_config.training.seq_len} seen by the model "
+            f"during forward pass (seq_len / cp) must be divisible by "
+            f"tensor parallel degree {parallel_dims.tp} because of numerical "
+            f"issue in the computation of complex numbers with DTensors. "
+            f"See https://github.com/pytorch/pytorch/issues/130646 and "
+            f"https://github.com/pytorch/torchtitan/issues/1306 for details. "
+        )
         if (
             job_config.parallelism.enable_async_tensor_parallel
             and not job_config.training.compile
@@ -103,6 +111,10 @@ def parallelize_llama(
             logger.info("Applied FSDP to the model")
 
         if parallel_dims.cp_enabled:
+            assert job_config.training.seq_len % parallel_dims.cp == 0, (
+                f"Sequence length {job_config.training.seq_len} must be divisible by "
+                f"context parallel degree {parallel_dims.cp}."
+            )
             logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
