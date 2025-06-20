@@ -47,8 +47,9 @@ def parallelize_llama(
     """
 
     if parallel_dims.tp_enabled:
-        assert job_config.training.seq_len % (parallel_dims.tp * parallel_dims.cp) == 0, (
-            f"Sequence length {job_config.training.seq_len} must be divisible by "
+        assert job_config.training.seq_len / parallel_dims.cp % parallel_dims.tp == 0, (
+            f"Sequence length {job_config.training.seq_len} seen by the model "
+            f"during forward pass (seq_len / cp) must be divisible by "
             f"tensor parallel degree {parallel_dims.tp} because of numerical "
             f"issue in the computation of complex numbers with DTensors. "
             f"See https://github.com/pytorch/pytorch/issues/130646 and "
