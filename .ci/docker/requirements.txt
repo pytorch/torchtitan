@@ -8,3 +8,4 @@ tabulate
 wandb
 fsspec
 tyro
+tokenizers >= 0.15.0
