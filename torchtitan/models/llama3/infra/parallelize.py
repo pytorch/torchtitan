@@ -47,7 +47,7 @@ def parallelize_llama(
     """
 
     if parallel_dims.tp_enabled:
-        assert job_config.training.seq_len % parallel_dims.tp == 0, (
+        assert job_config.training.seq_len % (parallel_dims.tp * parallel_dims.cp) == 0, (
             f"Sequence length {job_config.training.seq_len} must be divisible by "
             f"tensor parallel degree {parallel_dims.tp} because of numerical "
             f"issue in the computation of complex numbers with DTensors. "
@@ -111,6 +111,10 @@ def parallelize_llama(
 
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
+            assert job_config.training.seq_len % parallel_dims.cp == 0, (
+                f"Sequence length {job_config.training.seq_len} must be divisible by "
+                f"context parallel degree {parallel_dims.cp}."
+            )
 
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
