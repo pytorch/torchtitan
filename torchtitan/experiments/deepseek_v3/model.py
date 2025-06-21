@@ -45,7 +45,9 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from group_gemms import (
+    CUTLASSGroupedGemmStrategy,
     DSGroupGEMM,
+    ManualLoopGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
@@ -474,7 +476,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "cutlass"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["manual", "torch", , "torchao", "tritoncg"]
 
     def __init__(self, config):
         super().__init__()
@@ -548,6 +550,12 @@ class MoE(nn.Module):
                     MLP.act_fn,
                 )
                 if TritonCGBF16GroupGEMM.is_available()
+                else None
+            ),
+            "manual": ManualLoopGroupGEMM(MLP.act_fn),
+            "cutlass": (
+                CUTLASSGroupedGemmStrategy(MLP.act_fn)
+                if CUTLASSGroupedGemmStrategy.is_available()
                 else None
             ),
         }
@@ -856,6 +864,7 @@ class MoE(nn.Module):
 
         # Prepare buffer for tokens processed by experts
         processed_tokens = self.get_gather_buf()
+        # processed_tokens.to("cuda")
 
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs
