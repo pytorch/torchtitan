@@ -89,6 +89,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             cp=parallelism_config.context_parallel_degree,
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
         )
@@ -431,12 +432,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
-        )
+        # TODO: torch.nn.utils.get_total_norm crashes when aten.stack.default
+        #       is called with not all parameters being on the same mesh
+        # dist_utils.clip_grad_norm_(
+        #     [p for m in self.model_parts for p in m.parameters()],
+        #     self.job_config.training.max_norm,
+        #     foreach=True,
+        #     pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
+        # )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
@@ -493,9 +496,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
-                self.checkpointer.save(
-                    self.step, force=(self.step == job_config.training.steps)
-                )
+                # self.checkpointer.save(
+                #     self.step, force=(self.step == job_config.training.steps)
+                # )
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:

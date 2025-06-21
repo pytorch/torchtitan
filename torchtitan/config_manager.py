@@ -363,6 +363,13 @@ class Parallelism:
     The default value is 'allgather'.
     """
 
+    expert_parallel_degree: int = 1
+    """
+    Expert parallelism degree. 1 means disabled.
+    Currently, only "dp2ep" is supported.
+    EP degree has to be k * context_parallel_degree, where k >= 1 and data_parallel_shard_degree % k == 0.
+    """
+
 
 @dataclass
 class Checkpoint:
