@@ -47,7 +47,7 @@ def parallelize_llama(
     """
     assert job_config.training.seq_len % (parallel_dims.tp * parallel_dims.cp) == 0, (
         f"""
-        Sequence length {job_config.training.seq_len} must be divisible by TP degree 
+        Sequence length {job_config.training.seq_len} must be divisible by both TP degree 
         ({parallel_dims.tp}) and CP degree ({parallel_dims.cp}).
         TP currently cannot handle uneven seq_len because we set `use_local_output=True` 
         (to use plain Tensors), which was because the bug in computation of complex 
