@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..infra.expert_parallel import expert_parallel
+
 from .args import TransformerModelArgs
 
 
@@ -29,49 +31,65 @@ class GroupedExperts(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        num_local_tokens_per_expert: torch.Tensor | list[int] | None = None,
+        num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # TODO: keeping this for loop implementation for comparison
-        #       and readability, will remove later
-        if not self.use_grouped_mm:
-            if num_local_tokens_per_expert is not None:
-                # a tuple of tensors indexed by experts
-                # each with shape (tokens_per_expert(varying), dim)
-                x = torch.split(
-                    x,
-                    split_size_or_sections=num_local_tokens_per_expert,
-                    dim=0,
-                )
-                out_experts_splits = []
-                for expert_idx, x_expert in enumerate(x):
-                    w1, w2, w3 = (
-                        self.w1[expert_idx],
-                        self.w2[expert_idx],
-                        self.w3[expert_idx],
-                    )
-                    h = F.silu(torch.matmul(x_expert, w1))
-                    h = h * torch.matmul(x_expert, w3)
-                    h = torch.matmul(h, w2)
-                    # h shape (tokens_per_expert(varying), dim)
-                    out_experts_splits.append(h)
-                out = torch.cat(out_experts_splits, dim=0)
-            else:
-                # x shape (num_experts, tokens_per_expert, dim)
-                h = F.silu(torch.bmm(x, self.w1))
-                h = h * torch.bmm(x, self.w3)
-                # out shape (num_experts, tokens_per_expert, dim)
-                out = torch.bmm(h, self.w2)
-
-            return out
-
-        # grouped mm implementation
-        if num_local_tokens_per_expert is not None:
-            # https://github.com/pytorch/pytorch/pull/150374
-            # NOTE: torch._gouped_mm requires bf16 dtypes
-            #       and shapes to be multiple of 8
-            offsets = torch.cumsum(
-                num_local_tokens_per_expert, dim=0, dtype=torch.int32
+        if self.use_grouped_mm:
+            return GroupedExperts._run_experts_grouped_mm(
+                self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
+        else:
+            return GroupedExperts._run_experts_for_loop(
+                self.w1, self.w2, self.w3, x, num_tokens_per_expert
+            )
+
+    # TODO: keeping this for-loop implementation for comparison
+    #       and readability, may remove later
+    @expert_parallel
+    @staticmethod
+    def _run_experts_for_loop(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if num_tokens_per_expert is not None:
+            # a tuple of tensors indexed by experts
+            # each with shape (tokens_per_expert(varying), dim)
+            x = torch.split(
+                x,
+                # NOTE: this would incur a synchronization between device and host
+                split_size_or_sections=num_tokens_per_expert.tolist(),
+                dim=0,
+            )
+            out_experts_splits = []
+            for expert_idx, x_expert in enumerate(x):
+                h = F.silu(torch.matmul(x_expert, w1[expert_idx]))
+                h = h * torch.matmul(x_expert, w3[expert_idx])
+                h = torch.matmul(h, w2[expert_idx])
+                # h shape (tokens_per_expert(varying), dim)
+                out_experts_splits.append(h)
+            out = torch.cat(out_experts_splits, dim=0)
+        else:
+            # x shape (num_experts, tokens_per_expert, dim)
+            h = F.silu(torch.bmm(x, w1))
+            h = h * torch.bmm(x, w3)
+            # out shape (num_experts, tokens_per_expert, dim)
+            out = torch.bmm(h, w2)
+
+        return out
+
+    @expert_parallel
+    @staticmethod
+    def _run_experts_grouped_mm(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if num_tokens_per_expert is not None:
+            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
             # grouped mm between a 2D tensor and a 3D tensor
             assert x.dim() == 2
         else:
@@ -80,11 +98,12 @@ class GroupedExperts(nn.Module):
             assert x.dim() == 3
 
         assert (
-            x.dtype == self.w1.dtype == self.w2.dtype == self.w3.dtype == torch.bfloat16
+            x.dtype == w1.dtype == w2.dtype == w3.dtype == torch.bfloat16
         ), "torch._grouped_mm only supports bf16 dtypes"
-        h = F.silu(torch._grouped_mm(x, self.w1, offs=offsets))
-        h = h * torch._grouped_mm(x, self.w3, offs=offsets)
-        out = torch._grouped_mm(h, self.w2, offs=offsets)
+
+        h = F.silu(torch._grouped_mm(x, w1, offs=offsets))
+        h = h * torch._grouped_mm(x, w3, offs=offsets)
+        out = torch._grouped_mm(h, w2, offs=offsets)
 
         return out
 
@@ -131,7 +150,7 @@ class TokenChoiceTopKRouter(nn.Module):
                 Tokens grouped together by experts indices with shape ``(bs*slen*top_k,)``.
             token_indices (torch.Tensor):
                 Token indices for routed_input with shape ``(bs*slen*top_k,)``.
-            num_local_tokens_per_expert (torch.Tensor):
+            num_tokens_per_expert (torch.Tensor):
                 Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
@@ -152,7 +171,7 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_local_tokens_per_expert = torch.histc(
+        num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
             bins=self.num_experts,
             min=0,
@@ -165,7 +184,7 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
-        return top_scores, token_indices_experts_sorted, num_local_tokens_per_expert
+        return top_scores, token_indices_experts_sorted, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
@@ -191,12 +210,11 @@ class MoE(nn.Module):
             hidden_dim = int(hidden_dim / hidden_dim_denom)
         hidden_dim += -hidden_dim % model_args.multiple_of
 
-        self.use_grouped_mm = model_args.use_grouped_mm
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            use_grouped_mm=self.use_grouped_mm,
+            use_grouped_mm=model_args.use_grouped_mm,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim, num_experts=num_experts, top_k=model_args.top_k
@@ -206,7 +224,7 @@ class MoE(nn.Module):
                 dim=dim,
                 hidden_dim=hidden_dim,
                 num_experts=1,
-                use_grouped_mm=self.use_grouped_mm,
+                use_grouped_mm=model_args.use_grouped_mm,
             )
             if model_args.use_shared_expert
             else None
@@ -252,15 +270,15 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
 
         # top_scores and selected_indices shape (bs*slen*top_k,)
-        # num_local_tokens_per_expert shape (num_experts,)
+        # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
             token_indices,
-            num_local_tokens_per_expert,
+            num_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
         # will be used to update the expert bias for load balancing
-        self.tokens_per_expert += num_local_tokens_per_expert
+        self.tokens_per_expert += num_tokens_per_expert
 
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
@@ -275,40 +293,10 @@ class MoE(nn.Module):
             x.dtype
         )
 
-        if self.use_grouped_mm:
-            # NOTE: In order to use torch._grouped_mm, we need to make sure
-            # the number of tokens each expert gets is a multiple of 16.
-            # The following kernel helps achieve this via padding, without
-            # incurring synchronization between device and host.
-            from torchtitan.experiments.kernels.moe.indices import (
-                generate_permute_indices,
-            )
-
-            ALIGN_SIZE_M = 16
-
-            with torch.no_grad():
-                (
-                    permuted_indices,
-                    num_local_tokens_per_expert,
-                    _,
-                ) = generate_permute_indices(
-                    num_local_tokens_per_expert,
-                    self.experts.num_experts,
-                    1,
-                    ALIGN_SIZE_M,
-                )
-            token_indices = torch.vstack(
-                (token_indices, token_indices.new_zeros((dim)))
-            )
-            token_indices = token_indices[permuted_indices, :]
-            routed_input = torch.vstack((routed_input, routed_input.new_zeros((dim))))
-            routed_input = routed_input[permuted_indices, :]
-        else:
-            # NOTE: this would incur a synchronization between device and host
-            num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
+        print("num_tokens_per_expert before: ", num_tokens_per_expert)
 
         # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_local_tokens_per_expert)
+        routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         # shared expert
         if self.shared_expert is not None:

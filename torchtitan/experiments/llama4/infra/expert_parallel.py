@@ -6,10 +6,12 @@
 
 
 from functools import partial
-from typing import Optional, Tuple
+from typing import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
@@ -27,8 +29,8 @@ class TensorParallel(ParallelStyle):
     def __init__(
         self,
         *,
-        input_layouts: Optional[Tuple[Optional[Placement]]] = None,
-        output_layout: Optional[Placement] = None,
+        input_layouts: tuple[Placement | None] | None = None,
+        output_layout: Placement | None = None,
         use_local_output: bool = True,
     ):
         super().__init__()
@@ -99,8 +101,8 @@ class NoParallel(ParallelStyle):
     def __init__(
         self,
         *,
-        input_layout: Optional[Placement] = None,
-        output_layout: Optional[Placement] = None,
+        input_layout: Placement | None = None,
+        output_layout: Placement | None = None,
         use_local_output: bool = True,
     ):
         super().__init__()
@@ -141,3 +143,143 @@ class NoParallel(ParallelStyle):
             ),
             partial(self._prepare_output_fn, self.output_layout, self.use_local_output),
         )
+
+
+class ExpertParallel(ParallelStyle):
+    def __init__(
+        self,
+        *,
+        input_layouts: Placement | None = None,
+        output_layouts: Placement | None = None,
+        use_local_output: bool = True,
+    ):
+        super().__init__()
+        self.input_layouts = (input_layouts or Shard(0),)
+        self.output_layouts = (output_layouts or Shard(0),)
+        self.use_local_output = use_local_output
+        self.input_splits = None
+        self.output_splits = None
+
+    # performing all-to-all dispatch on the input
+    def _prepare_input_fn(self, mod, inputs, device_mesh):
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = num_tokens_per_expert.new_empty(
+                num_tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                num_tokens_per_expert_group,
+                num_tokens_per_expert,
+                group=device_mesh.get_group(),
+            )
+            # NOTE: this would incur a device-to-host sync
+            self.input_splits = (
+                num_tokens_per_expert.view(device_mesh.shape[0], -1).sum(dim=1).tolist()
+            )
+            self.output_splits = (
+                num_tokens_per_expert_group.view(device_mesh.shape[0], -1)
+                .sum(dim=1)
+                .tolist()
+            )
+
+        # perform all-to-all
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct format -- this is done via the function
+        # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
+        # each expert gets locally is a multiple of ALIGN_SIZE_M.
+
+        return routed_input, num_tokens_per_expert_group
+
+    def _partition_fn(self, name, module, device_mesh):
+        # shard on the expert dimension
+        for name, param in module.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            module.register_parameter(name, dist_param)
+
+    # performing all-to-all combine on the output
+    def _prepare_output_fn(self, mod, routed_output, device_mesh):
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+        )
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            self._partition_fn,
+            self._prepare_input_fn,
+            self._prepare_output_fn,
+        )
+
+
+def expert_parallel(func: Callable) -> Callable:
+    def wrapper(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if isinstance(w1, DTensor):
+            w1 = w1.to_local()
+            w2 = w2.to_local()
+            w3 = w3.to_local()
+
+        if num_tokens_per_expert is not None:
+            # NOTE: In order to use torch._grouped_mm, we need to make sure
+            # the number of tokens each expert gets is a multiple of 16.
+            # The following kernel helps achieve this via padding, without
+            # incurring synchronization between device and host.
+            from torchtitan.experiments.kernels.moe.indices import (
+                generate_permute_indices,
+            )
+
+            experts_per_ep_rank = w1.shape[0]
+            num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
+
+            ALIGN_SIZE_M = 16
+            with torch.no_grad():
+                (
+                    permuted_indices,
+                    num_tokens_per_expert,
+                    _,  # offsets,
+                ) = generate_permute_indices(
+                    num_tokens_per_expert,
+                    experts_per_ep_rank,
+                    num_ep_ranks,
+                    ALIGN_SIZE_M,
+                )
+
+            x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
+            input_shape = x.shape
+            x = x[permuted_indices, :]
+
+        out = func(w1, w2, w3, x, num_tokens_per_expert)
+
+        if num_tokens_per_expert is not None:
+            out_unpermuted = out.new_empty(input_shape)
+            out_unpermuted[permuted_indices, :] = out
+            out = out_unpermuted[:-1]
+
+        return out
+
+    return wrapper

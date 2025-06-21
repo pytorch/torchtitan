@@ -41,6 +41,10 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+# For now, we will manually pop the freqs_cis buffer, as we made this permanent
+# temporarily and we don't want to include it in the exported state_dict.
+# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
+excluded_parameters_for_model_only = {"freqs_cis"}
 
 
 class AsyncMode(str, enum.Enum):
@@ -53,7 +57,10 @@ class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cache_state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+            k: v
+            for sd in map(get_model_state_dict, self.model)
+            for k, v in sd.items()
+            if k not in excluded_parameters_for_model_only
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -69,7 +76,10 @@ class ModelWrapper(Stateful):
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
         self.cache_state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
+            k: v
+            for sd in map(get_model_state_dict, self.model)
+            for k, v in sd.items()
+            if k not in excluded_parameters_for_model_only
         }
 
 
@@ -79,12 +89,6 @@ class Terminate:
 
 class SaveDone:
     pass
-
-
-# For now, we will manually pop the freqs_cis buffer, as we made this permanent
-# temporarily and we don't want to include it in the exported state_dict.
-# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-excluded_parameters_for_model_only = {"freqs_cis"}
 
 
 @torch.no_grad()
@@ -568,10 +572,7 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model weights.
         if model_only:
-            sd = self.states[MODEL].state_dict()
-            for k in excluded_parameters_for_model_only:
-                sd.pop(k, None)
-            return sd
+            return {MODEL: self.states[MODEL]}
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
