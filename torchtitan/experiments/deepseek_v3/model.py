@@ -51,11 +51,15 @@ from group_gemms import (
     TorchFP8GroupGEMM,
     TritonCGBF16GroupGEMM,
 )
-
 from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
+
+# blackwell specific
+from torchtitan.experiments.kernels.blackwell.cute_grouped_gemm_fwd import (
+    CUTLASSGroupedGemmStrategy,
+)
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
@@ -474,7 +478,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "cute"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch","torchao", "tritoncg"], blackwell = ["cute"]
 
     def __init__(self, config):
         super().__init__()
@@ -548,6 +552,11 @@ class MoE(nn.Module):
                     MLP.act_fn,
                 )
                 if TritonCGBF16GroupGEMM.is_available()
+                else None
+            ),
+            "cute": (
+                CUTLASSGroupedGemmStrategy(MLP.act_fn)
+                if CUTLASSGroupedGemmStrategy.is_available()
                 else None
             ),
         }
