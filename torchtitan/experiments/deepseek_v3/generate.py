@@ -8,6 +8,7 @@
 
 # use inference.sh "Your Question Here?" to run inference with a single prompt.
 
+import os
 import sys
 from dataclasses import dataclass
 
@@ -353,6 +354,8 @@ def generate_with_cuda_graph(
 
 
 if __name__ == "__main__":
+    rank = int(os.environ.get("RANK", "0"))
+    torch.cuda.set_device(rank)
     # Get user prompt from command line arguments
     user_prompt = "What is 2+2?"  # Default prompt
     if len(sys.argv) > 1:

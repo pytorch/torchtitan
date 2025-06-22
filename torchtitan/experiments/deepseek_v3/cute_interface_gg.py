@@ -131,6 +131,7 @@ class ImprovedCUTLASSGroupedGemmStrategy:
 
     def _initialize_hardware(self):
         """Initialize hardware information and CUDA stream."""
+        # TODO - if we do not have a cuda context, this will fail...
         self.hardware_info = utils.HardwareInfo()
         self.max_active_clusters = self.hardware_info.get_max_active_clusters(
             self.cluster_shape_mn[0] * self.cluster_shape_mn[1]
@@ -152,6 +153,7 @@ class ImprovedCUTLASSGroupedGemmStrategy:
         self, all_weights: List[torch.Tensor], submod_name: str, module
     ) -> torch.Tensor:
         """Store weights in stacked format."""
+        # TODO - let's pre-transsose...
         return torch.stack(all_weights)
 
     def execute(
@@ -237,26 +239,34 @@ class ImprovedCUTLASSGroupedGemmStrategy:
         device: torch.device,
     ) -> torch.Tensor:
         """Execute the complete MoE computation pipeline."""
+        print(f"⚙️  Executing MoE computation on {device}")
+        print(f"Stage 1: Gate and Up projections")
+        if m_sizes_gpu.requires_grad:
+            m_sizes_gpu = m_sizes_gpu.detach()
+            m_offsets_gpu = m_offsets_gpu.detach()
 
         # Stage 1: Gate and Up projections
         gate_outputs, up_outputs = self._execute_gate_up_projections(
             contig_tokens,
-            weights["gate"],
-            weights["up"],
+            weights["gate"].detach(),
+            weights["up"].detach(),
             m_sizes_gpu,
             m_offsets_gpu,
             device,
         )
 
+        print(f"Stage 2: Apply activation and combine")
         # Stage 2: Apply activation and combine
         hidden_states = self._apply_activation_and_combine(gate_outputs, up_outputs)
 
         # Stage 3: Down projection
+        print(f"Stage 3: Down projection")
         down_outputs = self._execute_down_projection(
-            hidden_states, weights["down"], m_sizes_gpu, device
+            hidden_states, weights["down"].detach(), m_sizes_gpu, device
         )
 
         # Stage 4: Reconstruct output
+        print(f"Stage 4: Reconstruct output")
         return self._reconstruct_output(
             down_outputs, contig_tokens, m_sizes_gpu, m_offsets_gpu
         )
@@ -462,7 +472,7 @@ class ImprovedCUTLASSGroupedGemmStrategy:
             tuple(all_problem_sizes[0]), device, self.DTYPE_TORCH
         )
 
-        # Compile and execute kernel
+        # Get or Compile kernel
         compiled_kernel = self._get_or_compile_kernel(
             num_groups,
             total_clusters,
@@ -642,7 +652,7 @@ def test_improved_strategy():
         print("❌ CUTLASS not available for testing")
         return False
 
-    print("🧪 Testing Improved CUTLASS Strategy")
+    print("Testing Improved CUTLASS Strategy")
     print("=" * 50)
 
     # note - we have to make a pytorch cuda context or this will fail
