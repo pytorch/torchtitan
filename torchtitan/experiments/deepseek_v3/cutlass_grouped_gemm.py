@@ -9,12 +9,35 @@ CUTLASS GroupedGEMM Strategy for Blackwell architecture.
 
 This module contains the CUTLASSGroupedGemmStrategy implementation that uses
 CUTLASS GroupedGemmKernel for high-performance group GEMM operations with
-pre-transposed weights and optional input validation.
+minimal CPU-GPU synchronization and optional input validation.
 """
 
 """
-current error:
-The expanded size of the tensor (1408) must match the existing size (2048) at non-singleton dimension 1.  Target sizes: [12288, 1408].  Tensor sizes: [12288, 2048]
+[DEBUG] Gate/Up projection expert 14
+  - expert_tokens: torch.Size([12288, 2048])
+  - gate_weight (after .t()): torch.Size([2048, 1408])
+  - up_weight (after .t()): torch.Size([2048, 1408])
+[DEBUG] Matrix mult: input torch.Size([12288, 2048]) @ weight torch.Size([2048, 1408]) -> output torch.Size([12288, 1408])
+[DEBUG] Gate/Up projection expert 15[DEBUG] Matrix mult: input torch.Size([12288, 2048]) @ weight torch.Size([2048, 1408]) -> output torch.Size([12288, 1408])
+
+  - expert_tokens: torch.Size([12288, 2048])
+  - gate_weight (after .t()): torch.Size([2048, 1408])
+  - up_weight (after .t()): torch.Size([2048, 1408])
+[DEBUG] Matrix mult: input torch.Size([12288, 2048]) @ weight torch.Size([2048, 1408]) -> output torch.Size([12288, 1408])
+[DEBUG] Matrix mult: input torch.Size([12288, 2048]) @ weight torch.Size([2048, 1408]) -> output torch.Size([12288, 1408])
+down projection:
+[DEBUG] Down projection expert 10[DEBUG] Matrix mult: input torch.Size([12288, 1408]) @ weight torch.Size([1408, 2048]) -> output torch.Size([12288, 2048])
+
+[DEBUG] Down projection expert 10
+  - hidden: torch.Size([12288, 1408])
+  - hidden: torch.Size([12288, 1408])  - down_weight (after .t()): torch.Size([1408, 2048])
+
+  - down_weight (after .t()): torch.Size([1408, 2048])
+[DEBUG] Matrix mult: input torch.Size([12288, 1408]) @ weight torch.Size([1408, 2048]) -> output torch.Size([12288, 2048])
+[DEBUG] Matrix mult: input torch.Size([12288, 1408]) @ weight torch.Size([1408, 2048]) -> output torch.Size([12288, 2048])
+
+
+
 
 """
 
@@ -40,7 +63,7 @@ except ImportError as e:
     print(f"✗ CUTLASS import failed: {e}")
     print("CUTLASSGroupedGemmStrategy will not be available")
 
-# Import base class
+# Import base class - adjust path as needed based on your project structure
 from .group_gemms import GroupGEMMStrategy
 
 logger = logging.getLogger(__name__)
@@ -50,19 +73,6 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
     """
     Strategy using CUTLASS GroupedGemmKernel for group GEMM operations on Blackwell architecture.
 
-    This version is optimized for minimal CPU-GPU synchronization with the following features:
-    - Pre-transposed weights during arrangement (eliminates runtime transpose overhead)
-    - GPU-first processing with batched CPU transfers when unavoidable
-    - Deferred synchronization until absolutely necessary for control flow
-    - Filtered operations on GPU before any CPU transfer
-    - Optional input validation that can be disabled for production performance
-
-    Sync Optimization Strategy:
-    - Keep all computations on GPU as long as possible
-    - Batch multiple CPU transfers into single operations
-    - Filter invalid/empty data on GPU before CPU transfer
-    - Use GPU tensor operations instead of CPU iteration where possible
-    - Only sync when control flow decisions are absolutely required
     """
 
     # Constants for Blackwell architecture support
@@ -94,9 +104,9 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         custom_activation,
         use_2cta_instrs=True,
         mma_tiler_mn=(256, 128),
-        cluster_shape_mn=(4, 4),
-        validate=True,
-        debug_shapes=True,
+        cluster_shape_mn=(2, 2),
+        validate=False,
+        debug_shapes=False,
     ):
         """
         Initialize the CUTLASS grouped GEMM strategy for Blackwell architecture.
@@ -112,7 +122,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         super().__init__(custom_activation)
         self.use_2cta_instrs = use_2cta_instrs
         self.validate = validate
-        self.debug_shapes = True  # debug_shapes
+        self.debug_shapes = debug_shapes
 
         # Set configuration
         self.mma_tiler_mn = mma_tiler_mn or self._get_default_mma_tiler()
@@ -212,7 +222,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         logger.info(f"  - MMA tiler (M, N): {self.mma_tiler_mn}")
         logger.info(f"  - Cluster shape (M, N): {self.cluster_shape_mn}")
         logger.info(f"  - Cluster size: {cluster_size}")
-        logger.info(f"  - Pre-transposed weights: Enabled")
+        logger.info(f"  - Weight format: Standard PyTorch (runtime transpose)")
         logger.info(
             f"  - Input validation: {'Enabled' if self.validate else 'Disabled'}"
         )
@@ -232,30 +242,35 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
                     shape_info.append(f"{name}: {tensor.shape}")
                 else:
                     shape_info.append(f"{name}: {type(tensor)}")
-            logger.info(f"[SHAPE DEBUG] {message} - {', '.join(shape_info)}")
+            logger.debug(f"[SHAPE DEBUG] {message} - {', '.join(shape_info)}")
 
     def arrange_expert_weights(self, all_weights, submod_name, module):
-        """Store weights in pre-transposed stacked format for optimal CUTLASS performance."""
-        # Pre-transpose weights from [out_dim, in_dim] to [in_dim, out_dim]
-        # This eliminates the need for transpose operations during execution
+        """Store weights in stacked format (NO transpose - keep original PyTorch format)"""
+        # Keep original weight format for compatibility:
+        # gate/up: [intermediate_size, hidden_size]
+        # down: [hidden_size, intermediate_size]
 
-        # Note: Different projections have different original shapes:
-        # - gate/up: [intermediate_size, hidden_size] -> transpose to [hidden_size, intermediate_size]
-        # - down: [hidden_size, intermediate_size] -> transpose to [intermediate_size, hidden_size]
-        # for w in all_weights:
-        #    print(f"weight shape: {w.shape}, ")
-        # transposed_weights = [w.t().contiguous() for w in all_weights]
-        return torch.stack(all_weights)
+        # DEBUG: Print shapes to verify no transpose
+        print(f"[arrange_expert_weights] Processing {submod_name}")
+        for i, w in enumerate(all_weights):
+            print(f"[arrange_expert_weights] {submod_name} expert {i}: {w.shape}")
+
+        # NO TRANSPOSE - just stack the original weights
+        stacked = torch.stack(all_weights)
+        print(
+            f"[arrange_expert_weights] {submod_name} final stacked shape: {stacked.shape}"
+        )
+        return stacked
 
     def execute(self, contig_tokens, m_sizes, m_offsets, module):
         """
-        Execute using CUTLASS grouped GEMM kernel with pre-transposed weights.
+        Execute using CUTLASS grouped GEMM kernel with standard PyTorch weight format.
 
         Args:
             contig_tokens: Input tokens arranged contiguously by expert
             m_sizes: Tensor of expert sizes (GPU tensor to avoid sync)
             m_offsets: Tensor of expert offsets (GPU tensor to avoid sync)
-            module: MoE module containing pre-transposed weights
+            module: MoE module containing weights in standard PyTorch format
         """
         # Convert to GPU tensors if needed (avoid CPU-GPU sync)
         m_sizes_gpu, m_offsets_gpu = self._ensure_gpu_tensors(
@@ -266,23 +281,24 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         if self.validate:
             self._validate_inputs(contig_tokens, m_sizes_gpu, module)
 
-        # Get pre-transposed weights and device
+        # Get weights and device
         weights = self._get_weights(module)
         device = contig_tokens.device
 
-        # Debug logging
-        self._debug_log_shapes(
-            "Input tensors",
-            contig_tokens=contig_tokens,
-            gate_weights=weights["gate"],
-            up_weights=weights["up"],
-            down_weights=weights["down"],
-        )
+        # Debug logging - force print for visibility
+        if self.debug_shapes:
+            print(f"[DEBUG] Input tensors - contig_tokens: {contig_tokens.shape}")
+            print(f"[DEBUG] Gate weights: {weights['gate'].shape}")
+            print(f"[DEBUG] Up weights: {weights['up'].shape}")
+            print(f"[DEBUG] Down weights: {weights['down'].shape}")
+            print(f"[DEBUG] m_sizes_gpu: {m_sizes_gpu}")
+            print(f"[DEBUG] m_offsets_gpu: {m_offsets_gpu}")
 
-        # Prepare output tensor
+        # Prepare output tensor - use down projection weight shape for final output size
+        # Down weights are [num_experts, hidden_size, intermediate_size], so output is hidden_size
         output = torch.zeros(
             contig_tokens.shape[0],
-            weights["gate"].shape[2],  # output dimension is now last dimension
+            weights["down"].shape[1],  # hidden_size from down projection
             dtype=self.DTYPE_TORCH,
             device=device,
         )
@@ -294,7 +310,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         if not has_valid_experts.item():
             return output
 
-        # Execute the three-stage computation using GPU-only operations with pre-transposed weights
+        # Execute the three-stage computation using GPU-only operations
         gate_outputs, up_outputs = self._execute_projections_gpu(
             contig_tokens,
             weights["gate"],
@@ -363,22 +379,24 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
             if not hasattr(module, param) or module.get_parameter(param) is None:
                 raise ValueError(f"Module missing required parameter: {param}")
 
-        # Note: Avoid checking tensor values or sizes that would require GPU sync
-
     def _get_weights(self, module):
-        """Extract and return pre-transposed weight tensors from module."""
+        """Extract and return weight tensors from module (original format, not transposed)."""
         return {
             "gate": module.get_parameter(
                 "gate_proj_weight"
-            ),  # [num_experts, in_dim, out_dim]
-            "up": module.get_parameter("up_proj_weight"),
-            "down": module.get_parameter("down_proj_weight"),
+            ),  # [num_experts, intermediate_size, hidden_size]
+            "up": module.get_parameter(
+                "up_proj_weight"
+            ),  # [num_experts, intermediate_size, hidden_size]
+            "down": module.get_parameter(
+                "down_proj_weight"
+            ),  # [num_experts, hidden_size, intermediate_size]
         }
 
     def _execute_projections_gpu(
         self, input_tokens, weight1, weight2, m_sizes_gpu, m_offsets_gpu, device
     ):
-        """Execute gate and up projections using GPU-only operations with pre-transposed weights."""
+        """Execute gate and up projections using GPU-only operations."""
         # Find valid experts using GPU operations
         valid_mask = m_sizes_gpu > 0
         valid_indices = torch.nonzero(valid_mask, as_tuple=True)[0]
@@ -458,13 +476,33 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         for expert_idx, size, offset in zip(indices_list, sizes_list, offsets_list):
             # Get expert data
             expert_tokens = input_tokens[offset : offset + size].contiguous()
-            # Pre-transposed weights: [in_dim, out_dim] - no transpose needed
-            gate_weight = gate_weights[expert_idx].contiguous()
-            up_weight = up_weights[expert_idx].contiguous()
+            # Original weight format: gate/up are [intermediate_size, hidden_size]
+            # Need to transpose for matrix multiplication: tokens @ weight.t()
+            gate_weight = (
+                gate_weights[expert_idx].t().contiguous()
+            )  # [hidden_size, intermediate_size]
+            up_weight = (
+                up_weights[expert_idx].t().contiguous()
+            )  # [hidden_size, intermediate_size]
 
-            M, K = expert_tokens.shape
-            N = gate_weight.shape[1]  # output dimension is now second dimension
-            L = 1
+            if self.debug_shapes:
+                print(f"[DEBUG] Gate/Up projection expert {expert_idx}")
+                print(f"  - expert_tokens: {expert_tokens.shape}")
+                print(f"  - gate_weight (after .t()): {gate_weight.shape}")
+                print(f"  - up_weight (after .t()): {up_weight.shape}")
+
+            M, K = expert_tokens.shape  # M = batch_size, K = hidden_size
+            K_weight, N = (
+                gate_weight.shape
+            )  # K_weight = hidden_size, N = intermediate_size
+
+            # Verify dimension compatibility
+            if K != K_weight:
+                raise ValueError(
+                    f"Dimension mismatch in gate/up projections: "
+                    f"input tokens have {K} features but weight expects {K_weight}. "
+                    f"Tokens shape: {expert_tokens.shape}, Gate weight shape: {gate_weight.shape}"
+                )
 
             # Create output tensors
             gate_output = torch.empty(M, N, dtype=self.DTYPE_TORCH, device=device)
@@ -490,7 +528,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
     def _execute_down_projection_gpu(
         self, hidden_states, down_weights, m_sizes_gpu, device
     ):
-        """Execute down projection using GPU operations with pre-transposed weights."""
+        """Execute down projection using GPU operations."""
         if not hidden_states:
             return []
 
@@ -536,15 +574,16 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         for i, expert_idx in enumerate(valid_indices_cpu):
             if i < num_hidden_states:
                 hidden = hidden_states[i]
-                # Pre-transposed down weights: original [hidden_size, intermediate_size] -> [intermediate_size, hidden_size]
-                down_weight = down_weights[expert_idx].contiguous()
+                # Original down weight format: [hidden_size, intermediate_size]
+                # Need to transpose for matrix multiplication: hidden @ weight.t()
+                down_weight = (
+                    down_weights[expert_idx].t().contiguous()
+                )  # [intermediate_size, hidden_size]
 
-                # Debug logging
-                self._debug_log_shapes(
-                    f"Down projection expert {expert_idx}",
-                    hidden=hidden,
-                    down_weight=down_weight,
-                )
+                if self.debug_shapes:
+                    print(f"[DEBUG] Down projection expert {expert_idx}")
+                    print(f"  - hidden: {hidden.shape}")
+                    print(f"  - down_weight (after .t()): {down_weight.shape}")
 
                 M, K = hidden.shape  # M = batch_size, K = intermediate_size
                 K_weight, N = (
@@ -584,12 +623,18 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         strides_abc,
         ptrs_abc,
     ):
-        """Add a single projection to the metadata lists (assumes pre-transposed weights)."""
+        """Add a single projection to the metadata lists (weights are transposed at call site)."""
         M, K = input_tensor.shape  # M = batch_size, K = input_features
         K_weight, N = (
             weight_tensor.shape
         )  # K_weight = input_features, N = output_features
         L = 1
+
+        # Debug print
+        if self.debug_shapes:
+            print(
+                f"[DEBUG] Matrix mult: input {input_tensor.shape} @ weight {weight_tensor.shape} -> output {output_tensor.shape}"
+            )
 
         # Verify dimension compatibility for matrix multiplication
         if K != K_weight:
@@ -693,7 +738,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
 
         if cache_key not in self._compiled_kernels:
             logger.info(
-                f"Compiling CUTLASS grouped GEMM kernel: {num_groups} groups, 2CTA={self.use_2cta_instrs}, cluster={self.cluster_shape_mn}, Pre-transposed weights"
+                f"Compiling CUTLASS grouped GEMM kernel: {num_groups} groups, 2CTA={self.use_2cta_instrs}, cluster={self.cluster_shape_mn}"
             )
 
             self._compiled_kernels[cache_key] = cute.compile(
@@ -716,12 +761,12 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         """Create initial CUTE tensors for kernel compilation."""
         M, N, K, L = problem_shape
 
-        # Create tensors with pre-transposed weight layout
+        # Create tensors with standard PyTorch layout (weights will be transposed at runtime)
         tensors = [
             torch.randn(M, K, dtype=self.DTYPE_TORCH, device=device),  # A (input)
             torch.randn(
                 K, N, dtype=self.DTYPE_TORCH, device=device
-            ),  # B (pre-transposed weight)
+            ),  # B (transposed weight)
             torch.zeros(M, N, dtype=self.DTYPE_TORCH, device=device),  # C (output)
         ]
 
