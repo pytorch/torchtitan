@@ -528,7 +528,7 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
             tensormap_cute,
             self.stream,
         )
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
 
     def _convert_to_cute_tensors(self, problem_sizes, strides_abc, ptrs_abc, device):
         """Convert metadata to CUTE tensors."""
