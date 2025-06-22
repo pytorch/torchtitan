@@ -135,7 +135,9 @@ def _register_parametrization(
     get_model_state_dict func in torchtitan's torchtitan/components/checkpoint.py.
     """
     param_name_to_property = {
-        param_name: property(lambda self: parametrization(self._parameters[param_name]))
+        param_name: property(
+            lambda self, pn=param_name: parametrization(self._parameters[pn])
+        )
         for param_name in param_names
     }
     module_cls = type(
