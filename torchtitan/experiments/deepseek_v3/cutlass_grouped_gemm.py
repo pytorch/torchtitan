@@ -41,6 +41,12 @@ down projection:
 
 """
 
+# Disable file caching while keeping in-memory cache available, defaults to False.
+# export CUTE_DSL_DISABLE_FILE_CACHING=True
+
+# Maximum number of cache files allowed, defaults to 1000.
+# export CUTE_DSL_FILE_CACHING_CAPACITY=1000
+
 import logging
 
 import torch
