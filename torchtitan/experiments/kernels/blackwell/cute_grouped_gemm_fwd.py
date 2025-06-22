@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
     Strategy using CUTLASS GroupedGemmKernel for group GEMM operations on Blackwell.
 
@@ -467,10 +473,12 @@ class CUTLASSGroupedGemmStrategy(GroupGEMMStrategy):
         num_groups = len(problem_sizes)
 
         # Convert to CUTE tensors using improved converter
-        problem_sizes_cute, strides_cute, ptrs_cute = (
-            self.converter.create_metadata_tensors(
-                problem_sizes, strides_abc, ptrs_abc, device
-            )
+        (
+            problem_sizes_cute,
+            strides_cute,
+            ptrs_cute,
+        ) = self.converter.create_metadata_tensors(
+            problem_sizes, strides_abc, ptrs_abc, device
         )
 
         # Get other required components
