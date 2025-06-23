@@ -45,7 +45,9 @@ import torch.utils.checkpoint
 from attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from group_gemms import (
+    # CUTLASSGroupedGemmStrategy,
     DSGroupGEMM,
+    ManualLoopGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
@@ -56,6 +58,14 @@ from model_config import ModelArgs
 from symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
+
+from torchtitan.experiments.deepseek_v3.cute_interface_gg import (
+    ImprovedCUTLASSGroupedGemmStrategy,
+)
+
+from torchtitan.experiments.deepseek_v3.cutlass_grouped_gemm import (
+    CUTLASSGroupedGemmStrategy,
+)
 
 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 from torchtitan.experiments.kernels.triton_mg_group_gemm.torchao_pr import ALIGN_SIZE_M
@@ -474,7 +484,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "cutlass"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["manual", "torch", , "torchao", "tritoncg"] "cutlass", "improvedCutlass"
 
     def __init__(self, config):
         super().__init__()
@@ -548,6 +558,17 @@ class MoE(nn.Module):
                     MLP.act_fn,
                 )
                 if TritonCGBF16GroupGEMM.is_available()
+                else None
+            ),
+            "manual": ManualLoopGroupGEMM(MLP.act_fn),
+            "cutlass": (
+                CUTLASSGroupedGemmStrategy(MLP.act_fn)
+                if CUTLASSGroupedGemmStrategy.is_available()
+                else None
+            ),
+            "improvedCutlass": (
+                ImprovedCUTLASSGroupedGemmStrategy(MLP.act_fn)
+                if ImprovedCUTLASSGroupedGemmStrategy.is_available()
                 else None
             ),
         }
@@ -856,6 +877,7 @@ class MoE(nn.Module):
 
         # Prepare buffer for tokens processed by experts
         processed_tokens = self.get_gather_buf()
+        # processed_tokens.to("cuda")
 
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs
