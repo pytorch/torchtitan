@@ -310,11 +310,10 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
-        self.layers = torch.nn.ModuleList()
+        self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers.append(
-                TransformerBlock(layer_id=layer_id, model_args=model_args)
-            )
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
             model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
@@ -333,7 +332,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         """
         h = self.tok_embeddings(tokens)
 
-        for layer in self.layers:
+        for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
         h = self.norm(h)
         output = self.output(h)  # (batch_size, seq_len, dim)

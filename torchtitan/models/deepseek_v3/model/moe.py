@@ -317,6 +317,8 @@ class MoE(nn.Module):
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
+        # Convert the routed_output to the same dtype as out
+        routed_output = routed_output.to(out.dtype)
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out
