@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .args import DeepseekV3ModelArgs
+from .args import DeepSeekV3ModelArgs
 
 
 # Reference: torchtitan/experiments/llama4/model/
@@ -103,6 +103,7 @@ class TokenChoiceTopKRouter(nn.Module):
 
     def __init__(
         self,
+        dim: int,
         num_experts: int,
         top_k: int,
         use_sigmoid: bool = False,
@@ -110,14 +111,13 @@ class TokenChoiceTopKRouter(nn.Module):
     ):
         super().__init__()
 
+        self.dim = dim
         self.num_experts = num_experts
         self.top_k = top_k
         self.use_sigmoid = use_sigmoid
         self.route_sclaing_factor = route_sclaing_factor
 
-        self.weight = nn.Parameter(
-            torch.empty((self.n_routed_experts, self.gating_dim))
-        )
+        self.weight = nn.Parameter(torch.empty((self.num_experts, self.dim)))
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor = None
@@ -138,7 +138,7 @@ class TokenChoiceTopKRouter(nn.Module):
                 Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = F.linear(x.type, self.weight, None)
+        scores = F.linear(x, self.weight, bias=None)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.use_sigmoid:
@@ -176,7 +176,7 @@ class TokenChoiceTopKRouter(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs):
 
         super().__init__()
         dim = model_args.dim
@@ -194,6 +194,7 @@ class MoE(nn.Module):
             use_grouped_mm=self.use_grouped_mm,
         )
         self.router = TokenChoiceTopKRouter(
+            dim=dim,
             num_experts=num_experts,
             top_k=top_k,
             use_sigmoid=model_args.score_func == "sigmoid",
