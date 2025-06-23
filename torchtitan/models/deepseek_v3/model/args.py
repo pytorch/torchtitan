@@ -15,11 +15,12 @@ from torch import nn
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
+from torchtitan.tools.logging import logger
 
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
 @dataclass
-class DeepseekV3ModelArgs(BaseModelArgs):
+class DeepSeekV3ModelArgs(BaseModelArgs):
     """
     Data class for defining model arguments and hyperparameters.
 
@@ -53,7 +54,6 @@ class DeepseekV3ModelArgs(BaseModelArgs):
         rope_factor (float): Scaling factor for extended sequence lengths.
         beta_fast (int): Fast beta correction factor.
         beta_slow (int): Slow beta correction factor.
-        mscale (float): Scaling factor for extended attention.
     """
 
     max_batch_size: int = 8
@@ -95,12 +95,63 @@ class DeepseekV3ModelArgs(BaseModelArgs):
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         """
-        TODO: Placeholder for now
+        Update the model_config config from the given job config.
         """
-        pass
+        self.vocab_size = tokenizer.n_words
+        self.max_seq_len = job_config.training.seq_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """
-        TODO: Placeholder for now
+        Adopted from llama4 implementation.
         """
-        return 0, 0
+        nparams_embedding = 0
+        nparams_moe_router = 0
+        nparams_shared_expert = 0
+        nparams_experts = 0
+        nparams_dense = 0
+
+        for name, p in model.named_parameters():
+            print(name)
+            if "embedding" in name:
+                nparams_embedding += p.numel()
+                nparams_dense += p.numel()
+            elif "moe.shared_expert" in name:
+                nparams_shared_expert += p.numel()
+            elif "moe.router" in name:
+                nparams_moe_router += p.numel()
+            elif "moe.experts" in name:
+                nparams_experts += p.numel()
+            else:
+                nparams_dense += p.numel()
+
+        nparams_sparse = nparams_moe_router + nparams_shared_expert + nparams_experts
+        nparams = nparams_dense + nparams_sparse
+        nparams_sparse_active = (
+            nparams_moe_router
+            + nparams_shared_expert
+            + nparams_experts * self.n_activated_experts // self.n_routed_experts
+        )
+
+        logger.info(
+            f"Total parameter count: dense {nparams_dense:,}, "
+            f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
+        )
+
+        l, h, q, t = (
+            self.n_layers,
+            self.n_heads,
+            self.dim // self.n_heads,
+            seq_len,
+        )
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
+        num_flops_per_token = (
+            6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+            + 12 * l * h * q * t
+        )
+
+        return nparams, num_flops_per_token
