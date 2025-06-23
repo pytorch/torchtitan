@@ -13,17 +13,17 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import DeepseekV3ModelArgs
+from .args import DeepSeekV3ModelArgs
 from .moe import MoE
 
 
-# Adopted from https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
+# Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
+def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
-        args (DeepseekV3ModelArgs): Model arguments containing positional embedding parameters.
+        args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
@@ -98,7 +98,7 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
     # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
 
-    # YaRN scaling for extended context
+    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
     if seqlen > args.original_seq_len:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, args.original_seq_len
@@ -106,8 +106,13 @@ def precompute_freqs_cis(args: DeepseekV3ModelArgs) -> torch.Tensor:
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
+    # Create position indices
     t = torch.arange(seqlen)
+
+    # Outer product: [positions] × [frequencies]
     freqs = torch.outer(t, freqs)
+
+    # Convert to complex exponentials: e^(i*freq*pos)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
 
@@ -135,7 +140,7 @@ class Attention(nn.Module):
     Multi-head attention (MLA) module.
     """
 
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
@@ -264,13 +269,13 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepseekV3ModelArgs):
+    def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
 
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn = (
+        self.moe_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.moe = (
             FeedForward(model_args.dim, model_args.inter_dim)
             if layer_id < model_args.n_dense_layers
             else MoE(model_args)
@@ -288,16 +293,16 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.moe(self.moe_norm(x))
         return x
 
 
-class Transformer(nn.Module, ModelProtocol):
+class DeepSeekV3Model(nn.Module, ModelProtocol):
     """
-    Deepseek-V3 Transformer model with attention and feed-forward layers.
+    DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepseekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs):
         super().__init__()
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
@@ -327,10 +332,11 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         h = self.tok_embeddings(tokens)
+
         for layer in self.layers:
             h = layer(h, self.freqs_cis)
-        h = self.norm(h)[:, -1]
-        output = self.output(h)
+        h = self.norm(h)
+        output = self.output(h)  # (batch_size, seq_len, dim)
         return output
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
