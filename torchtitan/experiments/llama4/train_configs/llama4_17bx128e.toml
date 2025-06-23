@@ -30,7 +30,7 @@ warmup_steps = 600
 lr_min = 0.1
 
 [training]
-batch_size = 1
+local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 3000
@@ -51,7 +51,7 @@ context_parallel_degree = 1
 enable_checkpoint = false
 folder = "checkpoint"
 interval = 500
-model_weights_only = false
+last_save_model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 

@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 @dataclass
 class Training:
     classifer_free_guidance_prob: float = 0.0
-    """Classifier-free guidance with probability p to dropout the text conditioning"""
+    """Classifier-free guidance with probability `p` to dropout each text encoding independently.
+    If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
+    For example, if `n = 2` and `p = 0.447`, the unconditional model is trained in 20% of all steps"""
     img_size: int = 256
     """Image width to sample"""
     test_mode: bool = False

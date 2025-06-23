@@ -12,7 +12,7 @@ from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize_llama import parallelize_llama
+from .infra.parallelize import parallelize_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 

@@ -16,6 +16,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.dataloader import DataloaderStopIteration
+from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -38,6 +40,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     parallel_dims: ParallelDims
     train_spec: train_spec_module.TrainSpec
     world_mesh: torch.distributed.DeviceMesh
+    gradient_accumulation_steps: int
 
     dataloader: train_spec_module.BaseDataLoader
     metrics_processor: train_spec_module.MetricsProcessor
@@ -60,6 +63,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
     def __init__(self, job_config: JobConfig):
+        torch._C._log_api_usage_once("torchtitan.train")
+
         self.job_config = job_config
 
         logger.info(f"Starting job: {job_config.job.description}")
@@ -142,7 +147,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls.from_model_args(model_args)
+            model = model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -182,6 +187,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = None
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
+
+        # verify batch sizes
+        global_batch_size = job_config.training.global_batch_size
+        if global_batch_size < 0:
+            # This global batch size results in 1 gradient accumulation
+            # step.
+            global_batch_size = job_config.training.local_batch_size * dp_degree
+        assert global_batch_size > 0
+        assert (
+            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+        ), (
+            f"global batch size must be multiple of local batch size times "
+            f"data-parallel degree ({global_batch_size} "
+            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+        )
+
+        # calculate gradient accumulation steps
+        self.gradient_accumulation_steps = global_batch_size // (
+            job_config.training.local_batch_size * dp_degree
+        )
+        assert self.gradient_accumulation_steps > 0
+        self.loss_fn = rescale_accumulated_loss(
+            self.loss_fn, self.gradient_accumulation_steps
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -284,11 +313,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallel_dims.loss_parallel_enabled,
             parallelism_config.enable_compiled_autograd,
         )
+        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
+            parallel_dims,
+            job_config.training.mixed_precision_param,
+            device_type,
+        )
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {job_config.training.batch_size}, "
-            f"global batch size {job_config.training.batch_size * dp_degree}, "
+            f"local batch size {job_config.training.local_batch_size}, "
+            f"global batch size {global_batch_size}, "
+            f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})."
@@ -299,8 +334,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
         device_type = utils.device_type
+        data_iterator = iter(data_iterable)
 
-        for batch in iter(data_iterable):
+        while True:
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                # If data runs out during gradient accumulation, that
+                # entire step will not be executed.
+                raise DataloaderStopIteration() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -316,13 +358,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
-    def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):
-        self.optimizers.zero_grad()
-
-        # Keep these variables local to shorten the code as these are
-        # the major variables that are used in the training loop.
+    def forward_backward_step(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> torch.Tensor:
         model_parts = self.model_parts
-        world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
 
         # apply context parallelism if cp is enabled
@@ -330,7 +369,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh=world_mesh["cp"],
+                cp_mesh=self.world_mesh["cp"],
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
@@ -366,14 +405,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
-                loss = self.loss_fn(pred, labels)
+                with self.maybe_enable_amp:
+                    pred = model_parts[0](inputs)
+                    loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
+        return loss
+
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        self.optimizers.zero_grad()
+
+        # Keep these variables local to shorten the code as these are
+        # the major variables that are used in the training loop.
+        parallel_dims = self.parallel_dims
+
+        accumulated_losses = []
+        # If data runs out during gradient accumulation, that
+        # entire step will not be executed.
+        for microbatch in range(self.gradient_accumulation_steps):
+            input_dict, labels = next(data_iterator)
+            loss = self.forward_backward_step(input_dict, labels)
+            accumulated_losses.append(loss.detach())
+
         dist_utils.clip_grad_norm_(
-            [p for m in model_parts for p in m.parameters()],
+            [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
@@ -382,16 +441,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers.step()
         self.lr_schedulers.step()
 
+        # Reduce the data collected over gradient accumulation steps.
+        loss = torch.sum(torch.stack(accumulated_losses))
+
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
 
-        if (
-            parallel_dims.dp_replicate_enabled
-            or parallel_dims.dp_shard_enabled
-            or parallel_dims.cp_enabled
-            or self.ft_manager.enabled
-        ):
+        if parallel_dims.dp_cp_enabled or self.ft_manager.enabled:
             loss = loss.detach()
             # Skip ft manager communication when using semi sync training
             use_ft_pg = (
@@ -400,8 +457,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             ft_pg = self.ft_manager.replicate_pg if use_ft_pg else None
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
-                dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_mean(loss, self.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_max(loss, self.world_mesh["dp_cp"], ft_pg),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -423,17 +480,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ft.maybe_semi_sync_training(
                 job_config,
                 ft_manager=self.ft_manager,
-                model=self.model_parts[0],
+                model_parts=self.model_parts,
                 optimizer=self.optimizers,
-                sync_every=job_config.fault_tolerance.sync_steps,
             ),
         ):
-            for inputs, labels in self.batch_generator(self.dataloader):
-                if self.step >= job_config.training.steps:
-                    break
+            data_iterator = self.batch_generator(self.dataloader)
+            while self.step < job_config.training.steps:
                 self.step += 1
                 self.gc_handler.run(self.step)
-                self.train_step(inputs, labels)
+                try:
+                    self.train_step(data_iterator)
+                except DataloaderStopIteration:
+                    logger.warning("Ran out of data; last step was canceled.")
+                    break
                 self.checkpointer.save(
                     self.step, force=(self.step == job_config.training.steps)
                 )

@@ -122,22 +122,22 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.model_weights_only",
+                    "--checkpoint.last_save_model_weights_only",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "model_weights_only_fp32",
+            "last_save_model_weights_only_fp32",
         ),
         OverrideDefinitions(
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.model_weights_only",
+                    "--checkpoint.last_save_model_weights_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
             "Checkpoint Integration Test - Save Model Weights Only bf16",
-            "model_weights_only_bf16",
+            "last_save_model_weights_only_bf16",
         ),
         OverrideDefinitions(
             [
@@ -493,6 +493,21 @@ def build_test_list():
             ],
             "Float8 emulation test",
             "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    # Local batch size = 8, and `ngpu=2`, so default
+                    # global batch size = 8 * 2 = 16.
+                    # To achieve 2 gradient accumulation steps, multiply
+                    # default global batch size by 2. 16 * 2 = 32.
+                    "--training.local_batch_size 8",
+                    "--training.global_batch_size 32",
+                ],
+            ],
+            "Gradient accumulation",
+            "gradient_accumulation",
+            ngpu=2,
         ),
     ]
     return integration_tests_flavors

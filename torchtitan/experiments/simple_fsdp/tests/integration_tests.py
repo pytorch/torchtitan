@@ -75,20 +75,19 @@ def build_test_list():
         #     "2D async TP",
         #     "2d_asynctp",
         # ),
-        # TODO: Adds back after DCP is supported by SimpleFSDP
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #         ],
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #             "--training.steps 20",
-        #         ],
-        #     ],
-        #     "Checkpoint Integration Test - Save Load Full Checkpoint",
-        #     "full_checkpoint",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 20",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Load Full Checkpoint",
+            "full_checkpoint",
+        ),
         OverrideDefinitions(
             [
                 [
@@ -131,7 +130,7 @@ def build_test_list():
             "hsdp",
             ngpu=4,
         ),
-        # TODO: Adds back after HSDP+TP & DDP+TP is supported by SimpleFSDP
+        # TODO: Adds back after HSDP+TP is supported by SimpleFSDP
         # OverrideDefinitions(
         #     [
         #         [
@@ -144,17 +143,17 @@ def build_test_list():
         #     "hsdp+tp",
         #     ngpu=8,
         # ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #         ]
-        #     ],
-        #     "DDP+TP",
-        #     "ddp+tp",
-        #     ngpu=4,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "DDP+TP",
+            "ddp+tp",
+            ngpu=4,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -179,33 +178,32 @@ def build_test_list():
             "fsdp+tp+cp",
             ngpu=8,
         ),
-        # TODO: Adds back after DCP is supported by SimpleFSDP
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #             "--training.steps 10",
-        #         ],
-        #         # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-        #         # excluded during loading to avoid errors caused by mismatched dp_degree.
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #             "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-        #             "--parallelism.tensor_parallel_degree 2",
-        #             "--training.steps 20",
-        #         ],
-        #         # load at [tp:4].
-        #         [
-        #             "--checkpoint.enable_checkpoint",
-        #             "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-        #             "--parallelism.tensor_parallel_degree 4",
-        #             "--training.steps 30",
-        #         ],
-        #     ],
-        #     "Optional checkpoint",
-        #     "optional_checkpoint",
-        #     ngpu=4,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 10",
+                ],
+                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
+                # excluded during loading to avoid errors caused by mismatched dp_degree.
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+                # load at [tp:4].
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--parallelism.tensor_parallel_degree 4",
+                    "--training.steps 30",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 

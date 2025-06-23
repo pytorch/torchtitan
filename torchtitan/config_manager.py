@@ -126,8 +126,15 @@ class Optimizer:
     lr: float = 8e-4
     """Learning rate to use"""
 
+    beta1: float = 0.9
+    beta2: float = 0.95
+    """Exponential moving average hyperparameters to use"""
+
     eps: float = 1e-8
     """Epsilon value to use"""
+
+    weight_decay: float = 0.1
+    """Weight decay to use"""
 
     implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     """
@@ -189,8 +196,13 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
-    batch_size: int = 8
-    """Batch size"""
+    local_batch_size: int = 8
+    """Local batch size (i.e., per-device batch size)"""
+
+    global_batch_size: int = -1
+    """
+    Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
+    """
 
     seq_len: int = 2048
     """Sequence length"""
@@ -208,8 +220,10 @@ class Training:
 
     mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
     """
-    torch dtype to use for parameters when applying mixed precision via FSDP.
-    This feature only takes effect when data_parallel_shard_degree > 1
+    torch dtype to use for parameters when applying mixed precision via fully_shard or torch.autocast.
+    This feature takes effect via fully_shard when data_parallel_shard_degree > 1 or
+    context_parallel_degree > 1; it takes effect via torch.autocast when data_replicate_degree >= 1
+    and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
     mixed_precision_reduce: Literal["float32"] = "float32"
@@ -333,7 +347,7 @@ class Parallelism:
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
-    This value is used to compute the total number of microbatches by dividing batch_size with
+    This value is used to compute the total number of microbatches by dividing local_batch_size with
     pipeline_parallel_microbatch_size.
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
@@ -361,21 +375,47 @@ class Checkpoint:
     When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
+    initial_load_path: str | None = None
+    """
+    This option specifies the path to the initial checkpoint to load, which is
+    particularly useful for resuming training from a previous run with a
+    different output path or when loading a checkpoint from a pre-trained model.
+    If the checkpoint folder for the current run is not empty,
+    located at {--job.dump_folder}/{--checkpoint.folder}, this option will be ignored.
+    This feature allows users to load an initial checkpoint from a different folder and
+    continue training, saving new checkpoints to the specified folder without affecting
+    the existing ones.
+
+    Note that the path should contain the full path to the checkpoint folder,
+    including the step number, if any; for example,
+    "//pre_train/checkpoints/llama3/llama3_8b/step_10000".
+    """
+
+    initial_load_model_weights_only: bool = True
+    """
+    This option specifies if only the model weights should be loaded during the initial
+    checkpoint load. The option is only used when `initial_load_path` is specified.
+    If False, the checkpoint at `initial_load_path` is treated as a standard training
+    checkpoint, including optimizer and training states.
+    The default setting for this option is True. Note that you will have to use
+    `--checkpoint.no_initial_load_model_weights_only` to override the default setting.
+    """
+
     interval: int = 500
     """Checkpointing interval in steps."""
 
-    model_weights_only: bool = False
+    last_save_model_weights_only: bool = False
     """
-    When model_weights_only=True, only model weights will be saved at the end of training.
-    With this, checkpoints can be loaded using `torch.load(..., weights_only=True)` after conversion.
-    When model_weights_only=False, the full checkpoint will be saved.
+    When last_save_model_weights_only=True, only model weights will be saved at the end of training,
+    the last save.  With this, checkpoints can be loaded using `torch.load(..., weights_only=True)`
+    after conversion.  When last_save_model_weights_only=False, the full checkpoint will be saved.
     A full checkpoint includes model, optimizer and train_state, which can be used to resume training.
     The default value is false.
     """
 
     export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     """
-    Converts to the specified precision when training completes and model_weights_only=true.
+    Converts to the specified precision when training completes and last_save_model_weights_only=true.
     """
 
     create_seed_checkpoint: bool = False
@@ -417,6 +457,14 @@ class Checkpoint:
     Exclude specific keys from being loaded from the checkpoint.
     Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
     This will load the model only, excluding the specified keys.
+    """
+
+    enable_first_step_checkpoint: bool = False
+    """
+    Enable the checkpoint save at first step. This will save a checkpoint immediately
+    after the first step to ensure checkpointing functions correctly. This is useful
+    when running on a new cluster or storage to verify checkpointing without waiting
+    for many steps or checkpointing too frequently. The default value is False.
     """
 
 
@@ -542,6 +590,43 @@ class FaultTolerance:
     """
     Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
     is set.
+    """
+
+    should_quantize: bool = False
+    """
+    Whether to quantize the gradients before allreduce.
+
+    Disabled by default since the quantization does utilize the GPU
+    and uses more collectives. Enabling this requires knowing about
+    the tradeoffs between GPU utilization and communication.
+
+
+    This is only used when "semi_sync_method" is set.
+    """
+
+    fragment_sync_delay: int = 0
+    """
+    Controls the number of inner steps to wait before blocking on a
+    model fragment's synchronization. This is the "tao" parameter in
+    the Streaming DiLoCo paper.
+
+    By default, each model fragment will be synced at the same step
+    at which the allreduce is issued. Enabling delay can improve
+    communication and computation overlap, but at the cost of compromising
+    model quality
+
+    This is only used when "semi_sync_method" is set.
+    """
+
+    fragment_update_alpha: float = 0.0
+    """
+    Determines how to mix the local and global optimized parameters
+
+    By default, we just use the global parameters. This ensures all
+    DDP replicas have the same parameters after syncrhonizing on
+    the fragment. Tuning this can also affect the model quality.
+
+    This is only used when "semi_sync_method" is set.
     """
 
 

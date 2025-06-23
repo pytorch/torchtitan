@@ -205,9 +205,15 @@ class FluxDataset(IterableDataset, Stateful):
     def __iter__(self):
         dataset_iterator = self._get_data_iter()
         while True:
+            # TODO: Add support for robust data loading and error handling.
+            # Currently, we assume the dataset is well-formed and does not contain corrupted samples.
+            # If a corrupted sample is encountered, the program will crash and throw an exception.
+            # You can NOT try to catch the exception and continue, becuase the iterator within dataset
+            # is not broken after raising an exception, so calling next() will thorw StopIteration and might cause re-loop.
             try:
                 sample = next(dataset_iterator)
             except StopIteration:
+                # We are asumming the program hits here only when reaching the end of the dataset.
                 if not self.infinite:
                     logger.warning(
                         f"Dataset {self.dataset_name} has run out of data. \
@@ -220,13 +226,6 @@ class FluxDataset(IterableDataset, Stateful):
                     logger.info(f"Dataset {self.dataset_name} is being re-looped.")
                     dataset_iterator = self._get_data_iter()
                     continue
-            except (UnicodeDecodeError, SyntaxError, OSError) as e:
-                # Handle other exception, eg, dataset corruption
-                logger.warning(
-                    f"Dataset {self.dataset_name} has error while loading batch data. \
-                    Error {type(e).__name__}: {e}. The error could be the result of a streaming glitch."
-                )
-                continue
 
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
@@ -249,6 +248,7 @@ class FluxDataset(IterableDataset, Stateful):
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:
                     sample_dict["t5_tokens"] = self._t5_empty_token
+                if torch.rand(1).item() < dropout_prob:
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
             self._sample_idx += 1
@@ -277,7 +277,7 @@ def build_flux_dataloader(
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.batch_size
+    batch_size = job_config.training.local_batch_size
 
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(job_config)
 
