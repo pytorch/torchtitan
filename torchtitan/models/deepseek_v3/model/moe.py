@@ -307,7 +307,9 @@ class MoE(nn.Module):
 
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_local_tokens_per_expert)
-        routed_output = routed_output * top_scores.unsqueeze(-1)
+        routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
+            x.dtype
+        )
 
         # shared expert
         if self.shared_expert is not None:
