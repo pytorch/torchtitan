@@ -15,12 +15,12 @@ from typing import cast, Literal
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
 
-class TikTokenizer(Tokenizer):
+class TikTokenizer(BaseTokenizer):
     """
     Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
 
@@ -85,8 +85,8 @@ class TikTokenizer(Tokenizer):
         self,
         s: str,
         *,
-        bos: bool,
-        eos: bool,
+        bos: bool = True,
+        eos: bool = True,
         allowed_special: Literal["all"] | AbstractSet[str] | None = None,
         disallowed_special: Literal["all"] | Collection[str] | None = None,
     ) -> list[int]:

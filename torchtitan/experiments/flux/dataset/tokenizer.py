@@ -11,13 +11,13 @@
 from typing import List
 
 import torch
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 from transformers import CLIPTokenizer, T5Tokenizer
 
 
-class FluxTestTokenizer(Tokenizer):
+class FluxTestTokenizer(BaseTokenizer):
     """
     Flux Tokenizer for test purpose. This is a simple wrapper around the TikTokenizer,
      to make it has same interface as the T5 and CLIP tokenizer used for Flux.
@@ -58,7 +58,7 @@ class FluxTestTokenizer(Tokenizer):
         return self.tiktokenizer.decode(t)
 
 
-class FluxTokenizer(Tokenizer):
+class FluxTokenizer(BaseTokenizer):
     """
     Tokenizing and encoding/decoding text using the T5 or Clip tokenizer.
 
@@ -108,7 +108,7 @@ class FluxTokenizer(Tokenizer):
         return self._tokenizer.decode(t)
 
 
-def build_flux_tokenizer(job_config: JobConfig) -> tuple[Tokenizer, Tokenizer]:
+def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseTokenizer]:
     """
     Build the tokenizer for Flux.
     """

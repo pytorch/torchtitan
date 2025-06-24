@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 
@@ -37,7 +37,9 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+    def update_from_config(
+        self, job_config: JobConfig, tokenizer: BaseTokenizer
+    ) -> None:
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = tokenizer.eos_id

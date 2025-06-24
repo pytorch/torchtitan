@@ -8,13 +8,15 @@
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from tokenizers import AddedToken, Tokenizer as HfTokenizer
+from tokenizers import AddedToken, Tokenizer
+from torchtitan.config_manager import JobConfig
+from torchtitan.tools.logging import logger
 from typing_extensions import override
 
 
-class Tokenizer(ABC):
+class BaseTokenizer(ABC):
     # basic tokenizer interface, for typing purpose mainly
     def __init__(self):
         self._n_words = 8
@@ -33,7 +35,7 @@ class Tokenizer(ABC):
         return self._n_words
 
 
-class HuggingFaceTokenizer(Tokenizer):
+class HuggingFaceTokenizer(BaseTokenizer):
     """
     A tokenizer wrapper that handles BOS/EOS token inference and encoding.
 
@@ -76,7 +78,7 @@ class HuggingFaceTokenizer(Tokenizer):
                 return json.load(f)
         return None
 
-    def _load_tokenizer_from_path(self, tokenizer_path: str) -> HfTokenizer:
+    def _load_tokenizer_from_path(self, tokenizer_path: str) -> Tokenizer:
         """Load tokenizer from various file formats."""
         if not os.path.exists(tokenizer_path):
             raise FileNotFoundError(f"Tokenizer path '{tokenizer_path}' does not exist")
@@ -91,7 +93,7 @@ class HuggingFaceTokenizer(Tokenizer):
             # Strategy 1: Load from tokenizer.json (preferred for modern tokenizers)
             if os.path.exists(tokenizer_json_path):
                 print("Loading tokenizer from tokenizer.json")
-                return HfTokenizer.from_file(tokenizer_json_path)
+                return Tokenizer.from_file(tokenizer_json_path)
             # Strategy 2: Load from vocab files (with or without merges.txt)
             elif os.path.exists(vocab_json_path) or os.path.exists(vocab_txt_path):
                 # Load vocabulary
@@ -130,7 +132,7 @@ class HuggingFaceTokenizer(Tokenizer):
 
                     # Create BPE model
                     bpe_model = BPE(vocab=vocab, merges=merges)
-                    tokenizer = HfTokenizer(bpe_model)
+                    tokenizer = Tokenizer(bpe_model)
 
                     # Configure GPT-2 style components for proper space handling
                     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
@@ -147,7 +149,7 @@ class HuggingFaceTokenizer(Tokenizer):
                     from tokenizers.models import WordLevel
 
                     word_level_model = WordLevel(vocab=vocab, unk_token="[UNK]")
-                    return HfTokenizer(word_level_model)
+                    return Tokenizer(word_level_model)
 
             else:
                 # List available files for debugging
@@ -406,7 +408,9 @@ class HuggingFaceTokenizer(Tokenizer):
         return self.tokenizer.id_to_token(token_id)
 
 
-def build_hf_tokenizer(tokenizer_path: str) -> HuggingFaceTokenizer:
+def build_hf_tokenizer(
+    job_config: JobConfig,
+) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
     """
     Builds a HuggingFaceTokenizer from the specified path.
 
@@ -415,11 +419,19 @@ def build_hf_tokenizer(tokenizer_path: str) -> HuggingFaceTokenizer:
     from various file formats and infers special token behavior.
 
     Args:
-        tokenizer_path (str): Path to the directory containing tokenizer files.
-                             Should contain one or more of the supported file types.
+        JobConfig: A JobConfig object containing the path to the tokenizer directory.
 
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
-    tokenizer = HuggingFaceTokenizer(tokenizer_path)
+    # TODO: legacy code for tokenizer.model case
+    if "tokenizer.model" in job_config.model.tokenizer_path:
+        from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
+        logger.warning(
+            "Please update your config to use the new tokenizer path format, "
+            "tokenizer related files are now stored in separate model directories, redownload using: "
+            "python scripts/download_tokenizer.py --repo_id <repo_id>"
+        )
+        return TikTokenizer(job_config.model.tokenizer_path)
+    tokenizer = HuggingFaceTokenizer(job_config.model.tokenizer_path)
     return tokenizer
