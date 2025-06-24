@@ -7,7 +7,15 @@
 
 from tests.integration_tests import OverrideDefinitions
 
-test_with_rocm = os.getenv("TEST_WITH_ROCM", "0")
+# tests skipped for ROCm
+skip_for_rocm_test_list = [
+    "pp_looped_zero_bubble",
+    "pp_zbv",
+    "pp_custom_csv",
+    "last_save_model_weights_only_bf16",
+    "last_save_model_weights_only_fp32",
+]
+TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
 
 
 def build_features_test_list() -> list[OverrideDefinitions]:
@@ -131,34 +139,28 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
         ),
-    ]
-    # check test_with_rocm
-    if test_with_rocm != "1":
-        integration_tests_flavors["debug_model.toml"].extend([
-            OverrideDefinitions(
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.pipeline_parallel_degree 4",
-                        "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                    ],
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
                 ],
-                "PP looped zero bubble test",
-                "pp_looped_zero_bubble",
-                ngpu=4,
-            ),
-            OverrideDefinitions(
+            ],
+            "PP looped zero bubble test",
+            "pp_looped_zero_bubble",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    ],
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
                 ],
-                "PP zero bubble test (v shaped)",
-                "pp_zbv",
-                ngpu=2,
-            ),
-        ])
-    integration_tests_flavors["debug_model.toml"].extend([
+            ],
+            "PP zero bubble test (v shaped)",
+            "pp_zbv",
+            ngpu=2,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -270,24 +272,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "pp_looped_1f1b",
             ngpu=4,
         ),
-    ])
-    # check test_with_rocm
-    if test_with_rocm != "1":
-        integration_tests_flavors["debug_model.toml"].extend([
-            OverrideDefinitions(
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-                        "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    ],
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
+                    "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
                 ],
-                "PP with custom pipeline schedule loaded from CSV file",
-                "pp_custom_csv",
-                ngpu=2,
-            ),
-        ])
-    integration_tests_flavors["debug_model.toml"].extend([
+            ],
+            "PP with custom pipeline schedule loaded from CSV file",
+            "pp_custom_csv",
+            ngpu=2,
+        ),
         OverrideDefinitions(
             [
                 [
