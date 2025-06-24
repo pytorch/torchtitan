@@ -45,6 +45,17 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    # TODO: TP currently cannot handle uneven seq_len because we set `use_local_output=True`
+    # (to use plain Tensors), which was because of the bug in computation of complex
+    # numbers with DTensors when setting `use_local_output=False`.
+    # See https://github.com/pytorch/pytorch/issues/130646 and
+    # https://github.com/pytorch/torchtitan/issues/1306 for details.
+    assert (
+        job_config.training.seq_len % (parallel_dims.tp * parallel_dims.cp) == 0
+    ), f"""
+        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and CP degree ({parallel_dims.cp}).
+        """
 
     if parallel_dims.tp_enabled:
         if (
