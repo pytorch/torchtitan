@@ -217,6 +217,10 @@ class Attention(nn.Module):
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
+        q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
+        k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
+        v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
+
         # TODO: Need to pass softmax_scale to sdpa() interface.
         # For mask, DeepseekV3 uses causal mask, so we can use the default mask in sdpa
         # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L17
@@ -310,11 +314,10 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
-        self.layers = torch.nn.ModuleList()
+        self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers.append(
-                TransformerBlock(layer_id=layer_id, model_args=model_args)
-            )
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
             model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
@@ -333,7 +336,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         """
         h = self.tok_embeddings(tokens)
 
-        for layer in self.layers:
+        for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
         h = self.norm(h)
         output = self.output(h)  # (batch_size, seq_len, dim)
