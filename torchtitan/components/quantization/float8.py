@@ -114,12 +114,12 @@ class Float8Converter(ModelConverter):
                 self.float8_config.recipe_name,
                 filter_fqns=self.float8_config.filter_fqns,
             )
-            logger.info("Using auto_filter_for_recipe for float8 model conversion.")
+            logger.info("Using _auto_filter_for_recipe for float8 model conversion.")
         except ImportError:
             logger.info(
                 (
                     "Using default module_filter_fn for float8 model conversion. "
-                    "To use auto_filter_for_recipe, please install torchao nightly build."
+                    "To use _auto_filter_for_recipe, please install torchao nightly build."
                 )
             )
             filter_fn = partial(
