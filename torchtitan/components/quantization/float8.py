@@ -107,10 +107,10 @@ class Float8Converter(ModelConverter):
         from torchao.float8 import convert_to_float8_training
 
         try:
-            from torchao.float8.float8_linear_utils import auto_filter_for_recipe
+            from torchao.float8 import _auto_filter_for_recipe
 
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-            filter_fn = auto_filter_for_recipe(
+            filter_fn = _auto_filter_for_recipe(
                 self.float8_config.recipe_name,
                 filter_fqns=self.float8_config.filter_fqns,
             )
