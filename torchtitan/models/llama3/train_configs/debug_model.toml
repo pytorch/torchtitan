@@ -23,8 +23,8 @@ enable_wandb = false
 [model]
 name = "llama3"
 flavor = "debugmodel"
-# test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/test_tiktoken.model"
+# test folder with tokenizer.json, for debug purpose only
+tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]

@@ -162,7 +162,7 @@ def test_generate(
     input_ids = (
         (
             torch.tensor(
-                tokenizer.encode(prompt, bos=True, eos=False), dtype=torch.long
+                tokenizer.encode(prompt, add_bos=True, add_eos=False), dtype=torch.long
             )
             .view(1, -1)
             .repeat(batch_size, 1)

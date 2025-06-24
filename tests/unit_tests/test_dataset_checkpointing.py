@@ -8,9 +8,9 @@ import unittest
 
 import torch
 from datasets import load_dataset
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config_manager import ConfigManager
 from torchtitan.datasets.hf_datasets import build_hf_dataloader, DatasetConfig, DATASETS
-from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -58,7 +58,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
                         assert torch.equal(labels, expected_labels)
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
-        tokenizer = TikTokenizer("./tests/assets/test_tiktoken.model")
+        tokenizer = HuggingFaceTokenizer("./tests/assets/tokenizer")
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [

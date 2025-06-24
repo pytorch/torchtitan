@@ -19,7 +19,7 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 class TestTokenizerIntegration(unittest.TestCase):
@@ -278,7 +278,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         model_name = test_repo_id.split("/")[-1]
         tokenizer_dir = "tokenizer" if model_name == "FLUX.1-dev" else "."
         tokenizer_path = os.path.join(self.temp_dir, model_name, tokenizer_dir)
-        our_tokenizer = build_hf_tokenizer(tokenizer_path)
+        our_tokenizer = HuggingFaceTokenizer(tokenizer_path)
 
         # Step 3: Load tokenizer using official Tokenizer library (if available)
         official_tokenizer = None
@@ -307,101 +307,6 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
             self._compare_tokenizers(
                 our_tokenizer, transformers_tokenizer, test_repo_id
             )
-
-    def test_backward_comptability(self):
-        from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
-
-        # The existing tokenizer lives under assets/original/tokenizer.model
-        # This test ensures that the new tokenizer can load the old tokenizer
-        # and produce the same results
-
-        # Get the base project directory (two levels up from test file)
-        base_project_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        old_tokenizer_path = os.path.join(
-            base_project_dir, "assets", "tokenizer", "original", "tokenizer.model"
-        )
-
-        # Skip test if the old tokenizer path cannot be found
-        if not os.path.exists(old_tokenizer_path):
-            self.skipTest(f"Old tokenizer file not found at {old_tokenizer_path}")
-
-        print(old_tokenizer_path)
-        old_tokenizer = TikTokenizer(old_tokenizer_path)
-
-        # Download and load a new tokenizer for comparison (using Meta-Llama-3.1-8B)
-        test_repo_id = "meta-llama/Meta-Llama-3.1-8B"
-        try:
-            download_hf_tokenizer_files(
-                repo_id=test_repo_id,
-                local_dir=self.temp_dir,
-            )
-
-            # Load the new tokenizer
-            model_name = test_repo_id.split("/")[-1]
-            new_tokenizer_path = os.path.join(self.temp_dir, model_name)
-            new_tokenizer = build_hf_tokenizer(new_tokenizer_path)
-
-            # Compare encoding and decoding functionality only (TikTokenizer doesn't support vocab operations)
-            test_texts = [
-                "Hello world!",
-                "This is a test.",
-                "The quick brown fox jumps over the lazy dog.",
-                "Special characters: @#$%^&*()",
-                "Numbers: 123456789",
-                "Mixed: Hello123 World!@#",
-                "",  # Empty string
-                " ",  # Single space
-                "  ",  # Multiple spaces
-            ]
-
-            for text in test_texts:
-                # Encode with both tokenizers
-                # TikTokenizer requires bos and eos parameters
-                old_tokens = old_tokenizer.encode(text, bos=True, eos=False)
-                # HuggingFaceTokenizer has optional add_bos and add_eos parameters
-                new_tokens = new_tokenizer.encode(text)
-
-                self.assertEqual(
-                    old_tokens,
-                    new_tokens,
-                    f"Encoded tokens should match for text '{text}' in backward compatibility test",
-                )
-
-                # Test decoding
-                old_decoded = old_tokenizer.decode(old_tokens)
-                new_decoded = new_tokenizer.decode(
-                    new_tokens, skip_special_tokens=False
-                )
-
-                self.assertEqual(
-                    old_decoded,
-                    new_decoded,
-                    f"Decoded text should match for '{text}' in backward compatibility test",
-                )
-
-            # Test edge cases
-            edge_cases = [
-                "🚀🌟✨",  # Emojis
-                "café naïve résumé",  # Accented characters
-                "こんにちは世界",  # Non-Latin scripts (Japanese)
-                "Здравствуй мир",  # Cyrillic
-                "\n\t\r",  # Whitespace characters
-                "a"
-                * 100,  # Long repeated character (reduced from 1000 to avoid tiktoken limits)
-            ]
-
-            for text in edge_cases:
-                old_tokens = old_tokenizer.encode(text, bos=True, eos=False)
-                new_tokens = new_tokenizer.encode(text)
-
-                self.assertEqual(
-                    old_tokens,
-                    new_tokens,
-                    f"Edge case tokens should match for text '{text[:50]}...' in backward compatibility test",
-                )
-
-        except HTTPError as e:
-            self.skipTest(f"Could not download new tokenizer for comparison: {e}")
 
 
 instantiate_parametrized_tests(TestTokenizerIntegration)
