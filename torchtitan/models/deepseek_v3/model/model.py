@@ -217,6 +217,10 @@ class Attention(nn.Module):
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
+        q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
+        k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
+        v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
+
         # TODO: Need to pass softmax_scale to sdpa() interface.
         # For mask, DeepseekV3 uses causal mask, so we can use the default mask in sdpa
         # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L17
