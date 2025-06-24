@@ -7,6 +7,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
+# TODO: Refactor this file since we have updated the tokenizer to
+# depend on Hugging Face Tokenizer (https://github.com/pytorch/torchtitan/pull/1333)
+
 import os
 from pathlib import Path
 from typing import (
@@ -28,7 +31,7 @@ import tiktoken
 import torch
 from tiktoken.load import load_tiktoken_bpe
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
@@ -36,7 +39,7 @@ IMAGE_TOKEN_ID = 128256
 IGNORE_INDEX = -100
 
 
-class TikTokenizer(Tokenizer):
+class TikTokenizer(BaseTokenizer):
     """
     Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
 

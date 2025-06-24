@@ -884,7 +884,15 @@ class ConfigManager:
                 self.config.model.tokenizer_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please update your config."
+                    "Please download the new tokenizer model (python scripts/download_tokenizer.py) and update your config."
+                )
+        else:
+            # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
+            if self.config.model.tokenizer_path.endswith("tokenizer.model"):
+                raise Exception(
+                    "You are using the old tokenizer.model, please redownload the tokenizer ",
+                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B) ",
+                    " and update your config to the directory of the downloaded tokenizer.",
                 )
 
     @staticmethod

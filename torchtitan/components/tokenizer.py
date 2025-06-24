@@ -6,18 +6,22 @@
 
 
 import json
+
+import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from tokenizers import AddedToken, Tokenizer as HfTokenizer
+from tokenizers import AddedToken, Tokenizer
+from torchtitan.config_manager import JobConfig
 from typing_extensions import override
 
+logger = logging.getLogger(__name__)
 
-class Tokenizer(ABC):
-    # basic tokenizer interface, for typing purpose mainly
+
+class BaseTokenizer(ABC):
+    # base tokenizer interface, for typing purpose mainly
     def __init__(self):
-        self._n_words = 8
         self.eos_id = 0
 
     @abstractmethod
@@ -28,12 +32,12 @@ class Tokenizer(ABC):
     def decode(self, *args, **kwargs) -> str:
         ...
 
-    @property
-    def n_words(self) -> int:
-        return self._n_words
+    @abstractmethod
+    def get_vocab_size(self) -> int:
+        ...
 
 
-class HuggingFaceTokenizer(Tokenizer):
+class HuggingFaceTokenizer(BaseTokenizer):
     """
     A tokenizer wrapper that handles BOS/EOS token inference and encoding.
 
@@ -49,6 +53,7 @@ class HuggingFaceTokenizer(Tokenizer):
         self,
         tokenizer_path: str,
     ):
+        super().__init__()
         self.tokenizer_path = tokenizer_path
 
         # Initialize BOS/EOS token attributes (frequently used)
@@ -76,7 +81,7 @@ class HuggingFaceTokenizer(Tokenizer):
                 return json.load(f)
         return None
 
-    def _load_tokenizer_from_path(self, tokenizer_path: str) -> HfTokenizer:
+    def _load_tokenizer_from_path(self, tokenizer_path: str) -> Tokenizer:
         """Load tokenizer from various file formats."""
         if not os.path.exists(tokenizer_path):
             raise FileNotFoundError(f"Tokenizer path '{tokenizer_path}' does not exist")
@@ -87,87 +92,79 @@ class HuggingFaceTokenizer(Tokenizer):
         vocab_json_path = os.path.join(tokenizer_path, "vocab.json")
         merges_txt_path = os.path.join(tokenizer_path, "merges.txt")
 
-        try:
-            # Strategy 1: Load from tokenizer.json (preferred for modern tokenizers)
-            if os.path.exists(tokenizer_json_path):
-                print("Loading tokenizer from tokenizer.json")
-                return HfTokenizer.from_file(tokenizer_json_path)
-            # Strategy 2: Load from vocab files (with or without merges.txt)
-            elif os.path.exists(vocab_json_path) or os.path.exists(vocab_txt_path):
-                # Load vocabulary
-                if os.path.exists(vocab_json_path):
-                    print("Loading vocabulary from vocab.json")
-                    with open(vocab_json_path, "r") as f:
-                        vocab = json.load(f)
-                    vocab_source = "vocab.json"
-                else:
-                    print("Loading vocabulary from vocab.txt")
-                    vocab = {}
-                    with open(vocab_txt_path, "r") as f:
-                        for i, line in enumerate(f):
-                            token = line.strip()
-                            if token:
-                                vocab[token] = i
-                    vocab_source = "vocab.txt"
-
-                # Strategy 2a: Use BPE if merges.txt exists
-                if os.path.exists(merges_txt_path):
-                    print(f"Loading BPE tokenizer from {vocab_source} + merges.txt")
-                    from tokenizers import decoders, pre_tokenizers, processors
-                    from tokenizers.models import BPE
-
-                    # Load merges from file and convert to tuples
-                    merges = []
-                    with open(merges_txt_path, "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith(
-                                "#"
-                            ):  # Skip comments and empty lines
-                                parts = line.split()
-                                if len(parts) >= 2:
-                                    merges.append((parts[0], parts[1]))
-
-                    # Create BPE model
-                    bpe_model = BPE(vocab=vocab, merges=merges)
-                    tokenizer = HfTokenizer(bpe_model)
-
-                    # Configure GPT-2 style components for proper space handling
-                    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
-                        add_prefix_space=False
-                    )
-                    tokenizer.decoder = decoders.ByteLevel()
-                    tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
-
-                    return tokenizer
-
-                # Strategy 2b: Use WordLevel if no merges.txt
-                else:
-                    print(f"Loading WordLevel tokenizer from {vocab_source}")
-                    from tokenizers.models import WordLevel
-
-                    word_level_model = WordLevel(vocab=vocab, unk_token="[UNK]")
-                    return HfTokenizer(word_level_model)
-
+        # Strategy 1: Load from tokenizer.json (preferred for modern tokenizers)
+        if os.path.exists(tokenizer_json_path):
+            logger.info("Loading tokenizer from tokenizer.json")
+            return Tokenizer.from_file(tokenizer_json_path)
+        # Strategy 2: Load from vocab files (with or without merges.txt)
+        elif os.path.exists(vocab_json_path) or os.path.exists(vocab_txt_path):
+            # Load vocabulary
+            if os.path.exists(vocab_json_path):
+                logger.info("Loading vocabulary from vocab.json")
+                with open(vocab_json_path, "r") as f:
+                    vocab = json.load(f)
+                vocab_source = "vocab.json"
             else:
-                # List available files for debugging
-                available_files = [
-                    f
-                    for f in os.listdir(tokenizer_path)
-                    if os.path.isfile(os.path.join(tokenizer_path, f))
-                ]
-                raise FileNotFoundError(
-                    f"No supported tokenizer files found in '{tokenizer_path}'. "
-                    f"Available files: {available_files}. "
-                    "Looking for: tokenizer.json, tokenizer.model, vocab.txt+merges.txt, or vocab.json+merges.txt"
-                )
+                logger.info("Loading vocabulary from vocab.txt")
+                vocab = {}
+                with open(vocab_txt_path, "r") as f:
+                    for i, line in enumerate(f):
+                        token = line.strip()
+                        if token:
+                            vocab[token] = i
+                vocab_source = "vocab.txt"
 
-        except Exception as e:
-            if isinstance(e, FileNotFoundError):
-                raise e
-            raise Exception(
-                f"Failed to load tokenizer from '{tokenizer_path}': {e}"
-            ) from e
+            # Strategy 2a: Use BPE if merges.txt exists
+            if os.path.exists(merges_txt_path):
+                logger.info(f"Loading BPE tokenizer from {vocab_source} + merges.txt")
+                from tokenizers import decoders, pre_tokenizers, processors
+                from tokenizers.models import BPE
+
+                # Load merges from file and convert to tuples
+                merges = []
+                with open(merges_txt_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith(
+                            "#"
+                        ):  # Skip comments and empty lines
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                merges.append((parts[0], parts[1]))
+
+                # Create BPE model
+                bpe_model = BPE(vocab=vocab, merges=merges)
+                tokenizer = Tokenizer(bpe_model)
+
+                # Configure GPT-2 style components for proper space handling
+                tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
+                    add_prefix_space=False
+                )
+                tokenizer.decoder = decoders.ByteLevel()
+                tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
+
+                return tokenizer
+
+            # Strategy 2b: Use WordLevel if no merges.txt
+            else:
+                logger.info(f"Loading WordLevel tokenizer from {vocab_source}")
+                from tokenizers.models import WordLevel
+
+                word_level_model = WordLevel(vocab=vocab, unk_token="[UNK]")
+                return Tokenizer(word_level_model)
+
+        else:
+            # List available files for debugging
+            available_files = [
+                f
+                for f in os.listdir(tokenizer_path)
+                if os.path.isfile(os.path.join(tokenizer_path, f))
+            ]
+            raise FileNotFoundError(
+                f"No supported tokenizer files found in '{tokenizer_path}'. "
+                f"Available files: {available_files}. "
+                "Looking for: tokenizer.json, tokenizer.model, vocab.txt+merges.txt, or vocab.json+merges.txt"
+            )
 
     def _get_token_from_config(self, config: dict[str, Any], key: str) -> Optional[str]:
         """
@@ -387,11 +384,11 @@ class HuggingFaceTokenizer(Tokenizer):
     @property
     def vocab_size(self) -> int:
         """Get the vocabulary size."""
-        return len(self.tokenizer.get_vocab())
+        return self.tokenizer.get_vocab_size()
 
     def get_vocab_size(self) -> int:
         """Get the vocabulary size."""
-        return len(self.tokenizer.get_vocab())
+        return self.tokenizer.get_vocab_size()
 
     def get_vocab(self) -> dict[str, int]:
         """Get the vocabulary as a dictionary."""
@@ -406,7 +403,9 @@ class HuggingFaceTokenizer(Tokenizer):
         return self.tokenizer.id_to_token(token_id)
 
 
-def build_hf_tokenizer(tokenizer_path: str) -> HuggingFaceTokenizer:
+def build_hf_tokenizer(
+    job_config: JobConfig,
+) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
     """
     Builds a HuggingFaceTokenizer from the specified path.
 
@@ -415,11 +414,10 @@ def build_hf_tokenizer(tokenizer_path: str) -> HuggingFaceTokenizer:
     from various file formats and infers special token behavior.
 
     Args:
-        tokenizer_path (str): Path to the directory containing tokenizer files.
-                             Should contain one or more of the supported file types.
+        JobConfig: A JobConfig object containing the path to the tokenizer directory.
 
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
-    tokenizer = HuggingFaceTokenizer(tokenizer_path)
+    tokenizer = HuggingFaceTokenizer(job_config.model.tokenizer_path)
     return tokenizer

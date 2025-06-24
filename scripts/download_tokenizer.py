@@ -108,7 +108,7 @@ def download_hf_tokenizer_files(
                 print(f"Successfully downloaded {filename} to {file_path}")
                 downloaded_files.append(filename)
             except HTTPError as e:
-                if e.response.status_code == 404:
+                if e.response and e.response.status_code == 404:
                     print(f"File {filename} not found, skipping...")
                     continue
                 else:
@@ -122,7 +122,7 @@ def download_hf_tokenizer_files(
             print(f"Warning: No tokenizer files could be downloaded from {repo_id}")
 
     except HTTPError as e:
-        if e.response.status_code == 401:
+        if e.response and e.response.status_code == 401:
             print(
                 "You need to pass a valid `--hf_token=...` to download private checkpoints."
             )
