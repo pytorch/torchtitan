@@ -531,7 +531,7 @@ if __name__ == "__main__":
             trainer.checkpointer.states[MODEL] = DummyModel(state_dict)
             trainer.checkpointer.last_save_model_weights_only = True
             trainer.checkpointer.export_dtype = next(iter(state_dict.values())).dtype
-            trainer.checkpointer.save(curr_step=0, force=True)
+            trainer.checkpointer.save(curr_step=0, last_step=True)
             time.sleep(2)
     finally:
         pass

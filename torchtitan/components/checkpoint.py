@@ -349,17 +349,17 @@ class CheckpointManager:
                 self.purge_thread.join()
 
     @torch.no_grad()
-    def save(self, curr_step: int, force: bool = False) -> None:
+    def save(self, curr_step: int, last_step: bool = False) -> None:
         """Save the checkpoint for the current step.
 
-        This function will save the checkpoint for the current step. If ``force`` is
+        This function will save the checkpoint for the current step. If ``last_step`` is
         true, it will save the checkpoint even if the interval has not been reached.
         This only happens when train_state.step == job_config.training.steps, or
         for initial seed checkpoint.
 
         Args:
             curr_step (int): The current step.
-            force (bool, optional): Whether to force save the checkpoint. Defaults to False.
+            last_step (bool, optional): Whether this is the last step of training.
 
         Returns:
             None
@@ -368,7 +368,7 @@ class CheckpointManager:
         if self.ft_manager:
             self._ft_save(curr_step)
 
-        if not self._should_save(curr_step, force):
+        if not self._should_save(curr_step, last_step):
             return
 
         begin = time.monotonic()
@@ -379,7 +379,7 @@ class CheckpointManager:
             # This GC is called for async checkpoint as it is useless to do
             # GC right after async_save -- the CPU memory is not able to be
             # freed until _async_wait()
-            if force:
+            if last_step:
                 self._save_last_step(curr_step)
             elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -616,14 +616,14 @@ class CheckpointManager:
 
         save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
 
-    def _should_save(self, curr_step: int, force: bool = False) -> bool:
+    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable_checkpoint:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:
             return True
 
-        if force:
+        if last_step:
             return True
 
         if curr_step % self.interval == 0:

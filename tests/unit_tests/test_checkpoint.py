@@ -329,13 +329,13 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(mock_save.call_count, 0)
         manager.save(curr_step=2)
         self.assertEqual(mock_save.call_count, 0)
-        manager.save(curr_step=2, force=True)
+        manager.save(curr_step=2, last_step=True)
         self.assertEqual(mock_save.call_count, 1)
         manager.save(curr_step=3)
         self.assertEqual(mock_save.call_count, 2)
         manager.save(curr_step=4)
         self.assertEqual(mock_save.call_count, 2)
-        manager.save(curr_step=4, force=True)
+        manager.save(curr_step=4, last_step=True)
         self.assertEqual(mock_save.call_count, 3)
         manager.close()
 
@@ -358,7 +358,7 @@ class TestCheckpointManager(unittest.TestCase):
             job_config=self.job_config,
             ft_manager=self.ft_manager,
         )
-        manager1.save(curr_step=1, force=True)
+        manager1.save(curr_step=1, last_step=True)
         path1 = os.path.join(self.test_folder, "step-1")
         self.assertTrue(os.path.isdir(path1))
         # Phase 2: initial load from step-1
@@ -383,7 +383,7 @@ class TestCheckpointManager(unittest.TestCase):
         args1, kwargs1 = mock_load.call_args
         self.assertEqual(kwargs1.get("checkpoint_id"), path1)
         # Phase 3: save new step under default folder, then load that
-        manager2.save(curr_step=2, force=True)
+        manager2.save(curr_step=2, last_step=True)
         # Default folder is test_folder, so step-2 under that
         step2_dir = os.path.join(self.test_folder, "step-2")
         self.assertTrue(os.path.isdir(step2_dir))
@@ -419,12 +419,12 @@ class TestCheckpointManager(unittest.TestCase):
         )
 
         # First save schedules async
-        manager.save(curr_step=10, force=False)
+        manager.save(curr_step=10, last_step=False)
         future = manager.async_future
         future.result.assert_not_called()
 
         # Second save should wait
-        manager.save(curr_step=20, force=False)
+        manager.save(curr_step=20, last_step=False)
         future.result.assert_called_once()
 
         # New future created
@@ -462,12 +462,12 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Initially no future
         self.assertIsNone(manager.async_future)
-        manager.save(curr_step=5, force=False)
+        manager.save(curr_step=5, last_step=False)
         self.assertIsNotNone(manager.async_future)
 
         manager.async_future.result.assert_not_called()
         prev_future = manager.async_future
-        manager.save(curr_step=6, force=False)
+        manager.save(curr_step=6, last_step=False)
         prev_future.result.assert_called_once()
         self.assertIsNotNone(manager.async_future)
         manager.async_future.result.assert_not_called()
