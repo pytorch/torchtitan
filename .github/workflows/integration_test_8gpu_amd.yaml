@@ -32,7 +32,7 @@ jobs:
         conda activate "${CONDA_ENV}"
         pip config --user set global.progress_bar off
         pip install -r requirements.txt
-        pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
         mkdir artifacts-to-be-uploaded
         python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
