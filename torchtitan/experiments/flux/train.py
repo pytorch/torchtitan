@@ -221,7 +221,7 @@ if __name__ == "__main__":
             assert (
                 config.checkpoint.enable_checkpoint
             ), "Must enable checkpointing when creating a seed checkpoint."
-            trainer.checkpointer.save(curr_step=0, force=True)
+            trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
