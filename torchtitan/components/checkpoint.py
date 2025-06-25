@@ -35,6 +35,10 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import GarbageCollection
+from torch.distributed.checkpoint.staging import (
+    DefaultStager,
+    StagingOptions,
+)
 
 
 MODEL = "model"
@@ -239,6 +243,7 @@ class CheckpointManager:
         self.sending_to_checkpoint_mp = False
         self.staging_id = None
         self.cpu_offload_state_dict = None
+        self.stager = None
 
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
 
@@ -306,7 +311,8 @@ class CheckpointManager:
                 self.purge_thread.join()
 
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-                dcp.close()
+                if self.stager is not None:
+                    self.stager.close()
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -343,8 +349,10 @@ class CheckpointManager:
                 self._save_last_step(curr_step)
             elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
+                if self.stager is None:
+                    self.stager = DefaultStager(StagingOptions(True, True, True, True))
                 result = dcp.async_save(
-                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, block_on_staging=False,
+                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, async_stager=self.stager, block_on_staging=False,
                 )
                 self.upload_future = result.upload_completion
                 self.async_future = result.staging_completion

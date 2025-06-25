@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 200
+steps = 500
 compile = false
 dataset = "c4"
 
