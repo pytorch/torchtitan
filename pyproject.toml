@@ -22,8 +22,9 @@ dependencies = [
 
     # Miscellaneous
     "tomli>=1.1.0",
-    "fsspec"
-    "tyro"
+    "fsspec",
+    "tyro",
+    "tensorboard",
 ]
 dynamic = ["version"]
 
