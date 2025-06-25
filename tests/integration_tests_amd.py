@@ -51,8 +51,34 @@ def build_test_list():
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "2D TP compile",
-            "2d_tp_compile",
+            "2D async TP compile",
+            "2d_asynctp_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+PP+torch.compile",
+            "fsdp+tp+cp+compile",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP+torch.compile",
+            "hsdp+cp+compile",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
@@ -134,7 +160,7 @@ def main():
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
     )
-    parser.add_argument("--ngpu", default=2, type=int)
+    parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
