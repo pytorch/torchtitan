@@ -537,9 +537,7 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     def test_excluded_parameters_not_saved(self, mock_save, mock_rank):
-        """
-        Test that freqs_cis and other excluded parameters are not saved in the checkpoint.
-        """
+        """Test that freqs_cis is not saved"""
 
         # Create a fake model with freqs_cis and other parameters
         class FakeModelWithFreqsCis(nn.Module):
@@ -552,8 +550,6 @@ class TestCheckpointManager(unittest.TestCase):
                 self.other_param = nn.Parameter(torch.randn(3, 3))
 
         fake_model = FakeModelWithFreqsCis()
-
-        # Use the existing fake_save method
         mock_save.side_effect = self.fake_save
 
         cfg = self.job_config.checkpoint
@@ -569,22 +565,14 @@ class TestCheckpointManager(unittest.TestCase):
             ft_manager=self.ft_manager,
         )
 
-        # Save the checkpoint
         manager.save(curr_step=1)
-
-        # Verify that dcp.save was called
         self.assertEqual(mock_save.call_count, 1)
-
-        # Load the saved state dict from disk to verify exclusions
         checkpoint_path = os.path.join(self.test_folder, "step-1", "state_dict.pt")
         saved_data = torch.load(checkpoint_path, weights_only=False)
-
-        # Get the model state dict that was saved
         model_state_dict = saved_data[MODEL]
 
         # Verify that freqs_cis is NOT in the saved state dict
         self.assertNotIn("freqs_cis", model_state_dict)
-
         # Verify that other parameters ARE in the saved state dict
         self.assertIn("weight", model_state_dict)
         self.assertIn("bias", model_state_dict)
