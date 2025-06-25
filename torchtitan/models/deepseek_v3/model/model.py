@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from re import I
 from typing import Tuple
 
 import torch
@@ -194,7 +195,10 @@ class Attention(nn.Module):
         else:
             q = self.wq_b(self.q_norm(self.wq_a(x)))
 
-        q = q.view(bsz, seqlen, self.n_heads, self.qk_head_dim)
+        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+        # local heads from sizes of q and kv as TP may have sharded them after
+        # the above linear ops.
+        q = q.view(bsz, seqlen, -1, self.qk_head_dim)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
@@ -211,10 +215,11 @@ class Attention(nn.Module):
         kv = self.wkv_b(
             self.kv_norm(kv)
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
-        kv = kv.view(bsz, seqlen, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        n_local_heads = k_nope.size(2)
         k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
+            [k_nope, k_pe.expand(-1, -1, n_local_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
@@ -278,12 +283,13 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.moe_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.moe = (
-            FeedForward(model_args.dim, model_args.inter_dim)
-            if layer_id < model_args.n_dense_layers
-            else MoE(model_args)
-        )
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.moe_enabled = layer_id < model_args.n_dense_layers
+
+        if self.moe_enabled:
+            self.moe = MoE(model_args)
+        else:
+            self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
@@ -297,7 +303,10 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
-        x = x + self.moe(self.moe_norm(x))
+        if self.moe_enabled:
+            x = x + self.moe(self.ffn_norm(x))
+        else:
+            x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
 
