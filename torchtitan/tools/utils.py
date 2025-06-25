@@ -135,6 +135,7 @@ class Color:
     cyan = "\033[36m"
     white = "\033[37m"
     reset = "\033[39m"
+    orange = "\033[38;2;180;60;0m"
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,7 @@ class NoColor:
     cyan = ""
     white = ""
     reset = ""
+    orange = ""
 
 
 def check_if_feature_in_pytorch(

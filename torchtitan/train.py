@@ -467,7 +467,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.step,
             global_avg_loss,
             global_max_loss,
-            extra_metrics={"grad_norm": grad_norm},
+            grad_norm.item(),
         )
 
     @record

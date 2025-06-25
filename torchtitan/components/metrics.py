@@ -352,6 +352,7 @@ class MetricsProcessor:
         step: int,
         global_avg_loss: float,
         global_max_loss: float,
+        grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
@@ -377,6 +378,7 @@ class MetricsProcessor:
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
+            "grad_norm": grad_norm,
             "throughput(tps)": tps,
             "tflops": tflops,
             "mfu(%)": mfu,
@@ -400,6 +402,7 @@ class MetricsProcessor:
         logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
+            f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
