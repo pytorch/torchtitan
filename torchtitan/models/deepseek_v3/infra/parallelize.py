@@ -33,7 +33,7 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
             raise NotImplementedError(
-                "Currently, async TP is not supported for deepseekv3"
+                "Currently, async TP is not tested for deepseekv3"
             )
 
         enable_float8_linear = "float8" in job_config.model.converters
@@ -45,12 +45,12 @@ def parallelize_deepseekv3(
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
             raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not supported for deepseekv3"
+                "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
         if parallel_dims.loss_parallel_enabled:
             raise NotImplementedError(
-                "Currently, loss parallel is not supported for deepseekv3"
+                "Currently, loss parallel is not tested for deepseekv3"
             )
 
         apply_tp(
@@ -140,10 +140,12 @@ def apply_tp(
                 input_layouts=(Shard(1), None),
                 desired_input_layouts=(Replicate(), None),
             ),
-            "attention.wkv_a": NoParallel(),  # Make ths a DTensor
+            "attention.wkv_a": NoParallel(),
             "attention.wkv_b": colwise_parallel(),
+            "attention.kv_norm": NoParallel(),
             "attention.wq_a": NoParallel(),
             "attention.wq_b": colwise_parallel(),
+            "attention.q_norm": NoParallel(),
             "attention.wq": colwise_parallel(),  # This is only used when q_lora_rank==0
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
