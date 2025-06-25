@@ -38,7 +38,7 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "tensorboard",
+    "wandb"
 ]
 
 [tool.setuptools.dynamic]
