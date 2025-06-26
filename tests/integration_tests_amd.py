@@ -58,25 +58,24 @@ def build_test_list():
             [
                 [
                     "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_shard_degree=4",
                     "--parallelism.tensor_parallel_degree=2",
                 ]
             ],
             "FSDP+TP+torch.compile",
             "fsdp+tp+compile",
-            ngpu=4,
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_shard_degree=4",
                     "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP+torch.compile",
-            "hsdp+cp+compile",
+            "HSDP+torch.compile",
+            "hsdp+compile",
             ngpu=8,
         ),
     ]
