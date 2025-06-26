@@ -551,7 +551,9 @@ if __name__ == "__main__":
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
-    finally:
+    except Exception:
+        raise
+    else:
         if trainer:
             trainer.close()
 
