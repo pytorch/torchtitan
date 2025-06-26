@@ -51,19 +51,18 @@ def build_test_list():
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
+            "TP compile",
+            "tp_compile",
         ),
         OverrideDefinitions(
             [
                 [
                     "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=8",
                 ]
             ],
-            "FSDP+TP+torch.compile",
-            "fsdp+tp+compile",
+            "FSDP+torch.compile",
+            "fsdp+compile",
             ngpu=8,
         ),
     ]
