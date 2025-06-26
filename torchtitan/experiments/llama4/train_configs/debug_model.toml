@@ -26,7 +26,8 @@ tokenizer_path = "./tests/assets/test_tiktoken.model"
 # converters = ["float8"]
 
 [optimizer]
-name = "AdamW"
+# TODO: AdamW has numerical issues when TP is used, need to fix it
+name = "Adam"
 lr = 4e-3
 eps = 1e-15
 
@@ -52,6 +53,7 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
+expert_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false

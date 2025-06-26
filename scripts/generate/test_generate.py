@@ -125,6 +125,7 @@ def test_generate(
             cp=1,
             tp=world_size,
             pp=1,
+            ep=1,
             world_size=world_size,
             enable_loss_parallel=False,
         )
