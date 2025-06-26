@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 from torchtitan.config_manager import ConfigManager
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
 from torchtitan.tools.profiling import (
@@ -16,6 +17,7 @@ class TestFluxDataLoader:
     def test_load_dataset(self):
         for dataset_name in ["cc12m-test"]:
             self._test_flux_dataloader(dataset_name)
+            self._test_flux_dataloader_checkpointing(dataset_name)
 
     def _test_flux_dataloader(self, dataset_name):
         batch_size = 4
@@ -97,3 +99,63 @@ class TestFluxDataLoader:
             tokenizer=None,
             infinite=True,
         )
+
+    def _test_flux_dataloader_checkpointing(self, dataset_name):
+        for world_size in [2, 4]:
+            for rank in range(world_size):
+                batch_size = 4
+
+                path = "torchtitan.experiments.flux.job_config"
+                config_manager = ConfigManager()
+                config = config_manager.parse_args(
+                    [
+                        f"--experimental.custom_args_module={path}",
+                        # Profiling options
+                        # "--profiling.enable_profiling",
+                        # "--profiling.profile_freq",
+                        # "5",
+                        # "--profiling.enable_memory_snapshot",
+                        # "--profiling.save_memory_snapshot_folder",
+                        # "memory_snapshot_flux",
+                        "--training.img_size",
+                        str(256),
+                        "--training.dataset",
+                        dataset_name,
+                        "--training.local_batch_size",
+                        str(batch_size),
+                        "--training.seed",
+                        "0",
+                        "--training.classifer_free_guidance_prob",
+                        "0.447",
+                        "--encoder.t5_encoder",
+                        "google/t5-v1_1-small",
+                        "--encoder.clip_encoder",
+                        "openai/clip-vit-large-patch14",
+                        "--encoder.max_t5_encoding_len",
+                        "512",
+                    ]
+                )
+                dl = self._build_dataloader(config, world_size, rank)
+
+                it = iter(dl)
+                for _ in range(10):
+                    next(it)
+                state = dl.state_dict()
+
+                # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
+                dl_resumed = self._build_dataloader(config, world_size, rank)
+                dl_resumed.load_state_dict(state)
+                it_resumed = iter(dl_resumed)
+
+                for i in range(50):
+                    torch.manual_seed(i)
+                    expected_input_ids, expected_labels = next(it)
+                    torch.manual_seed(i)
+                    input_ids, labels = next(it_resumed)
+                    assert torch.equal(
+                        input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
+                    )
+                    assert torch.equal(
+                        input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
+                    )
+                    assert torch.equal(labels, expected_labels)
