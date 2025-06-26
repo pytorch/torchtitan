@@ -554,9 +554,6 @@ if __name__ == "__main__":
     except Exception:
         raise
     else:
-        if trainer:
-            trainer.close()
-
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
-            logger.info("Process group destroyed.")
+        trainer.close()
+        torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed.")
