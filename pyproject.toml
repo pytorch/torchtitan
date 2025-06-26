@@ -22,7 +22,9 @@ dependencies = [
 
     # Miscellaneous
     "tomli>=1.1.0",
-    "fsspec"
+    "fsspec",
+    "tyro",
+    "tensorboard",
 ]
 dynamic = ["version"]
 
@@ -36,7 +38,7 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "tensorboard",
+    "wandb"
 ]
 
 [tool.setuptools.dynamic]
