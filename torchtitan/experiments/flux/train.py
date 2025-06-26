@@ -226,6 +226,8 @@ if __name__ == "__main__":
         else:
             trainer.train()
     except Exception:
+        if trainer:
+            trainer.close()
         raise
     else:
         trainer.close()
