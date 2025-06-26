@@ -497,11 +497,6 @@ if __name__ == "__main__":
             size += v.numel() * v.element_size()
         logger.info(f"Total size of the model: {size / 1e9:.2f} GB")
 
-        # Do not support PP yet, we will need to iterate over the PP dimension and
-        # extract the corresponding state_dict and device_mesh.
-        if "freqs_cis" in state_dict:
-            state_dict.pop("freqs_cis")
-
         # Our tokenizer is not up-to-date yet.
         tok_embeddings_weight = state_dict.pop("tok_embeddings.weight")
         output_weight = state_dict.pop("output.weight")
@@ -531,8 +526,6 @@ if __name__ == "__main__":
             dist.barrier()
             logger.info(f"Verifies state_dict {time.time() - begin}.")
         else:
-            # oh, this is pretty bad, when can we get rid of the freqs_cis issue?
-            state_dict["freqs_cis"] = None
             trainer.checkpointer.states[MODEL] = DummyModel(state_dict)
             trainer.checkpointer.last_save_model_weights_only = True
             trainer.checkpointer.export_dtype = next(iter(state_dict.values())).dtype

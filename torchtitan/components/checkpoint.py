@@ -49,12 +49,25 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
+# For now, we will manually pop the freqs_cis buffer, as we made this permanent
+# temporarily and we don't want to include it in the exported state_dict.
+# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
+excluded_parameters_for_model_only = {"freqs_cis"}
+
+
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.cache_state_dict = {
+        self.cache_state_dict = self._get_state_dict()
+
+    def _get_state_dict(self) -> dict[str, Any]:
+        state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
+        # Exclude parameters that should not be saved
+        for excluded_key in excluded_parameters_for_model_only:
+            state_dict.pop(excluded_key, None)
+        return state_dict
 
     def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
@@ -68,9 +81,7 @@ class ModelWrapper(Stateful):
         list(map(func, self.model))
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
-        self.cache_state_dict = {
-            k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
-        }
+        self.cache_state_dict = self._get_state_dict()
 
 
 class Terminate:
@@ -79,12 +90,6 @@ class Terminate:
 
 class SaveDone:
     pass
-
-
-# For now, we will manually pop the freqs_cis buffer, as we made this permanent
-# temporarily and we don't want to include it in the exported state_dict.
-# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-excluded_parameters_for_model_only = {"freqs_cis"}
 
 
 @torch.no_grad()
@@ -569,8 +574,6 @@ class CheckpointManager:
         # For the first step, we will only load the model weights.
         if model_only:
             sd = self.states[MODEL].state_dict()
-            for k in excluded_parameters_for_model_only:
-                sd.pop(k, None)
             return sd
 
         for exclude_key in self.exclude_from_loading:
@@ -599,9 +602,6 @@ class CheckpointManager:
             #      'layers.0.attention.wq.weight': ...
             # }.
             self.states = self.states[MODEL].state_dict()
-
-            for k in excluded_parameters_for_model_only:
-                self.states.pop(k, None)
 
             if self.export_dtype != torch.float32:
                 self.states = {

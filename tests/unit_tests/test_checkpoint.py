@@ -534,6 +534,52 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager2.close()
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_excluded_parameters_not_saved(self, mock_save, mock_rank):
+        """Test that freqs_cis is not saved"""
+
+        # Create a fake model with freqs_cis and other parameters
+        class FakeModelWithFreqsCis(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(2, 2))
+                self.bias = nn.Parameter(torch.randn(2))
+                # Register freqs_cis as a buffer (common pattern in transformer models)
+                self.register_buffer("freqs_cis", torch.randn(10, 5))
+                self.other_param = nn.Parameter(torch.randn(3, 3))
+
+        fake_model = FakeModelWithFreqsCis()
+        mock_save.side_effect = self.fake_save
+
+        cfg = self.job_config.checkpoint
+        cfg.keep_latest_k = 0  # Disable purging
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=[fake_model],
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+
+        manager.save(curr_step=1)
+        self.assertEqual(mock_save.call_count, 1)
+        checkpoint_path = os.path.join(self.test_folder, "step-1", "state_dict.pt")
+        saved_data = torch.load(checkpoint_path, weights_only=False)
+        model_state_dict = saved_data[MODEL]
+
+        # Verify that freqs_cis is NOT in the saved state dict
+        self.assertNotIn("freqs_cis", model_state_dict)
+        # Verify that other parameters ARE in the saved state dict
+        self.assertIn("weight", model_state_dict)
+        self.assertIn("bias", model_state_dict)
+        self.assertIn("other_param", model_state_dict)
+
+        manager.close()
+
 
 if __name__ == "__main__":
     unittest.main()
