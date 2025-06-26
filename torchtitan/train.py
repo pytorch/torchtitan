@@ -23,7 +23,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-
+from torch.distributed.tensor import DTensor
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -158,10 +158,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             from torchtitan.models.llama3.model import precompute_freqs_cis
 
             model.buffers_.get_buffer("freqs_cis").copy_(
-                precompute_freqs_cis(
-                    model_args.dim // model_args.n_heads,
-                    model_args.max_seq_len,
-                    model_args.rope_theta,
+                DTensor.from_local(
+                    precompute_freqs_cis(
+                        model_args.dim // model_args.n_heads,
+                        model_args.max_seq_len,
+                        model_args.rope_theta,
+                    ),
+                    device_mesh=model.buffers_.get_buffer("freqs_cis").device_mesh,
                 )
             )
 

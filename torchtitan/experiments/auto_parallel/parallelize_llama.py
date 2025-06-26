@@ -56,7 +56,7 @@ def parallelize_llama(
     # model = model_fn()
     # return model
 
-    autop = AutoParallel(model, input_fn, world_mesh, device=world_mesh.device_type)
+    autop = AutoParallel(model, input_fn, world_mesh)
     autop.add_parameter_memory_constraint(low=None, high=None)
 
     x_sharding = (Shard(0), Replicate())
