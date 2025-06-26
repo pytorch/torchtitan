@@ -387,13 +387,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
                 if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs, target=targets, losses=losses, input_batch=inputs
-                    )
+                    # TODO: need to update kwargs for different models?
+                    self.pp_schedule.step(inputs, target=targets, losses=losses)
                 else:
-                    self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
-                    )
+                    self.pp_schedule.step(target=targets, losses=losses)
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -538,6 +535,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.checkpointer.close()
 
 
+# import fbvscode
+# fbvscode.attach_debugger()
 if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
