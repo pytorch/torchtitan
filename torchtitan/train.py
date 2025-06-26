@@ -89,6 +89,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             cp=parallelism_config.context_parallel_degree,
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
         )
@@ -280,7 +281,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config, self.ft_manager
+            self.model_parts, job_config, parallel_dims, world_mesh, self.ft_manager
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config
@@ -436,6 +437,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
+            parallel_dims=parallel_dims,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()

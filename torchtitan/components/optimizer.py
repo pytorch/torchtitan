@@ -15,10 +15,12 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
+from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "OptimizersContainer",
@@ -241,6 +243,8 @@ class FTOptimizersContainer(OptimizersContainer):
 def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    world_mesh: DeviceMesh,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
@@ -259,12 +263,23 @@ def build_optimizers(
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
         job_config (JobConfig): Job config containing the optimizer name and parameters.
+        parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
     optim_in_bwd = job_config.optimizer.early_step_in_backward
-    if optim_in_bwd and job_config.parallelism.pipeline_parallel_degree > 1:
-        raise NotImplementedError(
-            "Optimizers in backward is not supported with pipeline parallelism."
-        )
+    if optim_in_bwd:
+        if parallel_dims.ep_enabled:
+            raise NotImplementedError(
+                "Optimizers in backward is not supported with Expert Parallel."
+            )
+        if parallel_dims.pp_enabled:
+            raise NotImplementedError(
+                "Optimizers in backward is not supported with Pipeline Parallel."
+            )
+        if ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not supported with optimizers in backward."
+            )
+
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
     beta1 = job_config.optimizer.beta1
@@ -295,13 +310,12 @@ def build_optimizers(
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]
 
-    if optim_in_bwd and ft_manager.enabled:
-        raise ValueError("TorchFT is not supported with optimizers in backward.")
-    elif optim_in_bwd:
+    if optim_in_bwd:
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
         )
-    elif ft_manager.enabled:
+
+    if ft_manager.enabled:
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
@@ -309,5 +323,5 @@ def build_optimizers(
             ft_manager.manager,
             use_ft_optimizer=job_config.fault_tolerance.semi_sync_method is None,
         )
-    else:
-        return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
+
+    return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
