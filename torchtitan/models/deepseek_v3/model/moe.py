@@ -89,6 +89,11 @@ class GroupedExperts(nn.Module):
 
         return out
 
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+
 
 class TokenChoiceTopKRouter(nn.Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
@@ -173,6 +178,9 @@ class TokenChoiceTopKRouter(nn.Module):
 
         return top_scores, token_indices_experts_sorted, num_local_tokens_per_expert
 
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+
 
 class MoE(nn.Module):
     def __init__(self, model_args: DeepSeekV3ModelArgs):
@@ -231,7 +239,6 @@ class MoE(nn.Module):
         if self.load_balance_coeff is not None and self.load_balance_coeff > 0:
             self.register_full_backward_hook(self._update_expert_bias)
 
-    # TODO: double check the bias update logic. It aligns with the paper.
     def _update_expert_bias(self, *_):
         expert_bias_delta = self.load_balance_coeff * torch.sign(
             self.tokens_per_expert.mean() - self.tokens_per_expert
