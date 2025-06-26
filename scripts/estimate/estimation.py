@@ -46,6 +46,7 @@ def estimate_memory(job_config: JobConfig):
         cp=parallelism_config.context_parallel_degree,
         tp=parallelism_config.tensor_parallel_degree,
         pp=parallelism_config.pipeline_parallel_degree,
+        ep=parallelism_config.expert_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not parallelism_config.disable_loss_parallel,
     )
@@ -56,8 +57,9 @@ def estimate_memory(job_config: JobConfig):
         or parallel_dims.tp_enabled
         or parallel_dims.pp_enabled
         or parallel_dims.cp_enabled
+        or parallel_dims.ep_enabled
     ):
-        logger.warning("DDP, TP, PP, CP are not supported yet.")
+        logger.warning("DDP, TP, PP, CP, EP are not supported yet.")
         return
     if not parallel_dims.dp_shard_enabled:
         logger.warning("FSDP or HSDP is not enabled. Skipping memory estimation.")
@@ -115,7 +117,9 @@ def estimate_memory(job_config: JobConfig):
 
         # build optimizer after applying parallelisms to the model
         ft_manager = init_ft_manager(job_config)
-        optimizers = build_optimizers([model], job_config, ft_manager)
+        optimizers = build_optimizers(
+            [model], job_config, parallel_dims, world_mesh, ft_manager
+        )
         lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
