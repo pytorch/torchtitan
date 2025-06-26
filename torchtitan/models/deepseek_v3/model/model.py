@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from re import I
 from typing import Tuple
 
 import torch

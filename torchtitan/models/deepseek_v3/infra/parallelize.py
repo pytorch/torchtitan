@@ -32,8 +32,10 @@ def parallelize_deepseekv3(
 
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
+            # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
-                "Currently, async TP is not tested for deepseekv3"
+                "Currently, async TP is not tested for deepseekv3. \
+                torch.compile is not supported yet, which is required for async TP."
             )
 
         enable_float8_linear = "float8" in job_config.model.converters
@@ -44,13 +46,9 @@ def parallelize_deepseekv3(
 
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
+            # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
-            )
-
-        if parallel_dims.loss_parallel_enabled:
-            raise NotImplementedError(
-                "Currently, loss parallel is not tested for deepseekv3"
             )
 
         apply_tp(
