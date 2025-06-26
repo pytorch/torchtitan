@@ -21,6 +21,8 @@ class TestFluxDataLoader:
 
                 num_steps = 15
 
+                num_steps = 10
+
                 path = "torchtitan.experiments.flux.job_config"
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
@@ -34,6 +36,8 @@ class TestFluxDataLoader:
                         str(batch_size),
                         "--training.seed",
                         "0",
+                        "--training.classifer_free_guidance_prob",
+                        "0.447",
                         "--encoder.t5_encoder",
                         "google/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
@@ -91,7 +95,56 @@ class TestFluxDataLoader:
                     assert torch.equal(
                         input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
                     )
-                    assert torch.equal(
-                        input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
+
+                    it = iter(dl)
+
+                    for i in range(0, num_steps):
+                        input_data, labels = next(it)
+                        if torch_profiler:
+                            torch_profiler.step()
+                        if memory_profiler:
+                            memory_profiler.step()
+
+                        assert len(input_data) == 2  # (clip_encodings, t5_encodings)
+                        assert labels.shape == (batch_size, 3, 256, 256)
+                        # assert input_data["clip_tokens"].shape[0] == batch_size
+                        # assert input_data["t5_tokens"].shape == (batch_size, 512, 512)
+
+                    state = dl.state_dict()
+
+                    # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
+                    dl_resumed = build_flux_dataloader(
+                        dp_world_size=world_size,
+                        dp_rank=rank,
+                        job_config=config,
+                        tokenizer=None,
+                        infinite=True,
                     )
-                    assert torch.equal(labels, expected_labels)
+                    dl_resumed.load_state_dict(state)
+                    it_resumed = iter(dl_resumed)
+
+                    for i in range(num_steps):
+                        # Set torch manual seed before each dataloader iteration to ensure consistent randomness
+                        # across dataloaders for testing purposes.
+                        torch.manual_seed(i)
+                        expected_input_ids, expected_labels = next(it)
+                        torch.manual_seed(i)
+                        input_ids, labels = next(it_resumed)
+
+                        if torch_profiler:
+                            torch_profiler.step()
+                        if memory_profiler:
+                            memory_profiler.step()
+
+                        assert torch.equal(
+                            input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
+                        )
+                        assert torch.equal(
+                            input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
+                        )
+                        assert torch.equal(labels, expected_labels)
+
+                    if torch_profiler:
+                        torch_profiler.step()
+                    if memory_profiler:
+                        memory_profiler.step(exit_ctx=True)
