@@ -431,7 +431,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        dist_utils.clip_grad_norm_(
+        grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
@@ -463,7 +463,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
 
-        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
+        self.metrics_processor.log(
+            self.step,
+            global_avg_loss,
+            global_max_loss,
+            grad_norm.item(),
+        )
 
     @record
     def train(self):
