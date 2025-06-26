@@ -77,7 +77,7 @@ def build_test_list():
             ],
             "HSDP+CP+torch.compile",
             "hsdp+cp+compile",
-            ngpu=4,
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
