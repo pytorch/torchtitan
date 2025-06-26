@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+
 from torchtitan.config_manager import ConfigManager
 from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
 from torchtitan.tools.profiling import (
@@ -31,13 +32,6 @@ class TestFluxDataLoader:
         config = config_manager.parse_args(
             [
                 f"--experimental.custom_args_module={path}",
-                # Profiling options
-                # "--profiling.enable_profiling",
-                # "--profiling.profile_freq",
-                # "5",
-                # "--profiling.enable_memory_snapshot",
-                # "--profiling.save_memory_snapshot_folder",
-                # "memory_snapshot_flux",
                 "--training.img_size",
                 str(256),
                 "--training.dataset",
@@ -110,13 +104,6 @@ class TestFluxDataLoader:
                 config = config_manager.parse_args(
                     [
                         f"--experimental.custom_args_module={path}",
-                        # Profiling options
-                        # "--profiling.enable_profiling",
-                        # "--profiling.profile_freq",
-                        # "5",
-                        # "--profiling.enable_memory_snapshot",
-                        # "--profiling.save_memory_snapshot_folder",
-                        # "memory_snapshot_flux",
                         "--training.img_size",
                         str(256),
                         "--training.dataset",
@@ -125,8 +112,6 @@ class TestFluxDataLoader:
                         str(batch_size),
                         "--training.seed",
                         "0",
-                        "--training.classifer_free_guidance_prob",
-                        "0.447",
                         "--encoder.t5_encoder",
                         "google/t5-v1_1-small",
                         "--encoder.clip_encoder",
@@ -148,6 +133,7 @@ class TestFluxDataLoader:
                 it_resumed = iter(dl_resumed)
 
                 for i in range(50):
+                    # Call torch_manual seed before each dataloader's it to ensure randomness in each dataloader is same for testing
                     torch.manual_seed(i)
                     expected_input_ids, expected_labels = next(it)
                     torch.manual_seed(i)
