@@ -191,7 +191,7 @@ class ScaledDotProductAttention(torch.nn.Module):
 
     def __init__(self, attn_mask_type: str) -> None:
         super().__init__()
-        
+
         ScaledDotProductAttention._init_backend()
 
         self.attn_mask_type = attn_mask_type
