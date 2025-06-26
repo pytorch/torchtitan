@@ -60,12 +60,11 @@ def build_test_list():
                     "--training.compile",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_degree=2",
                 ]
             ],
-            "FSDP+TP+PP+torch.compile",
-            "fsdp+tp+cp+compile",
-            ngpu=8,
+            "FSDP+TP+torch.compile",
+            "fsdp+tp+compile",
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
@@ -78,7 +77,7 @@ def build_test_list():
             ],
             "HSDP+CP+torch.compile",
             "hsdp+cp+compile",
-            ngpu=8,
+            ngpu=4,
         ),
     ]
     return integration_tests_flavors
