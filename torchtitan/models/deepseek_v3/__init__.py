@@ -15,6 +15,7 @@ from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_deepseekv3
+from .infra.pipeline import pipeline_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
 from .model.model import DeepSeekV3Model
 
@@ -116,7 +117,7 @@ register_train_spec(
         cls=DeepSeekV3Model,
         config=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_deepseekv3,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
