@@ -839,7 +839,7 @@ class ConfigManager:
                 self.config.model.tokenizer_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please update your config."
+                    "Please download the new tokenizer model (python scripts/download_tokenizer.py) and update your config."
                 )
 
     @staticmethod

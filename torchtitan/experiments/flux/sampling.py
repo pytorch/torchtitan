@@ -14,7 +14,7 @@ from PIL import ExifTags, Image
 
 from torch import Tensor
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
@@ -78,8 +78,8 @@ def generate_image(
     model: FluxModel,
     prompt: str,
     autoencoder: AutoEncoder,
-    t5_tokenizer: Tokenizer,
-    clip_tokenizer: Tokenizer,
+    t5_tokenizer: BaseTokenizer,
+    clip_tokenizer: BaseTokenizer,
     t5_encoder: FluxEmbedder,
     clip_encoder: FluxEmbedder,
 ) -> torch.Tensor:
