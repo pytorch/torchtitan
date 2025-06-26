@@ -152,17 +152,23 @@ class Attention(nn.Module):
         self.v_head_dim = model_args.v_head_dim
 
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim)
+            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
         else:
-            self.wq_a = nn.Linear(self.dim, self.q_lora_rank)
+            self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
             self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=model_args.norm_eps)
-            self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
+            self.wq_b = nn.Linear(
+                self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
+            )
+        self.wkv_a = nn.Linear(
+            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+        )
         self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
         self.wkv_b = nn.Linear(
-            self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)
+            self.kv_lora_rank,
+            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
         )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim)
+        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if model_args.max_seq_len > model_args.original_seq_len:
@@ -283,7 +289,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.moe_enabled = layer_id < model_args.n_dense_layers
+        self.moe_enabled = layer_id >= model_args.n_dense_layers
 
         if self.moe_enabled:
             self.moe = MoE(model_args)
@@ -319,7 +325,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=True
         )
 
         self.layers = torch.nn.ModuleDict()
@@ -328,8 +334,12 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
-            model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
+            model_args.dim,
+            model_args.vocab_size,
+            dtype=torch.get_default_dtype(),
+            bias=False,
         )
+        self.model_args = model_args
         self.init_weights()
 
     def forward(self, tokens: torch.Tensor):
@@ -351,4 +361,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         return output
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        # buffer_device = buffer_device or self.freqs_cis.device
+        # with torch.device(buffer_device):
+        #     self.freqs_cis = precompute_freqs_cis(self.model_args)
         pass
