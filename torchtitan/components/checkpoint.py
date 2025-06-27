@@ -632,7 +632,9 @@ class CheckpointManager:
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        save_with_gc(
+            self._flattend_model_states_sd(), checkpoint_id=self._create_checkpoint_id(curr_step)
+        )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable_checkpoint:
