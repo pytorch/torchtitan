@@ -141,9 +141,9 @@ def test_generate(
     model.to_empty(device=device_type)
     model.eval()
 
-    state_dict = {"model": model.state_dict()}
+    state_dict = model.state_dict()
     for k in excluded_parameters_for_model_only:
-        state_dict["model"].pop(k, None)
+        state_dict.pop(k, None)
 
     # Checkpoint Loading
     begin = time.monotonic()

@@ -392,11 +392,15 @@ class CheckpointManager:
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.async_future = dcp.async_save(
-                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg
+                    self._flattend_model_states_sd(),
+                    checkpoint_id=checkpoint_id,
+                    process_group=self.pg,
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
             else:
-                save_with_gc(self.states, checkpoint_id=checkpoint_id)
+                save_with_gc(
+                    self._flattend_model_states_sd(), checkpoint_id=checkpoint_id
+                )
             self._purge_stale_checkpoints()
 
             logger.info(
@@ -559,6 +563,19 @@ class CheckpointManager:
             f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
 
+    def _flattend_model_states_sd(
+        self, state_dict: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Flatten the model states into a single dictionary.
+
+        Note that other states, such as optimizer states, are not flattened.
+        """
+        states = state_dict if state_dict is not None else self.states
+        sd = {k: v for k, v in states.items() if k != MODEL}
+        if MODEL in states:
+            sd.update(states[MODEL].state_dict())
+        return sd
+
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         """Determines which states to load for the given step.
 
@@ -573,8 +590,7 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model weights.
         if model_only:
-            sd = self.states[MODEL].state_dict()
-            return sd
+            return self.states[MODEL].state_dict()
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -583,6 +599,8 @@ class CheckpointManager:
         states_to_load = {
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
+
+        states_to_load = self._flattend_model_states_sd(states_to_load)
 
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
@@ -614,7 +632,9 @@ class CheckpointManager:
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        save_with_gc(
+            self._flattend_model_states_sd(), checkpoint_id=self._create_checkpoint_id(curr_step)
+        )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable_checkpoint:
