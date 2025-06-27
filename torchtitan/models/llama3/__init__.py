@@ -39,6 +39,13 @@ llama3_configs = {
         use_flex_attn=True,
         attn_mask_type="block_causal",
     ),
+    "debugmodel_sdpa_block_causal": TransformerModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=16,
+        rope_theta=500000,
+        attn_mask_type="block_causal",
+    ),
     "8B": TransformerModelArgs(
         dim=4096,
         n_layers=32,

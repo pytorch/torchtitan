@@ -416,10 +416,11 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
-            )
+        init_attention_mask(
+            input_batch if input_batch is not None else tokens,
+            eos_id=self.eos_id,
+            use_flex_attn=self.model_args.use_flex_attn,
+        )
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
