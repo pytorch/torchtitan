@@ -122,6 +122,21 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable_hf_safetensors_format",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable_hf_safetensors_format",
+                    "--training.steps 20",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Load Full Checkpoint",
+            "full_checkpoint_hf_safetensors",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--checkpoint.last_save_model_weights_only",
                 ],
             ],
