@@ -19,6 +19,8 @@ from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
 
+AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
+
 
 class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
@@ -97,8 +99,8 @@ class Float8Converter(ModelConverter):
         self.filter_fn = self._init_filter_fn(float8_config)
 
     def _init_filter_fn(self, float8_config: Float8):
-        # use auto_filter if filter_fqns is ["auto_filter"]
-        use_auto_filter = float8_config.filter_fqns == ["auto_filter"]
+        # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
+        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
             try:
                 from torchao.float8 import _auto_filter_for_recipe
@@ -106,14 +108,23 @@ class Float8Converter(ModelConverter):
                 logger.info(
                     "Using automatic module filter for float8 model conversion."
                 )
+
                 recipe_name = (
                     float8_config.recipe_name
                     if float8_config.recipe_name
                     else "tensorwise"
                 )
+
+                # remove auto filter flag from filter_fqns before passing to _auto_filter_for_recipe
+                fqns = [
+                    fqn
+                    for fqn in float8_config.filter_fqns
+                    if fqn != AUTO_FILTER_SMALL_KN_FLAG
+                ]
+
                 filter_fn = _auto_filter_for_recipe(
                     recipe_name,
-                    filter_fqns=float8_config.filter_fqns,
+                    filter_fqns=fqns,
                 )
                 return filter_fn
             except ImportError:
