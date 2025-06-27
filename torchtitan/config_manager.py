@@ -513,6 +513,13 @@ class Float8:
     Not compatible with torch.compile.
     """
 
+    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+    """
+    Comma-separated list of fully qualified names of MoE modules to apply float8 rowwise training to.
+    This is a prototype feature that requires the torchao nightly build.
+    Example: --float8.moe_fqns_prototype="experts"
+    """
+
 
 @dataclass
 class MX:
