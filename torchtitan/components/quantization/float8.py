@@ -94,7 +94,7 @@ class Float8Converter(ModelConverter):
             logger.info("Float8 tensorwise scaled training active")
 
         # configure the module filter function
-        self.module_filter_fn = self._init_filter_fn(float8_config)
+        self.filter_fn = self._init_filter_fn(float8_config)
 
     def _init_filter_fn(self, float8_config: Float8):
         # use auto_filter if filter_fqns is ["auto_filter"]
@@ -104,11 +104,16 @@ class Float8Converter(ModelConverter):
                 from torchao.float8 import _auto_filter_for_recipe
 
                 logger.info(
-                    "Using _auto_filter_for_recipe for float8 model conversion."
+                    "Using automatic module filter for float8 model conversion."
+                )
+                recipe_name = (
+                    float8_config.recipe_name
+                    if float8_config.recipe_name
+                    else "tensorwise"
                 )
                 filter_fn = _auto_filter_for_recipe(
-                    float8_config.recipe_name,
-                    filter_fqns=self.float8_config.filter_fqns,
+                    recipe_name,
+                    filter_fqns=float8_config.filter_fqns,
                 )
                 return filter_fn
             except ImportError:
