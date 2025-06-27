@@ -78,7 +78,6 @@ def build_test_list():
             "fsdp+tp+cp+compile",
             ngpu=8,
         ),
-        OverrideDefinitions(
     ]
     return integration_tests_flavors
 
