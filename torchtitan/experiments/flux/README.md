@@ -34,6 +34,11 @@ If you want to train with other model config, run the following command:
 CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml" ./torchtitan/experiments/flux/run_train.sh
 ```
 
+To perform inference with the model, run the following command:
+```bash
+JOB_FOLDER=outputs torchtitan/experiments/flux/run_inference.sh
+```
+
 ## Running Tests
 
 ### Unit Tests
