@@ -467,6 +467,12 @@ class Checkpoint:
     for many steps or checkpointing too frequently. The default value is False.
     """
 
+    enable_hf_safetensors_format: bool = False
+    """
+    Enable the use of safetensors format for checkpointing. This will save checkpoints
+    in safetensors format instead of the default DCP format. The default value is False.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:
