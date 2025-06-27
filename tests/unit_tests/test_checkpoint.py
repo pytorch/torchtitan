@@ -580,6 +580,46 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.close()
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_verify_prefix(self, mock_save, mock_load, mock_rank):
+        def fake_save(state_dict: dict, checkpoint_id: str):
+            self.assertIn("bias", state_dict)
+            self.assertIn("weight", state_dict)
+            # No model prefix
+            self.assertNotIn("model", state_dict)
+            if "step-1" in checkpoint_id:
+                self.assertIn("optimizer", state_dict)
+                self.fake_save(state_dict, checkpoint_id)
+            else:
+                self.assertNotIn("optimizer", state_dict)
+            return
+
+        def fake_load(state_dict: dict, checkpoint_id=None):
+            self.assertIn("bias", state_dict)
+            self.assertIn("weight", state_dict)
+            # No model prefix
+            self.assertNotIn("model", state_dict)
+            self.assertNotIn("optimizer", state_dict)
+
+        self.job_config.checkpoint.last_save_model_weights_only = True
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+
+        mock_save.side_effect = fake_save
+        mock_load.side_effect = fake_load
+        manager.save(curr_step=1)
+        manager.save(curr_step=2, last_step=True)
+        manager.load(step=1)
+
 
 if __name__ == "__main__":
     unittest.main()
