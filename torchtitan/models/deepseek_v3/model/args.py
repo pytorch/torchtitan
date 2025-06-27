@@ -75,8 +75,8 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     n_limited_groups: int = 1
     score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.0
-    use_grouped_mm: bool = False
-    load_balance_coeff: float | None = 1e-3
+    use_grouped_mm: bool = True
+    load_balance_coeff: float = 1e-3
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
