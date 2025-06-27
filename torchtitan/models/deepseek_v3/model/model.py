@@ -14,7 +14,7 @@ from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
-from .moe import MoE
+from .moe import FeedForward, MoE
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -260,42 +260,6 @@ class Attention(nn.Module):
             self.q_norm.reset_parameters()
 
 
-class FeedForward(nn.Module):
-    """
-    FeedForward module
-
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
-
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
-
-
 class TransformerBlock(nn.Module):
     """
     Transformer block with attention and feed-forward layers.
@@ -316,6 +280,7 @@ class TransformerBlock(nn.Module):
 
         # TODO: Need to revisit the weight initialization for the TransformerBlock
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
@@ -330,8 +295,10 @@ class TransformerBlock(nn.Module):
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
         if self.moe_enabled:
+            print(f"In TransformerBlock {self.layer_id}: MoE is enabled")
             x = x + self.moe(self.ffn_norm(x))
         else:
+            print(f"In TransformerBlock {self.layer_id}: FFN is enabled")
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -360,6 +327,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
+            print(f"Create layer: {layer_id}")
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = nn.RMSNorm(model_args.dim)

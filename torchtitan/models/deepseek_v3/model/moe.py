@@ -11,6 +11,42 @@ from torch import nn
 from .args import DeepSeekV3ModelArgs
 
 
+class FeedForward(nn.Module):
+    """
+    FeedForward module
+
+    Args:
+        dim (int): Input dimension.
+        hidden_dim (int): Hidden dimension of the feedforward layer.
+        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+
+    Attributes:
+        w1 (Linear): Linear transformation for the first layer.
+        w2 (Linear): Linear transformation for the second layer.
+        w3 (Linear): Linear transformation for the third layer.
+
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def init_weights(self, init_std: float = 0.02):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
 # Reference: torchtitan/experiments/llama4/model/
 class GroupedExperts(nn.Module):
     def __init__(
@@ -212,11 +248,17 @@ class MoE(nn.Module):
             GroupedExperts(
                 dim=dim,
                 hidden_dim=hidden_dim * model_args.n_shared_experts,
-                num_experts=1,
+                num_experts=1,  # Here needs to be 1 to make it equivalent to the MLP
                 use_grouped_mm=self.use_grouped_mm,
             )
             if model_args.n_shared_experts > 0
             else None
+            # FeedForward(
+            #     dim=dim,
+            #     hidden_dim=hidden_dim * model_args.n_shared_experts,
+            # )
+            # if model_args.n_shared_experts > 0
+            # else None
         )
 
         # auxiliary-loss-free load balancing
@@ -266,6 +308,15 @@ class MoE(nn.Module):
             num_local_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
+        print(
+            "In MoE, top_scores shape: ",
+            top_scores.shape,
+            "token_indices: ",
+            token_indices.shape,
+            "num_local_tokens: ",
+            num_local_tokens_per_expert.shape,
+        )
+
         # will be used to update the expert bias for load balancing
         self.tokens_per_expert += num_local_tokens_per_expert
 
@@ -299,6 +350,7 @@ class MoE(nn.Module):
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
+                    token_indices[0] + self.experts.num_experts * ALIGN_SIZE_M,
                     ALIGN_SIZE_M,
                 )
             token_indices = torch.vstack(
@@ -311,8 +363,12 @@ class MoE(nn.Module):
             # NOTE: this would incur a synchronization between device and host
             num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
 
+        print("Num local tokens per expert: ", num_local_tokens_per_expert)
         # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_local_tokens_per_expert)
+        routed_output = self.experts(
+            routed_input, num_local_tokens_per_expert
+        )  # torch.Size([16384(bsz), 256])
+        print("Routed output shape: ", routed_output.shape)
         routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
             x.dtype
         )
@@ -321,9 +377,13 @@ class MoE(nn.Module):
         if self.shared_expert is not None:
             out = self.shared_expert(x.reshape(1, bs * slen, dim)).reshape(
                 bs * slen, dim
-            )
+            )  #  torch.Size([16384, 256]) None
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
+
+        print(
+            "Out shape: ", out.shape, out.grad.shape if out.grad is not None else None
+        )
 
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
