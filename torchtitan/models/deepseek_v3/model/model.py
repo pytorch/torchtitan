@@ -295,10 +295,8 @@ class TransformerBlock(nn.Module):
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
         if self.moe_enabled:
-            print(f"In TransformerBlock {self.layer_id}: MoE is enabled")
             x = x + self.moe(self.ffn_norm(x))
         else:
-            print(f"In TransformerBlock {self.layer_id}: FFN is enabled")
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -327,7 +325,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            print(f"Create layer: {layer_id}")
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
         self.norm = nn.RMSNorm(model_args.dim)
