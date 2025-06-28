@@ -11,6 +11,42 @@ from torch import nn
 from .args import DeepSeekV3ModelArgs
 
 
+class FeedForward(nn.Module):
+    """
+    FeedForward module
+
+    Args:
+        dim (int): Input dimension.
+        hidden_dim (int): Hidden dimension of the feedforward layer.
+        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
+        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+
+    Attributes:
+        w1 (Linear): Linear transformation for the first layer.
+        w2 (Linear): Linear transformation for the second layer.
+        w3 (Linear): Linear transformation for the third layer.
+
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+    def init_weights(self, init_std: float = 0.02):
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        for linear in (self.w2, self.w3):
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
 # Reference: torchtitan/experiments/llama4/model/
 class GroupedExperts(nn.Module):
     def __init__(
@@ -89,6 +125,11 @@ class GroupedExperts(nn.Module):
 
         return out
 
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+
 
 class TokenChoiceTopKRouter(nn.Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
@@ -116,8 +157,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.top_k = top_k
         self.use_sigmoid = use_sigmoid
         self.route_sclaing_factor = route_sclaing_factor
-
-        self.weight = nn.Parameter(torch.empty((self.num_experts, self.dim)))
+        self.gate = nn.Linear(self.dim, self.num_experts, bias=False)
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor = None
@@ -138,7 +178,7 @@ class TokenChoiceTopKRouter(nn.Module):
                 Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = F.linear(x, self.weight, bias=None)
+        scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.use_sigmoid:
@@ -171,8 +211,11 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = (
             top_scores * self.route_sclaing_factor
         )  # must multiply the scaling factor
-
+        print("In TokenChoiceTopKRouter, top_scores shape: ", top_scores)
         return top_scores, token_indices_experts_sorted, num_local_tokens_per_expert
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
 class MoE(nn.Module):
@@ -205,7 +248,7 @@ class MoE(nn.Module):
             GroupedExperts(
                 dim=dim,
                 hidden_dim=hidden_dim * model_args.n_shared_experts,
-                num_experts=1,
+                num_experts=1,  # Here needs to be 1 to make it equivalent to the MLP
                 use_grouped_mm=self.use_grouped_mm,
             )
             if model_args.n_shared_experts > 0
@@ -232,7 +275,6 @@ class MoE(nn.Module):
         if self.load_balance_coeff is not None and self.load_balance_coeff > 0:
             self.register_full_backward_hook(self._update_expert_bias)
 
-    # TODO: double check the bias update logic. It aligns with the paper.
     def _update_expert_bias(self, *_):
         expert_bias_delta = self.load_balance_coeff * torch.sign(
             self.tokens_per_expert.mean() - self.tokens_per_expert
@@ -250,6 +292,7 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        print("In MoE input, x shape: ", x)
         bs, slen, dim = x.shape
 
         # top_scores and selected_indices shape (bs*slen*top_k,)
@@ -259,6 +302,15 @@ class MoE(nn.Module):
             token_indices,
             num_local_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
+
+        # print(
+        #     "In MoE, top_scores shape: ",
+        #     top_scores.shape,
+        #     "token_indices: ",
+        #     token_indices.shape,
+        #     "num_local_tokens: ",
+        #     num_local_tokens_per_expert.shape,
+        # )
 
         # will be used to update the expert bias for load balancing
         self.tokens_per_expert += num_local_tokens_per_expert
@@ -271,6 +323,12 @@ class MoE(nn.Module):
             x.view(-1, dim),
             dim=0,
             index=token_indices,
+        )
+        print("Routed input: ", routed_input)
+
+        # TODO: remove this line, this is a temporary test
+        routed_input = (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(
+            x.dtype
         )
 
         if self.use_grouped_mm:
@@ -293,29 +351,37 @@ class MoE(nn.Module):
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
+                    token_indices.shape[0] + self.experts.num_experts * ALIGN_SIZE_M,
                     ALIGN_SIZE_M,
                 )
-            token_indices = torch.vstack(
-                (token_indices, token_indices.new_zeros((dim)))
-            )
-            token_indices = token_indices[permuted_indices, :]
+
             routed_input = torch.vstack((routed_input, routed_input.new_zeros((dim))))
+            input_shape = routed_input.shape
             routed_input = routed_input[permuted_indices, :]
         else:
             # NOTE: this would incur a synchronization between device and host
             num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
+            input_shape, permuted_indices = None, None
 
         # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_local_tokens_per_expert)
-        routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
-            x.dtype
-        )
+        routed_output = self.experts(
+            routed_input, num_local_tokens_per_expert
+        )  # torch.Size([16384(bsz), 256])
+
+        routed_output_unpermuted = routed_output.new_empty(input_shape)
+        routed_output_unpermuted[permuted_indices, :] = routed_output
+        routed_output = routed_output_unpermuted[:-1]
+
+        # TODO: Use this line instead if routed_input*top_scores, need to pad top_scores to be multiple of 16
+        # routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
+        #     x.dtype
+        # )
 
         # shared expert
         if self.shared_expert is not None:
             out = self.shared_expert(x.reshape(1, bs * slen, dim)).reshape(
                 bs * slen, dim
-            )
+            )  #  torch.Size([16384, 256]) None
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
