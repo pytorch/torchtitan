@@ -211,7 +211,7 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = (
             top_scores * self.route_sclaing_factor
         )  # must multiply the scaling factor
-
+        print("In TokenChoiceTopKRouter, top_scores shape: ", top_scores)
         return top_scores, token_indices_experts_sorted, num_local_tokens_per_expert
 
     def init_weights(self, init_std: float):
@@ -253,12 +253,6 @@ class MoE(nn.Module):
             )
             if model_args.n_shared_experts > 0
             else None
-            # FeedForward(
-            #     dim=dim,
-            #     hidden_dim=hidden_dim * model_args.n_shared_experts,
-            # )
-            # if model_args.n_shared_experts > 0
-            # else None
         )
 
         # auxiliary-loss-free load balancing
@@ -298,6 +292,7 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        print("In MoE input, x shape: ", x)
         bs, slen, dim = x.shape
 
         # top_scores and selected_indices shape (bs*slen*top_k,)
@@ -308,14 +303,14 @@ class MoE(nn.Module):
             num_local_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
-        print(
-            "In MoE, top_scores shape: ",
-            top_scores.shape,
-            "token_indices: ",
-            token_indices.shape,
-            "num_local_tokens: ",
-            num_local_tokens_per_expert.shape,
-        )
+        # print(
+        #     "In MoE, top_scores shape: ",
+        #     top_scores.shape,
+        #     "token_indices: ",
+        #     token_indices.shape,
+        #     "num_local_tokens: ",
+        #     num_local_tokens_per_expert.shape,
+        # )
 
         # will be used to update the expert bias for load balancing
         self.tokens_per_expert += num_local_tokens_per_expert
@@ -328,6 +323,12 @@ class MoE(nn.Module):
             x.view(-1, dim),
             dim=0,
             index=token_indices,
+        )
+        print("Routed input: ", routed_input)
+
+        # TODO: remove this line, this is a temporary test
+        routed_input = (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(
+            x.dtype
         )
 
         if self.use_grouped_mm:
@@ -350,28 +351,31 @@ class MoE(nn.Module):
                     num_local_tokens_per_expert,
                     self.experts.num_experts,
                     1,
-                    token_indices[0] + self.experts.num_experts * ALIGN_SIZE_M,
+                    token_indices.shape[0] + self.experts.num_experts * ALIGN_SIZE_M,
                     ALIGN_SIZE_M,
                 )
-            token_indices = torch.vstack(
-                (token_indices, token_indices.new_zeros((dim)))
-            )
-            token_indices = token_indices[permuted_indices, :]
+
             routed_input = torch.vstack((routed_input, routed_input.new_zeros((dim))))
+            input_shape = routed_input.shape
             routed_input = routed_input[permuted_indices, :]
         else:
             # NOTE: this would incur a synchronization between device and host
             num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
+            input_shape, permuted_indices = None, None
 
-        print("Num local tokens per expert: ", num_local_tokens_per_expert)
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(
             routed_input, num_local_tokens_per_expert
         )  # torch.Size([16384(bsz), 256])
-        print("Routed output shape: ", routed_output.shape)
-        routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
-            x.dtype
-        )
+
+        routed_output_unpermuted = routed_output.new_empty(input_shape)
+        routed_output_unpermuted[permuted_indices, :] = routed_output
+        routed_output = routed_output_unpermuted[:-1]
+
+        # TODO: Use this line instead if routed_input*top_scores, need to pad top_scores to be multiple of 16
+        # routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
+        #     x.dtype
+        # )
 
         # shared expert
         if self.shared_expert is not None:
@@ -380,10 +384,6 @@ class MoE(nn.Module):
             )  #  torch.Size([16384, 256]) None
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
-
-        print(
-            "Out shape: ", out.shape, out.grad.shape if out.grad is not None else None
-        )
 
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)

@@ -77,6 +77,7 @@ def fill_indices_wrapper(
     max_blocks: int = 1024,  # cap on total number of blocks to launch
 ):
     # preallocate output
+    print("max_len: ", max_len, "block_size: ", block_size, "max_blocks: ", max_blocks)
     permuted_indices = torch.full(
         (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
     )
