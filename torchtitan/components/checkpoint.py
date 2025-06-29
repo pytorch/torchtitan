@@ -17,9 +17,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-import torch.multiprocessing as mp
 import torch.nn as nn
-from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -33,7 +31,7 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 from torch.distributed.checkpoint.staging import (
     DefaultStager,
@@ -351,7 +349,11 @@ class CheckpointManager:
                 if self.stager is None:
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
                 result = dcp.async_save(
-                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, async_stager=self.stager,
+                    self.states,
+                    checkpoint_id=checkpoint_id,
+                    process_group=self.pg,
+                    async_checkpointer_type=AsyncCheckpointerType.PROCESS,
+                    async_stager=self.stager,
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
