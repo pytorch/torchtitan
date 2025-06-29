@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -33,10 +34,6 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
-from torch.distributed.checkpoint.staging import (
-    DefaultStager,
-    StagingOptions,
-)
 
 
 MODEL = "model"
@@ -235,7 +232,11 @@ class CheckpointManager:
         self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
         self.interval = ckpt_config.interval
         async_mode = ckpt_config.async_mode.lower()
-        if async_mode == AsyncMode.ASYNC or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM or self.ft_manager:
+        if (
+            async_mode == AsyncMode.ASYNC
+            or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+            or self.ft_manager
+        ):
             self.pg = dist.new_group(backend="gloo")
 
         self.keep_latest_k = ckpt_config.keep_latest_k
@@ -549,7 +550,6 @@ class CheckpointManager:
                 "self.async_future is not None, but self.async_mode is not enabled "
                 "and fault tolerance is not active."
             )
-
 
     def _purge_stale_checkpoints(self):
         if (
