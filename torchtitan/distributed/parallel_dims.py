@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -23,6 +22,7 @@ class ParallelDims:
     cp: int
     tp: int
     pp: int
+    ep: int
     world_size: int
     enable_loss_parallel: bool
 
@@ -30,14 +30,15 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp = (
+        dp_replicate, dp_shard, cp, tp, pp, ep = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
             self.tp,
             self.pp,
+            self.ep,
         )
-        for d in (dp_replicate, cp, tp, pp):
+        for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
 
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must -1 or >=1."
@@ -50,7 +51,84 @@ class ParallelDims:
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
 
+        if ep > 1:
+            # EP would borrow all cp and some dp_shard degree
+            assert ep % cp == 0 and (dp_shard * cp) % ep == 0
+
     def build_mesh(self, device_type: str) -> DeviceMesh:
+        # TODO: Current implementation of ParallelDims for dp2ep Expert Parallel
+        #       is not very clean, due to the limited support from DeviceMesh
+        #       for creating two staggered meshes. Will improve.
+        if self.ep > 1:
+            return self._build_mesh_with_ep(device_type)
+        else:
+            return self._build_mesh_without_ep(device_type)
+
+    def _build_mesh_with_ep(self, device_type: str) -> DeviceMesh:
+        # With ep, dp_shard and ep are derived submeshes:
+        # dp_shard = dp_shard_mod_ep * dp_shard_in_ep
+        # ep = dp_shard_in_ep * cp
+        dp_shard_mod_ep = self.dp_shard * self.cp // self.ep
+        dp_shard_in_ep = self.ep // self.cp
+
+        dims = []
+        names = []
+        for d, name in zip(
+            [
+                self.pp,
+                self.dp_replicate,
+                dp_shard_mod_ep,
+                dp_shard_in_ep,
+                self.cp,
+                self.tp,
+            ],
+            ["pp", "dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep", "cp", "tp"],
+        ):
+            # dp_shard_mod_ep is needed even if it's 1, whose FSDP wrapping
+            # helps the MoE layers do mixed precision training
+            if d > 1 or name == "dp_shard_mod_ep":
+                dims.append(d)
+                names.append(name)
+
+        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+
+        # Create all the submesh here to ensure all required process groups are
+        # initialized:
+        # Mesh for data loading (no communication on this mesh)
+        dp_mesh_dim_names = []
+        # Mesh for param sharding
+        dp_shard_cp_mesh_dim_names = []
+        # Mesh for loss all-reduce
+        dp_cp_mesh_dim_names = []
+        # Mesh for ep
+        ep_mesh_dim_names = []
+
+        if self.dp_replicate_enabled:
+            dp_mesh_dim_names.append("dp_replicate")
+            dp_cp_mesh_dim_names.append("dp_replicate")
+        # dp_shard_mod_ep is always needed, even if it's 1
+        dp_mesh_dim_names.append("dp_shard_mod_ep")
+        dp_shard_cp_mesh_dim_names.append("dp_shard_mod_ep")
+        dp_cp_mesh_dim_names.append("dp_shard_mod_ep")
+        if "dp_shard_in_ep" in names:
+            dp_mesh_dim_names.append("dp_shard_in_ep")
+            dp_shard_cp_mesh_dim_names.append("dp_shard_in_ep")
+            dp_cp_mesh_dim_names.append("dp_shard_in_ep")
+            ep_mesh_dim_names.append("dp_shard_in_ep")
+        if self.cp_enabled:
+            dp_shard_cp_mesh_dim_names.append("cp")
+            dp_cp_mesh_dim_names.append("cp")
+            ep_mesh_dim_names.append("cp")
+
+        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
+        mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_shard_cp")
+        mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+        mesh[tuple(ep_mesh_dim_names)]._flatten(mesh_dim_name="ep")
+
+        return mesh
+
+    def _build_mesh_without_ep(self, device_type: str) -> DeviceMesh:
         dims = []
         names = []
         for d, name in zip(
@@ -61,17 +139,8 @@ class ParallelDims:
                 dims.append(d)
                 names.append(name)
 
-        return self._build_mesh(device_type, dims, names, init_device_mesh)
-
-    def _build_mesh(
-        self,
-        device_type: str,
-        dims: list[int],
-        names: list[str],
-        init_device_mesh_fn: Callable,
-    ) -> DeviceMesh:
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        mesh = init_device_mesh_fn(device_type, dims, mesh_dim_names=names)
+        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
@@ -143,3 +212,12 @@ class ParallelDims:
     @cached_property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
+
+    @property
+    def ep_enabled(self):
+        return self.ep > 1
+
+    @property
+    def dense_params_mesh_ndim(self):
+        # Note: EP params mesh ndim is 1 more due to the 'ep' mesh
+        return self.dp_replicate_enabled + self.fsdp_enabled + self.tp_enabled
