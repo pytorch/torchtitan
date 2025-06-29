@@ -279,8 +279,8 @@ class CheckpointManager:
             self.purge_thread = None
 
         self.mp = None
-        self.async_future = None
-        self.upload_future = None
+        self.staging_future = None
+        self.save_future = None
         if async_mode == AsyncMode.DISABLED:
             self.async_mode = AsyncMode.DISABLED
         elif async_mode == AsyncMode.ASYNC:
@@ -310,9 +310,8 @@ class CheckpointManager:
                 self.purge_queue.put(Terminate())
                 self.purge_thread.join()
 
-            if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-                if self.stager is not None:
-                    self.stager.close()
+            if self.stager is not None:
+                self.stager.close()
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -354,11 +353,11 @@ class CheckpointManager:
                 result = dcp.async_save(
                     self.states, checkpoint_id=checkpoint_id, process_group=self.pg, async_checkpointer_type=AsyncCheckpointerType.PROCESS, async_stager=self.stager,
                 )
-                self.upload_future = result.upload_completion
-                self.async_future = result.staging_completion
+                self.save_future = result.upload_completion
+                self.staging_future = result.staging_completion
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
-                self.async_future = dcp.async_save(
+                self.save_future = dcp.async_save(
                     self.states, checkpoint_id=checkpoint_id, process_group=self.pg
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -442,7 +441,7 @@ class CheckpointManager:
         with ``async_checkpoint_with_pinned_memory``.
         """
         if self.enable_staging and self.staging:
-            self.async_future.result()
+            self.staging_future.result()
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
@@ -481,7 +480,7 @@ class CheckpointManager:
         begin = time.monotonic()
         self._async_wait()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self.async_future = dcp.async_save(
+        self.save_future = dcp.async_save(
             self.ft_states, checkpoint_id=checkpoint_id, process_group=self.pg
         )
         logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
@@ -574,13 +573,13 @@ class CheckpointManager:
 
     def _async_wait(self) -> None:
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            if self.upload_future is not None:
-                self.upload_future.result()
+            if self.save_future is not None:
+                self.save_future.result()
         elif self.async_mode == AsyncMode.ASYNC or self.ft_manager is not None:
-            if self.async_future is not None:
-                self.async_future.result()
-                self.async_future = None
-        elif self.async_future is not None:
+            if self.save_future is not None:
+                self.save_future.result()
+                self.save_future = None
+        elif self.save_future is not None:
             raise RuntimeError(
                 "self.async_future is not None, but self.async_mode is not enabled "
                 "and fault tolerance is not active."
