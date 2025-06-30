@@ -67,6 +67,17 @@ def build_test_list():
             "fsdp+compile",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.context_parallel_degree=8",
+                    "--parallelism.context_parallel_rotate_method='allgather'",
+                ]
+            ],
+            "CP (allgather)",
+            "cp_allgather",
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
 
