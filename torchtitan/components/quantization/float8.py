@@ -106,7 +106,8 @@ class Float8Converter(ModelConverter):
                 from torchao.float8 import _auto_filter_for_recipe
 
                 logger.info(
-                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small to benefit from float8 training. See docs/float8.md for more info."
+                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small "
+                    "to benefit from float8 training. See docs/float8.md for more info."
                 )
 
                 recipe_name = (
@@ -190,7 +191,6 @@ class Float8Converter(ModelConverter):
             f"Converted MoE layers matching FQNS {self.moe_fqns} "
             "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
         )
-
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         if not self.enabled:
