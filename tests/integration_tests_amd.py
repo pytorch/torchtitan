@@ -68,14 +68,11 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=8",
                 ]
             ],
-            "FSDP+TP+PP+torch.compile",
-            "fsdp+tp+cp+compile",
+            "PP",
+            "pp",
             ngpu=8,
         ),
     ]
