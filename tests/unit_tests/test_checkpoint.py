@@ -446,8 +446,10 @@ class TestCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "disabled"
+        job_config.checkpoint.async_mode = "async"
         ft_manager = mock.Mock()
+        ft_manager.manager.return_value = mock.Mock()
+        ft_manager.manager.participating_rank = mock.Mock(return_value=1)
         ft_manager.enabled = True
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
