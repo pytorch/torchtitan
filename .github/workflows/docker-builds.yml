@@ -29,7 +29,7 @@ jobs:
           - docker-image-name: torchtitan-ubuntu-20.04-clang12
             runner: [self-hosted, linux.2xlarge]
           - docker-image-name: torchtitan-rocm-pytorch-nightly-ubuntu-22.04-clang19-py3
-            runner: [linux.12xlarge]
+            runner: [linux.2xlarge]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     env:
