@@ -126,6 +126,13 @@ DATASETS = {
         ),
         data_processor=_cc12m_wds_data_processor,
     ),
+    "cc12m-test-iterable": TextToImageDatasetConfig(
+        path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*tar"}
+        ).to_iterable_dataset(num_shards=4),
+        data_processor=_cc12m_wds_data_processor,
+    ),
 }
 
 
@@ -194,13 +201,13 @@ class FluxDataset(IterableDataset, Stateful):
         self._all_samples: list[dict[str, Any]] = []
 
     def _get_data_iter(self):
-        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
-            return iter([])
+        if isinstance(self._data, Dataset):
+            if self._sample_idx == len(self._data):
+                return iter([])
+            else:
+                return iter(self._data.skip(self._sample_idx))
 
-        it = iter(self._data)
-        for _ in range(self._sample_idx):
-            next(it)
-        return it
+        return iter(self._data)
 
     def __iter__(self):
         dataset_iterator = self._get_data_iter()
@@ -223,8 +230,13 @@ class FluxDataset(IterableDataset, Stateful):
                 else:
                     # Reset offset for the next iteration if infinite
                     self._sample_idx = 0
-                    logger.info(f"Dataset {self.dataset_name} is being re-looped.")
+                    logger.warning(f"Dataset {self.dataset_name} is being re-looped.")
                     dataset_iterator = self._get_data_iter()
+                    if not isinstance(self._data, Dataset):
+                        if hasattr(self._data, "set_epoch") and hasattr(
+                            self._data, "epoch"
+                        ):
+                            self._data.set_epoch(self._data.epoch + 1)
                     continue
 
             # Use the dataset-specific preprocessor
@@ -258,12 +270,19 @@ class FluxDataset(IterableDataset, Stateful):
             yield sample_dict, labels
 
     def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
+        if isinstance(self._data, Dataset):
+            self._sample_idx = state_dict["sample_idx"]
+        else:
+            assert "data" in state_dict
+            self._data.load_state_dict(state_dict["data"])
+            print("load state dict: ", self._data.state_dict())
 
     def state_dict(self):
-        return {
-            "sample_idx": self._sample_idx,
-        }
+        if isinstance(self._data, Dataset):
+            return {"sample_idx": self._sample_idx}
+        else:
+            print("save state dict: ", self._data.state_dict())
+            return {"data": self._data.state_dict()}
 
 
 def build_flux_dataloader(

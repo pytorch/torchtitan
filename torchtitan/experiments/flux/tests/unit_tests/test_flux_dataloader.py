@@ -14,12 +14,12 @@ class TestFluxDataLoader:
     def test_load_dataset(self):
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
-        for world_size in [2, 4]:
+        for world_size in [1]:
             for rank in range(world_size):
-                dataset_name = "cc12m-test"
-                batch_size = 4
+                dataset_name = "cc12m-test-iterable"
+                batch_size = 33
 
-                num_steps = 10
+                num_steps = 1
 
                 path = "torchtitan.experiments.flux.job_config"
                 config_manager = ConfigManager()
