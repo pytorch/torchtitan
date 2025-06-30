@@ -449,7 +449,7 @@ class TestCheckpointManager(unittest.TestCase):
         job_config.checkpoint.async_mode = "async"
         ft_manager = mock.Mock()
         ft_manager.manager.return_value = mock.Mock()
-        ft_manager.manager.participating_rank = mock.Mock(return_value=1)
+        ft_manager.manager.participating_rank = mock.Mock(return_value=0)
         ft_manager.enabled = True
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
