@@ -41,6 +41,8 @@ def build_test_list():
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
+    TODO: 8*amd gpu current only support 1D TP/DP test, ebale test for PP/CP
+    and xD test later.
     """
     integration_tests_flavors = defaultdict(list)
     integration_tests_flavors["debug_model.toml"] = [
@@ -63,16 +65,6 @@ def build_test_list():
             ],
             "FSDP+torch.compile",
             "fsdp+compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree=8",
-                ]
-            ],
-            "PP",
-            "pp",
             ngpu=8,
         ),
     ]
