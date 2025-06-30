@@ -20,6 +20,11 @@ class TestLRScheduler(unittest.TestCase):
         self.model = torch.nn.Linear(10, 10)
         # Create an optimizer
         self.optimizer = Adam(self.model.parameters(), lr=0.1)
+
+        # We don't actually call `optimizer.step()` which will cause a warning
+        # from PyTorch. Avoid the warnings that may confuse people.
+        self.optimizer._opt_called = True
+
         # Create an optimizer container
         self.optimizer_container = MagicMock(spec=OptimizersContainer)
         self.optimizer_container.__iter__.return_value = iter([self.optimizer])
