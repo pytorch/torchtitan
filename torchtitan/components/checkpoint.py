@@ -584,7 +584,7 @@ class CheckpointManager:
                 self.save_future = None
         elif self.save_future is not None:
             raise RuntimeError(
-                "self.async_future is not None, but self.async_mode is not enabled "
+                "self.save_future is not None, but self.async_mode is not enabled "
                 "and fault tolerance is not active."
             )
 
