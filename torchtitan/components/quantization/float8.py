@@ -106,7 +106,7 @@ class Float8Converter(ModelConverter):
                 from torchao.float8 import _auto_filter_for_recipe
 
                 logger.info(
-                    "Using automatic module filter for float8 model conversion."
+                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small to benefit from float8 training. See docs/float8.md for more info."
                 )
 
                 recipe_name = (
