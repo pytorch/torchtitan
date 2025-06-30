@@ -22,7 +22,7 @@ enable_wandb = false
 [model]
 name = "flux"
 flavor = "flux-debug"
-
+tokenizer_path = "./tests/assets/test_tiktoken.model"
 [optimizer]
 name = "AdamW"
 lr = 8e-4
@@ -33,6 +33,7 @@ warmup_steps = 1  # 10% warmup steps
 decay_ratio = 0.0  # no decay, stay stable during training
 
 [training]
+test_mode = true
 local_batch_size = 4
 max_norm = 2.0  # grad norm clipping
 steps = 10
@@ -42,8 +43,8 @@ classifer_free_guidance_prob = 0.447
 img_size = 256
 
 [encoder]
-t5_encoder = "google/t5-v1_1-xxl"
-clip_encoder = "openai/clip-vit-large-patch14"
+t5_encoder = "/data/users/wesleytruong/a/torchtitan/torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl"  # T5 encoder to use for text
+clip_encoder = "/data/users/wesleytruong/a/torchtitan/torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14"
 max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
@@ -65,7 +66,7 @@ custom_args_module = "torchtitan.experiments.flux.job_config"
 mode = "full"
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval = 10
 last_save_model_weights_only = false

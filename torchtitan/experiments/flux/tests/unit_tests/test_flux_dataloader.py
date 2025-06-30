@@ -21,7 +21,7 @@ class TestFluxDataLoader:
 
                 num_steps = 15
 
-                num_steps = 10
+                num_steps = 1
 
                 path = "torchtitan.experiments.flux.job_config"
                 config_manager = ConfigManager()
