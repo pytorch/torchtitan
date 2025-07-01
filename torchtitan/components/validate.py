@@ -1,4 +1,8 @@
-import os
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import torch
 import torch.nn as nn
@@ -21,6 +25,16 @@ class BaseValidator:
 
 
 class Validator(BaseValidator):
+    """
+    Simple validator focused on correctness and integration.
+
+    Args:
+        job_config: Job configuration
+        validation_dataloader: The validation dataloader
+        loss_fn: Loss function to use for validation
+        model: The model to validate (single model, no parallelism)
+    """
+
     validation_dataloader: BaseDataLoader
 
     def __init__(
@@ -32,15 +46,6 @@ class Validator(BaseValidator):
         dp_rank: int,
         tokenizer: Tokenizer,
     ):
-        """
-        Simple validator focused on correctness and integration.
-
-        Args:
-            job_config: Job configuration
-            validation_dataloader: The validation dataloader
-            loss_fn: Loss function to use for validation
-            model: The model to validate (single model, no parallelism)
-        """
         self.job_config = job_config
         self.loss_fn = loss_fn
         self.model = model
