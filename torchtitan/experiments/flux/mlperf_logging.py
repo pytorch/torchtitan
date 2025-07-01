@@ -48,7 +48,7 @@ class MLPerfLogger:
         )
 
         self.submission_info = {
-            constants.SUBMISSION_BENCHMARK: "text_to_image",
+            constants.SUBMISSION_BENCHMARK: "flux",
             constants.SUBMISSION_DIVISION: "closed",
             constants.SUBMISSION_ORG: "reference",
             constants.SUBMISSION_PLATFORM: "reference",
