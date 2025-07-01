@@ -420,7 +420,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # First save schedules async
         manager.save(curr_step=10, last_step=False)
-        future = manager.async_future
+        future = manager.save_future
         future.result.assert_not_called()
 
         # Second save should wait
@@ -428,7 +428,7 @@ class TestCheckpointManager(unittest.TestCase):
         future.result.assert_called_once()
 
         # New future created
-        new_future = manager.async_future
+        new_future = manager.save_future
         new_future.result.assert_not_called()
 
     @mock.patch("torch.cuda.Stream")
@@ -446,8 +446,10 @@ class TestCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "disabled"
+        job_config.checkpoint.async_mode = "async"
         ft_manager = mock.Mock()
+        ft_manager.manager.return_value = mock.Mock()
+        ft_manager.manager.participating_rank = mock.Mock(return_value=0)
         ft_manager.enabled = True
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
@@ -461,16 +463,16 @@ class TestCheckpointManager(unittest.TestCase):
         )
 
         # Initially no future
-        self.assertIsNone(manager.async_future)
+        self.assertIsNone(manager.save_future)
         manager.save(curr_step=5, last_step=False)
-        self.assertIsNotNone(manager.async_future)
+        self.assertIsNotNone(manager.save_future)
 
-        manager.async_future.result.assert_not_called()
-        prev_future = manager.async_future
+        manager.save_future.result.assert_not_called()
+        prev_future = manager.save_future
         manager.save(curr_step=6, last_step=False)
         prev_future.result.assert_called_once()
-        self.assertIsNotNone(manager.async_future)
-        manager.async_future.result.assert_not_called()
+        self.assertIsNotNone(manager.save_future)
+        manager.save_future.result.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
