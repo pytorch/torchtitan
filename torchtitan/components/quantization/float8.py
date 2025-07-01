@@ -102,21 +102,12 @@ class Float8Converter(ModelConverter):
         if not self.enabled:
             return
 
-        from torchao.float8 import convert_to_float8_training
-
-        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
-        convert_to_float8_training(
-            model,
-            config=self.config,
-            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
-        )
-        logger.info(
-            "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
-            f"{self.config.enable_fsdp_float8_all_gather}"
-        )
-
         # Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
         # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        # MoE conversion must take place before Float8Linear conversion, otherwise the Float8Linears will
+        # be converted back to nn.Linear:
+        # https://github.com/pytorch/ao/blob/c2a6568a04075acc371a338206216bb65536fb27/torchao/quantization/quant_api.py#L294-L299
+        # TODO: add warning in torchao when this happens, or find a better way to avoid this.
         if self.moe_fqns:
             from torchao.quantization.quant_api import quantize_
 
@@ -137,7 +128,23 @@ class Float8Converter(ModelConverter):
 
             config = MoETrainingConfig()
             quantize_(model, config=config, filter_fn=moe_module_filter_fn)
-            logger.info("Converted MoE to float8")
+            logger.info(
+                f"Converted MoE layers matching FQNS {self.moe_fqns} "
+                "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
+            )
+
+        from torchao.float8 import convert_to_float8_training
+
+        # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
+        convert_to_float8_training(
+            model,
+            config=self.config,
+            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+        )
+        logger.info(
+            "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
+            f"{self.config.enable_fsdp_float8_all_gather}"
+        )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         if not self.enabled:
