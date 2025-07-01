@@ -3,7 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-
 from functools import partial
 
 import torch
@@ -19,6 +18,8 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
+
+AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
 class Float8Converter(ModelConverter):
@@ -54,14 +55,19 @@ class Float8Converter(ModelConverter):
         self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
         self.moe_fqns = float8_config.moe_fqns_prototype
+        self.filter_fn = self._init_filter_fn(float8_config)
 
         if float8_config.recipe_name is not None:
-            assert (
-                not float8_config.enable_fsdp_float8_all_gather
-            ), "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
-            assert (
-                not float8_config.force_recompute_fp8_weight_in_bwd
-            ), "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
+            assert not float8_config.enable_fsdp_float8_all_gather, (
+                "using `float8_config.enable_fsdp_float8_all_gather` together "
+                "with `float8_config.recipe_name` is not supported"
+            )
+
+            assert not float8_config.force_recompute_fp8_weight_in_bwd, (
+                "using `float8_config.force_recompute_fp8_weight_in_bwd` together "
+                "with `float8_config.recipe_name` is not supported"
+            )
+
             self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
             self.precompute_scale = False
             logger.info(
@@ -74,7 +80,6 @@ class Float8Converter(ModelConverter):
                 logger.debug(
                     "Set torch._inductor.config.emulate_precision_casts to True"
                 )
-
         else:
             # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
             enable_fsdp_float8_all_gather = (
@@ -93,6 +98,42 @@ class Float8Converter(ModelConverter):
             )
             logger.info("Float8 tensorwise scaled training active")
 
+    def _init_filter_fn(self, float8_config: Float8):
+        # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
+        use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
+        if use_auto_filter:
+            try:
+                from torchao.float8 import _auto_filter_for_recipe
+
+                logger.info(
+                    "Using _auto_filter_for_recipe to avoid converting linear layers with dims too small "
+                    "to benefit from float8 training. See docs/float8.md for more info."
+                )
+
+                recipe_name = (
+                    float8_config.recipe_name
+                    if float8_config.recipe_name
+                    else "tensorwise"
+                )
+
+                # remove auto filter flag from filter_fqns before passing to _auto_filter_for_recipe
+                float8_config.filter_fqns.remove(AUTO_FILTER_SMALL_KN_FLAG)
+
+                return _auto_filter_for_recipe(
+                    recipe_name,
+                    filter_fqns=float8_config.filter_fqns,
+                )
+            except ImportError:
+                logger.warning(
+                    (
+                        "Using default module_filter_fn for float8 model conversion. "
+                        "To use _auto_filter_for_recipe, please install torchao nightly build."
+                    )
+                )
+
+        # use default filter func
+        return partial(module_filter_fn, filter_fqns=float8_config.filter_fqns)
+
     def convert(self, model: nn.Module):
         """
         This function converts the linear layers of `model` to `Float8Linear`.
@@ -102,36 +143,12 @@ class Float8Converter(ModelConverter):
         if not self.enabled:
             return
 
-        # Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
-        # to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
         # MoE conversion must take place before Float8Linear conversion, otherwise the Float8Linears will
         # be converted back to nn.Linear:
         # https://github.com/pytorch/ao/blob/c2a6568a04075acc371a338206216bb65536fb27/torchao/quantization/quant_api.py#L294-L299
         # TODO: add warning in torchao when this happens, or find a better way to avoid this.
         if self.moe_fqns:
-            from torchao.quantization.quant_api import quantize_
-
-            try:
-                from torchao.prototype.moe_training.conversion_utils import (
-                    MoETrainingConfig,
-                )
-            except ImportError as e:
-                raise ImportError(
-                    "torchao installation does not have MoE training support. Please install torchao nightly build."
-                ) from e
-
-            def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-                for target_fqn in self.moe_fqns:
-                    if target_fqn in cur_fqn:
-                        return True
-                return False
-
-            config = MoETrainingConfig()
-            quantize_(model, config=config, filter_fn=moe_module_filter_fn)
-            logger.info(
-                f"Converted MoE layers matching FQNS {self.moe_fqns} "
-                "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
-            )
+            self._convert_moe_layers(model)
 
         from torchao.float8 import convert_to_float8_training
 
@@ -144,6 +161,35 @@ class Float8Converter(ModelConverter):
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
+        )
+
+    def _convert_moe_layers(self, model: nn.Module):
+        """
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        """
+        from torchao.quantization.quant_api import quantize_
+
+        try:
+            from torchao.prototype.moe_training.conversion_utils import (
+                MoETrainingConfig,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "torchao installation does not have MoE training support. Please install torchao nightly build."
+            ) from e
+
+        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+            for target_fqn in self.moe_fqns:
+                if target_fqn in cur_fqn:
+                    return True
+            return False
+
+        config = MoETrainingConfig()
+        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        logger.info(
+            f"Converted MoE layers matching FQNS {self.moe_fqns} "
+            "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
         )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
