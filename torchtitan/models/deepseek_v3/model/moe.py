@@ -201,17 +201,20 @@ class TokenChoiceTopKRouter(nn.Module):
             min=0,
             max=self.num_experts,
         )
+
+        # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
         token_indices_experts_sorted = torch.argsort(
             selected_experts_indices.view(-1), stable=True
         )
+
+        # reorder the scores to match the order of the token indices
         top_scores = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
         top_scores = (
             top_scores * self.route_sclaing_factor
         )  # must multiply the scaling factor
-        print("In TokenChoiceTopKRouter, top_scores shape: ", top_scores)
         return top_scores, token_indices_experts_sorted, num_local_tokens_per_expert
 
     def init_weights(self, init_std: float):
@@ -292,7 +295,6 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        print("In MoE input, x shape: ", x)
         bs, slen, dim = x.shape
 
         # top_scores and selected_indices shape (bs*slen*top_k,)
@@ -302,15 +304,6 @@ class MoE(nn.Module):
             token_indices,
             num_local_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
-
-        # print(
-        #     "In MoE, top_scores shape: ",
-        #     top_scores.shape,
-        #     "token_indices: ",
-        #     token_indices.shape,
-        #     "num_local_tokens: ",
-        #     num_local_tokens_per_expert.shape,
-        # )
 
         # will be used to update the expert bias for load balancing
         self.tokens_per_expert += num_local_tokens_per_expert
@@ -323,12 +316,6 @@ class MoE(nn.Module):
             x.view(-1, dim),
             dim=0,
             index=token_indices,
-        )
-        print("Routed input: ", routed_input)
-
-        # TODO: remove this line, this is a temporary test
-        routed_input = (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(
-            x.dtype
         )
 
         if self.use_grouped_mm:
@@ -361,30 +348,30 @@ class MoE(nn.Module):
         else:
             # NOTE: this would incur a synchronization between device and host
             num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
-            input_shape, permuted_indices = None, None
+            permuted_indices, input_shape = None, None
 
         # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(
-            routed_input, num_local_tokens_per_expert
-        )  # torch.Size([16384(bsz), 256])
+        routed_output = self.experts(routed_input, num_local_tokens_per_expert)
 
-        routed_output_unpermuted = routed_output.new_empty(input_shape)
-        routed_output_unpermuted[permuted_indices, :] = routed_output
-        routed_output = routed_output_unpermuted[:-1]
+        if self.use_grouped_mm:
+            # NOTE: Reverese the permutation to get the original order as inputs
+            routed_output_unpermuted = routed_output.new_empty(input_shape)
+            routed_output_unpermuted[permuted_indices, :] = routed_output
+            routed_output = routed_output_unpermuted[:-1]  # remove padding
 
-        # TODO: Use this line instead if routed_input*top_scores, need to pad top_scores to be multiple of 16
-        # routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
-        #     x.dtype
-        # )
+        routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
+            x.dtype
+        )
 
         # shared expert
         if self.shared_expert is not None:
             out = self.shared_expert(x.reshape(1, bs * slen, dim)).reshape(
                 bs * slen, dim
-            )  #  torch.Size([16384, 256]) None
+            )
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
+        # Accumulate multiple expert results becase each token can be routed to multiple experts
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out
