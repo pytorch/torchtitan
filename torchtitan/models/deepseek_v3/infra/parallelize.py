@@ -18,7 +18,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.llama4.infra.expert_parallel import NoParallel
-from torchtitan.experiments.llama4.infra.parallelize import apply_moe_tp
+from torchtitan.experiments.llama4.infra.parallelize import apply_moe_ep_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_fsdp
 from torchtitan.tools.logging import logger
 
@@ -59,7 +59,16 @@ def parallelize_deepseekv3(
             enable_async_tp=False,
         )
 
-        apply_moe_tp(model, world_mesh["tp"])
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
+            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
+            ep_tp_mesh=(
+                world_mesh["ep", "tp"]
+                if parallel_dims.tp_enabled and parallel_dims.ep_enabled
+                else None
+            ),
+        )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
