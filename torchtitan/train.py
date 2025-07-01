@@ -113,6 +113,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
         )
 
+        # allow configuring inductor comms optimizations from torchtitan commandline
+        torch._inductor.config.reorder_for_compute_comm_overlap = (
+            job_config.experimental.reorder_for_compute_comm_overlap
+        )
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = (
+            job_config.experimental.reorder_for_compute_comm_overlap_passes
+        )
+        torch._inductor.config.reorder_prefetch_limit = (
+            job_config.experimental.reorder_prefetch_limit
+        )
+
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
