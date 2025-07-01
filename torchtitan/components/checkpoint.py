@@ -52,7 +52,7 @@ class AsyncMode(str, enum.Enum):
 # For now, we will manually pop the freqs_cis buffer, as we made this permanent
 # temporarily and we don't want to include it in the exported state_dict.
 # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-excluded_parameters_for_model_only = {"freqs_cis"}
+excluded_parameters_for_model_only = {}
 
 
 class ModelWrapper(Stateful):
