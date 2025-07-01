@@ -509,6 +509,17 @@ def build_test_list():
             "gradient_accumulation",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_test",
+                ],
+            ],
+            "Validation test no parallelism",
+            "validation_no_parallel",
+            ngpu=1,
+        ),
     ]
     return integration_tests_flavors
 

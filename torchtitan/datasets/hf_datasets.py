@@ -49,6 +49,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train"),
         text_processor=_process_c4_text,
     ),
+    # "c4_validation": DatasetConfig(
+    #     path="tests/assets/c4_test",
+    #     loader=lambda path: load_dataset(path, split="validation"),
+    #     text_processor=_process_c4_text,
+    # ),
 }
 
 
@@ -176,6 +181,37 @@ def build_hf_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
+
+    hf_ds = HuggingFaceDataset(
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=hf_ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+    )
+
+
+def build_hf_validation_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    tokenizer: Tokenizer,
+    job_config: JobConfig,
+    infinite: bool = True,
+) -> ParallelAwareDataloader:
+    """Build a data loader for HuggingFace datasets."""
+    dataset_name = job_config.validation.dataset
+    dataset_path = job_config.validation.dataset_path
+    batch_size = job_config.validation.local_batch_size
+    seq_len = job_config.validation.seq_len
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,

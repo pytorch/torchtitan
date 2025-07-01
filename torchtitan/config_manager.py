@@ -666,6 +666,24 @@ class Experimental:
 
 
 @dataclass
+class Validator:
+    enabled: bool = False
+    """Enable validation to default run validation after each training loop"""
+
+    dataset: str = "c4_test"
+    """Dataset to use for validation"""
+
+    dataset_path: str | None = None
+    """Path to dataset to use for validation"""
+
+    local_batch_size: int = 8
+    """Batch size for validation"""
+
+    seq_len: int = 2048
+    """Sequence length for validation"""
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -689,6 +707,7 @@ class JobConfig:
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
+    validation: Validator = field(default_factory=Validator)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

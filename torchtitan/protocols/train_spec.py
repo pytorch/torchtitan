@@ -23,6 +23,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.validate import BaseValidator
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
 
@@ -80,6 +81,7 @@ LRSchedulersBuilder: TypeAlias = Callable[
     [OptimizersContainer, JobConfig], LRSchedulersContainer
 ]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
+ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]
 
 
 @dataclass
@@ -94,6 +96,7 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
+    build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
 
 

@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -51,6 +51,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
+
+    validator: train_spec_module.BaseValidator | None
 
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -320,6 +322,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             device_type,
         )
 
+        # Build validator if validation is configured
+        self.validator = None
+        if (
+            self.train_spec.build_validator_fn is not None
+            and job_config.validation.enabled
+            and job_config.validation.dataset
+        ):
+
+            model = (
+                self.model_parts[0]
+                if len(self.model_parts) == 1
+                else self.model_parts[0]
+            )
+            self.validator = self.train_spec.build_validator_fn(
+                job_config=job_config,
+                loss_fn=self.loss_fn,
+                model=model,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=tokenizer,
+            )
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {job_config.training.local_batch_size}, "
@@ -464,6 +488,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
+
+        # Run validation if validator is available
+        validation_metrics = None
+        if self.validator is not None:
+            validation_metrics = self.validator.validate()
+        print(validation_metrics)
 
         self.metrics_processor.log(
             self.step,
