@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -323,20 +323,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # Build validator if validation is configured
-        self.validator = None
-        if (
-            self.train_spec.build_validator_fn is not None
-            and job_config.validation.enabled
-            and job_config.validation.dataset
-        ):
+        if job_config.validation.enabled:
+            assert self.train_spec.build_validator_fn is not None
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
-                loss_fn=self.loss_fn,
-                model=self.model_parts[0],
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=tokenizer,
+                loss_fn=self.loss_fn,
             )
 
         logger.info(
@@ -485,10 +480,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             global_avg_loss = global_max_loss = loss.detach().item()
 
         # Run validation if validator is available
-        validation_metrics = None
-        if self.validator is not None:
-            validation_metrics = self.validator.validate()
-        print(validation_metrics)
+        if self.job_config.validation.enabled and self.validator.should_validate(
+            self.step
+        ):
+            validation_metrics = self.validator.validate(self.model_parts)
 
         self.metrics_processor.log(
             self.step,

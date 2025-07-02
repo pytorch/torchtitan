@@ -49,11 +49,13 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train"),
         text_processor=_process_c4_text,
     ),
-    # "c4_validation": DatasetConfig(
-    #     path="tests/assets/c4_test",
-    #     loader=lambda path: load_dataset(path, split="validation"),
-    #     text_processor=_process_c4_text,
-    # ),
+    "c4_validation": DatasetConfig(
+        path="allenai/c4",
+        loader=lambda path: load_dataset(
+            path, name="en", split="validation", streaming=True
+        ),
+        text_processor=_process_c4_text,
+    ),
 }
 
 

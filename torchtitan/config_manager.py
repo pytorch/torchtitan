@@ -670,7 +670,7 @@ class Validation:
     enabled: bool = False
     """Enable validation to default run validation after each training loop"""
 
-    dataset: str = "c4_test"
+    dataset: str = "c4_validation"
     """Dataset to use for validation"""
 
     dataset_path: str | None = None
@@ -681,6 +681,12 @@ class Validation:
 
     seq_len: int = 2048
     """Sequence length for validation"""
+
+    val_freq: int = 1
+    """Frequency of validation"""
+
+    val_steps: int = -1
+    """Number of validation steps, -1 means all steps"""
 
 
 @dataclass

@@ -20,7 +20,7 @@ class BaseValidator:
     def __init__(self, job_config: JobConfig):
         self.job_config = job_config
 
-    def validate(self) -> dict[str, float]:
+    def validate(self, model_parts: list[nn.Module]) -> dict[str, float]:
         raise NotImplementedError("validate method not implemented")
 
 
@@ -40,48 +40,59 @@ class Validator(BaseValidator):
     def __init__(
         self,
         job_config: JobConfig,
-        loss_fn: LossFunction,
-        model: nn.Module,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: Tokenizer,
+        loss_fn: LossFunction,
     ):
         self.job_config = job_config
         self.loss_fn = loss_fn
-        self.model = model
         self.validation_dataloader = build_hf_validation_dataloader(
+            job_config=job_config,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
-            job_config=job_config,
             infinite=False,
         )
 
-    def validate(self) -> dict[str, float]:
+    def should_validate(self, step: int) -> bool:
+        return step % self.job_config.validation.val_freq == 0
+
+    def validate(
+        self,
+        model_parts: list[nn.Module],
+    ) -> dict[str, float]:
         # Set model to eval mode
-        self.model.eval()
+        model = model_parts[0]
+        model.eval()
 
         total_loss = 0.0
         num_batches = 0
         device_type = utils.device_type
+        num_val_steps = 0
 
         with torch.no_grad():
             try:
-                for batch_data, targets in self.validation_dataloader:
-                    input_dict, labels = batch_data, targets
+                for input_dict, labels in self.validation_dataloader:
+
+                    if (
+                        self.job_config.validation.val_steps != -1
+                        and num_val_steps >= self.job_config.validation.val_steps
+                    ):
+                        break
 
                     for k, v in input_dict.items():
-                        if isinstance(v, torch.Tensor):
-                            input_dict[k] = v.to(device_type)
-                    if isinstance(labels, torch.Tensor):
-                        labels = labels.to(device_type)
+                        input_dict[k] = v.to(device_type)
+                    labels = labels.to(device_type)
 
                     inputs = input_dict["input"]
-                    predictions = self.model(inputs)
+                    predictions = model(inputs)
                     loss = self.loss_fn(predictions, labels)
 
                     total_loss += loss.item()
                     num_batches += 1
+
+                    num_val_steps += 1
 
             except StopIteration:
                 logger.info("Validation dataloader exhausted")
@@ -93,29 +104,28 @@ class Validator(BaseValidator):
             average_loss = 0.0
             logger.warning("No validation batches processed")
 
-        # Set model back to train mode
-        self.model.train()
-
         logger.info(
             f"Validation completed. Average loss: {average_loss:.4f} over {num_batches} batches"
         )
+
+        # Set model back to train mode
+        model.train()
+
         return {"validation_loss": average_loss}
 
 
 def build_validator(
     job_config: JobConfig,
-    loss_fn: LossFunction,
-    model: nn.Module,
     dp_world_size: int,
     dp_rank: int,
     tokenizer: Tokenizer,
+    loss_fn: LossFunction,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
     return Validator(
         job_config=job_config,
-        loss_fn=loss_fn,
-        model=model,
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
+        loss_fn=loss_fn,
     )

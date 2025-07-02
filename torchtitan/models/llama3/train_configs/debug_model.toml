@@ -74,5 +74,7 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enabled = false
-dataset = "c4_test"
+enabled = true
+dataset = "c4_validation"
+val_freq = 5
+val_steps = 10
