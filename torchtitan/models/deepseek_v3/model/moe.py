@@ -11,6 +11,30 @@ from torch import nn
 from .args import DeepSeekV3ModelArgs
 
 
+# This function is manually hidden from the compiler to:
+# - hide inactive experts to avoid 0/1 specialization caused by zero-shaped tokens
+# - mark_dynamic split outputs to avoid specializing on each expert's token shape
+@torch._dynamo.disable
+def split_tokens(x, num_local_tokens_per_expert):
+    splits = num_local_tokens_per_expert.tolist()
+    tokens_by_expert = torch.split(
+        x,
+        split_size_or_sections=splits,
+        dim=0,
+    )
+    expert_idxs = []
+    expert_tokens = []
+    for i, split in enumerate(splits):
+        if split == 0:
+            # inactive expert, hide it from the compiler
+            continue
+
+        torch._dynamo.mark_dynamic(tokens_by_expert[i], 0)
+        expert_idxs.append(i)
+        expert_tokens.append(tokens_by_expert[i])
+
+    return expert_idxs, expert_tokens
+
 # Reference: torchtitan/experiments/llama4/model/
 class GroupedExperts(nn.Module):
     def __init__(
@@ -38,13 +62,9 @@ class GroupedExperts(nn.Module):
             if num_local_tokens_per_expert is not None:
                 # a tuple of tensors indexed by experts
                 # each with shape (tokens_per_expert(varying), dim)
-                x = torch.split(
-                    x,
-                    split_size_or_sections=num_local_tokens_per_expert,
-                    dim=0,
-                )
+                expert_idxs, expert_tokens = split_tokens(x, num_local_tokens_per_expert)
                 out_experts_splits = []
-                for expert_idx, x_expert in enumerate(x):
+                for expert_idx, x_expert in zip(expert_idxs, expert_tokens):
                     w1, w2, w3 = (
                         self.w1[expert_idx],
                         self.w2[expert_idx],
@@ -301,10 +321,6 @@ class MoE(nn.Module):
             token_indices = token_indices[permuted_indices, :]
             routed_input = torch.vstack((routed_input, routed_input.new_zeros((dim))))
             routed_input = routed_input[permuted_indices, :]
-        else:
-            # NOTE: this would incur a synchronization between device and host
-            num_local_tokens_per_expert = num_local_tokens_per_expert.tolist()
-
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_local_tokens_per_expert)
         routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
