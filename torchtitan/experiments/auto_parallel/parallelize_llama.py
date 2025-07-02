@@ -32,6 +32,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
         if global_batch_size < 0:

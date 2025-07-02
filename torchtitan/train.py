@@ -12,6 +12,8 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
+
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -23,7 +25,6 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torch.distributed.tensor import DTensor
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -115,7 +116,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # TODO(whc)
         # I do this becuase otherwise sometimes inductor will skip re-running passes like comms reordering
-        torch._inductor.config.force_disable_caches=True
+        torch._inductor.config.force_disable_caches = True
 
         # allow configuring inductor comms optimizations from torchtitan commandline
         torch._inductor.config.reorder_for_compute_comm_overlap = (
