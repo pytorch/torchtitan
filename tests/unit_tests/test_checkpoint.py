@@ -601,9 +601,10 @@ class TestCheckpointManager(unittest.TestCase):
             self.assertIn("weight", state_dict)
             # No model prefix
             self.assertNotIn("model", state_dict)
-            self.assertNotIn("optimizer", state_dict)
+            self.assertIn("optimizer", state_dict)
 
         self.job_config.checkpoint.last_save_model_weights_only = True
+        self.job_config.checkpoint.initial_load_model_weights_only = False
         manager = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
