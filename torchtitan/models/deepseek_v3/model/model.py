@@ -368,15 +368,10 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        print("Input tokens:", tokens)
         h = self.tok_embeddings(tokens)
-        print("After token embedding:", h)
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
-            print(f"After layer {layer}: ", h)
         h = self.norm(h)
-        print("After normalization:", h)
         output = self.output(h)
-        print("Output logits:", output)
         return output
