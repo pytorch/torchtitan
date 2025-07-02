@@ -59,3 +59,46 @@ This will print a structured configuration to `stdout`, allowing you to verify t
 If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
 When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
 To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
+
+## Reproducibility between runs
+
+When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP), ensuring reproducible behavior is crucial for isolating and fixing problems. TorchTitan provides several mechanisms to achieve deterministic training runs:
+
+### Deterministic Mode
+
+Enable deterministic algorithms to ensure bit-for-bit reproducibility across runs:
+
+```bash
+CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.deterministic
+```
+
+**What it does:**
+- Forces all CUDA operations to use deterministic algorithms
+- Disables CuDNN benchmarking and enables deterministic mode
+- Sets deterministic workspace configuration for CuBLAS operations
+- **Note:** This will significantly reduce training performance but ensures exact reproducibility
+
+### Seed Configuration
+
+Set consistent random seeds across all parallelism dimensions:
+
+```bash
+CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
+```
+
+**Seed behavior with parallelism:**
+- **Data Parallel (DP/FSDP):** All ranks use the same seed for model initialization
+- **Tensor Parallel (TP):** All TP ranks use the same seed for consistent weight sharding
+- **Pipeline Parallel (PP):** Each PP stage gets a different seed to ensure different dropout patterns
+- **Sequence Parallel:** Maintains consistent seeding across sequence-sharded dimensions
+
+### Seed-Checkpoint-based Reproducibility
+
+For experimental runs with TP/PP/EP, we need use `seed_checkpoint` to ensure we initialize the model with the same weights on each rank. This is because in torchtitan/train.py, the model is sharded first, and then initialized weights on each rank seprately. So it's not equivalent to initialize the model on rank 0 and then shard it. An workaround is to use `seed_checkpoint` to make sure the model on each rank with the same weights, becuase the weights are loaded from the same checkpoint.
+
+
+```bash
+NGPU=1 CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1
+```
+
+Note: Using seed checkpoint will only make sure the model on each rank initialized with the same weights, but the later training process might not be exactly the same even with the `deterministic` mode (eg, the precision change during parallesim might cause the different results).
