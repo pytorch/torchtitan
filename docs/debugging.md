@@ -60,9 +60,26 @@ If you encounter jobs that timeout, you'll need to debug them to identify the ro
 When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
 To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
 
+
+
 ## Reproducibility between Runs
 
-When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP, EP), ensuring reproducible behavior is crucial for isolating and fixing problems. `torchtitan` provides several mechanisms to achieve deterministic training runs:
+When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP, EP), ensuring reproducible behavior is crucial for isolating and fixing problems. `torchtitan` provides several mechanisms to achieve deterministic training runs. For more information on ensuring reproducibility and managing randomness in PyTorch, you can refer to the official PyTorch documentation on randomness: [PyTorch Randomness Documentation](https://docs.pytorch.org/docs/stable/notes/randomness.html).
+
+### Seed Configuration
+Set consistent random seeds across all parallelism dimensions:
+
+```bash
+CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
+```
+
+**Seed behavior with parallelism:**
+- **Data Parallel (DP/FSDP):** All ranks use the same seed for model initialization
+- **Tensor Parallel (TP):** All TP ranks use the same seed for consistent weight sharding
+    - Note: For FSDP and TP, DTensor will do special RNG management to make sure a Replicate tensor get the same init across ranks, but a Shard tensor get "random"-like init across ranks.
+- **Pipeline Parallel (PP):** Each PP stage gets a different seed to ensure different dropout patterns
+- **Context Parallel (CP):** All ranks use the same seed for model initialization
+
 
 ### Deterministic Mode
 
@@ -78,19 +95,6 @@ CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.determi
 - Sets deterministic workspace configuration for CuBLAS operations
 - **Note:** This will significantly reduce training performance but ensures exact reproducibility
 
-### Seed Configuration
-
-Set consistent random seeds across all parallelism dimensions:
-
-```bash
-CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
-```
-
-**Seed behavior with parallelism:**
-- **Data Parallel (DP/FSDP):** All ranks use the same seed for model initialization
-- **Tensor Parallel (TP):** All TP ranks use the same seed for consistent weight sharding
-- **Pipeline Parallel (PP):** Each PP stage gets a different seed to ensure different dropout patterns
-- **Sequence Parallel:** Maintains consistent seeding across sequence-sharded dimensions
 
 ### Seed-Checkpoint-based Reproducibility
 
@@ -102,3 +106,16 @@ NGPU=1 CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --checkpoin
 ```
 
 Note: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
+
+### Example: Reproducing loss curves with different parallelism configs
+
+A common scenario is when you introduce a new parallelism strategy to the model, you need to ensure that the loss curve remains numerically equivalent to the previous parallelism plan, thereby confirming the accuracy of your implementation. To achieve consistent behavior across multiple runs with varying parallelism configurations, it's crucial to make sure dataloader behaves consistently. We need to fix the DP degree (`dp_replicate * dpshard`) to ensure the dataloader operates consistently.
+
+Here's a typical comparison setup (maintaining an overall DP degree of 4):
+- Run #1: FSDP degree = 4
+- Run #2: DDP degree = 2, FSDP dgree = 2, TP degree = 2
+- Run #3: DDP degree = 2, FSDP degree = 2, CP degree = 2, PP degree = 2
+
+To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You will also need to set the `deterministic` mode to ensure consistent training behavior.
+
+We also provided an example of verifying the numerical consistency across parallism plans on Llama3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
