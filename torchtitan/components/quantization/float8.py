@@ -57,6 +57,18 @@ class Float8Converter(ModelConverter):
         self.moe_fqns = float8_config.moe_fqns_prototype
         self.filter_fn = self._init_filter_fn(float8_config)
 
+        # Validate MoE training prototype limitations.
+        if self.moe_fqns:
+            assert (
+                job_config.parallelism.tensor_parallel_degree == 1
+            ), "Float8 MoE training prototype does not yet support tensor parallelism"
+            assert (
+                job_config.parallelism.pipeline_parallel_degree == 1
+            ), "Float8 MoE training prototype does not yet support pipeline parallelism"
+            assert (
+                job_config.parallelism.context_parallel_degree == 1
+            ), "Float8 MoE training prototype does not yet support context parallelism"
+
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
                 "using `float8_config.enable_fsdp_float8_all_gather` together "
