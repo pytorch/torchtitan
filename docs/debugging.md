@@ -94,7 +94,7 @@ CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
 
 ### Seed-Checkpoint-based Reproducibility
 
-For experimental runs with TP/PP/EP, we need use `seed_checkpoint` to ensure we initialize the model with the same weights on each rank. This is because in torchtitan/train.py, the model is sharded first, and then initialized weights on each rank seprately. So it's not equivalent to initialize the model on rank 0 and then shard it. An workaround is to use `seed_checkpoint` to make sure the model on each rank with the same weights, becuase the weights are loaded from the same checkpoint.
+For multiple experimental runs with different parallelism configs, we need to use a "seed" checkpoint to ensure model initializations are the same across runs. This is because in `torchtitan/train.py`, the model parameters are sharded first, and then have their weights initialized on each rank separately. As a result, it is not equivalent to initialize the model on one rank and then shard it. Using a seed checkpoint helps different runs load the same model weights from checkpoint -- DCP resharding will make sure the loaded weights are sharded correctly according to the parallelism configs.
 
 
 ```bash
