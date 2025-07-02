@@ -113,6 +113,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
         )
 
+        # TODO(whc)
+        # I do this becuase otherwise sometimes inductor will skip re-running passes like comms reordering
+        torch._inductor.config.force_disable_caches=True
+
         # allow configuring inductor comms optimizations from torchtitan commandline
         torch._inductor.config.reorder_for_compute_comm_overlap = (
             job_config.experimental.reorder_for_compute_comm_overlap
