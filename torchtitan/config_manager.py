@@ -666,7 +666,7 @@ class Experimental:
 
 
 @dataclass
-class Validator:
+class Validation:
     enabled: bool = False
     """Enable validation to default run validation after each training loop"""
 
@@ -707,7 +707,7 @@ class JobConfig:
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
-    validation: Validator = field(default_factory=Validator)
+    validation: Validation = field(default_factory=Validation)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

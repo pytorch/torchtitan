@@ -207,7 +207,7 @@ def build_hf_validation_dataloader(
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets."""
+    """Build a validation data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
