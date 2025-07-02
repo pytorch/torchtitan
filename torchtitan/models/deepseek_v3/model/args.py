@@ -75,8 +75,8 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     n_limited_groups: int = 1
     score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.0
-    use_grouped_mm: bool = False
-    load_balance_coeff: float | None = 1e-3
+    use_grouped_mm: bool = True
+    load_balance_coeff: float = 1e-3
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
@@ -97,7 +97,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         """
         Update the model_config config from the given job config.
         """
-        self.vocab_size = tokenizer.n_words
+        self.vocab_size = tokenizer.vocab_size
         self.max_seq_len = job_config.training.seq_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
