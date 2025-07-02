@@ -101,4 +101,4 @@ For multiple experimental runs with different parallelism configs, we need to us
 NGPU=1 CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1
 ```
 
-Note: Using seed checkpoint will only make sure the model on each rank initialized with the same weights, but the later training process might not be exactly the same even with the `deterministic` mode (eg, the precision change during parallesim might cause the different results).
+Note: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
