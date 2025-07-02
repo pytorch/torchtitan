@@ -60,7 +60,7 @@ If you encounter jobs that timeout, you'll need to debug them to identify the ro
 When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
 To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
 
-## Reproducibility between runs
+## Reproducibility between Runs
 
 When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP), ensuring reproducible behavior is crucial for isolating and fixing problems. TorchTitan provides several mechanisms to achieve deterministic training runs:
 
