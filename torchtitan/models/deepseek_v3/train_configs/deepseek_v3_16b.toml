@@ -13,7 +13,7 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 1
+log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
@@ -23,7 +23,7 @@ enable_wandb = false
 name = "deepseek_v3"
 flavor = "16B"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/test_tiktoken.model"
+tokenizer_path = "./assets/tokenizer/DeepSeek-V3"
 # converters = ["float8"]
 
 [optimizer]
@@ -38,10 +38,10 @@ decay_type = "linear"
 lr_min = 0.0
 
 [training]
-local_batch_size = 32
+local_batch_size = 16
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 100
 compile = false
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
@@ -49,6 +49,8 @@ dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 2
+enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = false

@@ -8,13 +8,12 @@ import math
 from typing import Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
-from .moe import MoE
+from .moe import FeedForward, MoE
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -152,17 +151,23 @@ class Attention(nn.Module):
         self.v_head_dim = model_args.v_head_dim
 
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim)
+            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
         else:
-            self.wq_a = nn.Linear(self.dim, self.q_lora_rank)
+            self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
             self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=model_args.norm_eps)
-            self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
+            self.wq_b = nn.Linear(
+                self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
+            )
+        self.wkv_a = nn.Linear(
+            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+        )
         self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
         self.wkv_b = nn.Linear(
-            self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim)
+            self.kv_lora_rank,
+            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
         )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim)
+        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if model_args.max_seq_len > model_args.original_seq_len:
@@ -192,9 +197,12 @@ class Attention(nn.Module):
         if self.q_lora_rank == 0:
             q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
         else:
-            q = self.wq_b(self.q_norm(self.wq_a(x)))
-
-        q = q.view(bsz, seqlen, self.n_heads, self.qk_head_dim)
+            q = self.wq_a(x)
+            q = self.wq_b(self.q_norm(q))
+        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+        # local heads from sizes of q and kv as TP may have sharded them after
+        # the above linear ops.
+        q = q.view(bsz, seqlen, -1, self.qk_head_dim)
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
@@ -211,10 +219,11 @@ class Attention(nn.Module):
         kv = self.wkv_b(
             self.kv_norm(kv)
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
-        kv = kv.view(bsz, seqlen, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        n_local_heads = k_nope.size(2)
         k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
+            [k_nope, k_pe.expand(-1, -1, n_local_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
@@ -231,41 +240,23 @@ class Attention(nn.Module):
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
-
-class FeedForward(nn.Module):
-    """
-    FeedForward module
-
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
-
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+        linear_list = [
+            self.wkv_a,
+            self.wkv_b,
+        ]
+        if self.q_lora_rank > 0:
+            linear_list.extend([self.wq_a, self.wq_b])
+        else:
+            linear_list.append(self.wq)
+
+        for linear in linear_list:
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+
+        self.kv_norm.reset_parameters()
+        if self.q_lora_rank > 0:
+            self.q_norm.reset_parameters()
 
 
 class TransformerBlock(nn.Module):
@@ -278,12 +269,17 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.moe_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.moe = (
-            FeedForward(model_args.dim, model_args.inter_dim)
-            if layer_id < model_args.n_dense_layers
-            else MoE(model_args)
-        )
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.moe_enabled = layer_id >= model_args.n_dense_layers
+
+        if self.moe_enabled:
+            self.moe = MoE(model_args)
+        else:
+            self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
+
+        # TODO: Need to revisit the weight initialization for the TransformerBlock
+        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        self.layer_id = layer_id
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
@@ -297,8 +293,20 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor with the same shape as the input.
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis)
-        x = x + self.moe(self.moe_norm(x))
+        if self.moe_enabled:
+            x = x + self.moe(self.ffn_norm(x))
+        else:
+            x = x + self.feed_forward(self.ffn_norm(x))
         return x
+
+    def init_weights(self, buffer_device: torch.device):
+        for norm in (self.attention_norm, self.ffn_norm):
+            norm.reset_parameters()
+        self.attention.init_weights(self.weight_init_std)
+        if self.moe_enabled:
+            self.moe.init_weights(self.weight_init_std, buffer_device)
+        else:
+            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class DeepSeekV3Model(nn.Module, ModelProtocol):
@@ -311,7 +319,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=True
         )
 
         self.layers = torch.nn.ModuleDict()
@@ -320,9 +328,35 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
-            model_args.dim, model_args.vocab_size, dtype=torch.get_default_dtype()
+            model_args.dim,
+            model_args.vocab_size,
+            dtype=torch.get_default_dtype(),
+            bias=False,
         )
+        self.model_args = model_args
         self.init_weights()
+
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        buffer_device = buffer_device or self.freqs_cis.device
+        with torch.device(buffer_device):
+            self.freqs_cis = precompute_freqs_cis(self.model_args)
+        if self.tok_embeddings is not None:
+            nn.init.normal_(self.tok_embeddings.weight)
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_weights(buffer_device=buffer_device)
+        if self.norm is not None:
+            self.norm.reset_parameters()
+        final_out_std = self.model_args.dim**-0.5
+        cutoff_factor = 3
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
 
     def forward(self, tokens: torch.Tensor):
         """
@@ -339,8 +373,5 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
         h = self.norm(h)
-        output = self.output(h)  # (batch_size, seq_len, dim)
+        output = self.output(h)
         return output
-
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        pass

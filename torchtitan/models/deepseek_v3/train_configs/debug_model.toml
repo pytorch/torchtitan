@@ -24,7 +24,7 @@ enable_wandb = false
 name = "deepseek_v3"
 flavor = "debugmodel"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/test_tiktoken.model"
+tokenizer_path = "./assets/tokenizer/DeepSeek-V3"
 # converters = ["float8"]
 
 [optimizer]
@@ -50,6 +50,8 @@ dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
 
 [checkpoint]
 enable_checkpoint = false

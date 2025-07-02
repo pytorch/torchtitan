@@ -8,9 +8,9 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
+from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
+from torchtitan.experiments.llama4.optimizer import build_llama4_optimizers
 
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
@@ -117,10 +117,10 @@ register_train_spec(
         config=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=None,
-        build_optimizers_fn=build_optimizers,
+        build_optimizers_fn=build_llama4_optimizers,  # use optimizer hooks to update expert weights
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
-        build_tokenizer_fn=build_tiktoken_tokenizer,
+        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )
 )
