@@ -10,8 +10,8 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_fsdp
 from torchtitan.models.deepseek_v3.model.moe import MoE
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_fsdp
 from torchtitan.tools.logging import logger
 
 
@@ -24,7 +24,7 @@ def apply_compile(model: nn.Module):
     torch._dynamo.config.fail_on_recompile_limit_hit = True
 
     for layer_id, transformer_block in model.layers.named_children():
-        fullgraph=True
+        fullgraph = True
         if isinstance(transformer_block.moe, MoE):
             # Allow graph break for MoE layers
             fullgraph = False

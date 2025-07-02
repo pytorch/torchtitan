@@ -35,6 +35,7 @@ def split_tokens(x, num_local_tokens_per_expert):
 
     return expert_idxs, expert_tokens
 
+
 # Reference: torchtitan/experiments/llama4/model/
 class GroupedExperts(nn.Module):
     def __init__(
@@ -62,7 +63,9 @@ class GroupedExperts(nn.Module):
             if num_local_tokens_per_expert is not None:
                 # a tuple of tensors indexed by experts
                 # each with shape (tokens_per_expert(varying), dim)
-                expert_idxs, expert_tokens = split_tokens(x, num_local_tokens_per_expert)
+                expert_idxs, expert_tokens = split_tokens(
+                    x, num_local_tokens_per_expert
+                )
                 out_experts_splits = []
                 for expert_idx, x_expert in zip(expert_idxs, expert_tokens):
                     w1, w2, w3 = (
