@@ -62,7 +62,7 @@ To learn how to analyze and diagnose issues using these logs, follow our step-by
 
 ## Reproducibility between Runs
 
-When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP), ensuring reproducible behavior is crucial for isolating and fixing problems. TorchTitan provides several mechanisms to achieve deterministic training runs:
+When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP, EP), ensuring reproducible behavior is crucial for isolating and fixing problems. `torchtitan` provides several mechanisms to achieve deterministic training runs:
 
 ### Deterministic Mode
 
