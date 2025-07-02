@@ -217,19 +217,34 @@ def main():
         # Synchronize all processes
         old_timeout = os.environ.get("NCCL_TIMEOUT_MS", None)
         os.environ["NCCL_TIMEOUT_MS"] = str(4 * 60 * 60 * 1000)
+        # Synchronize all processes after preprocessing
+        print(f"Rank {global_id}: Preprocessing completed, synchronizing...")
         dist.barrier()
-        print("Preprocessing completed successfully!")
+        print(f"Rank {global_id}: Preprocessing sync completed!")
         if old_timeout is not None:
             os.environ["NCCL_TIMEOUT_MS"] = old_timeout
-        if global_id == 0:
-            merge_datasets(config.preprocessing.output_dataset_path)
-        dist.barrier()
-    except Exception as e:
-        print(f"Rank {global_id}: Error during preprocessing: {e}")
-        raise
-    finally:
+        # Close distributed process group - we don't need it for merging
         if dist.is_initialized():
             dist.destroy_process_group()
+            print(f"Rank {global_id}: Process group destroyed")
+
+        # Only main process does the merge (no GPU needed)
+        if global_id == 0:
+            print("Main process: Starting dataset merge...")
+            merge_datasets(config.preprocessing.output_dataset_path)
+            print("Main process: Dataset merge completed successfully!")
+        else:
+            print(f"Rank {global_id}: Exiting after preprocessing")
+
+    except Exception as e:
+        print(f"Rank {global_id}: Error during preprocessing: {e}")
+        # Clean up distributed state on error
+        if dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except:
+                pass
+        raise
 
 
 if __name__ == "__main__":
