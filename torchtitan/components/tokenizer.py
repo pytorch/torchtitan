@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 from tokenizers import AddedToken, Tokenizer as HfTokenizer
 
-from torchtitan.config_manager import JobConfig
 from typing_extensions import override
 
 
@@ -23,10 +22,12 @@ class Tokenizer(ABC):
         self.eos_id = 0
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> list[int]: ...
+    def encode(self, *args, **kwargs) -> list[int]:
+        ...
 
     @abstractmethod
-    def decode(self, *args, **kwargs) -> str: ...
+    def decode(self, *args, **kwargs) -> str:
+        ...
 
     @property
     def n_words(self) -> int:
@@ -406,7 +407,7 @@ class HuggingFaceTokenizer(Tokenizer):
         return self.tokenizer.id_to_token(token_id)
 
 
-def build_hf_tokenizer(job_config: JobConfig) -> HuggingFaceTokenizer:
+def build_hf_tokenizer(tokenizer_path: str) -> HuggingFaceTokenizer:
     """
     Builds a HuggingFaceTokenizer from the specified path.
 
@@ -421,6 +422,5 @@ def build_hf_tokenizer(job_config: JobConfig) -> HuggingFaceTokenizer:
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
-    tokenizer_path = job_config.model.tokenizer_path
     tokenizer = HuggingFaceTokenizer(tokenizer_path)
     return tokenizer
