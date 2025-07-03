@@ -38,21 +38,18 @@ def parallelize_llama(
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            dp_degree = world_mesh["dp"].size()
+            dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
             global_batch_size = job_config.training.local_batch_size * dp_degree
         return torch.rand(
             (global_batch_size, job_config.training.seq_len), device="cuda"
         )
 
     # TODO make autop work correctly with different combinations of DP, DP+TP, TP, and support DDP / HSDP
-    assert (
-        len(world_mesh.shape) == 2
-    ), "Only support 2D mesh (DP, TP) for now- OK if one has size=1"
-    assert parallel_dims.dp_shard_enabled is True, "DDP not supported yet"
     assert parallel_dims.dp_replicate_enabled is False, "DDP not supported yet"
     assert parallel_dims.cp_enabled is False, "CP not supported yet"
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
+    
     # bail out
     # model = model_fn()
     # return model
@@ -60,8 +57,16 @@ def parallelize_llama(
     autop = AutoParallel(model, input_fn, world_mesh)
     autop.add_parameter_memory_constraint(low=None, high=None)
 
-    x_sharding = (Shard(0), Replicate())
-
+    possible_input_shardings = {
+        # maps relative to mesh dim names used in torchtitan
+        "dp_replicate": Shard(0),
+        "dp_shard": Shard(0),
+        "tp": Replicate(),
+    }
+    assert all(name in possible_input_shardings for name in world_mesh.mesh_dim_names), (
+        f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
+    )
+    x_sharding = tuple(possible_input_shardings[name] for name in world_mesh.mesh_dim_names) 
     autop.add_input_constraints([x_sharding])
     autop.add_output_constraints([x_sharding])
     t0 = time.time()
