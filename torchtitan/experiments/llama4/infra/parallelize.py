@@ -21,11 +21,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
-from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
-    apply_compile,
-    apply_ddp,
-)
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
 from .expert_parallel import (
@@ -34,6 +30,20 @@ from .expert_parallel import (
     NoParallel,
     TensorParallel,
 )
+
+
+def apply_compile(model: nn.Module):
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
+    torch._dynamo.config.fail_on_recompile_limit_hit = True
+    for layer_id, transformer_block in model.layers.named_children():
+        # NOTE: we allow graph breaks on FSDP hooks for MoE experts, `see set_fullgraph(False)` in moe.py
+        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling each TransformerBlock with torch.compile")
 
 
 def parallelize_llama(
