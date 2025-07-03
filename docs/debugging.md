@@ -70,15 +70,13 @@ When debugging issues with multi-dimensional parallelism (combinations of FSDP, 
 Set consistent random seeds across all parallelism dimensions:
 
 ```bash
-CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --training.seed 42
 ```
 
 **Seed behavior with parallelism:**
-- **Data Parallel (DP/FSDP):** All ranks use the same seed for model initialization
-- **Tensor Parallel (TP):** All TP ranks use the same seed for consistent weight sharding
+- **Data Parallel (DP/FSDP), Tensor Parallel (TP), Context Parallel (CP):** All ranks use the same seed.
     - Note: For FSDP and TP, DTensor will do special RNG management to make sure a Replicate tensor get the same init across ranks, but a Shard tensor get "random"-like init across ranks.
-- **Pipeline Parallel (PP):** Each PP stage gets a different seed to ensure different dropout patterns
-- **Context Parallel (CP):** All ranks use the same seed for model initialization
+- **Pipeline Parallel (PP):** Each PP stage gets a different seed to ensure different initialization across layers on different PP ranks.
 
 
 ### Deterministic Mode
@@ -86,7 +84,7 @@ CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.seed 42
 Enable deterministic algorithms to ensure bit-for-bit reproducibility across runs:
 
 ```bash
-CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --training.deterministic
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --training.deterministic
 ```
 
 **What it does:**
@@ -102,20 +100,20 @@ For multiple experimental runs with different parallelism configs, we need to us
 
 
 ```bash
-NGPU=1 CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1
+NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1
 ```
 
-Note: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
+**Note**: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
 
 ### Example: Reproducing loss curves with different parallelism configs
 
-A common scenario is when you introduce a new parallelism strategy to the model, you need to ensure that the loss curve remains numerically equivalent to the previous parallelism plan, thereby confirming the accuracy of your implementation. To achieve consistent behavior across multiple runs with varying parallelism configurations, it's crucial to make sure dataloader behaves consistently. We need to fix the DP degree (`dp_replicate * dpshard`) to ensure the dataloader operates consistently.
+A common scenario is when you introduce a new parallelism strategy to the model, you need to ensure that the loss curve remains numerically equivalent to the previous parallelism config, thereby confirming the accuracy of your implementation. To achieve consistent behavior across multiple runs with varying parallelism configurations, it's crucial to make sure dataloader behaves consistently. We need to fix the DP degree (`dp_replicate * dpshard`) to ensure the dataloader operates consistently.
 
 Here's a typical comparison setup (maintaining an overall DP degree of 4):
-- Run #1: FSDP degree = 4
-- Run #2: DDP degree = 2, FSDP dgree = 2, TP degree = 2
-- Run #3: DDP degree = 2, FSDP degree = 2, CP degree = 2, PP degree = 2
+- Run 1: dp_shard = 4
+- Run 2: dp_replicate = 2, dp_shard = 2, TP degree = 2
+- Run 3: dp_replicate = 2, dp_shard = 2, CP degree = 2, PP degree = 2
 
-To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You will also need to set the `deterministic` mode to ensure consistent training behavior.
+To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You might also need to set the `deterministic` mode to ensure consistent training behavior.
 
-We also provided an example of verifying the numerical consistency across parallism plans on Llama3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
+We also provided an example of verifying the numerical consistency across parallism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
