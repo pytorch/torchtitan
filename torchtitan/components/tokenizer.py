@@ -408,14 +408,11 @@ def build_hf_tokenizer(
 ) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
     """
     Builds a HuggingFaceTokenizer from the specified path.
-
     This function creates a HuggingFaceTokenizer instance that handles BOS/EOS token
     inference and intelligent encoding. The tokenizer automatically detects and loads
     from various file formats and infers special token behavior.
-
     Args:
         JobConfig: A JobConfig object containing the path to the tokenizer directory.
-
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
