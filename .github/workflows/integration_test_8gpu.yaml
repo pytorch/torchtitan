@@ -23,13 +23,30 @@ defaults:
 jobs:
   build-test:
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      matrix:
+        include:
+          - name: cuda
+            runner: linux.g5.48xlarge.nvidia.gpu
+            gpu-arch-type: cuda
+            gpu-arch-version: "12.6"
+            # This image is faster to clone than the default, but it lacks CC needed by triton
+            # (1m25s vs 2m37s).
+            docker-image: torchtitan-ubuntu-20.04-clang12
+            index-url: https://download.pytorch.org/whl/nightly/cu126
+            is-rocm: 0
+          - name: rocm
+            runner: linux.rocm.gpu.mi300.8
+            gpu-arch-type: rocm
+            gpu-arch-version: "6.4"
+            docker-image: torchtitan-rocm-ubuntu-22.04-clang12
+            index-url: https://download.pytorch.org/whl/nightly/rocm6.4
+            is-rocm: 1
     with:
-      runner: linux.g5.48xlarge.nvidia.gpu
-      gpu-arch-type: cuda
-      gpu-arch-version: "12.6"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       script: |
@@ -41,9 +58,9 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
+        TEST_WITH_ROCM=${{ matrix.is-rocm }} python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
