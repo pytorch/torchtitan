@@ -19,7 +19,7 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 class TestTokenizerIntegration(unittest.TestCase):
@@ -278,7 +278,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         model_name = test_repo_id.split("/")[-1]
         tokenizer_dir = "tokenizer" if model_name == "FLUX.1-dev" else "."
         tokenizer_path = os.path.join(self.temp_dir, model_name, tokenizer_dir)
-        our_tokenizer = build_hf_tokenizer(tokenizer_path)
+        our_tokenizer = HuggingFaceTokenizer(tokenizer_path)
 
         # Step 3: Load tokenizer using official Tokenizer library (if available)
         official_tokenizer = None
