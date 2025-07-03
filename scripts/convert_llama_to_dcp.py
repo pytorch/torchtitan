@@ -125,7 +125,7 @@ def convert_llama_weights(input_dir, output_dir, max_seq_len: int):
     logger.info(f"Writing to DCP at '{output_dir}'")
     output_dir.mkdir(parents=True, exist_ok=True)
     storage_writer = DCP.filesystem.FileSystemWriter(output_dir, thread_count=8)
-    DCP.save({"model": state_dict}, storage_writer=storage_writer)
+    DCP.save(state_dict, storage_writer=storage_writer)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import CheckpointManager, MODEL
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config_manager import Checkpoint as CheckpointConfig
 
 
@@ -105,11 +105,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         self.model_part = nn.Linear(2, 2)
         self.model_parts = [self.model_part]
+        self.states = {"trainer": torch.tensor([1.2347])}
         # TODO: Use a real OptimizerContainer here so that we can actually verify
         # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
-        self.states = {}
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager()
 
@@ -161,7 +161,7 @@ class TestCheckpointManager(unittest.TestCase):
             if key in states and hasattr(states[key], "load_state_dict"):
                 states[key].load_state_dict(val)
             elif key in states and isinstance(states[key], torch.Tensor):
-                states[key] = val
+                states[key].copy_(val)
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
@@ -354,7 +354,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states={MODEL: self.model_part},
+            states=self.states,
             job_config=self.job_config,
             ft_manager=self.ft_manager,
         )
@@ -373,7 +373,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states={MODEL: self.model_part},
+            states=self.states,
             job_config=self.job_config,
             ft_manager=self.ft_manager,
         )
@@ -451,13 +451,12 @@ class TestCheckpointManager(unittest.TestCase):
         ft_manager.manager.return_value = mock.Mock()
         ft_manager.manager.participating_rank = mock.Mock(return_value=0)
         ft_manager.enabled = True
-        states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states=states,
+            states=self.states,
             job_config=job_config,
             ft_manager=ft_manager,
         )
@@ -571,16 +570,56 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(mock_save.call_count, 1)
         checkpoint_path = os.path.join(self.test_folder, "step-1", "state_dict.pt")
         saved_data = torch.load(checkpoint_path, weights_only=False)
-        model_state_dict = saved_data[MODEL]
 
         # Verify that freqs_cis is NOT in the saved state dict
-        self.assertNotIn("freqs_cis", model_state_dict)
+        self.assertNotIn("freqs_cis", saved_data)
         # Verify that other parameters ARE in the saved state dict
-        self.assertIn("weight", model_state_dict)
-        self.assertIn("bias", model_state_dict)
-        self.assertIn("other_param", model_state_dict)
+        self.assertIn("weight", saved_data)
+        self.assertIn("bias", saved_data)
+        self.assertIn("other_param", saved_data)
 
         manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_verify_prefix(self, mock_save, mock_load, mock_rank):
+        def fake_save(state_dict: dict, checkpoint_id: str):
+            self.assertIn("bias", state_dict)
+            self.assertIn("weight", state_dict)
+            # No model prefix
+            self.assertNotIn("model", state_dict)
+            if "step-1" in checkpoint_id:
+                self.assertIn("optimizer", state_dict)
+                self.fake_save(state_dict, checkpoint_id)
+            else:
+                self.assertNotIn("optimizer", state_dict)
+            return
+
+        def fake_load(state_dict: dict, checkpoint_id=None):
+            self.assertIn("bias", state_dict)
+            self.assertIn("weight", state_dict)
+            # No model prefix
+            self.assertNotIn("model", state_dict)
+            self.assertIn("optimizer", state_dict)
+
+        self.job_config.checkpoint.last_save_model_weights_only = True
+        self.job_config.checkpoint.initial_load_model_weights_only = False
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            job_config=self.job_config,
+            ft_manager=self.ft_manager,
+        )
+
+        mock_save.side_effect = fake_save
+        mock_load.side_effect = fake_load
+        manager.save(curr_step=1)
+        manager.save(curr_step=2, last_step=True)
+        manager.load(step=1)
 
 
 if __name__ == "__main__":

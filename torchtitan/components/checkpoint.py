@@ -345,12 +345,15 @@ class CheckpointManager:
             # freed until _async_wait()
             if last_step:
                 self._save_last_step(curr_step)
-            elif self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+                return
+
+            states = self._flattened_model_states_sd()
+            if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
                 result = dcp.async_save(
-                    self.states,
+                    states,
                     checkpoint_id=checkpoint_id,
                     process_group=self.pg,
                     async_checkpointer_type=AsyncCheckpointerType.PROCESS,
@@ -361,11 +364,11 @@ class CheckpointManager:
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.save_future = dcp.async_save(
-                    self.states, checkpoint_id=checkpoint_id, process_group=self.pg
+                    states, checkpoint_id=checkpoint_id, process_group=self.pg
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
             else:
-                save_with_gc(self.states, checkpoint_id=checkpoint_id)
+                save_with_gc(states, checkpoint_id=checkpoint_id)
             self._purge_stale_checkpoints()
 
             logger.info(
@@ -502,6 +505,19 @@ class CheckpointManager:
             f"Finished loading the ft checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
 
+    def _flattened_model_states_sd(
+        self, state_dict: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Flatten the model states into a single dictionary.
+
+        Note that other states, such as optimizer states, are not flattened.
+        """
+        states = state_dict if state_dict is not None else self.states
+        sd = {k: v for k, v in states.items() if k != MODEL}
+        if MODEL in states:
+            sd.update(states[MODEL].state_dict())
+        return sd
+
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         """Determines which states to load for the given step.
 
@@ -516,8 +532,7 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model weights.
         if model_only:
-            sd = self.states[MODEL].state_dict()
-            return sd
+            return self.states[MODEL].state_dict()
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -526,6 +541,8 @@ class CheckpointManager:
         states_to_load = {
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
+
+        states_to_load = self._flattened_model_states_sd(states_to_load)
 
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
@@ -539,25 +556,19 @@ class CheckpointManager:
         # current dtype is not the same as the export dtype at the end of the training.
 
         if self.last_save_model_weights_only:
-            # We update self.states to keep the model only.
-            # After this update, self.states = {
-            #      'tok_embeddings.weight':...,
-            #      'layers.0.attention.wq.weight': ...
-            # }.
-            self.states = self.states[MODEL].state_dict()
+            states = self.states[MODEL].state_dict()
 
             if self.export_dtype != torch.float32:
-                self.states = {
-                    k: v.to(self.export_dtype) for k, v in self.states.items()
-                }
+                states = {k: v.to(self.export_dtype) for k, v in states.items()}
             logger.info(
                 f"Saving a model weights only checkpoint in {self.export_dtype} "
                 f"at last step, step {curr_step}."
             )
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
+            states = self._flattened_model_states_sd()
 
-        save_with_gc(self.states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        save_with_gc(states, checkpoint_id=self._create_checkpoint_id(curr_step))
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable_checkpoint:
