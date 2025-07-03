@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+from itertools import chain
 from typing import Any, Generic, Iterator, TypeVar
 
 import torch
@@ -15,10 +16,13 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
+from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "OptimizersContainer",
@@ -238,9 +242,85 @@ class FTOptimizersContainer(OptimizersContainer):
             super().zero_grad(*args, **kwargs)
 
 
+class ExpertParallelOptimizersContainer(OptimizersContainer):
+    """
+    This class is created to support fused optimizer implementation for Expert Parallel.
+    Since in EP, not all the parameters are sharded on the same DeviceMesh, the base
+    OptimizersContainer cannot perform fused optimizer steps on all DTensor parameters.
+    In this class, we create two optimizers for each model part, one for ep params and the
+    other for non-ep params. Parameters in the same optimizer are always on the same DeviceMesh,
+    so that fused optimizer can be performed.
+    """
+
+    def __init__(
+        self,
+        model_parts: list[nn.Module],
+        optimizer_cls: type[T],
+        optimizer_kwargs: dict[str, Any],
+        dense_params_mesh_ndim: int,
+    ) -> None:
+        ep_params, non_ep_params = [], []
+        self.ep_optimizers = []
+        self.non_ep_optimizers = []
+
+        self.model_parts = model_parts
+        # This is still needed to
+        # 1. reuse other OptimizersContainer's methods other than state dict save / load
+        # 2. define LR schedulers
+        self.optimizers = []
+
+        for model in self.model_parts:
+            for p in model.parameters():
+                if not p.requires_grad:
+                    continue
+                assert isinstance(p, DTensor)
+                if p.device_mesh.ndim == dense_params_mesh_ndim:
+                    non_ep_params.append(p)
+                else:
+                    ep_params.append(p)
+
+            ep_optimizer = optimizer_cls(ep_params, **optimizer_kwargs)
+            non_ep_optimizers = optimizer_cls(non_ep_params, **optimizer_kwargs)
+            self.ep_optimizers.append(ep_optimizer)
+            self.non_ep_optimizers.append(non_ep_optimizers)
+            self.optimizers.append(ep_optimizer)
+            self.optimizers.append(non_ep_optimizers)
+
+        # NOTE: each model part has two optimizers, one for ep params
+        #       and the other for non-ep params
+        self._validate_length(len(self.model_parts) * 2)
+        self._post_init(ep_params, optimizer_kwargs)
+        self._post_init(non_ep_params, optimizer_kwargs)
+
+    def state_dict(self) -> dict[str, Any]:
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        return {
+            k: v
+            for sd in chain(
+                map(func, self.model_parts, self.ep_optimizers),
+                map(func, self.model_parts, self.non_ep_optimizers),
+            )
+            for k, v in sd.items()
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        list(map(func, self.model_parts, self.ep_optimizers))
+        list(map(func, self.model_parts, self.non_ep_optimizers))
+
+
 def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    world_mesh: DeviceMesh,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
@@ -259,12 +339,23 @@ def build_optimizers(
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
         job_config (JobConfig): Job config containing the optimizer name and parameters.
+        parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
     optim_in_bwd = job_config.optimizer.early_step_in_backward
-    if optim_in_bwd and job_config.parallelism.pipeline_parallel_degree > 1:
-        raise NotImplementedError(
-            "Optimizers in backward is not supported with pipeline parallelism."
-        )
+    if optim_in_bwd:
+        if parallel_dims.ep_enabled:
+            raise NotImplementedError(
+                "Optimizers in backward is not supported with Expert Parallel."
+            )
+        if parallel_dims.pp_enabled:
+            raise NotImplementedError(
+                "Optimizers in backward is not supported with Pipeline Parallel."
+            )
+        if ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not supported with optimizers in backward."
+            )
+
     name = job_config.optimizer.name
     lr = job_config.optimizer.lr
     beta1 = job_config.optimizer.beta1
@@ -295,13 +386,12 @@ def build_optimizers(
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]
 
-    if optim_in_bwd and ft_manager.enabled:
-        raise ValueError("TorchFT is not supported with optimizers in backward.")
-    elif optim_in_bwd:
+    if optim_in_bwd:
         return OptimizersInBackwardContainer(
             model_parts, optimizer_cls, optimizer_kwargs
         )
-    elif ft_manager.enabled:
+
+    if ft_manager.enabled:
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
@@ -309,5 +399,18 @@ def build_optimizers(
             ft_manager.manager,
             use_ft_optimizer=job_config.fault_tolerance.semi_sync_method is None,
         )
-    else:
-        return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
+
+    if parallel_dims.ep_enabled and fused:
+        if ft_manager.enabled:
+            raise NotImplementedError(
+                "Expert Parallel with fused optimizer implementation "
+                "is not supported with TorchFT yet."
+            )
+        return ExpertParallelOptimizersContainer(
+            model_parts,
+            optimizer_cls,
+            optimizer_kwargs,
+            parallel_dims.dense_params_mesh_ndim,
+        )
+
+    return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
