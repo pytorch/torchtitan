@@ -126,7 +126,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build dataloader
         tokenizer = (
-            self.train_spec.build_tokenizer_fn(job_config.model.tokenizer_path)
+            self.train_spec.build_tokenizer_fn(job_config)
             if self.train_spec.build_tokenizer_fn is not None
             else None
         )
