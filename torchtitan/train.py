@@ -52,6 +52,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
+    validator: train_spec_module.BaseValidator | None
+
     pp_has_first_stage: bool
     pp_has_last_stage: bool
 
@@ -319,6 +321,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             device_type,
         )
 
+        # Build validator if validation is configured
+        if job_config.validation.enabled:
+            assert self.train_spec.build_validator_fn is not None
+
+            self.validator = self.train_spec.build_validator_fn(
+                job_config=job_config,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=tokenizer,
+                loss_fn=self.loss_fn,
+            )
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {job_config.training.local_batch_size}, "
@@ -462,6 +476,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
+
+        # Run validation if validator is available
+        if self.job_config.validation.enabled and self.validator.should_validate(
+            self.step
+        ):
+            validation_metrics = self.validator.validate(self.model_parts)
 
         self.metrics_processor.log(
             self.step,
