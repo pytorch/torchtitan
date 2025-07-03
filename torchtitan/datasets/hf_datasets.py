@@ -15,7 +15,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
@@ -73,7 +73,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: str | None,
-        tokenizer: Tokenizer,
+        tokenizer: BaseTokenizer,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -116,7 +116,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
-                sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
+                sample_tokens = self._tokenizer.encode(
+                    sample_text, add_bos=True, add_eos=True
+                )
                 self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
@@ -167,7 +169,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 def build_hf_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    tokenizer: Tokenizer,
+    tokenizer: BaseTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:

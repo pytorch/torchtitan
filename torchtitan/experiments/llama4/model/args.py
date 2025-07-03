@@ -8,7 +8,7 @@
 from dataclasses import dataclass
 
 from torch import nn
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 
 from torchtitan.protocols.train_spec import BaseModelArgs
@@ -58,8 +58,10 @@ class TransformerModelArgs(BaseModelArgs):
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.vocab_size = tokenizer.n_words
+    def update_from_config(
+        self, job_config: JobConfig, tokenizer: BaseTokenizer
+    ) -> None:
+        self.vocab_size = tokenizer.get_vocab_size()
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = tokenizer.eos_id
 

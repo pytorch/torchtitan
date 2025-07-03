@@ -22,7 +22,7 @@ enable_wandb = false
 name = "deepseek_v2"
 flavor = "deepseek-ai/DeepSeek-V2-Lite"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/test_tiktoken.model"
+tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]

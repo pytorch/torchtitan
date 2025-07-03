@@ -20,7 +20,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.experiments.flux.dataset.tokenizer import (
     build_flux_tokenizer,
@@ -161,8 +161,8 @@ class FluxDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        t5_tokenizer: Tokenizer,
-        clip_tokenizer: Tokenizer,
+        t5_tokenizer: BaseTokenizer,
+        clip_tokenizer: BaseTokenizer,
         job_config: Optional[JobConfig] = None,
         dp_rank: int = 0,
         dp_world_size: int = 1,
