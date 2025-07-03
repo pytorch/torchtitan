@@ -130,19 +130,18 @@ def build_test_list():
             "hsdp",
             ngpu=4,
         ),
-        # TODO: Adds back after HSDP+TP is supported by SimpleFSDP
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.data_parallel_shard_degree=2",
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #         ]
-        #     ],
-        #     "HSDP+TP",
-        #     "hsdp+tp",
-        #     ngpu=8,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
         OverrideDefinitions(
             [
                 [
