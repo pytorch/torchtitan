@@ -336,6 +336,10 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.init_weights()
 
+        # Explicitly set dtype to bfloat16 if use_grouped_mm is True
+        if model_args.use_grouped_mm:
+            self.to(dtype=torch.bfloat16)
+
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
