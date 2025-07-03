@@ -34,6 +34,23 @@ from .expert_parallel import (
 )
 
 
+def apply_compile(model: nn.Module):
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
+    torch._dynamo.config.fail_on_recompile_limit_hit = True
+    for layer_id, transformer_block in model.layers.named_children():
+        fullgraph = True
+        if transformer_block.moe_enabled:
+            # Allow graph break for MoE layers
+            fullgraph = False
+        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling each TransformerBlock with torch.compile")
+
+
 def parallelize_llama(
     model: nn.Module,
     world_mesh: DeviceMesh,
