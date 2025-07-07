@@ -33,9 +33,6 @@ def filter_dataset_by_indices(
     # Sort to maintain order
     indices_to_keep.sort()
 
-    print(f"Original dataset size: {len(dataset)}")
-    print(f"Filtered dataset size: {len(indices_to_keep)}")
-
     # Filter the dataset
     filtered_dataset = dataset.select(indices_to_keep)
 
@@ -97,14 +94,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    samples_to_filter = [i.strip() for i in open(args.filter_file, "r").readlines()]
+    samples_to_filter = [int(i) for i in samples_to_filter if i]
     dataset = load_dataset(
         "webdataset",
         data_dir=args.input_dir,
-        split=f"train[:{args.subset_size}]",
+        split="train",
         num_proc=args.num_workers,
     )
-    samples_to_filter = [i.strip() for i in open(args.filter_file, "r").readlines()]
-    samples_to_filter = [int(i) for i in samples_to_filter if i]
     filtered_dataset = filter_dataset_by_indices(dataset, samples_to_filter)
 
     # filter low resolution images using batched processing
@@ -113,7 +110,7 @@ if __name__ == "__main__":
         batched=True,
         batch_size=args.batch_size,
         num_proc=args.num_workers,
-    )
+    ).take(args.subset_size)
 
     # resize remaining images using batched processing
     filtered_dataset = filtered_dataset.map(
