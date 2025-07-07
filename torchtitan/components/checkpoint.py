@@ -19,15 +19,11 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-<<<<<<< HEAD
-from torch.distributed._state_dict_utils import _copy_state_dict, _create_cpu_state_dict
 from torch.distributed.checkpoint import (
     HuggingFaceStorageReader,
     HuggingFaceStorageWriter,
 )
-=======
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
->>>>>>> main
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -99,75 +95,6 @@ class Terminate:
 
 class SaveDone:
     pass
-
-
-@torch.no_grad()
-def dcp_save(
-    state_dict: dict[str, Any],
-    checkpoint_id: str,
-    is_async: bool,
-    hf_safetensors_format: bool,
-    pg: dist.ProcessGroup | None = None,
-) -> Future | None:
-
-    """Save the checkpoint with dcp.
-    Args:
-        state_dict (dict): The state dict to save.
-        checkpoint_id (str): The checkpoint id to save.
-        is_async (bool): Whether the checkpoint is async.
-        hf_safetensors_format (bool): Whether to use the HuggingFace safetensors format.
-        pg (Optional[dist.ProcessGroup]): The process group to use.
-
-    Returns:
-        Future: The future object if the checkpoint is async, otherwise None.
-    """
-    storage_writer = (
-        HuggingFaceStorageWriter(
-            path=checkpoint_id, save_distributed=True, enable_consolidation=True
-        )
-        if hf_safetensors_format
-        else None
-    )
-    id = checkpoint_id if not hf_safetensors_format else None
-    if is_async:
-        return dcp.async_save(
-            state_dict,
-            storage_writer=storage_writer,
-            checkpoint_id=id,
-            process_group=pg,
-        )
-    else:
-        return dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
-
-
-def dcp_load(
-    state_dict: dict[str, Any], checkpoint_id: str, hf_safetensors_format: bool
-) -> None:
-
-    """Load the checkpoint with dcp.
-    Args:
-        state_dict (dict): The state dict to load.
-        checkpoint_id (str): The checkpoint id to load.
-        hf_safetensors_format (bool): Whether to use the HuggingFace safetensors format.
-    """
-    if hf_safetensors_format:
-        storage_reader = HuggingFaceStorageReader(path=checkpoint_id)
-        dcp.load(state_dict, storage_writer=storage_reader)
-    else:
-        dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-
-@torch.no_grad()
-def save_with_gc(
-    state: dict[str, Any], checkpoint_id: str, hf_safetensors_format: bool
-) -> None:
-    dcp_save(
-        state,
-        checkpoint_id=checkpoint_id,
-        is_async=False,
-        hf_safetensors_format=hf_safetensors_format,
-    )
-    GarbageCollection.collect("GC collection invoked by checkpointer.")
 
 
 def purge_thread(purge_queue: queue.Queue):
@@ -386,6 +313,74 @@ class CheckpointManager:
                 self.stager.close()
 
     @torch.no_grad()
+    def dcp_save(
+        self,
+        state_dict: dict[str, Any],
+        checkpoint_id: str,
+        async_mode: AsyncMode,
+        garbage_collection: bool = False,
+    ) -> Future | None:
+        """Save the checkpoint with dcp.
+        Args:
+            state_dict (dict): The state dict to save.
+            checkpoint_id (str): The checkpoint id to save.
+            is_async (bool): Whether the checkpoint is async.
+
+        Returns:
+            Future: The future object if the checkpoint is async, otherwise None.
+        """
+        ret : Future | None = None
+
+        storage_writer = (
+            HuggingFaceStorageWriter(
+                path=checkpoint_id, save_distributed=True, enable_consolidation=True
+            )
+            if self.enable_hf_safetensors_format
+            else None
+        )
+        id = checkpoint_id if not self.enable_hf_safetensors_format else None
+        if async_mode == AsyncMode.ASYNC:
+            ret = dcp.async_save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=id,
+                process_group=self.pg,
+            )
+        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            ret = dcp.async_save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=id,
+                process_group=self.pg,
+                async_checkpointer_type=AsyncCheckpointerType.PROCESS,
+                async_stager=self.stager,
+            )
+        else:
+            ret = dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
+
+        if garbage_collection:
+            GarbageCollection.collect("GC collection invoked by checkpointer.")
+
+        return ret
+
+
+    def dcp_load(
+        self, state_dict: dict[str, Any], checkpoint_id: str
+    ) -> None:
+        """Load the checkpoint with dcp.
+        Args:
+            state_dict (dict): The state dict to load.
+            checkpoint_id (str): The checkpoint id to load.
+            hf_safetensors_format (bool): Whether to use the HuggingFace safetensors format.
+        """
+
+        if self.enable_hf_safetensors_format:
+            storage_reader = HuggingFaceStorageReader(path=checkpoint_id)
+            dcp.load(state_dict, storage_writer=storage_reader)
+        else:
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+
+    @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
         """Save the checkpoint for the current step.
 
@@ -425,23 +420,21 @@ class CheckpointManager:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
-                result = dcp.async_save(
+                result = self.dcp_save(
                     states,
                     checkpoint_id=checkpoint_id,
-                    process_group=self.pg,
-                    async_checkpointer_type=AsyncCheckpointerType.PROCESS,
-                    async_stager=self.stager,
+                    async_mode=self.async_mode,
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
-                self.save_future = dcp.async_save(
-                    states, checkpoint_id=checkpoint_id, process_group=self.pg
+                self.save_future = self.dcp_save(
+                    states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
             else:
-                save_with_gc(states, checkpoint_id=checkpoint_id)
+                self.dcp_save(states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.DISABLED, garbage_collection=True)
             self._purge_stale_checkpoints()
 
             logger.info(
@@ -506,10 +499,9 @@ class CheckpointManager:
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
-        dcp_load(
+        self.dcp_load(
             states,
             checkpoint_id=checkpoint_id,
-            hf_safetensors_format=self.enable_hf_safetensors_format,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -563,8 +555,8 @@ class CheckpointManager:
         begin = time.monotonic()
         self._async_wait()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self.save_future = dcp.async_save(
-            self.ft_states, checkpoint_id=checkpoint_id, process_group=self.pg
+        self.save_future = self.dcp_save(
+            self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
         logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
 
@@ -576,10 +568,9 @@ class CheckpointManager:
         begin = time.monotonic()
         logger.info(f"Loading the FT checkpoint at step {step}.")
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        dcp_load(
+        self.dcp_load(
             self.ft_states,
             checkpoint_id=checkpoint_id,
-            hf_safetensors_format=self.enable_hf_safetensors_format,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
