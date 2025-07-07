@@ -318,7 +318,7 @@ class CheckpointManager:
         state_dict: dict[str, Any],
         checkpoint_id: str,
         async_mode: AsyncMode,
-        garbage_collection: bool = False,
+        enable_garbage_collection: bool = False,
     ) -> Future | None:
         """Save the checkpoint with dcp.
         Args:
@@ -329,7 +329,7 @@ class CheckpointManager:
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
         """
-        ret : Future | None = None
+        ret: Future | None = None
 
         storage_writer = (
             HuggingFaceStorageWriter(
@@ -358,15 +358,12 @@ class CheckpointManager:
         else:
             ret = dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
 
-        if garbage_collection:
+        if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
 
         return ret
 
-
-    def dcp_load(
-        self, state_dict: dict[str, Any], checkpoint_id: str
-    ) -> None:
+    def dcp_load(self, state_dict: dict[str, Any], checkpoint_id: str) -> None:
         """Load the checkpoint with dcp.
         Args:
             state_dict (dict): The state dict to load.
@@ -434,7 +431,12 @@ class CheckpointManager:
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
             else:
-                self.dcp_save(states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.DISABLED, garbage_collection=True)
+                self.dcp_save(
+                    states,
+                    checkpoint_id=checkpoint_id,
+                    async_mode=AsyncMode.DISABLED,
+                    enable_garbage_collection=True,
+                )
             self._purge_stale_checkpoints()
 
             logger.info(
@@ -640,7 +642,12 @@ class CheckpointManager:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
 
-        save_with_gc(states, checkpoint_id=self._create_checkpoint_id(curr_step))
+        self.dcp_save(
+            states,
+            checkpoint_id=self._create_checkpoint_id(curr_step),
+            async_mode=AsyncMode.DISABLED,
+            enable_garbage_collection=True,
+        )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
         if not self.enable_checkpoint:
