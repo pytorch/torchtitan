@@ -102,18 +102,27 @@ def build_lr_schedulers(
     """
     training_steps = job_config.training.steps
     warmup_steps = int(job_config.lr_scheduler.warmup_steps)
+
+    if warmup_steps > training_steps:
+        logger.warning(
+            f"Warmup steps ({warmup_steps}) exceed total training steps ({training_steps}). "
+            f"Adjusting warmup steps to {training_steps}."
+        )
+        warmup_steps = training_steps
+
     if job_config.lr_scheduler.decay_ratio is not None:
         decay_steps = round(training_steps * job_config.lr_scheduler.decay_ratio)
-        # if warmup_steps + decay_steps > training_steps:
-        #     logger.warning(
-        #         f"Warmup ({warmup_steps}) + decay ({decay_steps}) steps exceed "
-        #         f"total training steps ({training_steps}). "
-        #         f"Adjusting decay steps to {training_steps - warmup_steps}."
-        #     )
-        #     decay_steps = training_steps - warmup_steps
+        if warmup_steps + decay_steps > training_steps:
+            logger.warning(
+                f"Warmup ({warmup_steps}) + decay ({decay_steps}) steps exceed "
+                f"total training steps ({training_steps}). "
+                f"Adjusting decay steps to {training_steps - warmup_steps}."
+            )
+            decay_steps = training_steps - warmup_steps
     else:
         decay_steps = training_steps - warmup_steps
-    stable_steps = training_steps - warmup_steps - decay_steps
+    # Add a vitual last step to prevent the learning rate from dropping to 0
+    stable_steps = training_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = job_config.lr_scheduler.decay_type
     lr_min = job_config.lr_scheduler.lr_min
 
@@ -140,34 +149,31 @@ def build_lr_schedulers(
 
         If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
         to ensure the learning rate does not drop below this minimum value.
-
-        NOTE: Since this is called before the step is taken, passing `current_step` returns the lr for the next step.
         """
-
         warmup_stable_steps = warmup_steps + stable_steps
-        if current_step >= warmup_stable_steps + decay_steps:
-            # edge case, this is the lr for the step which would take place after max_steps, which is undefined
-            current_step = warmup_stable_steps + decay_steps
-        # if we are in the warmup phase, return the warmup progress
-        # if warmup_steps is 0, we will go to the next phase
         if current_step < warmup_steps:
             # linear warmup
-            return float((current_step + 1) / (warmup_steps + 1))
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            assert (
+                warmup_steps != 0
+            ), "warmup_steps must not be zero to reach this branch"
+            curr_adjustment = float(current_step / warmup_steps)
+        elif current_step < warmup_stable_steps:
+            curr_adjustment = 1.0
+        else:
+            # 0-indexed step, hence + 1 adjustments
+            current_step += 1
+            assert decay_steps != 0, "decay_steps must not be zero to reach this branch"
+            progress = float(current_step - warmup_stable_steps) / decay_steps
 
-        # if we are in the stable phase or there is no decay, return 1.0
-        if current_step < warmup_stable_steps or decay_steps == 0:
-            return 1.0
-
-        # if we are in the decay phase, calculate the decay progress
-        progress = float((current_step + 1) - warmup_stable_steps) / (decay_steps + 1)
-
-        if lr_decay_type == "linear":
-            curr_adjustment = 1 - progress
-        elif lr_decay_type == "sqrt":
-            curr_adjustment = 1 - math.sqrt(progress)
-        elif lr_decay_type == "cosine":
-            curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
-        curr_adjustment = lr_min + (1 - lr_min) * curr_adjustment
+            if lr_decay_type == "linear":
+                curr_adjustment = 1 - progress
+            elif lr_decay_type == "sqrt":
+                curr_adjustment = 1 - math.sqrt(progress)
+            elif lr_decay_type == "cosine":
+                curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            curr_adjustment = lr_min + (1 - lr_min) * curr_adjustment
         return curr_adjustment
 
     lr_lambda = functools.partial(
