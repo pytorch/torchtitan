@@ -141,12 +141,12 @@ class GroupedExperts(nn.Module):
             assert x.dim() == 3
 
         assert (
-            x.dtype == w1.dtype == w2.dtype == w3.dtype == torch.bfloat16
-        ), "torch._grouped_mm only supports bf16 dtypes"
+            w1.dtype == w2.dtype == w3.dtype == torch.bfloat16
+        ), "torch._grouped_mm only supports bf16 model weight dtypes"
 
-        h = F.silu(torch._grouped_mm(x, w1, offs=offsets))
-        h = h * torch._grouped_mm(x, w3, offs=offsets)
-        out = torch._grouped_mm(h, w2, offs=offsets)
+        h = F.silu(torch._grouped_mm(x.to(torch.bfloat16), w1, offs=offsets))
+        h = h * torch._grouped_mm(x.to(torch.bfloat16), w3, offs=offsets)
+        out = torch._grouped_mm(h, w2, offs=offsets).to(x.dtype)
 
         return out
 
