@@ -319,6 +319,7 @@ class CheckpointManager:
         checkpoint_id: str,
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
+        is_last_step: bool = False
     ) -> Future | None:
         """Save the checkpoint with dcp.
         Args:
@@ -333,7 +334,7 @@ class CheckpointManager:
 
         storage_writer = (
             HuggingFaceStorageWriter(
-                path=checkpoint_id, save_distributed=True, enable_consolidation=True
+                path=checkpoint_id, save_distributed=True, enable_consolidation=is_last_step,
             )
             if self.enable_hf_safetensors_format
             else None
@@ -647,6 +648,7 @@ class CheckpointManager:
             checkpoint_id=self._create_checkpoint_id(curr_step),
             async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
+            is_last_step=True,
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
