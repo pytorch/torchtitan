@@ -195,7 +195,8 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+        output = self.wo(output)
+        return output
 
 
 class FeedForward(nn.Module):
@@ -234,7 +235,8 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        output =  self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return output
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
@@ -297,8 +299,10 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        x_normed = self.attention_norm(x)
+        h = x + self.attention(x_normed, freqs_cis)
+        h_normed = self.ffn_norm(h)
+        out = h + self.feed_forward(h_normed)
         return out
 
     def init_weights(self):
