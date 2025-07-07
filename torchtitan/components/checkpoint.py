@@ -373,7 +373,7 @@ class CheckpointManager:
 
         if self.enable_hf_safetensors_format:
             storage_reader = HuggingFaceStorageReader(path=checkpoint_id)
-            dcp.load(state_dict, storage_writer=storage_reader)
+            dcp.load(state_dict, storage_reader=storage_reader)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
