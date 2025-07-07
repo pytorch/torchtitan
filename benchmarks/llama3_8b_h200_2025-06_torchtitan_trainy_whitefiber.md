@@ -1,5 +1,5 @@
-This was performed by Trainy team in June 2025, to get a baseline of performance 
-of the H200 platform over multiple hosts.
+This was performed by Trainy team on WhiteFiber in June 2025, to get a baseline of performance 
+of the Trainy platform on H200s platform over multiple hosts.
 
 ### Models
 
@@ -37,7 +37,7 @@ Runs were invoked with the following, where `NUM_NODES` was `4` and `8`
 
 ### Results
 
-Detailed performance results and training configurations can be found in the tables below along and can visualized in [this WandB report](https://wandb.ai/asaiacai/torchtitan/reports/Trainy-Llama-8B-32xH200-vs-64xH200--VmlldzoxMzIxMjMyMw#llama-8b). `TPS` and `Memory(GiB)` are arbitrarily sampled at the 100th iteration:
+Detailed performance results and training configurations can be found in the tables below along and can visualized in [this WandB report](https://api.wandb.ai/links/asaiacai/w4c46stp). `TPS` and `Memory(GiB)` are arbitrarily sampled at the 100th iteration:
 
 | NUM_NODES | TPS/GPU | Memory(GiB) |
 | ----- | ----: | ----: |
