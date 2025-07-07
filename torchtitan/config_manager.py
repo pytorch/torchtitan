@@ -470,7 +470,9 @@ class Checkpoint:
     enable_hf_safetensors_format: bool = False
     """
     Enable the use of safetensors format for checkpointing. This will save checkpoints
-    in safetensors format instead of the default DCP format. The default value is False.
+    in safetensors format instead of the default DCP format. There will be a performance
+    cost in using this as we need to consolidate the sharded tensors to full tensors as 
+    a separate step. The default value is False.
     """
 
 

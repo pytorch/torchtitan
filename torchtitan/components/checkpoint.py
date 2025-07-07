@@ -13,7 +13,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -103,8 +103,9 @@ def dcp_save(
     checkpoint_id: str,
     is_async: bool,
     hf_safetensors_format: bool,
-    pg: Optional[dist.ProcessGroup] = None,
-) -> Optional[Future]:
+    pg: dist.ProcessGroup | None = None,
+) -> Future | None:
+
     """Save the checkpoint with dcp.
     Args:
         state_dict (dict): The state dict to save.
@@ -112,27 +113,33 @@ def dcp_save(
         is_async (bool): Whether the checkpoint is async.
         hf_safetensors_format (bool): Whether to use the HuggingFace safetensors format.
         pg (Optional[dist.ProcessGroup]): The process group to use.
+
+    Returns:
+        Future: The future object if the checkpoint is async, otherwise None.
     """
-    if hf_safetensors_format:
-        storage_writer = HuggingFaceStorageWriter(path=checkpoint_id, save_sharded=True)
-        if is_async:
-            return dcp.async_save(
-                state_dict, storage_writer=storage_writer, process_group=pg
-            )
-        else:
-            return dcp.save(state_dict, storage_writer=storage_writer)
+    storage_writer = (
+        HuggingFaceStorageWriter(
+            path=checkpoint_id, save_distributed=True, enable_consolidation=True
+        )
+        if hf_safetensors_format
+        else None
+    )
+    id = checkpoint_id if not hf_safetensors_format else None
+    if is_async:
+        return dcp.async_save(
+            state_dict,
+            storage_writer=storage_writer,
+            checkpoint_id=id,
+            process_group=pg,
+        )
     else:
-        if is_async:
-            return dcp.async_save(
-                state_dict, checkpoint_id=checkpoint_id, process_group=pg
-            )
-        else:
-            return dcp.save(state_dict, checkpoint_id=checkpoint_id)
+        return dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
 
 
 def dcp_load(
     state_dict: dict[str, Any], checkpoint_id: str, hf_safetensors_format: bool
 ) -> None:
+
     """Load the checkpoint with dcp.
     Args:
         state_dict (dict): The state dict to load.
