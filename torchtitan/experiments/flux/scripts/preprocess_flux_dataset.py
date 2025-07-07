@@ -214,19 +214,27 @@ def main():
         print(f"Rank {global_id}: Starting preprocessing...")
         process_with_streaming(trainer, global_id)
 
-        # Synchronize all processes
-        old_timeout = os.environ.get("NCCL_TIMEOUT_MS", None)
-        os.environ["NCCL_TIMEOUT_MS"] = str(4 * 60 * 60 * 1000)
         # Synchronize all processes after preprocessing
-        print(f"Rank {global_id}: Preprocessing completed, synchronizing...")
-        dist.barrier()
-        print(f"Rank {global_id}: Preprocessing sync completed!")
-        if old_timeout is not None:
-            os.environ["NCCL_TIMEOUT_MS"] = old_timeout
-        # Close distributed process group - we don't need it for merging
         if dist.is_initialized():
-            dist.destroy_process_group()
-            print(f"Rank {global_id}: Process group destroyed")
+            print(f"Rank {global_id}: Preprocessing completed, synchronizing...")
+            
+            # Set longer timeout for barrier - preprocessing can take hours on large datasets
+            # and we need all processes to complete before merging
+            old_timeout = os.environ.get("NCCL_TIMEOUT_MS", None)
+            os.environ["NCCL_TIMEOUT_MS"] = str(4 * 60 * 60 * 1000)  # 4 hours
+            
+            try:
+                dist.barrier()
+                print(f"Rank {global_id}: Preprocessing sync completed!")
+            finally:
+                # Restore original timeout
+                if old_timeout is not None:
+                    os.environ["NCCL_TIMEOUT_MS"] = old_timeout
+                else:
+                    # Remove the timeout if it wasn't set originally
+                    os.environ.pop("NCCL_TIMEOUT_MS", None)
+        else:
+            print(f"Rank {global_id}: Distributed not initialized, skipping sync...")
 
         # Only main process does the merge (no GPU needed)
         if global_id == 0:
@@ -238,12 +246,6 @@ def main():
 
     except Exception as e:
         print(f"Rank {global_id}: Error during preprocessing: {e}")
-        # Clean up distributed state on error
-        if dist.is_initialized():
-            try:
-                dist.destroy_process_group()
-            except:
-                pass
         raise
 
 
