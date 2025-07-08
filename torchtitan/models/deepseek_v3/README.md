@@ -33,3 +33,16 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml"
 - Activation checkpointing
 - Tensor Parallel (TP)
 - Expert Parallel (EP)
+
+
+## To be added
+- Modeling
+    - Merge DeepSeek-V3 and Llama4 MoE common components
+- Parallelism
+    - Context Parallel support for DeepSeek-V3
+    - PP support for DeepSeek-V3
+- torch.compile
+- Quantization
+- Testing
+    - perfomance and loss converging tests
+    - CI integration
