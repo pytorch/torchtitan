@@ -6,12 +6,15 @@
 
 import torch
 import torch.nn as nn
+from torch.distributed.fsdp import FSDPModule
 
+from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -22,6 +25,9 @@ class BaseValidator:
 
     def validate(self, model_parts: list[nn.Module]) -> dict[str, float]:
         raise NotImplementedError("validate method not implemented")
+
+    def should_validate(self, step: int) -> bool:
+        return step % self.job_config.validation.freq == 0
 
 
 class Validator(BaseValidator):
@@ -43,75 +49,83 @@ class Validator(BaseValidator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: Tokenizer,
+        parallel_dims: ParallelDims,
+        world_mesh: torch.distributed.DeviceMesh,
         loss_fn: LossFunction,
     ):
         self.job_config = job_config
+        self.parallel_dims = parallel_dims
+        self.world_mesh = world_mesh
         self.loss_fn = loss_fn
         self.validation_dataloader = build_hf_validation_dataloader(
             job_config=job_config,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
-            infinite=False,
         )
 
-    def should_validate(self, step: int) -> bool:
-        return step % self.job_config.validation.val_freq == 0
-
+    @torch.no_grad()
     def validate(
         self,
         model_parts: list[nn.Module],
     ) -> dict[str, float]:
         # Set model to eval mode
+        # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
         model.eval()
 
-        total_loss = 0.0
-        num_batches = 0
+        accumulated_losses = []
         device_type = utils.device_type
         num_val_steps = 0
 
-        with torch.no_grad():
-            try:
-                for input_dict, labels in self.validation_dataloader:
+        for input_dict, labels in self.validation_dataloader:
+            if (
+                self.job_config.validation.steps != -1
+                and num_val_steps >= self.job_config.validation.steps
+            ):
+                break
 
-                    if (
-                        self.job_config.validation.val_steps != -1
-                        and num_val_steps >= self.job_config.validation.val_steps
-                    ):
-                        break
+            for k, v in input_dict.items():
+                input_dict[k] = v.to(device_type)
+            labels = labels.to(device_type)
 
-                    for k, v in input_dict.items():
-                        input_dict[k] = v.to(device_type)
-                    labels = labels.to(device_type)
+            inputs = input_dict["input"]
+            predictions = model(inputs)
 
-                    inputs = input_dict["input"]
-                    predictions = model(inputs)
-                    loss = self.loss_fn(predictions, labels)
+            if self.parallel_dims.loss_parallel_enabled:
+                if isinstance(predictions, torch.Tensor) and not isinstance(
+                    predictions, DTensor
+                ):
+                    predictions = DTensor.from_local(predictions, self.world_mesh["tp"])
+                if isinstance(labels, torch.Tensor) and not isinstance(labels, DTensor):
+                    labels = DTensor.from_local(labels, self.world_mesh["tp"])
+            loss = self.loss_fn(predictions, labels)
 
-                    total_loss += loss.item()
-                    num_batches += 1
+            accumulated_losses.append(loss.detach())
 
-                    num_val_steps += 1
-
-            except StopIteration:
-                logger.info("Validation dataloader exhausted")
+            num_val_steps += 1
 
         # Compute average loss
-        if num_batches > 0:
-            average_loss = total_loss / num_batches
+        loss = torch.sum(torch.stack(accumulated_losses))
+        if self.parallel_dims.dp_cp_enabled:
+            global_avg_loss = dist_utils.dist_mean(loss, self.world_mesh["dp_cp"])
         else:
-            average_loss = 0.0
-            logger.warning("No validation batches processed")
+            global_avg_loss = loss
 
         logger.info(
-            f"Validation completed. Average loss: {average_loss:.4f} over {num_batches} batches"
+            f"Validation completed. Average loss: {global_avg_loss:.4f} over {num_val_steps} batches"
         )
+
+        # Reshard after run forward pass
+        # This is to ensure the model weights are sharded the same way for checkpoint saving.
+        for module in model.modules():
+            if isinstance(module, FSDPModule):
+                module.reshard()
 
         # Set model back to train mode
         model.train()
 
-        return {"validation_loss": average_loss}
+        return {"validation_loss": global_avg_loss}
 
 
 def build_validator(
@@ -119,6 +133,8 @@ def build_validator(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: Tokenizer,
+    parallel_dims: ParallelDims,
+    world_mesh: torch.distributed.DeviceMesh,
     loss_fn: LossFunction,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
@@ -127,5 +143,7 @@ def build_validator(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
+        parallel_dims=parallel_dims,
+        world_mesh=world_mesh,
         loss_fn=loss_fn,
     )

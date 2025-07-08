@@ -54,7 +54,6 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
-disable_loss_parallel = true
 
 [checkpoint]
 enable_checkpoint = false
@@ -76,5 +75,5 @@ filter_fqns = ["output"]
 [validation]
 enabled = false
 dataset = "c4_validation"
-val_freq = 5
-val_steps = 10
+freq = 5
+steps = 10

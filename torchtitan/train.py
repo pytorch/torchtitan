@@ -219,7 +219,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
+                    f"pipeline parallel is enabled but {self.train_spec.name} "
                     f"does not support pipelining"
                 )
 
@@ -325,12 +325,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Build validator if validation is configured
         if job_config.validation.enabled:
             assert self.train_spec.build_validator_fn is not None
+            assert (
+                not parallel_dims.pp_enabled
+            ), "pp is enabled but validation doesn't support pipeline parallelism yet"
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=tokenizer,
+                parallel_dims=parallel_dims,
+                world_mesh=world_mesh,
                 loss_fn=self.loss_fn,
             )
 
@@ -479,12 +484,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
 
-        # Run validation if validator is available
-        if self.job_config.validation.enabled and self.validator.should_validate(
-            self.step
-        ):
-            validation_metrics = self.validator.validate(self.model_parts)
-
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -520,6 +519,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
+
+                # Run validation if validator is available
+                if (
+                    self.job_config.validation.enabled
+                    and self.validator.should_validate(self.step)
+                ):
+                    validation_metrics = self.validator.validate(self.model_parts)
+
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )

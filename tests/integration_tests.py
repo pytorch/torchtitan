@@ -513,12 +513,83 @@ def build_test_list():
             [
                 [
                     "--validation.enabled",
-                    "--validation.dataset c4_test",
+                    "--validation.dataset c4_validation",
                 ],
             ],
             "Validation test no parallelism",
             "validation_no_parallel",
             ngpu=1,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_validation",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                ]
+            ],
+            "Validation test with DP",
+            "validation_dp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_validation",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "Validation test with FSDP",
+            "validation_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--validation.enabled",
+                    "--validation.dataset c4_validation",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "Validation checkpoint test with FSDP",
+            "validation_fsdp_checkpoint",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_validation",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "Validation test with FSDP, TP, CP",
+            "validation_fsdp_tp_cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--validation.enabled",
+                    "--validation.dataset c4_validation",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "Validation checkpoint test with FSDP, TP, CP",
+            "validation_fsdp_tp_cp_checkpoint",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors

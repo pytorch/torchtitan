@@ -682,11 +682,16 @@ class Validation:
     seq_len: int = 2048
     """Sequence length for validation"""
 
-    val_freq: int = 1
+    freq: int = 10
     """Frequency of validation"""
 
-    val_steps: int = -1
-    """Number of validation steps, -1 means all steps"""
+    steps: int = -1
+    """Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset"""
+
+    def __post_init__(self):
+        assert (
+            self.steps > 0 or self.steps == -1
+        ), "validation steps must be positive or -1"
 
 
 @dataclass
