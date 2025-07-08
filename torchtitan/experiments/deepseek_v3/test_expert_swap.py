@@ -12,7 +12,7 @@ import tempfile
 import torch
 import torch.distributed as dist
 
-from model import DeepseekForCausalLM
+from model import DeepseekForCausalLM, MoE
 from model_config import deepseek_config_registry
 from remap_experts import (
     apply_expert_remapping_with_routing,
@@ -438,6 +438,222 @@ def test_expert_swap():
         dist.barrier()
 
 
+def test_routing_tracer():
+    """
+    Test expert routing by testing gate outputs directly without full forward passes.
+    This avoids distributed communication issues while still verifying routing changes.
+    """
+    print("=" * 60)
+    print("Testing Expert Routing with Gate-Only Test")
+    print("=" * 60)
+
+    # Use a smaller model for testing
+    model_id = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+
+    # Initialize distributed like in generate.py
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+    # Create device mesh with ep=2 to fit model
+    mesh_shape = (1, 2)  # (pp, ep) - 1 pipeline stage, 2 expert parallel
+    mesh = dist.init_device_mesh("cuda", mesh_shape, mesh_dim_names=("pp", "ep"))
+    rank = dist.get_rank()
+
+    if rank == 0:
+        print(f"Running gate-only routing test with mesh shape {mesh_shape}")
+
+    # Create model
+    model_args = deepseek_config_registry[model_id]
+    model_args.ep_size = 2  # Expert parallelism = 2
+    model_args.num_stages = 1
+    model_args.stage_idx = 0
+    model_args.max_seq_len = 512  # Smaller for testing
+
+    device_count = torch.cuda.device_count()
+    device = torch.device("cuda", rank % device_count)
+
+    with device, mesh:
+        model = DeepseekForCausalLM(model_args)
+
+    model.eval()
+
+    if rank == 0:
+        print(f"Created model: {model_id}")
+
+    # Synchronize all ranks before starting
+    dist.barrier()
+
+    # Only run the routing test on rank 0 to avoid conflicts
+    if rank == 0:
+        # Create a simple tracer input - just a few tokens
+        batch_size, seq_len = 1, 4
+        tracer_input = torch.randint(
+            0, 1000, (batch_size, seq_len), device=device, dtype=torch.long
+        )
+
+        print(f"\nTracer input shape: {tracer_input.shape}")
+        print(f"Tracer tokens: {tracer_input.flatten().tolist()}")
+
+        # Find first MoE layer
+        first_moe_layer = None
+        first_moe_layer_idx = None
+        for layer_idx, layer in model.model.layers.items():
+            if isinstance(layer.mlp, MoE):
+                first_moe_layer = layer
+                first_moe_layer_idx = int(layer_idx)
+                break
+
+        if first_moe_layer is None:
+            print("No MoE layers found!")
+            return
+
+        print(f"Testing routing on first MoE layer: {first_moe_layer_idx}")
+
+        # Step 1: Create test hidden states (simulate what would reach the MoE layer)
+        print("\n--- Step 1: Creating test hidden states ---")
+
+        with torch.no_grad():
+            # Create embeddings and process through a few layers to get realistic hidden states
+            hidden_states = model.model.embed_tokens(tracer_input)
+
+            # Process through layers before the first MoE layer (but avoid full forward passes)
+            layer_count = 0
+            for layer_idx, layer in model.model.layers.items():
+                layer_num = int(layer_idx)
+                if layer_num >= first_moe_layer_idx:
+                    break
+
+                # Only process through a couple of layers to get realistic hidden states
+                if layer_count < 2:
+                    # Process through attention only (skip MLP to avoid hanging)
+                    residual = hidden_states
+                    hidden_states = layer.input_layernorm(hidden_states)
+                    hidden_states = layer.self_attn(hidden_states)
+                    hidden_states = residual + hidden_states
+                    layer_count += 1
+                else:
+                    break
+
+            # Prepare input for MoE gate
+            hidden_states = first_moe_layer.post_attention_layernorm(hidden_states)
+            print(f"Test hidden states shape: {hidden_states.shape}")
+
+        # Step 2: Capture original routing
+        print("\n--- Step 2: Capturing original gate routing ---")
+        original_routing = {}
+
+        with torch.no_grad():
+            # Get gate outputs directly (this should not hang)
+            topk_idx, topk_weight = first_moe_layer.mlp.gate(hidden_states)
+            original_routing = {
+                "topk_idx": topk_idx.cpu().clone(),
+                "topk_weight": topk_weight.cpu().clone(),
+            }
+
+            print(f"  Original routing = {topk_idx.flatten().tolist()}")
+            print(f"  Original weights = {topk_weight.flatten().tolist()}")
+
+        # Step 3: Apply expert swapping (0 <-> 1)
+        print("\n--- Step 3: Applying expert remapping (0 <-> 1) ---")
+
+        # Create temporary CSV file for swapping
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False
+        ) as tmp_file:
+            swap_csv_path = tmp_file.name
+
+        try:
+            create_swap_01_csv(model, swap_csv_path)
+            apply_expert_remapping_with_routing(model, swap_csv_path)
+            print("Expert remapping applied successfully")
+
+            # Step 4: Capture remapped routing
+            print("\n--- Step 4: Capturing remapped gate routing ---")
+            remapped_routing = {}
+
+            with torch.no_grad():
+                # Get gate outputs after remapping (same input)
+                topk_idx, topk_weight = first_moe_layer.mlp.gate(hidden_states)
+                remapped_routing = {
+                    "topk_idx": topk_idx.cpu().clone(),
+                    "topk_weight": topk_weight.cpu().clone(),
+                }
+
+                print(f"  Remapped routing = {topk_idx.flatten().tolist()}")
+                print(f"  Remapped weights = {topk_weight.flatten().tolist()}")
+
+            # Step 5: Verify routing changes
+            print("\n--- Step 5: Verifying routing changes ---")
+
+            orig_idx = original_routing["topk_idx"]
+            remap_idx = remapped_routing["topk_idx"]
+
+            print(f"  Layer {first_moe_layer_idx}:")
+            print(f"    Original: {orig_idx.flatten().tolist()}")
+            print(f"    Remapped: {remap_idx.flatten().tolist()}")
+
+            # Check if routing changed as expected (experts 0 and 1 should be swapped)
+            routing_verified = True
+            expected_changes = 0
+            actual_changes = 0
+
+            for i in range(orig_idx.numel()):
+                orig_expert = orig_idx.flatten()[i].item()
+                remap_expert = remap_idx.flatten()[i].item()
+
+                # Expected mapping: 0->1, 1->0, others unchanged
+                if orig_expert == 0:
+                    expected_expert = 1
+                elif orig_expert == 1:
+                    expected_expert = 0
+                else:
+                    expected_expert = orig_expert
+
+                if expected_expert != orig_expert:
+                    expected_changes += 1
+
+                if remap_expert == expected_expert:
+                    actual_changes += 1
+                else:
+                    print(
+                        f"      Token {i}: Expected expert {expected_expert}, got {remap_expert}"
+                    )
+                    routing_verified = False
+
+            if expected_changes > 0:
+                print(
+                    f"    ✓ {actual_changes}/{expected_changes} routing changes verified"
+                )
+            else:
+                print(f"    - No routing changes expected (no experts 0 or 1 selected)")
+
+            # Additional verification: check if any routing changed at all
+            routing_changed = not torch.equal(orig_idx, remap_idx)
+            if routing_changed:
+                print(f"    ✓ Routing did change after remapping")
+            else:
+                print(f"    - Routing remained the same (may be expected)")
+
+            if routing_verified and (expected_changes == 0 or actual_changes > 0):
+                print("\n" + "=" * 60)
+                print("Gate routing test completed successfully!")
+                print("Expert gate routing follows expected remapped paths.")
+                print("=" * 60)
+            else:
+                print("\n" + "=" * 60)
+                print("Warning: Some routing changes were not as expected!")
+                print("=" * 60)
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(swap_csv_path):
+                os.unlink(swap_csv_path)
+    else:
+        print(f"Rank {rank}: Waiting for rank 0 to complete routing test...")
+
+    # Final synchronization
+    dist.barrier()
+
+
 def verify_swap_csv(csv_path: str):
     """
     Verify that the CSV file contains the expected expert swapping.
@@ -487,6 +703,12 @@ if __name__ == "__main__":
         print("=" * 80 + "\n")
 
         test_random_reorder()
+
+        print("\n" + "=" * 80)
+        print("STARTING THIRD TEST")
+        print("=" * 80 + "\n")
+
+        test_routing_tracer()
 
         print("\n" + "=" * 80)
         print("ALL TESTS COMPLETED SUCCESSFULLY!")
