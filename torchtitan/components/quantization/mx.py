@@ -62,6 +62,7 @@ class MXConverter(ModelConverter):
         config.use_fp8_dim1_cast_triton_kernel = (
             mx_job_config.use_fp8_dim1_cast_triton_kernel
         )
+        config.leave_gw_in_hp = True
         self.config = config
 
         logger.info(f"Float8 training active with recipe {mx_job_config.recipe_name}")
