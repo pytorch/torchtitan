@@ -265,6 +265,15 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
             def _custom_policy(ctx, func, *args, **kwargs):
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
+
+                if func == torch.ops.aten.mm.default:
+                    m, k = args[0].shape
+                    k2, n = args[1].shape
+                    assert k == k2
+                    flops = m * n * 2 * k
+                    if flops < ac_config.selective_op_ac_mm_flops_threshold:
+                        return CheckpointPolicy.PREFER_RECOMPUTE
+
                 if func == torch.ops.aten.mm.default:
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
