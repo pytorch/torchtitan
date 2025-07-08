@@ -43,7 +43,7 @@ def remap_experts_from_csv(
                 order = row[order_col].strip().strip('"')
                 # Parse the order string into a list of integers
                 order = [int(x.strip()) for x in order.split(",")]
-                layer_remapping[layer_name] = expert_order
+                layer_remapping[layer] = order
     except Exception as e:
         raise ValueError(f"Error reading CSV file {csv_file_path}: {e}")
 
@@ -289,7 +289,7 @@ def create_expert_remapping_csv(
 
 
 def test_routing_remapping(
-    model: nn.module, layer_idx: int, batch_size: int = 2, seq_len: int = 10
+    model: nn.Module, layer_idx: int, batch_size: int = 2, seq_len: int = 10
 ):
     """
     Test the routing remapping by running a forward pass and checking expert assignments.
