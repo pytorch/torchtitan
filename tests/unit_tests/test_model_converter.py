@@ -21,6 +21,7 @@ def build_parallel_dims(job_config, world_size):
         cp=parallelism_config.context_parallel_degree,
         tp=parallelism_config.tensor_parallel_degree,
         pp=parallelism_config.pipeline_parallel_degree,
+        ep=parallelism_config.expert_parallel_degree,
         world_size=world_size,
         enable_loss_parallel=not parallelism_config.disable_loss_parallel,
     )
