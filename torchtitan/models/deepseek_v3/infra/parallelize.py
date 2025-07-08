@@ -18,18 +18,18 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.llama4.infra.expert_parallel import NoParallel
-from torchtitan.experiments.llama4.infra.parallelize import apply_moe_ep_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_fsdp
+from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
 
+# Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
     world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
             # TODO(jianiw): This branch needs to be tested and enabled
@@ -59,6 +59,7 @@ def parallelize_deepseekv3(
             enable_async_tp=False,
         )
 
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -73,15 +74,25 @@ def parallelize_deepseekv3(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
+    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
+    if job_config.training.compile:
+        raise NotImplementedError("torch.compile is not supported yet for deepseekv3")
+
     dp_mesh: DeviceMesh | None = None
-    if (
-        parallel_dims.dp_shard_enabled
-    ):  # apply FSDP or HSDP, potentially with Context Parallel
+    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+        # apply FSDP or HSDP, potentially with Context Parallel
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard")
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
-            dp_mesh_dim_names = ("dp_shard",)
+            dp_mesh_dim_names = ("dp_shard_cp",)
         dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        dp_mod_ep_mesh_dim_names = []
+        if parallel_dims.ep_enabled:
+            if parallel_dims.dp_replicate_enabled:
+                dp_mod_ep_mesh_dim_names.append("dp_replicate")
+            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
 
         apply_fsdp(
             model,
@@ -91,12 +102,33 @@ def parallelize_deepseekv3(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            dp_mod_ep_mesh=(
+                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
+                if dp_mod_ep_mesh_dim_names
+                else None
+            ),
         )
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
+
+        if parallel_dims.cp_enabled:
+            logger.info("Applied Context Parallel to the model")
+
+        if job_config.training.enable_cpu_offload:
+            logger.info("Applied CPU Offloading to the model")
+    elif parallel_dims.dp_replicate_enabled:
+        if world_mesh.ndim > 1:
+            raise RuntimeError("DDP has not supported > 1D parallelism")
+        dp_mesh = world_mesh
+        apply_ddp(
+            model,
+            dp_mesh,
+            enable_compile=job_config.training.compile,
+            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
+        )
 
     return model
 
