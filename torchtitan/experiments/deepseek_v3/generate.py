@@ -18,6 +18,8 @@ import torch.distributed as dist
 from checkpoint import load_weights_from_hf
 from model import DeepseekForCausalLM
 from model_config import deepseek_config_registry
+
+from remap_experts import create_expert_remapping_csv
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 
@@ -370,6 +372,8 @@ if __name__ == "__main__":
 
     dist_config = create_dist_config(mesh)
     model, pp_schedule = create_model(dist_config)
+    create_expert_remapping_csv(model, "expert_remapping.csv")
+    assert False, "check csv"
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     messages = [

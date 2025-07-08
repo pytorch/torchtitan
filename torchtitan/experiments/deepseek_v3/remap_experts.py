@@ -132,6 +132,7 @@ def _remap_layer_experts(moe_layer: "MoE", new_order: List[int]):
             moe_layer.gate.e_score_correction_bias.data[new_pos] = old_bias[old_pos]
 
     # For expert parallelism, we need to handle local expert remapping
+    # but ultimately this should be at load time, not runtime...runtime for now as experimental
     # Get all expert IDs that should be present on this rank
     local_expert_ids = set(int(k) for k in moe_layer.experts.keys())
 
@@ -171,12 +172,12 @@ def _remap_layer_experts(moe_layer: "MoE", new_order: List[int]):
                 print(
                     f"    Warning: Expert {old_global_id} -> {new_global_id} should move to rank {new_ep_rank} (currently on {moe_layer.ep_rank})"
                 )
-                # In a real distributed setting, this would require communication
+                # This should not be needed, we want to load at runtime via SPMD the sorted experts for final impl...
                 # For now, keep the expert at its original position with a warning
                 moe_layer.experts[str(old_global_id)] = old_expert
 
-    print(f"  Applied expert remapping {new_order} to layer")
-    print(f"  Routing remap tensor: {routing_remap}")
+    print(f"Applied expert remapping {new_order} to layer")
+    print(f"Routing remap tensor: {routing_remap}")
 
 
 def apply_routing_remap_to_moe():
@@ -184,7 +185,6 @@ def apply_routing_remap_to_moe():
     Remap experts in MoE class based on ordering specified in a CSV file.
 
     """
-
     # Stash original forward
     if not hasattr(MoE, "_original_forward"):
         MoE._original_forward = MoE.forward
@@ -289,13 +289,13 @@ def create_expert_remapping_csv(
 
 
 def test_routing_remapping(
-    model: "DeepseekForCausalLM", layer_idx: int, batch_size: int = 2, seq_len: int = 10
+    model: nn.module, layer_idx: int, batch_size: int = 2, seq_len: int = 10
 ):
     """
     Test the routing remapping by running a forward pass and checking expert assignments.
 
     Args:
-        model: DeepseekForCausalLM model instance
+        model: model instance
         layer_idx: Layer index to test
         batch_size: Batch size for test input
         seq_len: Sequence length for test input
