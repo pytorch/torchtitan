@@ -489,8 +489,8 @@ class ActivationCheckpoint:
     selective_op_ac_mm_flops_threshold: int = 0
     """
     When selective_ac_option is 'op', this threshold is used to determine whether to
-    save a given mm, e.g. 1e5 means every other mm is saved, excluding mm with
-    flops < 1e5.
+    save a given mm, e.g. 1e5 means excluding mms flops < 1e5, and then saving
+    every other mm from the remaining mms.
     """
 
 
