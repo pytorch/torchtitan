@@ -60,9 +60,6 @@ class Float8Converter(ModelConverter):
         # Validate MoE training prototype limitations.
         if self.moe_fqns:
             assert (
-                job_config.parallelism.tensor_parallel_degree == 1
-            ), "Float8 MoE training prototype does not yet support tensor parallelism"
-            assert (
                 job_config.parallelism.pipeline_parallel_degree == 1
             ), "Float8 MoE training prototype does not yet support pipeline parallelism"
             assert (
