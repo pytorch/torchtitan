@@ -46,12 +46,7 @@ def parallelize_flux(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-    else:
-        model = model.to(TORCH_DTYPE_MAP[job_config.training.mixed_precision_param])
-        logger.info(
-            "Model in precision: %s",
-            TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-        )
+
     return model
 
 

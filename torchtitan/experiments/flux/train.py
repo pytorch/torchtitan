@@ -73,7 +73,11 @@ class FluxTrainer(Trainer):
         )
 
         self._dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
-
+        self.maybe_enable_amp = dist_utils.maybe_enable_amp(
+            self.parallel_dims,
+            job_config.training.mixed_precision_param,
+            utils.device_type,
+        )
         model_config = self.train_spec.config[job_config.model.flavor]
 
         self.val_dataloader = (
@@ -280,14 +284,15 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        latent_noise_pred = self.model(
-            img=latents,
-            img_ids=latent_pos_enc.to(latents),
-            txt=t5_encodings.to(latents),
-            txt_ids=text_pos_enc.to(latents),
-            y=clip_encodings.to(latents),
-            timesteps=timesteps.to(latents),
-        )
+        with self.maybe_enable_amp:
+            latent_noise_pred = self.model(
+                img=latents,
+                img_ids=latent_pos_enc.to(latents),
+                txt=t5_encodings.to(latents),
+                txt_ids=text_pos_enc.to(latents),
+                y=clip_encodings.to(latents),
+                timesteps=timesteps.to(latents),
+            )
 
         # Convert sequence of patches to latent shape
         pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
@@ -410,14 +415,15 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-            latent_noise_pred = self.model(
-                img=latents,
-                img_ids=latent_pos_enc.to(latents),
-                txt=t5_encodings.to(latents),
-                txt_ids=text_pos_enc.to(latents),
-                y=clip_encodings.to(latents),
-                timesteps=timestep_values.to(latents),
-            )
+            with self.maybe_enable_amp:
+                latent_noise_pred = self.model(
+                    img=latents,
+                    img_ids=latent_pos_enc.to(latents),
+                    txt=t5_encodings.to(latents),
+                    txt_ids=text_pos_enc.to(latents),
+                    y=clip_encodings.to(latents),
+                    timesteps=timestep_values.to(latents),
+                )
 
             # Convert sequence of patches to latent shape
             pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
