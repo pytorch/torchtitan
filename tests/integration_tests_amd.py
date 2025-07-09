@@ -49,23 +49,12 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "TP+DP compile",
-            "tp_dp_compile",
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
             "DP+CP(allgather)",
             "dp_cp_allgather",
-            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -75,18 +64,20 @@ def build_test_list():
                     "--parallelism.enable_async_tensor_parallel",
                 ],
             ],
-            "TP async+ compile",
-            "tp_async_compile",
+            "DP+TP async+ compile",
+            "dp_tp_async_compile",
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.pipeline_parallel_degree=2",
-                ]
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--float8.force_recompute_fp8_weight_in_bwd",
+                ],
             ],
-            "PP",
-            "PP",
-            ngpu=8,
+            "Float8 test",
+            "float8",
         ),
         OverrideDefinitions(
             [
