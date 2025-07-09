@@ -41,8 +41,8 @@ def build_test_list():
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
-    TODO: 8*amd gpu current only support 1D TP/DP/CP test, enbale tests for PP
-    and xD later.
+    TODO: 8*amd gpu current only support TP, DP, CP test.
+    HSDP, PP are not supported yet.
     """
     integration_tests_flavors = defaultdict(list)
     integration_tests_flavors["debug_model.toml"] = [
@@ -53,19 +53,8 @@ def build_test_list():
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "TP compile",
-            "tp_compile",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=8",
-                ]
-            ],
-            "FSDP+torch.compile",
-            "fsdp+compile",
-            ngpu=8,
+            "TP+DP compile",
+            "tp_dp_compile",
         ),
         OverrideDefinitions(
             [
@@ -74,20 +63,41 @@ def build_test_list():
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "CP (allgather)",
-            "cp_allgather",
+            "DP+CP(allgather)",
+            "dp_cp_allgather",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.context_parallel_rotate_method='allgather'",
+                ]
+            ],
+            "DP+CP(allgather)",
+            "dp_cp_allgather",
             ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--training.compile",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.enable_async_tensor_parallel",
+                ],
+            ],
+            "TP async+ compile",
+            "tp_async_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree=2",
                 ]
             ],
-            "HSDP+CP+torch.compile+Float8",
-            "hsdp+cp+compile+float8",
+            "PP",
+            "PP",
             ngpu=8,
         ),
     ]
