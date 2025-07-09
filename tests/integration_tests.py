@@ -514,25 +514,14 @@ def build_test_list():
                 [
                     "--validation.enabled",
                     "--validation.dataset c4_test",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ],
             ],
-            "Validation test no parallelism",
-            "validation_no_parallel",
-            ngpu=1,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--validation.enabled",
-                    "--validation.dataset c4_test",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "Validation checkpoint test with FSDP",
-            "validation_fsdp_checkpoint",
-            ngpu=4,
+            "Validation test with fsdp, tp, cp",
+            "validation_fsdp_tp_cp",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
