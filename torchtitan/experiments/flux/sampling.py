@@ -101,7 +101,7 @@ def generate_image(
 
     batch = preprocess_data(
         device=device,
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
         autoencoder=None,
         clip_encoder=clip_encoder,
         t5_encoder=t5_encoder,

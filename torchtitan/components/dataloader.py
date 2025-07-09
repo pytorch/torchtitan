@@ -31,7 +31,8 @@ class BaseDataLoader(Stateful, ABC):
     """
 
     @abstractmethod
-    def __iter__(self): ...
+    def __iter__(self):
+        ...
 
 
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):

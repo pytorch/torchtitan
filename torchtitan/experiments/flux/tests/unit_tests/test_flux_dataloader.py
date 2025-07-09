@@ -21,8 +21,6 @@ class TestFluxDataLoader:
 
                 num_steps = 15
 
-                num_steps = 1
-
                 path = "torchtitan.experiments.flux.job_config"
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
@@ -36,8 +34,6 @@ class TestFluxDataLoader:
                         str(batch_size),
                         "--training.seed",
                         "0",
-                        "--training.classifer_free_guidance_prob",
-                        "0.447",
                         "--encoder.t5_encoder",
                         "google/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
