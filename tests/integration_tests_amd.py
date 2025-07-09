@@ -41,7 +41,7 @@ def build_test_list():
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
-    TODO: 8*amd gpu current only support 1D TP/DP/CP test, ebale tests for PP
+    TODO: 8*amd gpu current only support 1D TP/DP/CP test, enbale tests for PP
     and xD later.
     """
     integration_tests_flavors = defaultdict(list)
@@ -70,12 +70,24 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.context_parallel_degree=8",
+                    "--parallelism.context_parallel_degree 2",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
             "CP (allgather)",
             "cp_allgather",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "HSDP+CP+torch.compile+Float8",
+            "hsdp+cp+compile+float8",
             ngpu=8,
         ),
     ]
