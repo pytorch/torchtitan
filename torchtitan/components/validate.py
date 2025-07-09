@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Generator
+
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
-
 from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
@@ -52,6 +53,8 @@ class Validator(BaseValidator):
         parallel_dims: ParallelDims,
         world_mesh: torch.distributed.DeviceMesh,
         loss_fn: LossFunction,
+        validation_context: Generator[None, None, None],
+        maybe_enable_amp: Generator[None, None, None],
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
@@ -63,6 +66,8 @@ class Validator(BaseValidator):
             dp_rank=dp_rank,
             tokenizer=tokenizer,
         )
+        self.validation_context = validation_context
+        self.maybe_enable_amp = maybe_enable_amp
 
     @torch.no_grad()
     def validate(
@@ -76,44 +81,52 @@ class Validator(BaseValidator):
 
         accumulated_losses = []
         device_type = utils.device_type
-        num_val_steps = 0
+        num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
-                and num_val_steps >= self.job_config.validation.steps
+                and num_steps >= self.job_config.validation.steps
             ):
                 break
 
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
+            inputs = input_dict["input"]
             labels = labels.to(device_type)
 
-            inputs = input_dict["input"]
-            predictions = model(inputs)
+            optional_context_parallel_ctx = (
+                dist_utils.create_context_parallel_ctx(
+                    cp_mesh=self.world_mesh["cp"],
+                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                    cp_no_restore_buffers={inputs, labels},
+                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                )
+                if self.parallel_dims.cp_enabled
+                else None
+            )
 
-            if self.parallel_dims.loss_parallel_enabled:
-                if isinstance(predictions, torch.Tensor) and not isinstance(
-                    predictions, DTensor
-                ):
-                    predictions = DTensor.from_local(predictions, self.world_mesh["tp"])
-                if isinstance(labels, torch.Tensor) and not isinstance(labels, DTensor):
-                    labels = DTensor.from_local(labels, self.world_mesh["tp"])
-            loss = self.loss_fn(predictions, labels)
+            with self.validation_context(optional_context_parallel_ctx):
+                assert len(model_parts) == 1
+                with self.maybe_enable_amp:
+                    predictions = model(inputs)
+                    loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
 
-            num_val_steps += 1
+            num_steps += 1
 
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
+        loss /= num_steps
         if self.parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(loss, self.world_mesh["dp_cp"])
         else:
             global_avg_loss = loss
 
         logger.info(
-            f"Validation completed. Average loss: {global_avg_loss:.4f} over {num_val_steps} batches"
+            f"Validation completed. Average loss: {global_avg_loss:.4f} over {num_steps} batches"
         )
 
         # Reshard after run forward pass
@@ -125,8 +138,6 @@ class Validator(BaseValidator):
         # Set model back to train mode
         model.train()
 
-        return {"validation_loss": global_avg_loss}
-
 
 def build_validator(
     job_config: JobConfig,
@@ -136,6 +147,8 @@ def build_validator(
     parallel_dims: ParallelDims,
     world_mesh: torch.distributed.DeviceMesh,
     loss_fn: LossFunction,
+    validation_context: Generator[None, None, None],
+    maybe_enable_amp: Generator[None, None, None],
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
     return Validator(
@@ -146,4 +159,6 @@ def build_validator(
         parallel_dims=parallel_dims,
         world_mesh=world_mesh,
         loss_fn=loss_fn,
+        validation_context=validation_context,
+        maybe_enable_amp=maybe_enable_amp,
     )
