@@ -14,6 +14,7 @@ from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
 from .moe import FeedForward, MoE
+from .tensor_parallel_ops import tensor_parallel_expand
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -223,7 +224,7 @@ class Attention(nn.Module):
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         n_local_heads = k_nope.size(2)
         k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, n_local_heads, -1)], dim=-1
+            [k_nope, tensor_parallel_expand(k_pe, (-1, -1, n_local_heads, -1))], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)

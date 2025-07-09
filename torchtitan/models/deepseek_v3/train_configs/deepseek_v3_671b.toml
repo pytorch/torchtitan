@@ -60,6 +60,12 @@ interval = 10
 last_save_model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
+# Config for converting a HF model to DCP format
+convert_path = "" # path to the HF weights
+convert_hf_token = ""
+convert_load_every_n_ranks = 8
+fake_model = true
+
 
 [activation_checkpoint]
 mode = "full"  # ["none", "selective", "full"]
