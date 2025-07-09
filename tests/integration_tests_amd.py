@@ -42,7 +42,7 @@ def build_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     TODO: 8*amd gpu current only support TP, DP, CP test.
-    HSDP, PP are not supported yet.
+    HSDP, PP and their related test, TP+DP+CP are not supported yet.
     """
     integration_tests_flavors = defaultdict(list)
     integration_tests_flavors["debug_model.toml"] = [
@@ -70,13 +70,13 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 4",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
-            "DP+CP(allgather)",
-            "dp_cp_allgather",
+            "TP+CP(allgather)",
+            "tp_cp_allgather",
             ngpu=8,
         ),
         OverrideDefinitions(
