@@ -91,7 +91,7 @@ class Eval:
     """Path to the prompts csv file."""
     num_prompts: int | None = None
     """Number of prompts to use for validation."""
-    target_eval_loss: float = 0.591
+    target_eval_loss: float = 0.586
     """Target loss for validation. If the validation loss is less than this value, the training will be considered successful."""
 
 

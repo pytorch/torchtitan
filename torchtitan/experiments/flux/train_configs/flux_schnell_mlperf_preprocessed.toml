@@ -58,6 +58,7 @@ denoising_steps = 50
 save_img_folder = "img"
 eval_freq = 614400
 dataset = "coco_preprocessed"
+target_eval_loss = 0.586
 
 [parallelism]
 data_parallel_replicate_degree = 1
