@@ -9,7 +9,6 @@ from typing import Generator
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import Tokenizer
