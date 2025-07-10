@@ -145,7 +145,6 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    logger.warning("There are known issue with TP for deepseekv3. Please see details in discussion: https://github.com/pytorch/torchtitan/pull/1373#issuecomment-3050249520.")
     parallelize_module(
         model,
         tp_mesh,
@@ -177,12 +176,13 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), Replicate()),
+                desired_input_layouts=(Replicate(), Replicate()),
             ),
-            "attention.wkv_a": NoParallel(),
-            "attention.wkv_b": colwise_parallel(),
-            "attention.kv_norm": NoParallel(),
+            # use_local_output=False make the output to be a DTensor instead of a plain Tensor
+            "attention.wkv_a": NoParallel(use_local_output=False),
+            "attention.wkv_b": colwise_parallel(use_local_output=False),
+            "attention.kv_norm": NoParallel(use_local_output=False),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
@@ -190,28 +190,32 @@ def apply_non_moe_tp(
         if transformer_block.attention.q_lora_rank == 0:
             layer_plan.update(
                 {
-                    "attention.wq": colwise_parallel(),  # This is only used when q_lora_rank==0
+                    "attention.wq": colwise_parallel(
+                        use_local_output=False
+                    ),  # This is only used when q_lora_rank==0
                 }
             )
         else:
             layer_plan.update(
                 {
-                    "attention.wq_a": NoParallel(),
-                    "attention.wq_b": colwise_parallel(),
-                    "attention.q_norm": NoParallel(),
+                    "attention.wq_a": NoParallel(use_local_output=False),
+                    "attention.wq_b": colwise_parallel(use_local_output=False),
+                    "attention.q_norm": NoParallel(use_local_output=False),
                 }
             )
 
         if not transformer_block.moe_enabled:
-            layer_plan.update({
-                "feed_forward": prepare_module_input(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                ),
-                "feed_forward.w1": colwise_parallel(),
-                "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                "feed_forward.w3": colwise_parallel(),
-            })
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             module=transformer_block,

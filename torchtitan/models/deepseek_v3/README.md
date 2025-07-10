@@ -41,8 +41,6 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
 
 
 ## To be added
-- TP:
-    - TP has a known numerical issue with DeepSeek-V3 (https://github.com/pytorch/torchtitan/pull/1373#issuecomment-3050249520).
 - Modeling
     - Merge DeepSeek-V3 and Llama4 MoE common components
     - Attention Layer: need to pass softmax_scale to sdpa() to support scaling
