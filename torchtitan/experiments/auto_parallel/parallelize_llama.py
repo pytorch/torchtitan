@@ -53,6 +53,14 @@ def parallelize_llama(
     assert parallel_dims.cp_enabled is False, "CP not supported yet"
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
+    # TODO: there are multiple float8 recipes, this just hardcodes one
+    enable_float8_linear = "float8" in job_config.model.converters
+    if enable_float8_linear:
+        import copy
+        from torchao.float8.float8_linear_utils import convert_to_float8_training
+        from torchao.float8.config import Float8LinearConfig
+        model = convert_to_float8_training(copy.deepcopy(model), config=Float8LinearConfig())
+
     # bail out
     # model = model_fn()
     # return model
