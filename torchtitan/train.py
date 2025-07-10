@@ -52,6 +52,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
 
+    validator: train_spec_module.BaseValidator | None
+
     pp_has_first_stage: bool
     pp_has_last_stage: bool
 
@@ -320,6 +322,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             device_type,
         )
 
+        # Build validator if validation is configured
+        if job_config.validation.enabled:
+            assert self.train_spec.build_validator_fn is not None
+            assert (
+                not parallel_dims.pp_enabled
+            ), "pp is enabled but validation doesn't support pipeline parallelism yet"
+
+            self.validator = self.train_spec.build_validator_fn(
+                job_config=job_config,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=tokenizer,
+                parallel_dims=parallel_dims,
+                world_mesh=world_mesh,
+                loss_fn=self.train_spec.build_loss_fn(job_config),
+                validation_context=self.train_context,
+                maybe_enable_amp=self.maybe_enable_amp,
+            )
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {job_config.training.local_batch_size}, "
@@ -500,6 +521,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
+
+                # Run validation if validator is available
+                if (
+                    self.job_config.validation.enabled
+                    and self.validator.should_validate(self.step)
+                ):
+                    self.validator.validate(self.model_parts)
+
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )
