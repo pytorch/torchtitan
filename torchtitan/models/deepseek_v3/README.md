@@ -27,6 +27,11 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./r
 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh
 ```
 
+```bash
+# 671B parameter model
+CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml" ./run_train.sh
+```
+
 
 ## Supported Features
 - FSDP, HSDP
@@ -36,6 +41,8 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml"
 
 
 ## To be added
+- TP:
+    - TP has a known numerical issue with DeepSeek-V3 (https://github.com/pytorch/torchtitan/pull/1373#issuecomment-3050249520).
 - Modeling
     - Merge DeepSeek-V3 and Llama4 MoE common components
 - Parallelism
