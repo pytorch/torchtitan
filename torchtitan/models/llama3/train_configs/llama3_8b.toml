@@ -53,6 +53,7 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 enable_hf_safetensors_format = true
 safetensors_json = "./assets/safetensors/Meta-Llama-3.1-8B/model.index.safetensors.json"
+# load_step = 3
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]

@@ -544,6 +544,7 @@ class CheckpointManager:
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
+        model_only = True
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
