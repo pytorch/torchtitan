@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -48,7 +48,7 @@ class Validator(BaseValidator):
         job_config: JobConfig,
         dp_world_size: int,
         dp_rank: int,
-        tokenizer: Tokenizer,
+        tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         world_mesh: torch.distributed.DeviceMesh,
         loss_fn: LossFunction,
@@ -142,7 +142,7 @@ def build_validator(
     job_config: JobConfig,
     dp_world_size: int,
     dp_rank: int,
-    tokenizer: Tokenizer,
+    tokenizer: BaseTokenizer,
     parallel_dims: ParallelDims,
     world_mesh: torch.distributed.DeviceMesh,
     loss_fn: LossFunction,

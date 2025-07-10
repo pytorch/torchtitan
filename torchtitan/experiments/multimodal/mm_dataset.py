@@ -13,7 +13,7 @@ from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 
 from mm_collator import MultiModalCollator
-from tokenizer.tiktoken import IGNORE_INDEX, Tokenizer
+from tokenizer.tiktoken import BaseTokenizer, IGNORE_INDEX
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from transform import CLIPTransform
@@ -110,7 +110,7 @@ class MultiModalDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: Optional[str],
-        tokenizer: Tokenizer,
+        tokenizer: BaseTokenizer,
         image_token: str = "<|image|>",
         tile_size: int = 448,
         max_num_tiles: int = 4,
@@ -178,8 +178,8 @@ class MultiModalDataset(IterableDataset, Stateful):
                 # Tokenize
                 tokens = self._tokenizer.encode(
                     sample["text"],
-                    bos=True,
-                    eos=True,
+                    add_bos=True,
+                    add_eos=True,
                     allowed_special=set(["<|image|>"]),
                 )
                 sample["input_ids"] = torch.LongTensor(tokens[:-1])
@@ -233,7 +233,7 @@ class MultiModalDataset(IterableDataset, Stateful):
 def build_mm_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    tokenizer: Tokenizer,
+    tokenizer: BaseTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:

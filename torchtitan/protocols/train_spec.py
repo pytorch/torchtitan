@@ -22,7 +22,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -41,7 +41,9 @@ class BaseModelArgs:
     _enforced: str = "This field is used to enforce all fields have defaults."
 
     @abstractmethod
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
+    def update_from_config(
+        self, job_config: JobConfig, tokenizer: BaseTokenizer
+    ) -> None:
         pass
 
     @abstractmethod
@@ -71,7 +73,7 @@ PipeliningFunction: TypeAlias = Callable[
     ..., tuple[_PipelineSchedule, list[nn.Module], bool, bool]
 ]
 DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
-TokenizerBuilder: TypeAlias = Callable[..., Tokenizer]
+TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
     [list[nn.Module], JobConfig, ParallelDims, DeviceMesh, FTManager],
