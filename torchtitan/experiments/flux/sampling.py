@@ -93,7 +93,7 @@ def generate_image(
     img_height = 16 * (job_config.training.img_size // 16)
     img_width = 16 * (job_config.training.img_size // 16)
 
-    enable_classifer_free_guidance = job_config.eval.enable_classifer_free_guidance
+    enable_classifier_free_guidance = job_config.eval.enable_classifier_free_guidance
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
     clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
@@ -111,7 +111,7 @@ def generate_image(
         },
     )
 
-    if enable_classifer_free_guidance:
+    if enable_classifier_free_guidance:
         empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
         empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
         empty_batch = preprocess_data(
@@ -135,12 +135,12 @@ def generate_image(
         denoising_steps=job_config.eval.denoising_steps,
         clip_encodings=batch["clip_encodings"],
         t5_encodings=batch["t5_encodings"],
-        enable_classifer_free_guidance=enable_classifer_free_guidance,
+        enable_classifier_free_guidance=enable_classifier_free_guidance,
         empty_t5_encodings=(
-            empty_batch["t5_encodings"] if enable_classifer_free_guidance else None
+            empty_batch["t5_encodings"] if enable_classifier_free_guidance else None
         ),
         empty_clip_encodings=(
-            empty_batch["clip_encodings"] if enable_classifer_free_guidance else None
+            empty_batch["clip_encodings"] if enable_classifier_free_guidance else None
         ),
         classifier_free_guidance_scale=job_config.eval.classifier_free_guidance_scale,
     )
@@ -158,7 +158,7 @@ def denoise(
     denoising_steps: int,
     clip_encodings: torch.Tensor,
     t5_encodings: torch.Tensor,
-    enable_classifer_free_guidance: bool = False,
+    enable_classifier_free_guidance: bool = False,
     empty_t5_encodings: torch.Tensor | None = None,
     empty_clip_encodings: torch.Tensor | None = None,
     classifier_free_guidance_scale: float | None = None,
@@ -181,7 +181,7 @@ def denoise(
     ).to(latents)
     text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
 
-    if enable_classifer_free_guidance:
+    if enable_classifier_free_guidance:
         latents = torch.cat([latents, latents], dim=0)
         t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
         clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
@@ -200,7 +200,7 @@ def denoise(
             y=clip_encodings,
             timesteps=t_vec,
         )
-        if enable_classifer_free_guidance:
+        if enable_classifier_free_guidance:
             pred_u, pred_c = pred.chunk(2)
             pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
 

@@ -57,6 +57,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
+                        "--training.classifier_free_guidance_prob",
+                        "0.447",
                         "--encoder.t5_encoder",
                         "google/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
