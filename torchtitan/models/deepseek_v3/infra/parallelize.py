@@ -75,7 +75,6 @@ def parallelize_deepseekv3(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
         raise NotImplementedError("torch.compile is not supported yet for deepseekv3")
 

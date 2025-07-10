@@ -277,7 +277,6 @@ class TransformerBlock(nn.Module):
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
 
-        # TODO: Need to revisit the weight initialization for the TransformerBlock
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 

@@ -26,7 +26,6 @@ tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
-# TODO: AdamW has numerical issues when TP is used, need to fix it
 name = "AdamW"
 lr = 4e-3
 eps = 1e-15
