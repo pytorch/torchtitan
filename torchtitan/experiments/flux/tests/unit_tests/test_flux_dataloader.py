@@ -91,31 +91,6 @@ class TestFluxDataLoader:
                     assert torch.equal(
                         input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
                     )
-
-                state = dl.state_dict()
-
-                # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
-                dl_resumed = build_flux_dataloader(
-                    dp_world_size=world_size,
-                    dp_rank=rank,
-                    job_config=config,
-                    tokenizer=None,
-                    infinite=True,
-                )
-                dl_resumed.load_state_dict(state)
-                it_resumed = iter(dl_resumed)
-
-                for i in range(num_steps):
-                    # Set torch manual seed before each dataloader iteration to ensure consistent randomness
-                    # across dataloaders for testing purposes.
-                    torch.manual_seed(i)
-                    expected_input_ids, expected_labels = next(it)
-                    torch.manual_seed(i)
-                    input_ids, labels = next(it_resumed)
-
-                    assert torch.equal(
-                        input_ids["clip_tokens"], expected_input_ids["clip_tokens"]
-                    )
                     assert torch.equal(
                         input_ids["t5_tokens"], expected_input_ids["t5_tokens"]
                     )

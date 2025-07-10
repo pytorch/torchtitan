@@ -275,13 +275,11 @@ class FluxDataset(IterableDataset, Stateful):
         else:
             assert "data" in state_dict
             self._data.load_state_dict(state_dict["data"])
-            print("load state dict: ", self._data.state_dict())
 
     def state_dict(self):
         if isinstance(self._data, Dataset):
             return {"sample_idx": self._sample_idx}
         else:
-            print("save state dict: ", self._data.state_dict())
             return {"data": self._data.state_dict()}
 
 
