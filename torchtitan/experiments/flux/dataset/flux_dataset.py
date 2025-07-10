@@ -126,13 +126,6 @@ DATASETS = {
         ),
         data_processor=_cc12m_wds_data_processor,
     ),
-    "cc12m-test-iterable": TextToImageDatasetConfig(
-        path="torchtitan/experiments/flux/tests/assets/cc12m_test",
-        loader=lambda path: load_dataset(
-            path, split="train", data_files={"train": "*tar"}
-        ).to_iterable_dataset(num_shards=4),
-        data_processor=_cc12m_wds_data_processor,
-    ),
 }
 
 

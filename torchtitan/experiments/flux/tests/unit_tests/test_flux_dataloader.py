@@ -4,13 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import unittest
+
 import torch
 
+from datasets import load_dataset
+
 from torchtitan.config_manager import ConfigManager
-from torchtitan.experiments.flux.dataset.flux_dataset import build_flux_dataloader
+from torchtitan.experiments.flux.dataset.flux_dataset import (
+    _cc12m_wds_data_processor,
+    build_flux_dataloader,
+    DATASETS,
+    TextToImageDatasetConfig,
+)
 
 
-class TestFluxDataLoader:
+class TestFluxDataLoader(unittest.TestCase):
+    def setUp(self):
+        DATASETS["cc12m-test-iterable"] = TextToImageDatasetConfig(
+            path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+            loader=lambda path: load_dataset(
+                path, split="train", data_files={"train": "*tar"}
+            ).to_iterable_dataset(num_shards=4),
+            data_processor=_cc12m_wds_data_processor,
+        )
+
+    def tearDown(self):
+        del DATASETS["cc12m-test-iterable"]
+
     def test_load_dataset(self):
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
@@ -20,6 +41,10 @@ class TestFluxDataLoader:
                 batch_size = 1
 
                 num_steps = 15
+
+                # TODO: if num_steps * batch_size * world_size is larger than the number of samples
+                # in the dataset, then the test will fail, due to huggingface's
+                # non-resumption when checkpointing after the first epoch
 
                 path = "torchtitan.experiments.flux.job_config"
                 config_manager = ConfigManager()
@@ -32,8 +57,6 @@ class TestFluxDataLoader:
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
-                        "--training.seed",
-                        "0",
                         "--encoder.t5_encoder",
                         "google/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
