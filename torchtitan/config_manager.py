@@ -475,6 +475,12 @@ class Checkpoint:
     a separate step. The default value is False.
     """
 
+    safetensors_json: str | None = None
+    """
+    Path to the safetensors json file. This is only used when --checkpoint.enable_hf_safetensors_format
+    is set. The default value is None.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:

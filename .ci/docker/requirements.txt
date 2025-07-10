@@ -9,3 +9,4 @@ wandb
 fsspec
 tyro
 tokenizers >= 0.15.0
+safetensors

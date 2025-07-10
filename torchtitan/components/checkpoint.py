@@ -6,6 +6,7 @@
 
 import enum
 import functools
+import json
 import os
 import queue
 import re
@@ -289,6 +290,23 @@ class CheckpointManager:
         else:
             raise ValueError(f"Unkown checkpoint async_mode {ckpt_config.async_mode}")
 
+        self.hf_fqn_index_map = None
+        if (
+            self.enable_hf_safetensors_format
+            and ckpt_config.safetensors_json is not None
+        ):
+            self.hf_fqn_index_map = {}
+            with open(ckpt_config.safetensors_json, "r") as f:
+                data = json.load(f)
+                weight_map = data["weight_map"]
+                for k, v in weight_map.items():
+                    # expect the value to be in the format of "model-00000n-of-00000m.safetensors"
+                    try:
+                        self.hf_fqn_index_map[k] = int(v.split("-")[1])
+                    except Exception:
+                        self.hf_fqn_index_map = None
+                        break
+
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
@@ -319,7 +337,7 @@ class CheckpointManager:
         checkpoint_id: str,
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
-        is_last_step: bool = False
+        is_last_step: bool = False,
     ) -> Future | None:
         """Save the checkpoint with dcp.
         Args:
@@ -332,9 +350,32 @@ class CheckpointManager:
         """
         ret: Future | None = None
 
+        state_dict_to_save: dict[str, Any] = (
+            {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
+            if self.enable_hf_safetensors_format
+            else state_dict
+        )
+        logger.info(
+            "Num keys before parsing %d, after %d",
+            len(state_dict),
+            len(state_dict_to_save),
+        )
+        for k, v in state_dict_to_save.items():
+            if isinstance(v, torch.Tensor):
+                logger.info("key %s, shape %s", k, v.shape)
+            break
+
+        fqn_to_index_mapping = {}
+        for i, key in enumerate(state_dict_to_save.keys()):
+            group_num = (i // 30) + 1
+            fqn_to_index_mapping[key] = group_num
+
         storage_writer = (
             HuggingFaceStorageWriter(
-                path=checkpoint_id, save_distributed=True, enable_consolidation=is_last_step,
+                path=checkpoint_id,
+                save_distributed=True,
+                fqn_to_index_mapping=fqn_to_index_mapping,
+                enable_consolidation=is_last_step,
             )
             if self.enable_hf_safetensors_format
             else None
@@ -342,14 +383,14 @@ class CheckpointManager:
         id = checkpoint_id if not self.enable_hf_safetensors_format else None
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
-                state_dict,
+                state_dict_to_save,
                 storage_writer=storage_writer,
                 checkpoint_id=id,
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             ret = dcp.async_save(
-                state_dict,
+                state_dict_to_save,
                 storage_writer=storage_writer,
                 checkpoint_id=id,
                 process_group=self.pg,
@@ -357,7 +398,9 @@ class CheckpointManager:
                 async_stager=self.stager,
             )
         else:
-            ret = dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
+            ret = dcp.save(
+                state_dict_to_save, storage_writer=storage_writer, checkpoint_id=id
+            )
 
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
