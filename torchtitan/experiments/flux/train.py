@@ -452,11 +452,6 @@ class FluxTrainer(Trainer):
             # Count samples per timestep for averaging (using bincount)
             timestep_counts = torch.bincount(timestep_indices, minlength=8)
 
-            # Avoid division by zero
-            timestep_counts = torch.maximum(
-                timestep_counts, torch.ones_like(timestep_counts)
-            )
-
             if (
                 parallel_dims.dp_replicate_enabled
                 or parallel_dims.dp_shard_enabled
@@ -651,7 +646,10 @@ class FluxTrainer(Trainer):
         # Different batches and timestepsmay have different number of samples, so we need to average the loss like this
         # rather than taking the mean of the mean batch losses.
         timestep_counts_proportions = sum_timestep_counts / sum_timestep_counts.sum()
-        avg_loss_per_timestep = sum_loss_per_timestep / sum_timestep_counts
+        # avoid division by zero
+        avg_loss_per_timestep = sum_loss_per_timestep / torch.maximum(
+            sum_timestep_counts, torch.ones_like(sum_timestep_counts)
+        )
         avg_loss = (avg_loss_per_timestep * timestep_counts_proportions).sum()
         self.metrics_processor.val_log(self.step, avg_loss)
         self.model.train()
