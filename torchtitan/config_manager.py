@@ -467,7 +467,7 @@ class Checkpoint:
     for many steps or checkpointing too frequently. The default value is False.
     """
 
-    enable_hf_safetensors_format: bool = False
+    enable_save_safetensors_format: bool = False
     """
     Enable the use of safetensors format for checkpointing. This will save the final checkpoints
     in safetensors format instead of the default DCP format. There will be a performance

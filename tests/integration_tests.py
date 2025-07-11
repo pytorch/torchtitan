@@ -122,7 +122,7 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.enable_hf_safetensors_format",
+                    "--checkpoint.enable_save_safetensors_format",
                 ],
             ],
             "Checkpoint Integration Test - Save Load Full Checkpoint",

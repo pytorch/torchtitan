@@ -193,7 +193,7 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.enable_hf_safetensors_format = ckpt_config.enable_hf_safetensors_format
+        self.enable_save_safetensors_format = ckpt_config.enable_save_safetensors_format
         self.ft_manager = ft_manager.manager if ft_manager.enabled else None
 
         if self.ft_manager:
@@ -337,29 +337,14 @@ class CheckpointManager:
 
         ret: Future | None = None
 
-        state_dict_to_save: dict[str, Any] = (
-            {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
-            if self.enable_hf_safetensors_format
-            else state_dict
-        )
-        logger.info(
-            "Num keys before parsing %d, after %d",
-            len(state_dict),
-            len(state_dict_to_save),
-        )
-        for k, v in state_dict_to_save.items():
-            if isinstance(v, torch.Tensor):
-                logger.info("key %s, shape %s", k, v.shape)
-            break
-
         storage_writer: HuggingFaceStorageWriter | None = None
-        if self.enable_hf_safetensors_format and is_last_step:
+        if self.enable_save_safetensors_format and is_last_step:
             fqn_to_index_mapping = {}
             num_fqns_per_file = 30
             # the use of 30 is just a heuristic for now.
             # Once these fqns map to HF ones, we can use the fqn mapping
             # from the model.safetensors.index.json file
-            for i, key in enumerate(state_dict_to_save.keys()):
+            for i, key in enumerate(state_dict.keys()):
                 group_num = (i // num_fqns_per_file) + 1
                 fqn_to_index_mapping[key] = group_num
 
@@ -369,17 +354,17 @@ class CheckpointManager:
                 fqn_to_index_mapping=fqn_to_index_mapping,
                 enable_consolidation=is_last_step,
             )
-        id = checkpoint_id if not self.enable_hf_safetensors_format else None
+        id = checkpoint_id if not self.enable_save_safetensors_format else None
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
-                state_dict_to_save,
+                state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=id,
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             ret = dcp.async_save(
-                state_dict_to_save,
+                state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=id,
                 process_group=self.pg,
@@ -388,7 +373,7 @@ class CheckpointManager:
             )
         else:
             ret = dcp.save(
-                state_dict_to_save, storage_writer=storage_writer, checkpoint_id=id
+                state_dict, storage_writer=storage_writer, checkpoint_id=id
             )
 
         if enable_garbage_collection:
@@ -570,7 +555,6 @@ class CheckpointManager:
         folder = folder if folder else self.folder
         pattern = r"step-(\d+)"
         step_counts = []
-        checkpoint_type_map = {}
 
         if not os.path.isdir(folder):
             return -1
@@ -581,10 +565,8 @@ class CheckpointManager:
             safetensors_metadata_probe = os.path.join(folder, filename, "model.safetensors.index.json")
             if match and os.path.isfile(dcp_metadata_probe):
                 step_counts.append(int(match.group(1)))
-                checkpoint_type_map[int(match.group(1))] = CheckpointType.DCP
             elif match and os.path.isfile(safetensors_metadata_probe):
                 step_counts.append(int(match.group(1)))
-                checkpoint_type_map[int(match.group(1))] = CheckpointType.SAFETENSORS
         if not step_counts:
             return -1
         return max(step_counts)
