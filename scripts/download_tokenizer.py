@@ -32,7 +32,7 @@ def download_hf_tokenizer_files(
     - special_tokens_map.json - Special token mappings
 
     Args:
-        repo_id (str): HuggingFace repository ID (e.g., "meta-llama/Meta-Llama-3.1-8B")
+        repo_id (str): HuggingFace repository ID (e.g., meta-llama/Llama-3.1-8B")
         local_dir (str): Local directory to save tokenizer files. A subdirectory
                         named after the model will be created automatically.
         hf_token (Optional[str]): HuggingFace API token for accessing private repositories.
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         "--repo_id",
         type=str,
         required=True,
-        help="Repository ID to download from (e.g., 'meta-llama/Meta-Llama-3.1-8B', 'deepseek-ai/DeepSeek-V3')",
+        help="Repository ID to download from (e.g., 'meta-llama/Llama-3.1-8B', 'deepseek-ai/DeepSeek-V3')",
     )
     parser.add_argument(
         "--hf_token",
