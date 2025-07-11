@@ -9,7 +9,7 @@ from typing import Tuple
 
 import torch
 from torch import nn
-from torchtitan.models.attention import build_attention
+from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
@@ -339,16 +339,16 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
             self.freqs_cis = precompute_freqs_cis(self.model_args)
-        if self.tok_embeddings is not None:
+        if not isinstance(self.tok_embeddings, nn.Identity):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
-            if layer is not None:
+            if not isinstance(layer, nn.Identity):
                 layer.init_weights(buffer_device=buffer_device)
-        if self.norm is not None:
+        if not isinstance(self.norm, nn.Identity):
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        if self.output is not None:
+        if not isinstance(self.output, nn.Identity):
             nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
@@ -357,16 +357,28 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
         """
         Forward pass for the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
+                If pipeline parallelism is enabled, this will be the input token indices
+                for the ranks on the first pipeline stage. This will be the activation of the
+                previous pipeline stage if the current rank is not on the first stage.
+            input_batch (torch.Tensor): The input batch read from the dataloader.
+                This will always be the input batch regardless of the pipeline stage.
+                This field is required for non-first PP stages to perform document
+                masking attention (to analyze the boundary of the document).
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
+        if self.model_args.use_flex_attn:
+            init_attention_mask(
+                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
+            )
+
         h = self.tok_embeddings(tokens)
 
         for layer in self.layers.values():
