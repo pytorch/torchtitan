@@ -8,17 +8,15 @@
 # https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm
 
 # pyre-unsafe
-import functools
 
 import os
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict
 
 import torch
 
 import triton
 import triton.language as tl
-from triton import Config as TConfig
 
 from triton.runtime import driver  # @manual
 
@@ -54,7 +52,11 @@ class CudaUtils:
 
 
 class TmaDescriptorHelper:
-    """Helper class for managing TMA descriptors in Triton kernels."""
+    """Helper class for managing TMA descriptors in Triton kernels.
+
+    Args:
+        tma_size: Size of the TMA descriptor in bytes
+    """
 
     class KernelParamWrapper:
         """Wrapper to implement the TmaDescKernelParam interface."""
@@ -67,11 +69,6 @@ class TmaDescriptorHelper:
             return self.desc.data_ptr()
 
     def __init__(self, tma_size: int = 128):
-        """Initialize the TMA descriptor helper.
-
-        Args:
-            tma_size: Size of the TMA descriptor in bytes
-        """
         if not CudaUtils.verify_tma():
             raise RuntimeError(
                 "TMA not supported on this device (requires Hopper or newer)"
