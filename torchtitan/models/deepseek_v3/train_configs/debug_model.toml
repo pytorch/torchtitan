@@ -50,9 +50,11 @@ dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 2
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 expert_parallel_degree = 1
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "1F1B"
 
 [checkpoint]
 enable_checkpoint = false

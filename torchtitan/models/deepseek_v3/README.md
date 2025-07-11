@@ -38,6 +38,7 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
 - Activation checkpointing
 - Tensor Parallel (TP)
 - Expert Parallel (EP)
+- Pipeline Parallel (PP)
 
 
 ## To be added
@@ -46,7 +47,6 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
     - Attention Layer: need to pass softmax_scale to sdpa() to support scaling
 - Parallelism
     - Context Parallel support for DeepSeek-V3
-    - PP support for DeepSeek-V3
 - torch.compile
 - Quantization
 - Testing
