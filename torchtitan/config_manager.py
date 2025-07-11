@@ -6,6 +6,7 @@
 
 import importlib
 import os
+import random
 import sys
 
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, make_dataclass
@@ -238,7 +239,7 @@ class Training:
     many temporary files.
     """
 
-    seed: int | None = None
+    seed: int | None = random.randint(0, 1000000)
     """Choose the base RNG seed used for training"""
 
     deterministic: bool = False
