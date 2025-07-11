@@ -568,8 +568,9 @@ class CheckpointManager:
 
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
-            metadata_probe = os.path.join(folder, filename, ".metadata")
-            if match and os.path.isfile(metadata_probe):
+            dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
+            safetensors_metadata_probe = os.path.join(folder, filename, "model.safetensors.index.json")
+            if match and (os.path.isfile(dcp_metadata_probe) or os.path.isfile(safetensors_metadata_probe)):
                 step_counts.append(int(match.group(1)))
         if not step_counts:
             return -1
