@@ -53,6 +53,10 @@ class AsyncMode(str, enum.Enum):
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
+class CheckpointType(str, enum.Enum):
+    DCP = "DCP"
+    SAFETENSORS = "safetensors"
+
 
 # For now, we will manually pop the freqs_cis buffer, as we made this permanent
 # temporarily and we don't want to include it in the exported state_dict.
@@ -392,7 +396,7 @@ class CheckpointManager:
 
         return ret
 
-    def dcp_load(self, state_dict: dict[str, Any], checkpoint_id: str) -> None:
+    def dcp_load(self, state_dict: dict[str, Any], checkpoint_id: str, checkpoint_type: CheckpointType) -> None:
         """Load the checkpoint with dcp.
         Args:
             state_dict (dict): The state dict to load.
@@ -400,7 +404,7 @@ class CheckpointManager:
             hf_safetensors_format (bool): Whether to use the HuggingFace safetensors format.
         """
 
-        if self.enable_hf_safetensors_format:
+        if checkpoint_type == CheckpointType.SAFETENSORS:
             storage_reader = HuggingFaceStorageReader(path=checkpoint_id)
             dcp.load(state_dict, storage_reader=storage_reader)
         else:
@@ -526,13 +530,17 @@ class CheckpointManager:
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
                 )
-
+        
+        checkpoint_type = self._find_checkpoint_type(checkpoint_id)
+        if checkpoint_type == CheckpointType.SAFETENSORS:
+            model_only = True
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
             checkpoint_id=checkpoint_id,
+            checkpoint_type=checkpoint_type,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -562,6 +570,7 @@ class CheckpointManager:
         folder = folder if folder else self.folder
         pattern = r"step-(\d+)"
         step_counts = []
+        checkpoint_type_map = {}
 
         if not os.path.isdir(folder):
             return -1
@@ -570,11 +579,31 @@ class CheckpointManager:
             match = re.search(pattern, filename)
             dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
             safetensors_metadata_probe = os.path.join(folder, filename, "model.safetensors.index.json")
-            if match and (os.path.isfile(dcp_metadata_probe) or os.path.isfile(safetensors_metadata_probe)):
+            if match and os.path.isfile(dcp_metadata_probe):
                 step_counts.append(int(match.group(1)))
+                checkpoint_type_map[int(match.group(1))] = CheckpointType.DCP
+            elif match and os.path.isfile(safetensors_metadata_probe):
+                step_counts.append(int(match.group(1)))
+                checkpoint_type_map[int(match.group(1))] = CheckpointType.SAFETENSORS
         if not step_counts:
             return -1
         return max(step_counts)
+
+    def _find_checkpoint_type(self, checkpoint_id: str) -> CheckpointType:
+        """Find the checkpoint type for the given id.
+
+        Args:
+            checkpoint_id (str): The folder to find the checkpoint type for.
+
+        Returns:
+            CheckpointType: The checkpoint type for the given folder.
+        """
+
+        for filename in os.listdir(checkpoint_id):
+            if filename == "model.safetensors.index.json":
+                return CheckpointType.SAFETENSORS
+        return CheckpointType.DCP
+        
 
     def _ft_folder(self) -> str:
         return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
@@ -603,6 +632,7 @@ class CheckpointManager:
         self.dcp_load(
             self.ft_states,
             checkpoint_id=checkpoint_id,
+            checkpoint_type=CheckpointType.DCP, # FT checkpoints are always DCP
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
