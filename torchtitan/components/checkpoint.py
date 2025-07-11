@@ -6,7 +6,6 @@
 
 import enum
 import functools
-import json
 import os
 import queue
 import re
@@ -331,6 +330,7 @@ class CheckpointManager:
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
         """
+
         ret: Future | None = None
 
         state_dict_to_save: dict[str, Any] = (
