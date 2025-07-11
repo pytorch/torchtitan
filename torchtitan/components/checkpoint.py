@@ -354,6 +354,7 @@ class CheckpointManager:
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
                 enable_consolidation=is_last_step,
+                thread_count_consolidation=5,
             )
         id = checkpoint_id if not self.enable_save_safetensors_format else None
         if async_mode == AsyncMode.ASYNC:
