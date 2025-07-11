@@ -261,11 +261,32 @@ def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
             create_selective_checkpoint_contexts,
         )
 
+        mm_recompute_shapes = set()
+        if len(ac_config.selective_op_ac_force_recompute_mm_shapes_by_fqns) > 0:
+            for fqn, submod in module.named_modules():
+                if (
+                    fqn
+                    not in ac_config.selective_op_ac_force_recompute_mm_shapes_by_fqns
+                ):
+                    continue
+                if not isinstance(submod, nn.Linear):
+                    raise ValueError(
+                        "selective_op_ac_force_recompute_mm_shapes_by_fqns expected to match "
+                        f"a nn.Linear, but got: {submod}"
+                    )
+                out_f, in_f = submod.weight.shape
+                mm_recompute_shapes.add((in_f, out_f))
+            logger.debug(
+                f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
+            )
+
         def _get_custom_policy(meta):
             def _custom_policy(ctx, func, *args, **kwargs):
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
                 if func == torch.ops.aten.mm.default:
+                    if args[1].shape in mm_recompute_shapes:
+                        return CheckpointPolicy.PREFER_RECOMPUTE
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
                 to_save = func in _save_list and not (
