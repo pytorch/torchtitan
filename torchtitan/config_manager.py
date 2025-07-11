@@ -472,13 +472,9 @@ class Checkpoint:
     Enable the use of safetensors format for checkpointing. This will save checkpoints
     in safetensors format instead of the default DCP format. There will be a performance
     cost in using this as we need to consolidate the sharded tensors to full tensors as
-    a separate step. The default value is False.
-    """
-
-    safetensors_json: str | None = None
-    """
-    Path to the safetensors json file. This is only used when --checkpoint.enable_hf_safetensors_format
-    is set. The default value is None.
+    a separate step. Last_save_model_weights and initial_load_model_weights_only
+    must be true because safetensors doesn't support saving non tensors. 
+    The default value is False.
     """
 
 

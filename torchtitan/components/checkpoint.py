@@ -290,23 +290,6 @@ class CheckpointManager:
         else:
             raise ValueError(f"Unkown checkpoint async_mode {ckpt_config.async_mode}")
 
-        self.hf_fqn_index_map = None
-        if (
-            self.enable_hf_safetensors_format
-            and ckpt_config.safetensors_json is not None
-        ):
-            self.hf_fqn_index_map = {}
-            with open(ckpt_config.safetensors_json, "r") as f:
-                data = json.load(f)
-                weight_map = data["weight_map"]
-                for k, v in weight_map.items():
-                    # expect the value to be in the format of "model-00000n-of-00000m.safetensors"
-                    try:
-                        self.hf_fqn_index_map[k] = int(v.split("-")[1])
-                    except Exception:
-                        self.hf_fqn_index_map = None
-                        break
-
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
         )
@@ -365,21 +348,23 @@ class CheckpointManager:
                 logger.info("key %s, shape %s", k, v.shape)
             break
 
-        fqn_to_index_mapping = {}
-        for i, key in enumerate(state_dict_to_save.keys()):
-            group_num = (i // 30) + 1
-            fqn_to_index_mapping[key] = group_num
+        storage_writer: HuggingFaceStorageWriter | None = None
+        if self.enable_hf_safetensors_format and is_last_step:
+            fqn_to_index_mapping = {}
+            num_fqns_per_file = 30
+            # the use of 30 is just a heuristic for now.
+            # Once these fqns map to HF ones, we can use the fqn mapping
+            # from the model.safetensors.index.json file
+            for i, key in enumerate(state_dict_to_save.keys()):
+                group_num = (i // num_fqns_per_file) + 1
+                fqn_to_index_mapping[key] = group_num
 
-        storage_writer = (
-            HuggingFaceStorageWriter(
+            storage_writer = HuggingFaceStorageWriter(
                 path=checkpoint_id,
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
                 enable_consolidation=is_last_step,
             )
-            if self.enable_hf_safetensors_format
-            else None
-        )
         id = checkpoint_id if not self.enable_hf_safetensors_format else None
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
@@ -544,7 +529,6 @@ class CheckpointManager:
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
-        model_only = True
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,

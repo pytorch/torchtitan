@@ -11,10 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
-from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -51,6 +51,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
+
+    validator: train_spec_module.BaseValidator | None
 
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -89,6 +91,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             cp=parallelism_config.context_parallel_degree,
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
             enable_loss_parallel=not parallelism_config.disable_loss_parallel,
         )
@@ -280,7 +283,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config, self.ft_manager
+            self.model_parts, job_config, parallel_dims, world_mesh, self.ft_manager
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config
@@ -318,6 +321,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.training.mixed_precision_param,
             device_type,
         )
+
+        # Build validator if validation is configured
+        if job_config.validation.enabled:
+            assert self.train_spec.build_validator_fn is not None
+            assert (
+                not parallel_dims.pp_enabled
+            ), "pp is enabled but validation doesn't support pipeline parallelism yet"
+
+            self.validator = self.train_spec.build_validator_fn(
+                job_config=job_config,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=tokenizer,
+                parallel_dims=parallel_dims,
+                world_mesh=world_mesh,
+                loss_fn=self.train_spec.build_loss_fn(job_config),
+                validation_context=self.train_context,
+                maybe_enable_amp=self.maybe_enable_amp,
+            )
 
         logger.info(
             "Trainer is initialized with "
@@ -436,6 +458,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=self.world_mesh["pp"] if parallel_dims.pp_enabled else None,
+            parallel_dims=parallel_dims,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
@@ -498,7 +521,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
-                logger.info("Calling checkpoint save after step %d", self.step)
+
+                # Run validation if validator is available
+                if (
+                    self.job_config.validation.enabled
+                    and self.validator.should_validate(self.step)
+                ):
+                    self.validator.validate(self.model_parts)
+
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )
