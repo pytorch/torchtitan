@@ -515,7 +515,7 @@ class CheckpointManager:
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
                 )
-        
+
         checkpoint_type = self._find_checkpoint_type(checkpoint_id)
         if checkpoint_type == CheckpointType.SAFETENSORS:
             model_only = True
@@ -585,7 +585,7 @@ class CheckpointManager:
             if filename == "model.safetensors.index.json":
                 return CheckpointType.SAFETENSORS
         return CheckpointType.DCP
-        
+
 
     def _ft_folder(self) -> str:
         return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
@@ -614,7 +614,7 @@ class CheckpointManager:
         self.dcp_load(
             self.ft_states,
             checkpoint_id=checkpoint_id,
-            checkpoint_type=CheckpointType.DCP, # FT checkpoints are always DCP
+            checkpoint_type=CheckpointType.DCP,  # FT checkpoints are always DCP
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
