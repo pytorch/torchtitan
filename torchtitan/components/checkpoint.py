@@ -53,6 +53,7 @@ class AsyncMode(str, enum.Enum):
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
+
 class CheckpointType(str, enum.Enum):
     DCP = "DCP"
     SAFETENSORS = "safetensors"
@@ -372,16 +373,19 @@ class CheckpointManager:
                 async_stager=self.stager,
             )
         else:
-            ret = dcp.save(
-                state_dict, storage_writer=storage_writer, checkpoint_id=id
-            )
+            ret = dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
 
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
 
         return ret
 
-    def dcp_load(self, state_dict: dict[str, Any], checkpoint_id: str, checkpoint_type: CheckpointType) -> None:
+    def dcp_load(
+        self,
+        state_dict: dict[str, Any],
+        checkpoint_id: str,
+        checkpoint_type: CheckpointType,
+    ) -> None:
         """Load the checkpoint with dcp.
         Args:
             state_dict (dict): The state dict to load.
@@ -562,7 +566,9 @@ class CheckpointManager:
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
             dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            safetensors_metadata_probe = os.path.join(folder, filename, "model.safetensors.index.json")
+            safetensors_metadata_probe = os.path.join(
+                folder, filename, "model.safetensors.index.json"
+            )
             if match and os.path.isfile(dcp_metadata_probe):
                 step_counts.append(int(match.group(1)))
             elif match and os.path.isfile(safetensors_metadata_probe):
@@ -585,7 +591,6 @@ class CheckpointManager:
             if filename == "model.safetensors.index.json":
                 return CheckpointType.SAFETENSORS
         return CheckpointType.DCP
-
 
     def _ft_folder(self) -> str:
         return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
