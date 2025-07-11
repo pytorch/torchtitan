@@ -244,7 +244,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
     @parametrize(
         "test_repo_id",
         [
-            "meta-llama/Meta-Llama-3.1-8B",
+            "meta-llama/Llama-3.1-8B",
             "deepseek-ai/DeepSeek-V3",
             # "black-forest-labs/FLUX.1-dev", TODO: load the actual tokenizer
             "Qwen/Qwen2-7B",
@@ -267,9 +267,9 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
                 local_dir=self.temp_dir,
             )
         except HTTPError as e:
-            if test_repo_id == "meta-llama/Meta-Llama-3.1-8B":
+            if test_repo_id == "meta-llama/Llama-3.1-8B":
                 self.skipTest(
-                    f"Could not download tokenizer files for Meta-Llama-3.1-8B: {e}"
+                    f"Could not download tokenizer files for Llama-3.1-8B: {e}"
                 )
             else:
                 raise e

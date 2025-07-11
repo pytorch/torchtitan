@@ -891,7 +891,7 @@ class ConfigManager:
             if self.config.model.tokenizer_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
-                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B) ",
+                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B) ",
                     " and update your config to the directory of the downloaded tokenizer.",
                 )
 
