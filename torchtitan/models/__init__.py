@@ -8,3 +8,4 @@
 # Import the built-in models here so that the corresponding register_model_spec()
 # will be called.
 import torchtitan.models.llama3  # noqa: F401
+import torchtitan.models.eurolingua  # noqa: F401
