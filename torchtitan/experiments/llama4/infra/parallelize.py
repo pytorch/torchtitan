@@ -38,7 +38,6 @@ from .expert_parallel import (
 
 def parallelize_llama(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -49,6 +48,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    world_mesh = parallel_dims.world_mesh
 
     if parallel_dims.tp_enabled:
         if (
@@ -71,7 +71,7 @@ def parallelize_llama(
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )

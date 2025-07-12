@@ -26,8 +26,8 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import DataLoader
 
+from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -180,17 +180,19 @@ class CheckpointManager:
 
     def __init__(
         self,
-        dataloader: DataLoader,
+        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         job_config: JobConfig,
-        ft_manager: FTManager,
+        ft_manager: FTManager | None = None,
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.ft_manager = ft_manager.manager if ft_manager.enabled else None
+        self.ft_manager = (
+            ft_manager.manager if ft_manager and ft_manager.enabled else None
+        )
 
         if self.ft_manager:
             optimizers.init_cache_state_dict()

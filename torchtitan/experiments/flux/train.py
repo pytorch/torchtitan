@@ -36,7 +36,7 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.world_mesh,
+            self.parallel_dims.world_mesh,
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
@@ -77,7 +77,6 @@ class FluxTrainer(Trainer):
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
-            world_mesh=self.world_mesh,
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
