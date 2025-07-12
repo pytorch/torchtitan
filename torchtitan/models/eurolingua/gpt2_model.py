@@ -627,7 +627,10 @@ class CausalSelfAttention(nn.Module):
         # q: (B, nh_q, T, hd), k: (B, nh_kv, T, hd), v: (B, nh_kv, T, hd)
         q, k, v = CausalSelfAttention.execute_qkv_transforms(q, k, v, self.qkv_transforms, self.n_head_q)
         y = CausalSelfAttention.execute_attention(q, k, v, self.dropout, self.attention_impl)  # (B, T, nh_q, hd)
-        y = y.reshape(B, T, self.n_embd)  # (B, T, n_embd), re-assemble all head outputs side by side
+        # (B, T, n_embd), re-assemble all head outputs side by side
+        # Note that, we set n_embd to -1, as we shard on that dimension when using tensor parallelism
+        # in which case the size is n_embd // tp degree
+        y = y.reshape(B, T, -1)
         return self.resid_dropout(self.c_proj(y))  # (B, T, n_embd), output projection
 
 
@@ -879,7 +882,30 @@ class GPT2LLM(NNModel):
                 self.transformer.lm_head.weight
             )  # https://paperswithcode.com/method/weight-tying
 
-    def forward_impl(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+
+    def init_weights(
+        self,
+        buffer_device: torch.device | None = None,
+    ):
+        # TODO verify correctness of initialization
+        def _init_fn(m):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+        if buffer_device is not None:
+            self.to(buffer_device)
+
+        self.apply(_init_fn)
+
+
+    def forward_impl(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Forward pass implementation of the GPT2LLM module.
 
@@ -891,7 +917,7 @@ class GPT2LLM(NNModel):
             dict[str, torch.Tensor]: A dictionary containing output tensors.
                 - prediction_key (str): Key for the output tensor containing logits.
         """
-        input_ids = inputs[self.sample_key]
+        input_ids = inputs # = inputs[self.sample_key]
         device = input_ids.device
         _, t = input_ids.size()  # batch size, sequence length
         assert t <= self.sequence_length, f"Cannot forward sequence of length {t}, the model's maximum "
@@ -912,21 +938,11 @@ class GPT2LLM(NNModel):
             x = block(x)
         x = self.transformer.lm_head_norm(x)
         logits = self.transformer.lm_head(x)
-        return {self.prediction_key: logits}
+        return logits # {self.prediction_key: logits}
 
-    def forward(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """
-        Forward pass of the GPT2LLM module.
-
-        Args:
-            inputs (dict[str, torch.Tensor]): A dictionary containing input tensors.
-                - sample_key (str): Key for the input tensor containing token ids.
-
-        Returns:
-            dict[str, torch.Tensor]: A dictionary containing output tensors.
-                - prediction_key (str): Key for the output tensor containing logits.
-        """
-        return self.forward_impl(inputs)
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        output_tensor = self.forward_impl(inputs)
+        return output_tensor
 
 
 def manual_scaled_dot_product_attention(

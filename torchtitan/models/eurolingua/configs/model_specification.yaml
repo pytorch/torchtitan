@@ -1,0 +1,44 @@
+use_weight_tying: false
+sample_key: input_ids
+poe_type: NOPE
+sequence_length: 256
+prediction_key: logits
+vocab_size: 50304
+n_layer: 3
+n_head_q: 8
+n_head_kv: 4
+ffn_hidden: 128
+n_embd: 128
+dropout: 0.0
+bias: false
+attention_config:
+  qkv_transforms:
+  - type_hint: RotaryTransform
+    config:
+      n_embd: ${n_embd}
+      n_head: ${n_head_q}
+      seq_length_dim: -2
+      base_freq: 10000
+attention_implementation: pytorch_flash
+activation_type: swiglu
+attention_norm_config:
+  norm_type: layer_norm
+  config:
+    normalized_shape: ${n_embd}
+    eps: 1.0e-05
+ffn_norm_config:
+  norm_type: layer_norm
+  config:
+    normalized_shape: ${n_embd}
+    eps: 1.0e-05
+lm_head_norm_config:
+  norm_type: layer_norm
+  config:
+    normalized_shape: ${n_embd}
+    eps: 1.0e-05
+debugging_args:
+  logging_dir_path: /raid/s3/opengptx/max_lue/repositories/torchtitan/torchtitan/logs
+  tracked_ranks: 
+    - 0
+    - 1
+    - 2

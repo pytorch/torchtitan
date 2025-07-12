@@ -35,7 +35,7 @@ class BaseModelArgs:
     arguments to all models in the future.
     """
 
-    _enforced: str = "This field is used to enforce all fields have defaults."
+    # _enforced: str = "This field is used to enforce all fields have defaults."
 
     @abstractmethod
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
