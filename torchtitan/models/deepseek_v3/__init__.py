@@ -113,8 +113,8 @@ deepseekv3_configs = {
 register_train_spec(
     TrainSpec(
         name="deepseek_v3",
-        cls=DeepSeekV3Model,
-        config=deepseekv3_configs,
+        model_cls=DeepSeekV3Model,
+        model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=None,
         build_optimizers_fn=build_llama4_optimizers,  # use optimizer hooks to update expert weights

@@ -9,12 +9,14 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
+from torchtitan.components.ft import FTManager
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import parallelize_llama, pipeline_llama
 from torchtitan.protocols.train_spec import (
     apply_to_train_specs,
@@ -39,7 +41,10 @@ class FakeModel(nn.Module, ModelProtocol):
 
 
 def fake_build_optimizers(
-    model_parts: list[nn.Module], job_config: JobConfig
+    model_parts: list[nn.Module],
+    job_config: JobConfig,
+    parallel_dims: ParallelDims,
+    ft_manager: FTManager,
 ) -> OptimizersContainer:
     optimizer_kwargs = {
         "lr": 0.1,
@@ -57,11 +62,11 @@ def fake_build_optimizers(
 
 class TestTrainSpec:
     def test_register_train_spec(self):
-        fake_config = {"fake": None}
+        fake_config = {"fake": BaseModelArgs()}
         spec = TrainSpec(
             name="fake",
-            cls=FakeModel,
-            config=fake_config,
+            model_cls=FakeModel,
+            model_args=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=pipeline_llama,
             build_optimizers_fn=build_optimizers,
@@ -78,11 +83,11 @@ class TestTrainSpec:
             new_spec = get_train_spec("fake2")
 
     def test_optim_hook(self):
-        fake_config = {"fake": None}
+        fake_config = {"fake": BaseModelArgs()}
         spec = TrainSpec(
             name="fake2",
-            cls=FakeModel,
-            config=fake_config,
+            model_cls=FakeModel,
+            model_args=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=pipeline_llama,
             build_optimizers_fn=fake_build_optimizers,
@@ -111,21 +116,27 @@ class TestTrainSpec:
             original_build_optimizers_fn = spec.build_optimizers_fn
 
             def my_build_optimizer_fn(
-                model_parts: list[nn.Module], job_config: JobConfig
+                model_parts: list[nn.Module],
+                job_config: JobConfig,
+                parallel_dims: ParallelDims,
+                ft_manager: FTManager,
             ) -> OptimizersContainer:
-                optimizers = original_build_optimizers_fn(model_parts, job_config)
+                optimizers = original_build_optimizers_fn(
+                    model_parts, job_config, parallel_dims, ft_manager
+                )
                 optimizers.register_step_post_hook(
                     partial(my_hook, model_parts=model_parts)
                 )
                 return optimizers
 
             spec.build_optimizers_fn = my_build_optimizer_fn
+            return spec
 
         apply_to_train_specs(register_optimizer_hook_to_spec)
 
-        model = new_spec.cls(BaseModelArgs())
+        model = new_spec.model_cls(BaseModelArgs())
         model_parts = [model]
-        optimizers = new_spec.build_optimizers_fn(model_parts, JobConfig())
+        optimizers = new_spec.build_optimizers_fn(model_parts, None, None, None)
         assert optimizers.optimizers[0].__class__.__name__ == "Adam"
         batch = torch.randn(8, 8)
         model(batch).sum().backward()

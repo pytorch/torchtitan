@@ -34,7 +34,6 @@ from torchtitan.tools.logging import logger
 
 def parallelize_llama(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -45,16 +44,15 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set `use_local_output=True`
-    # (to use plain Tensors), which was because of the bug in computation of complex
-    # numbers with DTensors when setting `use_local_output=False`.
-    # See https://github.com/pytorch/pytorch/issues/130646 and
-    # https://github.com/pytorch/torchtitan/issues/1306 for details.
+    world_mesh = parallel_dims.world_mesh
+    # TODO: TP currently cannot handle uneven seq_len because we set
+    #       `use_local_output=True` to use plain Tensors for legacy reasons.
+    #       Need to revisit this.
     assert (
-        job_config.training.seq_len % (parallel_dims.tp * parallel_dims.cp) == 0
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and CP degree ({parallel_dims.cp}).
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     if parallel_dims.tp_enabled:
@@ -78,7 +76,7 @@ def parallelize_llama(
         apply_tp(
             model,
             world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )

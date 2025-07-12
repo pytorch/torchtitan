@@ -94,8 +94,8 @@ llama4_configs = {
 register_train_spec(
     TrainSpec(
         name="llama4",
-        cls=Transformer,
-        config=llama4_configs,
+        model_cls=Transformer,
+        model_args=llama4_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_llama4_optimizers,

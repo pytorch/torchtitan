@@ -39,6 +39,12 @@ def estimate_memory(job_config: JobConfig):
         job_config.training.compile = False
         job_config.parallelism.enable_compiled_autograd = False
 
+    # init fake pg
+    store = FakeStore()
+    torch.distributed.init_process_group(
+        "fake", rank=int(os.environ["LOCAL_RANK"]), world_size=world_size, store=store
+    )
+
     parallelism_config = job_config.parallelism
     parallel_dims = ParallelDims(
         dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -48,8 +54,9 @@ def estimate_memory(job_config: JobConfig):
         pp=parallelism_config.pipeline_parallel_degree,
         ep=parallelism_config.expert_parallel_degree,
         world_size=world_size,
-        enable_loss_parallel=not parallelism_config.disable_loss_parallel,
     )
+    # ParallelDims.build_mesh has to happen outside of the FakeTensorMode
+    _ = parallel_dims.world_mesh
 
     # only FSDP and HSDP are supported
     if (
@@ -68,28 +75,21 @@ def estimate_memory(job_config: JobConfig):
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     torch.cuda.set_device(device)
 
-    # init fake pg
-    store = FakeStore()
-    torch.distributed.init_process_group(
-        "fake", rank=int(os.environ["LOCAL_RANK"]), world_size=world_size, store=store
-    )
-
     train_spec = get_train_spec(job_config.model.name)
-
-    # build meshes
-    world_mesh = parallel_dims.build_mesh(device_type="cuda")
 
     # build tokenizer
     tokenizer = train_spec.build_tokenizer_fn(job_config)
 
+    loss_parallel_enabled = (
+        parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
+    )
     train_context = dist_utils.get_train_context(
-        parallel_dims.loss_parallel_enabled,
+        loss_parallel_enabled,
         job_config.parallelism.enable_compiled_autograd,
     )
 
     # build model (using meta init)
-    model_cls = train_spec.cls
-    model_args = train_spec.config[job_config.model.flavor]
+    model_args = train_spec.model_args[job_config.model.flavor]
     model_args.update_from_config(job_config, tokenizer)
 
     with (
@@ -101,14 +101,14 @@ def estimate_memory(job_config: JobConfig):
             f"Building {train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = model_cls(model_args)
+            model = train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
         model_converters.convert(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
+        train_spec.parallelize_fn(model, parallel_dims, job_config)
 
         model.to_empty(device="cuda")
         if not active_fake_mode():
@@ -117,9 +117,7 @@ def estimate_memory(job_config: JobConfig):
 
         # build optimizer after applying parallelisms to the model
         ft_manager = init_ft_manager(job_config)
-        optimizers = build_optimizers(
-            [model], job_config, parallel_dims, world_mesh, ft_manager
-        )
+        optimizers = build_optimizers([model], job_config, parallel_dims, ft_manager)
         lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
