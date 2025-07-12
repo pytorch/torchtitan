@@ -38,10 +38,10 @@ class TestSimpleFSDP(FSDPTest):
             cp=1,
             tp=1,
             pp=1,
+            ep=1,
             world_size=self.world_size,
-            enable_loss_parallel=True,
         )
-        self.device_mesh = self.parallel_dims.build_mesh(device_type="cuda")
+        self.device_mesh = self.parallel_dims.world_mesh
 
     def get_input(self):
         inputs = torch.randn(8, 8).cuda()

@@ -33,7 +33,6 @@ from ..model.args import TransformerModelArgs
 
 def pipeline_llama(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: DeviceType,
@@ -41,7 +40,7 @@ def pipeline_llama(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    pp_mesh = world_mesh["pp"]
+    pp_mesh = parallel_dims.world_mesh["pp"]
 
     stages, model_parts = pipeline_llama_manual_split(
         model, pp_mesh, parallel_dims, job_config, device, model_config
@@ -52,7 +51,7 @@ def pipeline_llama(
     # optimizer, and checkpointing
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
-        m = parallelize_fn(m, world_mesh, parallel_dims, job_config)
+        m = parallelize_fn(m, parallel_dims, job_config)
         model_parts[i] = m
         # NOTE: this is to update the model in the stage
         #       in case the model is modified e.g. by torch.compile

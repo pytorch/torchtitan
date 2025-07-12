@@ -26,10 +26,11 @@ from torchtitan.tools.logging import logger
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
+    world_mesh = parallel_dims.world_mesh
+
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
             # TODO(jianiw): This branch needs to be tested and enabled
@@ -54,7 +55,7 @@ def parallelize_deepseekv3(
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             enable_async_tp=False,
         )

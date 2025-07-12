@@ -13,7 +13,6 @@ from typing import Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -76,7 +75,7 @@ DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, ParallelDims, DeviceMesh, FTManager],
+    [list[nn.Module], JobConfig, ParallelDims, FTManager],
     OptimizersContainer,
 ]
 LRSchedulersBuilder: TypeAlias = Callable[
