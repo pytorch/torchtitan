@@ -239,7 +239,7 @@ class Training:
     many temporary files.
     """
 
-    seed: int | None = random.randint(0, 1000000)
+    seed: int | None = None 
     """Choose the base RNG seed used for training"""
 
     deterministic: bool = False

@@ -295,10 +295,10 @@ class FluxTrainer(Trainer):
                 timesteps=timesteps.to(latents),
             )
 
-        # Convert sequence of patches to latent shape
-        pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-        target = noise - labels
-        loss = self.loss_fn(pred, target)
+            # Convert sequence of patches to latent shape
+            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+            target = noise - labels
+            loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
         # need to free to before bwd to avoid peaking memory
         del (pred, noise, target)
@@ -426,10 +426,10 @@ class FluxTrainer(Trainer):
                     timesteps=timestep_values.to(latents),
                 )
 
-            # Convert sequence of patches to latent shape
-            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-            target = noise - labels
-            loss = self.loss_fn(pred, target, reduction="none")
+                # Convert sequence of patches to latent shape
+                pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+                target = noise - labels
+                loss = self.loss_fn(pred, target, reduction="none")
 
             # Clean up large intermediate tensors immediately
             del pred, noise, target, latent_noise_pred, latents

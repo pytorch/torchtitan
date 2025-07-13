@@ -45,11 +45,9 @@ for var in "${required_vars[@]}"; do
 done
 
 NGPU=${NGPU:-"8"}
-export SEED=${SEED:-""}
-if [ -n "${SEED}" ]; then
-    SEED_FLAG="--training.seed=${SEED}"
-else
-    SEED_FLAG=""
+if [ -z "${SEED}" ]; then
+    SEED=$RANDOM
+    echo "SEED not set, using random seed: ${SEED}"
 fi
 
 export LOG_RANK=${LOG_RANK:-0}
@@ -118,5 +116,5 @@ srun --ntasks-per-node=1 --output=${LOGDIR}/slurm-%j.out --container-image=${CON
 --container-mounts="${MOUNT_CURRENT_DIR_FLAG}, ${MODELROOT}:/models,${DATAROOT}:/dataset,${LOGDIR}:/logdir,./hf_cache:/root/.cache" \
 torchrun --nnodes ${#nodes[@]} --nproc_per_node ${NGPU} --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" --local-ranks-filter ${LOG_RANK} \
 --role rank --tee 3 -m torchtitan.experiments.flux.train --job.config_file ${CONFIG_FILE} ${TB_FLAG} ${CKPT_FLAG} --job.dump_folder=/logdir \
---parallelism.data_parallel_replicate_degree=${#nodes[@]} --parallelism.data_parallel_shard_degree=${NGPU} ${SEED_FLAG} \
+--parallelism.data_parallel_replicate_degree=${#nodes[@]} --parallelism.data_parallel_shard_degree=${NGPU} --training.seed=${SEED} \
 $overrides
