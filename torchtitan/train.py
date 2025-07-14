@@ -336,6 +336,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 loss_fn=self.train_spec.build_loss_fn(job_config),
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
+                metrics_processor=self.metrics_processor,
             )
 
         logger.info(
@@ -530,7 +531,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enabled
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts)
+                    self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

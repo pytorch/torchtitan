@@ -134,6 +134,7 @@ class Color:
     white = "\033[37m"
     reset = "\033[39m"
     orange = "\033[38;2;180;60;0m"
+    turquoise = "\033[38;2;54;234;195m"
 
 
 @dataclass(frozen=True)
