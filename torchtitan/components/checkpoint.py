@@ -194,7 +194,9 @@ class CheckpointManager:
     ) -> None:
         ckpt_config = job_config.checkpoint
         self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.enable_save_safetensors_format = ckpt_config.enable_save_safetensors_format
+        self.last_save_in_safetensors_format = (
+            ckpt_config.last_save_in_safetensors_format
+        )
         self.ft_manager = ft_manager.manager if ft_manager.enabled else None
 
         if self.ft_manager:
@@ -324,7 +326,7 @@ class CheckpointManager:
         checkpoint_id: str,
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
-        is_last_step: bool = False,
+        save_in_safetensors_format: bool = False,
     ) -> Future | None:
         """Save the checkpoint with dcp.
         Args:
@@ -339,7 +341,7 @@ class CheckpointManager:
         ret: Future | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
-        if self.enable_save_safetensors_format and is_last_step:
+        if save_in_safetensors_format:
             fqn_to_index_mapping = {}
             num_fqns_per_file = 30
             # the use of 30 is just a heuristic for now.
@@ -353,28 +355,35 @@ class CheckpointManager:
                 path=checkpoint_id,
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
-                enable_consolidation=is_last_step,
+                enable_consolidation=True,
                 thread_count_consolidation=5,
             )
-        id = checkpoint_id if not self.enable_save_safetensors_format else None
+
+        checkpoint_save_id = (
+            checkpoint_id if not self.last_save_in_safetensors_format else None
+        )
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
-                checkpoint_id=id,
+                checkpoint_id=checkpoint_save_id,
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
-                checkpoint_id=id,
+                checkpoint_id=checkpoint_save_id,
                 process_group=self.pg,
                 async_checkpointer_type=AsyncCheckpointerType.PROCESS,
                 async_stager=self.stager,
             )
         else:
-            ret = dcp.save(state_dict, storage_writer=storage_writer, checkpoint_id=id)
+            ret = dcp.save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=checkpoint_save_id,
+            )
 
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -523,7 +532,9 @@ class CheckpointManager:
 
         checkpoint_type = self._find_checkpoint_type(checkpoint_id)
         if checkpoint_type == CheckpointType.SAFETENSORS:
-            model_only = True
+            assert (
+                model_only
+            ), "Only model weights can be loaded when loading from safetensors checkpoint."
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
@@ -620,7 +631,8 @@ class CheckpointManager:
         self.dcp_load(
             self.ft_states,
             checkpoint_id=checkpoint_id,
-            checkpoint_type=CheckpointType.DCP,  # FT checkpoints are always DCP
+            # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
+            checkpoint_type=CheckpointType.DCP,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -690,12 +702,17 @@ class CheckpointManager:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
 
+        if self.last_save_in_safetensors_format:
+            assert (
+                self.last_save_model_weights_only
+            ), "Only model weights can be saved when saving in safetensors format."
+
         self.dcp_save(
             states,
             checkpoint_id=self._create_checkpoint_id(curr_step),
             async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
-            is_last_step=True,
+            save_in_safetensors_format=self.last_save_in_safetensors_format,
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
