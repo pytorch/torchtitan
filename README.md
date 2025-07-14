@@ -9,6 +9,9 @@
 [![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
+[![pip](https://img.shields.io/pypi/v/torchtitan?color=blue)](https://pypi.org/project/torchtitan/)
+[![conda](https://img.shields.io/conda/vn/conda-forge/torchtitan?color=green)](https://anaconda.org/conda-forge/torchtitan)
+
 
 </div>
 
@@ -86,6 +89,15 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+Via pip:
+```sh
+pip install torchtitan
+```
+Or via conda:
+```sh
+conda install conda-forge::torchtitan
+```
+Or using sources:
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
