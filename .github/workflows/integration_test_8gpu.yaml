@@ -46,4 +46,5 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
+        python ./tests/integration_tests.py --config_dir ./torchtitan/models/llama3/train_configs artifacts-to-be-uploaded/llama3 --ngpu 8
+        python ./tests/integration_tests.py --config_dir ./torchtitan/models/deepseek_v3/train_configs artifacts-to-be-uploaded/deepseek --ngpu 4
