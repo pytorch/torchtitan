@@ -12,6 +12,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
+from torchtitan.models import deepseek_v3
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,9 @@ def build_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = defaultdict(list)
-    integration_tests_flavors["debug_model.toml"] = [
+    integration_tests_flavors = defaultdict(lambda: defaultdict(list))
+    # llama3 integration test list. This test is aimed for testing llama3 model and torchtitan core components.
+    integration_tests_flavors["llama3"]["debug_model.toml"] = [
         OverrideDefinitions(
             [
                 [
@@ -555,7 +558,54 @@ def build_test_list():
             ngpu=8,
         ),
     ]
+
+    # deepseek v3 integration test list. This test is aimed for testing deepseek v3 model.
+    integration_tests_flavors['deepseek_v3']["debug_model.toml"] = [
+        OverrideDefinitions(
+            [
+                [
+                    "--profiling.enable_profiling",
+                    "--metrics.enable_tensorboard",
+                ],
+            ],
+            "default",
+            "default",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "2D eager",
+            "2d_eager",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                ]
+            ],
+            "DDP",
+            "ddp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "HSDP",
+            "hsdp",
+            ngpu=4,
+        ),
+    ]   
+    
     return integration_tests_flavors
+
 
 
 def _run_cmd(cmd):
@@ -603,24 +653,35 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
 def run_tests(args):
     integration_tests_flavors = build_test_list()
+
     for config_file in os.listdir(args.config_dir):
         if config_file.endswith(".toml"):
             full_path = os.path.join(args.config_dir, config_file)
             with open(full_path, "rb") as f:
                 config = tomllib.load(f)
+                model_name = config["model"].get("name", "llama3")
                 is_integration_test = config["job"].get(
                     "use_for_integration_test", False
                 )
-                if is_integration_test:
-                    for test_flavor in integration_tests_flavors[config_file]:
-                        if args.test == "all" or test_flavor.test_name == args.test:
-                            if args.ngpu < test_flavor.ngpu:
-                                logger.info(
-                                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                                    f" because --ngpu arg is {args.ngpu}"
-                                )
-                            else:
-                                run_test(test_flavor, full_path, args.output_dir)
+
+                if not is_integration_test:
+                    continue
+
+                if model_name not in integration_tests_flavors.keys():
+                    logger.info(
+                        f"Integration test not supported for model {model_name}, skipping {config_file}"
+                    )
+                    continue
+
+                for test_flavor in integration_tests_flavors[model_name][config_file]:
+                    if args.test == "all" or test_flavor.test_name == args.test:
+                        if args.ngpu < test_flavor.ngpu:
+                            logger.info(
+                                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                                f" because --ngpu arg is {args.ngpu}"
+                            )
+                        else:
+                            run_test(test_flavor, full_path, args.output_dir)
 
 
 def main():
@@ -642,7 +703,6 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
     run_tests(args)
-
 
 if __name__ == "__main__":
     main()
