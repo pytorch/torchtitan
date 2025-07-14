@@ -89,6 +89,12 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+### Nightly
+
+Coming soon.
+
+### Stable
+
 Via pip:
 ```sh
 pip install torchtitan
@@ -97,7 +103,8 @@ Or via conda:
 ```sh
 conda install conda-forge::torchtitan
 ```
-Or using sources:
+### Sources
+   
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
