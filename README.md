@@ -6,9 +6,12 @@
 
 [![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
-[![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
+[![ICLR](https://img.shields.io/badge/ICLR-2025-violet.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
+[![pip](https://img.shields.io/pypi/v/torchtitan?color=blue)](https://pypi.org/project/torchtitan/)
+[![conda](https://img.shields.io/conda/vn/conda-forge/torchtitan?color=green)](https://anaconda.org/conda-forge/torchtitan)
+
 
 </div>
 
@@ -86,6 +89,22 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+### Nightly
+
+Coming soon.
+
+### Stable
+
+Via pip:
+```sh
+pip install torchtitan
+```
+Or via conda:
+```sh
+conda install conda-forge::torchtitan
+```
+### Sources
+   
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
