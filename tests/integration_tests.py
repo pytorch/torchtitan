@@ -128,7 +128,7 @@ def build_test_list():
                 ],
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.initial_load_path outputs/hf_checkpoint/step-10",
+                    "--checkpoint.initial_load_path outputs/full_checkpoint_hf_safetensors/hf_checkpoint/step-10/",
                 ],
             ],
             "Checkpoint Integration Test - save load full checkpoint in HF safetensors format",
