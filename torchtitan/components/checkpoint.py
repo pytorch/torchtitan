@@ -343,6 +343,7 @@ class CheckpointManager:
         ret: Future | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
+        checkpoint_save_id: str | None = None
         if save_in_safetensors_format:
             fqn_to_index_mapping = {}
             num_fqns_per_file = 30
@@ -360,10 +361,9 @@ class CheckpointManager:
                 enable_consolidation=True,
                 thread_count_consolidation=5,
             )
+        else:
+            checkpoint_save_id = checkpoint_id
 
-        checkpoint_save_id = (
-            checkpoint_id if not self.last_save_in_safetensors_format else None
-        )
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
                 state_dict,
