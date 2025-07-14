@@ -6,7 +6,7 @@ on:
       - nightly
   workflow_dispatch:
   pull_request:
-  # ^ Only here for testing, should remove before landing
+  # ^ Only here for testing - should remove before landing
 
 permissions:
   id-token: write
@@ -23,7 +23,7 @@ jobs:
       test-infra-ref: main
       with-cuda: enable
       with-rocm: enable
-      build-python-only: enable
+      python-versions: '["3.10", "3.11", "3.12"]'
   build:
     needs: generate-matrix
     name: ${{ matrix.repository }}
