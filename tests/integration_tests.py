@@ -12,8 +12,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
-from torchtitan.models import deepseek_v3
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -560,7 +558,7 @@ def build_test_list():
     ]
 
     # deepseek v3 integration test list. This test is aimed for testing deepseek v3 model.
-    integration_tests_flavors['deepseek_v3']["debug_model.toml"] = [
+    integration_tests_flavors["deepseek_v3"]["debug_model.toml"] = [
         OverrideDefinitions(
             [
                 [
@@ -602,10 +600,9 @@ def build_test_list():
             "hsdp",
             ngpu=4,
         ),
-    ]   
-    
-    return integration_tests_flavors
+    ]
 
+    return integration_tests_flavors
 
 
 def _run_cmd(cmd):
@@ -703,6 +700,7 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
     run_tests(args)
+
 
 if __name__ == "__main__":
     main()
