@@ -332,7 +332,9 @@ class CheckpointManager:
         Args:
             state_dict (dict): The state dict to save.
             checkpoint_id (str): The checkpoint id to save.
-            is_async (bool): Whether the checkpoint is async.
+            async_mode (AsyncMode): Whether the checkpoint is async.
+            enable_garbage_collection (bool): Whether to enable garbage collection after save.
+            save_in_safetensors_format (bool): Whether to save in safetensors format.
 
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
