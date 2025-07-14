@@ -89,6 +89,8 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+> [Install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
+
 ### Stable
 
 Via pip:
@@ -102,17 +104,20 @@ conda install conda-forge::torchtitan
 
 ### Nightly
 
+> This method requires the nightly build of PyTorch.
+
 ```sh
-pip install --pre torch torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
 You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
 
 ### From source
 
+> This method requires the nightly build of PyTorch or PyTorch built from source.
+
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
-pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 pip install -r requirements.txt
 ```
 You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
