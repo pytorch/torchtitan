@@ -123,7 +123,7 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.folder hf_checkpoint",
-                    "--checkpoint.enable_save_safetensors_format",
+                    "--checkpoint.last_save_in_safetensors_format",
                     "--checkpoint.last_save_model_weights_only",
                 ],
                 [
