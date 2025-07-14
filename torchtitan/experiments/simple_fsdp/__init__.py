@@ -20,8 +20,8 @@ from .parallelize import parallelize_llama
 register_train_spec(
     TrainSpec(
         name="llama3_simple_fsdp",
-        cls=SimpleFSDPTransformer,
-        config=llama3_configs,
+        model_cls=SimpleFSDPTransformer,
+        model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,

@@ -24,8 +24,8 @@ llama4_mm_configs = {
 register_train_spec(
     TrainSpec(
         name="llama4_multimodal",
-        cls=MultimodalDecoder,
-        config=llama4_mm_configs,
+        model_cls=MultimodalDecoder,
+        model_args=llama4_mm_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,

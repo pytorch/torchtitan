@@ -42,8 +42,8 @@ deepseek_configs = {
 register_train_spec(
     TrainSpec(
         name="deepseek3",
-        cls=DeepseekForCausalLM,
-        config=deepseek_configs,
+        model_cls=DeepseekForCausalLM,
+        model_args=deepseek_configs,
         parallelize_fn=parallelize_deepseek,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,

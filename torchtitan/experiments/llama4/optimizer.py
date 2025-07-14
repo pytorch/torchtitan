@@ -6,7 +6,6 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.components.ft import FTManager
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
@@ -17,10 +16,11 @@ from torchtitan.distributed import ParallelDims
 # for MoE auxiliary-loss-free load balancing
 def _update_expert_bias(
     model_parts: list[nn.Module],
-    world_mesh: dict[str, DeviceMesh],
     parallel_dims: ParallelDims,
 ):
-    dp_cp_mesh = world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
+    dp_cp_mesh = (
+        parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
+    )
     # TODO: Currently this sync is blocking (thus exposed) and happens on the
     # default compute stream. Need to assess if this is OK performance-wise.
     for model_part in model_parts:
@@ -48,20 +48,18 @@ def build_llama4_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     parallel_dims: ParallelDims,
-    world_mesh: DeviceMesh,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
     optimizers = build_optimizers(
         model_parts=model_parts,
         job_config=job_config,
         parallel_dims=parallel_dims,
-        world_mesh=world_mesh,
         ft_manager=ft_manager,
     )
 
     optimizers.register_step_pre_hook(
         lambda *args, **kwargs: _update_expert_bias(
-            model_parts, world_mesh=world_mesh, parallel_dims=parallel_dims
+            model_parts, parallel_dims=parallel_dims
         )
     )
 

@@ -155,8 +155,8 @@ def run_full_model(
         pp=pp_size,
         cp=1,
         tp=1,
+        ep=1,
         world_size=world_mesh.size(),
-        enable_loss_parallel=False,
     )
 
     metrics_processor = build_metrics_processor(
@@ -180,7 +180,7 @@ def run_full_model(
     loss_fn = cross_entropy_loss  # torch.nn.functional.cross_entropy
 
     ft_manager = ft.init_ft_manager(config)
-    optimizer = build_optimizers([model], config, ft_manager)
+    optimizer = build_optimizers([model], config, proxy_parallel_dims, ft_manager)
 
     lr_scheduler = build_lr_schedulers(optimizer, config)
 

@@ -50,14 +50,12 @@ class Validator(BaseValidator):
         dp_rank: int,
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
-        world_mesh: torch.distributed.DeviceMesh,
         loss_fn: LossFunction,
         validation_context: Generator[None, None, None],
         maybe_enable_amp: Generator[None, None, None],
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
-        self.world_mesh = world_mesh
         self.loss_fn = loss_fn
         self.validation_dataloader = build_hf_validation_dataloader(
             job_config=job_config,
@@ -78,6 +76,8 @@ class Validator(BaseValidator):
         model = model_parts[0]
         model.eval()
 
+        parallel_dims = self.parallel_dims
+
         accumulated_losses = []
         device_type = utils.device_type
         num_steps = 0
@@ -96,13 +96,13 @@ class Validator(BaseValidator):
 
             optional_context_parallel_ctx = (
                 dist_utils.create_context_parallel_ctx(
-                    cp_mesh=self.world_mesh["cp"],
+                    cp_mesh=parallel_dims.world_mesh["cp"],
                     cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={inputs, labels},
                     cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                 )
-                if self.parallel_dims.cp_enabled
+                if parallel_dims.cp_enabled
                 else None
             )
 
@@ -119,8 +119,10 @@ class Validator(BaseValidator):
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
-        if self.parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(loss, self.world_mesh["dp_cp"])
+        if parallel_dims.dp_cp_enabled:
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.world_mesh["dp_cp"]
+            )
         else:
             global_avg_loss = loss
 
@@ -144,7 +146,6 @@ def build_validator(
     dp_rank: int,
     tokenizer: BaseTokenizer,
     parallel_dims: ParallelDims,
-    world_mesh: torch.distributed.DeviceMesh,
     loss_fn: LossFunction,
     validation_context: Generator[None, None, None],
     maybe_enable_amp: Generator[None, None, None],
@@ -156,7 +157,6 @@ def build_validator(
         dp_rank=dp_rank,
         tokenizer=tokenizer,
         parallel_dims=parallel_dims,
-        world_mesh=world_mesh,
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,

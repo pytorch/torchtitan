@@ -15,7 +15,6 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
@@ -244,7 +243,6 @@ def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     parallel_dims: ParallelDims,
-    world_mesh: DeviceMesh,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
