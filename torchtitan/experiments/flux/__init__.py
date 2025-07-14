@@ -108,8 +108,8 @@ flux_configs = {
 register_train_spec(
     TrainSpec(
         name="flux",
-        cls=FluxModel,
-        config=flux_configs,
+        model_cls=FluxModel,
+        model_args=flux_configs,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,

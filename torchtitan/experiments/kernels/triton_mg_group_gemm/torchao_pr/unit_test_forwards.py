@@ -5,17 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-import logging
 import unittest
 from typing import Tuple
 
 import torch
-import torch.nn as nn
 
 from mg_grouped_gemm import grouped_gemm_forward
 
 
-class TestMG_GroupedGEMM(unittest.TestCase):
+class TestMgGroupedGemm(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(2020)
 
@@ -51,7 +49,7 @@ class TestMG_GroupedGEMM(unittest.TestCase):
         result = result.to(dtype)
         torch.testing.assert_close(result, expected_result, atol=atol, rtol=rtol)
 
-    def test_MG_grouped_gemm_bf16(self) -> None:
+    def test_mg_grouped_gemm_bf16(self) -> None:
         for G in (1, 4, 16):
             for M in (128, 512, 1024):
                 print(f"Testing BF16 M*G GroupGeMM with G={G}, M={M}")
@@ -63,7 +61,7 @@ class TestMG_GroupedGEMM(unittest.TestCase):
                     rtol=1.6e-2,
                 )
 
-    def test_MG_grouped_gemm_deepseek_shapes(self) -> None:
+    def test_mg_grouped_gemm_deepseek_shapes(self) -> None:
         """Test with shapes from Deepseek model."""
         deepseek_shapes = [
             (4, 2048, 4096, 7168),  # G, M, N, K

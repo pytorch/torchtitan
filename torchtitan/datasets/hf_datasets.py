@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+
+from functools import partial
 from typing import Any, Callable
 
 import torch
@@ -15,14 +17,14 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
 
-def _load_c4_dataset(dataset_path: str):
+def _load_c4_dataset(dataset_path: str, split: str):
     """Load C4 dataset with default configuration."""
-    return load_dataset(dataset_path, name="en", split="train", streaming=True)
+    return load_dataset(dataset_path, name="en", split=split, streaming=True)
 
 
 def _process_c4_text(sample: dict[str, Any]) -> str:
@@ -41,12 +43,17 @@ class DatasetConfig:
 DATASETS = {
     "c4": DatasetConfig(
         path="allenai/c4",
-        loader=_load_c4_dataset,
+        loader=partial(_load_c4_dataset, split="train"),
         text_processor=_process_c4_text,
     ),
     "c4_test": DatasetConfig(
         path="tests/assets/c4_test",
         loader=lambda path: load_dataset(path, split="train"),
+        text_processor=_process_c4_text,
+    ),
+    "c4_validation": DatasetConfig(
+        path="allenai/c4",
+        loader=partial(_load_c4_dataset, split="validation"),
         text_processor=_process_c4_text,
     ),
 }
@@ -73,7 +80,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: str | None,
-        tokenizer: Tokenizer,
+        tokenizer: BaseTokenizer,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -116,7 +123,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
-                sample_tokens = self._tokenizer.encode(sample_text, bos=True, eos=True)
+                sample_tokens = self._tokenizer.encode(
+                    sample_text, add_bos=True, add_eos=True
+                )
                 self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
@@ -167,7 +176,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
 def build_hf_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    tokenizer: Tokenizer,
+    tokenizer: BaseTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
@@ -185,6 +194,36 @@ def build_hf_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=hf_ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+    )
+
+
+def build_hf_validation_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    tokenizer: BaseTokenizer,
+    job_config: JobConfig,
+) -> ParallelAwareDataloader:
+    """Build a validation data loader for HuggingFace datasets."""
+    dataset_name = job_config.validation.dataset
+    dataset_path = job_config.validation.dataset_path
+    batch_size = job_config.validation.local_batch_size
+    seq_len = job_config.validation.seq_len
+
+    hf_ds = HuggingFaceDataset(
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=False,
     )
 
     return ParallelAwareDataloader(

@@ -60,9 +60,6 @@ class Float8Converter(ModelConverter):
         # Validate MoE training prototype limitations.
         if self.moe_fqns:
             assert (
-                job_config.parallelism.tensor_parallel_degree == 1
-            ), "Float8 MoE training prototype does not yet support tensor parallelism"
-            assert (
                 job_config.parallelism.pipeline_parallel_degree == 1
             ), "Float8 MoE training prototype does not yet support pipeline parallelism"
             assert (
@@ -168,7 +165,7 @@ class Float8Converter(ModelConverter):
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+            module_filter_fn=self.filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="

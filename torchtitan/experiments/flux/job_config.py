@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Training:
-    classifer_free_guidance_prob: float = 0.0
+    classifier_free_guidance_prob: float = 0.0
     """Classifier-free guidance with probability `p` to dropout each text encoding independently.
     If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
     For example, if `n = 2` and `p = 0.447`, the unconditional model is trained in 20% of all steps"""
@@ -37,7 +37,7 @@ class Encoder:
 
 @dataclass
 class Eval:
-    enable_classifer_free_guidance: bool = False
+    enable_classifier_free_guidance: bool = False
     """Whether to use classifier-free guidance during sampling"""
     classifier_free_guidance_scale: float = 5.0
     """Classifier-free guidance scale when sampling"""
