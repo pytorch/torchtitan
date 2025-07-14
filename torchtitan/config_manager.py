@@ -475,6 +475,17 @@ class Checkpoint:
     for many steps or checkpointing too frequently. The default value is False.
     """
 
+    last_save_in_safetensors_format: bool = False
+    """
+    Enable the use of safetensors format for checkpointing. This will save the final checkpoints
+    in safetensors format instead of the default DCP format. There will be a performance
+    cost in using this as we need to consolidate the sharded tensors to full tensors as
+    a separate step. last_save_model_weights_only must be true because safetensors doesn't
+    support saving non tensors. On load, this argument isn't needed as we will detect
+    whether the loaded checkpoint is in safetensors format or not.
+    The default value is False.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:
