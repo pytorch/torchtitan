@@ -339,7 +339,6 @@ class CheckpointManager:
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
         """
-        print("saving to checkpoint_id", checkpoint_id)
 
         ret: Future | None = None
 
