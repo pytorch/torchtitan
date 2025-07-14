@@ -207,7 +207,11 @@ class ScaledDotProductAttention(torch.nn.Module):
             cls.backends.insert(0, SDPBackend.CUDNN_ATTENTION)
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float | None = None
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float | None = None,
     ) -> torch.Tensor:
         assert self.backends, "SDPA Backends should not be empty."
         with sdpa_kernel(self.backends, set_priority=True):
