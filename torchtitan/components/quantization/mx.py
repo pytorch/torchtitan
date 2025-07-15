@@ -56,11 +56,20 @@ class MXConverter(ModelConverter):
         self.filter_fqns = mx_job_config.filter_fqns
 
         # Configure MXFP8
-        from torchao.prototype.mx_formats.config import MXLinearConfig
+        from torchao.prototype.mx_formats.config import (
+            MXFP8Dim1CastKernelChoice,
+            MXLinearConfig,
+        )
 
         config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
-        config.use_fp8_dim1_cast_triton_kernel = (
-            mx_job_config.use_fp8_dim1_cast_triton_kernel
+
+        dim1_cast_kernel_choice_str = (
+            mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
+        )
+        config.mxfp8_dim1_cast_kernel_choice = (
+            MXFP8Dim1CastKernelChoice[dim1_cast_kernel_choice_str]
+            if mx_job_config.mxfp8_dim1_cast_kernel_choice != "NONE"
+            else None
         )
         self.config = config
 
