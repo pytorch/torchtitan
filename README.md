@@ -120,7 +120,6 @@ git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
 ```
-You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
 
 ### Downloading a tokenizer
 
