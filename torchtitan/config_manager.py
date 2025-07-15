@@ -363,6 +363,14 @@ class Parallelism:
     The default value is 'allgather'.
     """
 
+    expert_parallel_degree: int = 1
+    """
+    Expert parallelism degree. 1 means disabled.
+    Currently, only "dp2ep" is supported, with the following constraints:
+    context_parallel_degree <= expert_parallel_degree <= data_parallel_shard_degree * context_parallel_degree
+    Note that this is still an experimental feature.
+    """
+
 
 @dataclass
 class Checkpoint:
@@ -465,6 +473,17 @@ class Checkpoint:
     after the first step to ensure checkpointing functions correctly. This is useful
     when running on a new cluster or storage to verify checkpointing without waiting
     for many steps or checkpointing too frequently. The default value is False.
+    """
+
+    last_save_in_safetensors_format: bool = False
+    """
+    Enable the use of safetensors format for checkpointing. This will save the final checkpoints
+    in safetensors format instead of the default DCP format. There will be a performance
+    cost in using this as we need to consolidate the sharded tensors to full tensors as
+    a separate step. last_save_model_weights_only must be true because safetensors doesn't
+    support saving non tensors. On load, this argument isn't needed as we will detect
+    whether the loaded checkpoint is in safetensors format or not.
+    The default value is False.
     """
 
 
@@ -658,6 +677,35 @@ class Experimental:
 
 
 @dataclass
+class Validation:
+    enabled: bool = False
+    """Enable validation to default run validation after each training loop"""
+
+    dataset: str = "c4_validation"
+    """Dataset to use for validation"""
+
+    dataset_path: str | None = None
+    """Path to dataset to use for validation"""
+
+    local_batch_size: int = 8
+    """Batch size for validation"""
+
+    seq_len: int = 2048
+    """Sequence length for validation"""
+
+    freq: int = 10
+    """Frequency of validation"""
+
+    steps: int = -1
+    """Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset"""
+
+    def __post_init__(self):
+        assert (
+            self.steps > 0 or self.steps == -1
+        ), "validation steps must be positive or -1"
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -681,6 +729,7 @@ class JobConfig:
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
+    validation: Validation = field(default_factory=Validation)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -846,7 +895,15 @@ class ConfigManager:
                 self.config.model.tokenizer_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please update your config."
+                    "Please download the new tokenizer model (python scripts/download_tokenizer.py) and update your config."
+                )
+        else:
+            # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
+            if self.config.model.tokenizer_path.endswith("tokenizer.model"):
+                raise Exception(
+                    "You are using the old tokenizer.model, please redownload the tokenizer ",
+                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B) ",
+                    " and update your config to the directory of the downloaded tokenizer.",
                 )
 
     @staticmethod

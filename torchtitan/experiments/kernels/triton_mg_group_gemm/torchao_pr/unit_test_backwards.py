@@ -5,20 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-import logging
 import unittest
 from typing import Tuple
 
 import torch
-import torch.nn as nn
 
-from mg_grouped_gemm import (
-    grouped_gemm_backward,
-    grouped_gemm_dw_tma,
-    grouped_gemm_dx_tma,
-    grouped_gemm_forward,
-    mg_grouped_gemm,
-)
+from mg_grouped_gemm import grouped_gemm_backward, grouped_gemm_forward
 
 from reference_utils import (
     analyze_tensor_differences,
@@ -27,7 +19,7 @@ from reference_utils import (
 )
 
 
-class TestMG_GroupedGEMM_Backward(unittest.TestCase):
+class TestMgGroupedGemmBackward(unittest.TestCase):
     def setUp(self) -> None:
         torch.manual_seed(2020)  # Set seed for reproducibility
 
@@ -81,7 +73,7 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
         self.assertTrue(grad_a_close)
         self.assertTrue(grad_b_close)
 
-    def test_MG_grouped_gemm_backward_bf16(self) -> None:
+    def test_mg_grouped_gemm_backward_bf16(self) -> None:
         for G in (1, 8, 16):
             for M in (512, 1024):
                 print(f"Testing BF16 M*G GroupGeMM Backward with G={G}, M={M}")
@@ -93,7 +85,7 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
                     rtol=1e-2,
                 )
 
-    def test_MG_grouped_gemm_backward_deepseek_shapes(self) -> None:
+    def test_mg_grouped_gemm_backward_deepseek_shapes(self) -> None:
         """Test backward pass with shapes from Deepseek model."""
         deepseek_shapes = [
             (4, 2048, 4096, 7168),  # G, M, N, K
@@ -113,7 +105,7 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
                 shape, device, dtype=torch.float16, atol=1e-2, rtol=1e-2
             )
 
-    def test_MG_dx(self) -> None:
+    def test_mg_dx(self) -> None:
         """Test specifically the dx (gradient w.r.t. input) computation."""
         G, M, N, K = 4, 512, 1024, 2048
         device = torch.device("cuda")
@@ -143,7 +135,7 @@ class TestMG_GroupedGEMM_Backward(unittest.TestCase):
         dx_close = analyze_tensor_differences(grad_a, expected_grad_a, "grad_a (dx)")
         self.assertTrue(dx_close)
 
-    def test_MG_dw(self) -> None:
+    def test_mg_dw(self) -> None:
         """Test specifically the dw (gradient w.r.t. weights) computation."""
         G, M, N, K = 4, 512, 1024, 2048
         device = torch.device("cuda")
