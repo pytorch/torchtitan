@@ -53,7 +53,7 @@ class Validator(BaseValidator):
         loss_fn: LossFunction,
         validation_context: Generator[None, None, None],
         maybe_enable_amp: Generator[None, None, None],
-        metrics_processor: MetricsProcessor | None = None,
+        metrics_processor: MetricsProcessor,
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
@@ -92,7 +92,7 @@ class Validator(BaseValidator):
             ):
                 break
 
-            self.metrics_processor.validation_ntokens_since_last_log += labels.numel()
+            self.metrics_processor.ntokens_since_last_log += labels.numel()
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
             inputs = input_dict["input"]
@@ -128,9 +128,9 @@ class Validator(BaseValidator):
                 loss, parallel_dims.world_mesh["dp_cp"]
             )
         else:
-            global_avg_loss = loss
+            global_avg_loss = loss.item()
 
-        self.metrics_processor.log_validation(val_loss=global_avg_loss, step=step)
+        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
         # Reshard after run forward pass
         # This is to ensure the model weights are sharded the same way for checkpoint saving.

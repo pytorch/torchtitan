@@ -307,7 +307,6 @@ class MetricsProcessor:
 
     gpu_peak_flops: int
     ntokens_since_last_log: int
-    validation_ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
 
@@ -336,7 +335,6 @@ class MetricsProcessor:
             self.device_memory_monitor.device_name
         )
         self.ntokens_since_last_log = 0
-        self.validation_ntokens_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
@@ -417,36 +415,36 @@ class MetricsProcessor:
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def log_validation(self, val_loss: float, step: int):
+    def log_validation(self, loss: float, step: int):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
 
         # tokens per second per device, abbreviated as tps
-        tps = self.validation_ntokens_since_last_log / (
+        tps = self.ntokens_since_last_log / (
             time_delta * self.parallel_dims.non_data_parallel_size
         )
 
-        val_metrics = {
-            "validation_metrics/val_loss": val_loss,
+        metrics = {
+            "validation_metrics/loss": loss,
             "validation_metrics/throughput(tps)": tps,
             "validation_metrics/memory/max_active(GiB)": device_mem_stats.max_active_gib,
             "validation_metrics/memory/max_active(%)": device_mem_stats.max_active_pct,
             "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
             "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
         }
-        self.logger.log(val_metrics, step)
+        self.logger.log(metrics, step)
 
         color = self.color
         logger.info(
             f"{color.yellow}validate step: {step:2}  "
-            f"{color.green}loss: {val_loss:7.4f}  "
+            f"{color.green}loss: {loss:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}{color.reset}"
         )
 
-        self.validation_ntokens_since_last_log = 0
+        self.ntokens_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
