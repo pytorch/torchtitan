@@ -15,7 +15,6 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed._tools.fsdp2_mem_tracker import FSDPMemTracker
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from torchtitan.components.ft import init_ft_manager
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.config_manager import ConfigManager, JobConfig
@@ -116,8 +115,7 @@ def estimate_memory(job_config: JobConfig):
         model.train()
 
         # build optimizer after applying parallelisms to the model
-        ft_manager = init_ft_manager(job_config)
-        optimizers = build_optimizers([model], job_config, parallel_dims, ft_manager)
+        optimizers = build_optimizers([model], job_config, parallel_dims)
         lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
