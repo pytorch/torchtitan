@@ -523,7 +523,7 @@ class Float8:
 
 @dataclass
 class MX:
-    use_fp8_dim1_cast_triton_kernel: bool = True
+    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "none"] = "triton"
     """Temp work around for inductor performance gap"""
 
     recipe_name: Literal["mxfp8"] = "mxfp8"
