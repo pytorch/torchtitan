@@ -307,7 +307,7 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
-    parallel_dims: ParallelDims | None = None,
+    ep_dense_params_mesh_ndim: int | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -329,14 +329,15 @@ def clip_grad_norm_(
             If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
             fall back to the slow implementation for other device types.
             Default: ``None``
-        pp_mesh: pipeline parallel device mesh. If not None, will reduce gradient norm across PP stages.
-        parallel_dims: ParallelDims object which contains Expert Parallel related info.
+        pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
+        ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
+            set it to ``None``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    if parallel_dims and parallel_dims.ep_enabled:
+    if ep_dense_params_mesh_ndim is not None:
         return _clip_grad_norm_with_ep(
             parameters,
             max_norm,
@@ -344,7 +345,7 @@ def clip_grad_norm_(
             error_if_nonfinite,
             foreach,
             pp_mesh,
-            parallel_dims,
+            ep_dense_params_mesh_ndim,
         )
 
     if isinstance(parameters, torch.Tensor):
@@ -388,10 +389,8 @@ def _clip_grad_norm_with_ep(
     error_if_nonfinite: bool,
     foreach: bool | None,
     pp_mesh: DeviceMesh | None,
-    parallel_dims: ParallelDims,
+    dense_params_mesh_ndim: int,
 ) -> torch.Tensor:
-    assert parallel_dims.ep_enabled
-
     ep_params = []
     non_ep_params = []
     ep_grads = []
@@ -401,7 +400,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        if p.device_mesh.ndim == parallel_dims.dense_params_mesh_ndim:
+        if p.device_mesh.ndim == dense_params_mesh_ndim:
             non_ep_params.append(p)
             non_ep_grads.append(p.grad)
         else:

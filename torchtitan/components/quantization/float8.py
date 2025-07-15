@@ -165,7 +165,7 @@ class Float8Converter(ModelConverter):
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+            module_filter_fn=self.filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="

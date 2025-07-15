@@ -144,7 +144,7 @@ class TestCheckpointManager(unittest.TestCase):
         shutil.rmtree(self.base_temp_dir)
         time.sleep(0.1)
 
-    def fake_save(self, state_dict: dict, checkpoint_id: str):
+    def fake_save(self, state_dict: dict, checkpoint_id: str, storage_writer=None):
         os.makedirs(checkpoint_id, exist_ok=True)
         sd_to_save = {}
         for key, val in state_dict.items():
@@ -584,7 +584,7 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     def test_verify_prefix(self, mock_save, mock_load, mock_rank):
-        def fake_save(state_dict: dict, checkpoint_id: str):
+        def fake_save(state_dict: dict, checkpoint_id: str, storage_writer=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix

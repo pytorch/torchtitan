@@ -7,13 +7,12 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from abc import abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -26,8 +25,6 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
-
-DeviceType = int | str | torch.device
 
 
 @dataclass
@@ -65,6 +62,11 @@ class ModelProtocol(Protocol):
 
     @abstractmethod
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        """Initialize model weights.
+
+        Args:
+            buffer_device: Optional device to place buffers on during initialization.
+        """
         pass
 
 
@@ -76,7 +78,7 @@ DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, ParallelDims, DeviceMesh, FTManager],
+    [list[nn.Module], JobConfig, ParallelDims, FTManager],
     OptimizersContainer,
 ]
 LRSchedulersBuilder: TypeAlias = Callable[
@@ -89,8 +91,8 @@ ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]
 @dataclass
 class TrainSpec:
     name: str
-    cls: type[nn.Module]
-    config: Mapping[str, BaseModelArgs]
+    model_cls: type[ModelProtocol]
+    model_args: dict[str, BaseModelArgs]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
     build_optimizers_fn: OptimizersBuilder
