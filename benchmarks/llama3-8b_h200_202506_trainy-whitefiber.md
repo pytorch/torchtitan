@@ -1,4 +1,4 @@
-This was performed by Trainy team on WhiteFiber in June 2025, to get a baseline of performance 
+This was performed by Trainy team on WhiteFiber in June 2025, to get a baseline of performance
 of the Trainy platform on H200s platform over multiple hosts.
 
 ### Models
