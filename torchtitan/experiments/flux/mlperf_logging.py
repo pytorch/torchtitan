@@ -67,6 +67,7 @@ class MLPerfLogger:
         warmup_steps: int,
         gradient_clip_norm: float,
         optimizer_config: dict,
+        eval_freq: int,
     ):
         self.gbs = gbs
         self.mllogger.event(
@@ -98,7 +99,7 @@ class MLPerfLogger:
             key=constants.OPT_GRADIENT_CLIP_NORM, value=gradient_clip_norm
         )
         self.mllogger.event(key=constants.GRADIENT_ACCUMULATION_STEPS, value=1)
-
+        self.mllogger.event(key="evaluation_frequency", value=eval_freq)
         self.mllogger.start(key=constants.INIT_START, value="")
 
     def log_train_start(self):

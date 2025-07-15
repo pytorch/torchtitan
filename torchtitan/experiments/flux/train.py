@@ -523,6 +523,7 @@ class FluxTrainer(Trainer):
                 warmup_steps=self.job_config.lr_scheduler.warmup_steps,
                 gradient_clip_norm=self.job_config.training.max_norm,
                 optimizer_config=self.optimizers.optimizers[0].param_groups[0],
+                eval_freq=job_config.eval.eval_freq
             )
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
@@ -644,14 +645,14 @@ class FluxTrainer(Trainer):
             sum_loss_per_timestep += loss
             sum_timestep_counts += counts
 
-        # Different batches and timestepsmay have different number of samples, so we need to average the loss like this
+        # Different batches and timesteps may have different number of samples, so we need to average the loss like this
         # rather than taking the mean of the mean batch losses.
-        timestep_counts_proportions = sum_timestep_counts / sum_timestep_counts.sum()
+        
         # avoid division by zero
         avg_loss_per_timestep = sum_loss_per_timestep / torch.maximum(
             sum_timestep_counts, torch.ones_like(sum_timestep_counts)
         )
-        avg_loss = (avg_loss_per_timestep * timestep_counts_proportions).sum()
+        avg_loss = avg_loss_per_timestep.mean()
         self.metrics_processor.val_log(self.step, avg_loss)
         self.model.train()
 
