@@ -55,7 +55,7 @@ enable_classifer_free_guidance = true
 classifer_free_guidance_scale = 5.0
 denoising_steps = 50
 save_img_folder = "img"
-eval_freq = 614400
+eval_freq = 262144
 dataset = "coco"
 target_eval_loss = 0.586
 
