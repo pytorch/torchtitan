@@ -51,6 +51,8 @@ fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 8
 enable_async_tensor_parallel = false
 expert_parallel_degree = 1
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
 
 [checkpoint]
 enable_checkpoint = false
