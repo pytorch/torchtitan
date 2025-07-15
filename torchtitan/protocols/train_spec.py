@@ -78,7 +78,7 @@ DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, ParallelDims, FTManager],
+    [list[nn.Module], JobConfig, ParallelDims, FTManager | None],
     OptimizersContainer,
 ]
 LRSchedulersBuilder: TypeAlias = Callable[

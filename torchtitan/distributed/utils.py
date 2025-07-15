@@ -29,7 +29,7 @@ def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,
     mesh: DeviceMesh,
-    extra_pg: dist.ProcessGroup | None = None,
+    extra_pg: dist.ProcessGroup | None,
 ) -> float:
     """Perform distributed reduction on a tensor.
 
