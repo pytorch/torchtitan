@@ -37,7 +37,7 @@ max_norm = 1.0  # grad norm clipping
 steps = 30_000
 compile = false
 dataset = "cc12m-wds"
-classifer_free_guidance_prob = 0.447
+classifier_free_guidance_prob = 0.447
 img_size = 256
 
 [encoder]
@@ -47,8 +47,8 @@ max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
 [eval]
-enable_classifer_free_guidance = true
-classifer_free_guidance_scale = 5.0
+enable_classifier_free_guidance = true
+classifier_free_guidance_scale = 5.0
 denoising_steps = 50
 save_img_folder = "img"
 eval_freq = 1000
