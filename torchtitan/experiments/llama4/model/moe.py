@@ -249,12 +249,10 @@ class MoE(nn.Module):
             self.register_buffer(
                 "expert_bias",
                 torch.zeros(num_experts, dtype=torch.float32),
-                persistent=True,
             )
             self.register_buffer(
                 "tokens_per_expert",
                 torch.zeros(num_experts, dtype=torch.float32),
-                persistent=True,
             )
         else:
             self.expert_bias = None
