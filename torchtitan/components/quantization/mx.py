@@ -57,7 +57,7 @@ class MXConverter(ModelConverter):
 
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
-            MXFP8Dim1CastKernelChoice,
+            MXFP8CastKernelChoice,
             MXLinearConfig,
         )
 
@@ -67,7 +67,7 @@ class MXConverter(ModelConverter):
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         )
         config.mxfp8_dim1_cast_kernel_choice = (
-            MXFP8Dim1CastKernelChoice[dim1_cast_kernel_choice_str]
+            MXFP8CastKernelChoice[dim1_cast_kernel_choice_str]
             if mx_job_config.mxfp8_dim1_cast_kernel_choice != "NONE"
             else None
         )
