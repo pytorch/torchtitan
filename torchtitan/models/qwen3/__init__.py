@@ -29,17 +29,6 @@ __all__ = [
 
 
 qwen3_configs = {
-    # "debugmodel": TransformerModelArgs(
-    #     dim=256, n_layers=6, n_heads=16, rope_theta=500000
-    # ),
-    # "debugmodel_flex_attn": TransformerModelArgs(
-    #     dim=256,
-    #     n_layers=6,
-    #     n_heads=16,
-    #     rope_theta=500000,
-    #     use_flex_attn=True,
-    #     attn_mask_type="block_causal",
-    # ),
     "0.6B": TransformerModelArgs(
         vocab_size=151_936,
         max_seq_len=40_960,
