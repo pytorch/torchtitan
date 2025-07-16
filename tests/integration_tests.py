@@ -123,37 +123,37 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.folder hf_checkpoint",
-                    "--checkpoint.last_save_in_safetensors_format",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.last_save_in_hf",
+                    "--checkpoint.last_save_model_only",
                 ],
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/full_checkpoint_hf_safetensors/hf_checkpoint/step-10/",
+                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
                 ],
             ],
-            "Checkpoint Integration Test - save load full checkpoint in HF safetensors format",
-            "full_checkpoint_hf_safetensors",
+            "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
+            "model_only_hf_checkpoint",
         ),
         OverrideDefinitions(
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.last_save_model_only",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "last_save_model_weights_only_fp32",
+            "Checkpoint Integration Test - Save Model Only fp32",
+            "last_save_model_only_fp32",
         ),
         OverrideDefinitions(
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.last_save_model_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only bf16",
-            "last_save_model_weights_only_bf16",
+            "Checkpoint Integration Test - Save Model Only bf16",
+            "last_save_model_only_bf16",
         ),
         OverrideDefinitions(
             [

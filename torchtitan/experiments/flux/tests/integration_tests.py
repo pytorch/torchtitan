@@ -58,11 +58,11 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.last_save_model_only",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "last_save_model_weights_only_fp32",
+            "Checkpoint Integration Test - Save Model Only fp32",
+            "last_save_model_only_fp32",
         ),
         # Parallelism tests.
         OverrideDefinitions(
