@@ -27,7 +27,6 @@ __all__ = [
     "qwen3_configs",
 ]
 
-
 qwen3_configs = {
     "0.6B": TransformerModelArgs(
         vocab_size=151_936,
