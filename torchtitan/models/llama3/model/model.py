@@ -14,7 +14,7 @@ from quack.rmsnorm import QuackRMSNorm
 from torch import nn
 
 # Global toggle to switch between nn.RMSNorm and QuackRMSNorm
-USE_QUACK_RMSNORM = False
+USE_QUACK_RMSNORM = True
 
 
 def get_rmsnorm(dim, eps):
