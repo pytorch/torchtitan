@@ -100,7 +100,22 @@ def parallelize_llama(
         logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
 
     if job_config.training.compile:
+        from torch._inductor.comms import (
+            reorder_communication_preserving_peak_memory,
+            sink_waits_iterative,
+        )
+
+        torch._inductor.config.allow_buffer_reuse = False
         torch._inductor.config.reorder_for_peak_memory = False
+        torch._inductor.config.reorder_for_compute_comm_overlap = False
+
+        torch._inductor.config.bucket_all_gathers_fx = "fsdp"
+        torch._inductor.config.bucket_reduce_scatters_fx = "fsdp"
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+            sink_waits_iterative,
+            reorder_communication_preserving_peak_memory,
+        ]
         model = torch.compile(model, fullgraph=True)
 
     return model
