@@ -491,10 +491,10 @@ class ActivationCheckpoint:
         default_factory=lambda: ["moe.router.gate"]
     )
     """
-    When per-op selective ac is used, this list of fully qualified names (relative
-    to the module at which AC is applied) is used to determine which mm shapes to
-    force recompute, rather than being considered by rest of the sac policy, e.g
-    save every other mm. Only nn.Linear modules are supported today.
+    When per-op selective ac is used, this list of fully qualified names is used
+    to determine which mm shapes to force recompute, rather than being considered
+    by rest of the sac policy, e.g save every other mm. Only nn.Linear modules are
+    supported today.
 
     Note: this config applies to mms not limited to those matching the specified
     fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,

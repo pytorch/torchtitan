@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -242,7 +243,7 @@ _save_list = {
 
 
 def _apply_ac_to_transformer_block(
-    module: nn.Module, ac_config: ACConfig, base_fqn: str
+    module: nn.Module, ac_config: ACConfig, *, base_fqn: Optional[str] = None
 ):
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -270,7 +271,9 @@ def _apply_ac_to_transformer_block(
         mm_recompute_shapes = set()
         if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
             for module_fqn, submod in module.named_modules():
-                fqn = f"{base_fqn}.{module_fqn}"
+                fqn = module_fqn
+                if base_fqn is not None:
+                    fqn = f"{base_fqn}.{module_fqn}"
                 if not any(
                     filter_fqn in fqn
                     for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
@@ -331,7 +334,7 @@ def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = _apply_ac_to_transformer_block(
-            transformer_block, ac_config, f"layers.{layer_id}"
+            transformer_block, ac_config, base_fqn=f"layers.{layer_id}"
         )
         model.layers.register_module(layer_id, transformer_block)
 
