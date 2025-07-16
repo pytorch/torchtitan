@@ -231,15 +231,15 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: float | None,
+        # multiple_of: int,
+        # ffn_dim_multiplier: float | None,
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
+        # hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        # if ffn_dim_multiplier is not None:
+        # hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        # hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -284,11 +284,11 @@ class TransformerBlock(nn.Module):
 
         self.attention = Attention(model_args)
         self.feed_forward = FeedForward(
-            dim=model_args.dim,
-            hidden_dim=4 * model_args.dim,
-            multiple_of=model_args.multiple_of,
-            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-        )
+            dim=model_args.dim, hidden_dim=model_args.hidden_dim
+        )  # why 4 *?
+        # multiple_of=model_args.multiple_of,
+        # ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+        # )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         # Added here

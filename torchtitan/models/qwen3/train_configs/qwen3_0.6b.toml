@@ -3,7 +3,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 8B training"
+description = "Qwen 3 0.6B training"
 
 [profiling]
 enable_profiling = true
@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 10
 compile = false
 dataset = "c4"
 

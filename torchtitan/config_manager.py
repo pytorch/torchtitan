@@ -94,7 +94,7 @@ class Metrics:
 
 @dataclass
 class Model:
-    name: str = "llama3"
+    name: str = "qwen3"
     """Which model to train"""
 
     flavor: str = "debugmodel"
