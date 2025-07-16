@@ -63,14 +63,10 @@ class MXConverter(ModelConverter):
 
         config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
 
-        dim1_cast_kernel_choice_str = (
+        # String to enum
+        config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
-        )
-        config.mxfp8_dim1_cast_kernel_choice = (
-            MXFP8Dim1CastKernelChoice[dim1_cast_kernel_choice_str]
-            if mx_job_config.mxfp8_dim1_cast_kernel_choice != "NONE"
-            else None
-        )
+        ]
         self.config = config
 
         logger.info(f"Float8 training active with recipe {mx_job_config.recipe_name}")
