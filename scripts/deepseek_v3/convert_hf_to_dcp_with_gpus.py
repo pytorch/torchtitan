@@ -20,7 +20,7 @@ from torchtitan.components.checkpoint import MODEL
 from torchtitan.config_manager import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
-
+import re
 
 def extract_layer_number_expert_number(s):
     import re
@@ -33,9 +33,33 @@ def extract_layer_number_expert_number(s):
 
     
 
+def is_quantization_tensor(fqn: str) -> bool:
+    """
+    Check if a tensor is related to quantization.
+    """
+    return any(suffix in fqn for suffix in [
+        "weight_scale_inv", 
+        "weight_scale", 
+        "zeros", 
+        "quant_state", 
+        "_scale"
+    ])
+
+# Global dictionaries to track expert weights for concatenation
+expert_weights_by_layer = {}  # {layer: {type: {expert_id: tensor}}}
+expert_mapping = {
+    "gate_proj.weight": "w1",
+    "up_proj.weight": "w3",
+    "down_proj.weight": "w2"
+}
+
 def convert_to_titan_fqns(fqn: str) -> list[str]:
     """Converts a fqn from the stored checkpoint to the fqn in the TorchTitan model."""
-
+    
+    # Skip quantization-related tensors
+    if is_quantization_tensor(fqn):
+        return []
+        
     layer, expert = extract_layer_number_expert_number(fqn)
 
     if layer is None:
@@ -50,12 +74,23 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
 
     # MoE layer
     # 1) Experts's weights -> Need to fuse to GroupedExperts
-    if f"mlp.experts.{expert}.down_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.experts.w2"]
-    elif f"mlp.experts.{expert}.gate_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.experts.w1"]
-    elif f"mlp.experts.{expert}.up_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.experts.w3"]
+    # For expert weights, we'll collect them and concatenate later
+    if expert is not None and "mlp.experts" in fqn:
+        # Check if this is one of the projection weights we need to handle
+        for proj_type, titan_proj_type in expert_mapping.items():
+            if f"mlp.experts.{expert}.{proj_type}" in fqn:
+                # Initialize nested dictionaries if needed
+                if layer not in expert_weights_by_layer:
+                    expert_weights_by_layer[layer] = {}
+                if titan_proj_type not in expert_weights_by_layer[layer]:
+                    expert_weights_by_layer[layer][titan_proj_type] = {}
+                    
+                # Store the mapping for later concatenation
+                titan_fqn = f"layers.{layer}.moe.experts.{titan_proj_type}"
+                
+                # Return the TorchTitan FQN - we'll handle the concatenation separately
+                return [titan_fqn]
+        
     # 2) Router's weights
     elif f"mlp.gate.weight" in fqn:
         return [f"layers.{layer}.moe.router.gate.weight"]
@@ -101,19 +136,24 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
         raise ValueError(f"Unknown fqn {fqn}")
 
 
-def convert_to_hf_shape(fqn: str, titan_fqns: list[str], dtensor: DTensor) -> list[str]:
-    if "feed_forward.experts.gate_up_proj" in fqn:
-        assert len(titan_fqns) == 2
-        shape = dtensor.shape
-        return torch.Size(list(shape[:-1]) + [shape[-1] * 2])
-    elif "shared_expert" in fqn:
+def convert_to_hf_shape(fqn: str, titan_fqns: list[str], dtensor: DTensor) -> torch.Size:
+    if "shared_expert" in fqn:
+        # TODO(jianiw): check this
         s = dtensor.shape
         # TODO: this is not right but I have to do this to load the checkpoint.
         return torch.Size((s[2], s[1]))
+    elif "mlp.experts" in fqn:
+        # For MoE expert weights, the HF checkpoint has 2D tensors for each expert
+        # while TorchTitan has a single 3D tensor for all experts
+        s = dtensor.shape
+        if len(s) == 3:  # This is a 3D tensor [num_experts, dim1, dim2]
+            # Return the shape of a single expert. And we are using nn.Parameter, 
+            # while HF is using nn.Linear. So we need to transpose the weight.
+            return torch.Size([s[2], s[1]])  
     return dtensor.shape
 
 
-def convert_to_titan_tensors(fqn: str, full_tensor: torch.Tensor) -> torch.Tensor:
+def convert_to_titan_tensors(fqn: str, full_tensor: torch.Tensor) -> list[torch.Tensor]:
     if "feed_forward.experts.gate_up_proj" in fqn:
         full_tensors = full_tensor.chunk(2, dim=-1)
     elif "shared_expert" in fqn:
@@ -245,6 +285,11 @@ class CheckpointConverter:
 
         # Create the mapping from the stored checkpoint keys to TorchTitan keys.
         for fqn in list(self.metadata.keys()):
+            # Skip quantization-specific tensors
+            if is_quantization_tensor(fqn):
+                # logger.info(f"Skipping quantization tensor: {fqn}")
+                self.metadata.pop(fqn)
+                continue
 
             # We don't know how to process _extra_state
             # And we don't have e_score_correction_bias in torchtitan implementation
@@ -253,6 +298,11 @@ class CheckpointConverter:
                 continue
             
             titan_fqns = convert_to_titan_fqns(fqn)
+            
+            # Skip if no mapping was found (e.g., for quantization tensors)
+            if not titan_fqns:
+                self.metadata.pop(fqn)
+                continue
 
             if titan_fqns[0] not in state_dict:
                 for titan_fqn in titan_fqns:
@@ -337,66 +387,166 @@ class CheckpointConverter:
         self.stored_fqn_to_titan_fqn = object_list[2]
         return rounds
 
+    def _dequantize_weight(self, weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+        """
+        Dequantize a weight tensor using its scale_inv tensor.
+        Implementation for DeepSeek-V3 block-wise quantization.
+        """
+        # For DeepSeek-V3, the scale_inv tensor is typically much smaller than the weight tensor
+        # and represents scaling factors for blocks of the weight tensor
+        
+        # Check if we're dealing with a quantized tensor
+        if weight.dtype == torch.int8:
+            # Convert to float first
+            float_weight = weight.to(torch.float32)
+            
+            # Get original dimensions
+            orig_shape = weight.shape
+            
+            # For DeepSeek-V3, scale_inv shape is typically (block_rows, block_cols)
+            # where each element is the scaling factor for a block of the weight matrix
+            block_rows, block_cols = scale_inv.shape
+            
+            # Calculate block size
+            block_size_row = (orig_shape[0] + block_rows - 1) // block_rows
+            block_size_col = (orig_shape[1] + block_cols - 1) // block_cols
+            
+            # Create output tensor
+            dequantized = torch.zeros(orig_shape, dtype=torch.bfloat16, device="cuda")
+            
+            # Apply scaling factors to each block
+            for i in range(block_rows):
+                row_start = i * block_size_row
+                row_end = min(row_start + block_size_row, orig_shape[0])
+                
+                for j in range(block_cols):
+                    col_start = j * block_size_col
+                    col_end = min(col_start + block_size_col, orig_shape[1])
+                    
+                    # Get the block and apply the scaling factor
+                    block = float_weight[row_start:row_end, col_start:col_end]
+                    scale = scale_inv[i, j]
+                    dequantized[row_start:row_end, col_start:col_end] = block * scale
+            
+            return dequantized
+        
+        # If not quantized or unknown format, return as is
+        return weight.to(dtype=torch.bfloat16)
+
     def _load_round(self, assignment: _Assignment) -> dict[str, Any]:
         from safetensors.torch import load_file as hf_load_file
-
+        
         path = os.path.join(self.path, assignment.filename)
         state_dict = hf_load_file(path)
-        return {
-            k: v.to(device="cuda")
-            for k, v in state_dict.items()
-            if k in assignment.fqns
-        }
+        
+        # Group quantized weights with their scales
+        weight_groups = defaultdict(dict)
+        for k, v in state_dict.items():
+            if k in assignment.fqns:
+                # Extract base name without quantization suffix
+                if ".weight_" in k:
+                    base_name = k.split(".weight_")[0]
+                    weight_groups[base_name][k] = v.to(device="cuda")
+                else:
+                    # Regular tensor
+                    weight_groups[k][k] = v.to(device="cuda")
+        
+        # Process and dequantize weights
+        result_dict = {}
+        for base_name, tensors in weight_groups.items():
+            # Check if this is a quantized weight that needs dequantization
+            weight_key = f"{base_name}.weight" if f"{base_name}.weight" in tensors else base_name
+            scale_inv_key = f"{base_name}.weight_scale_inv"
+            
+            if weight_key in tensors and scale_inv_key in tensors:
+                # This is a quantized weight that needs dequantization
+                weight = tensors[weight_key]
+                scale_inv = tensors[scale_inv_key]
+                
+                logger.info(f"Dequantizing {weight_key} with shape {weight.shape}, using scale_inv with shape {scale_inv.shape}")
+                
+                # Dequantize the weight
+                dequantized_weight = self._dequantize_weight(weight, scale_inv)
+                result_dict[weight_key] = dequantized_weight
+            else:
+                # Regular tensors or already in full precision
+                for k, v in tensors.items():
+                    if k in assignment.fqns and not is_quantization_tensor(k):
+                        result_dict[k] = v
+        
+        return result_dict
 
     def _reshard_send(
         self,
         assignment: _Assignment,
         loaded_state_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        flatten_tensors = [t.to(dtype=torch.bfloat16).flatten() for t in loaded_state_dict.values()]
-        flatten_tensor = torch.concat(flatten_tensors)
         assert self.loader_id == assignment.loader_id
         rank = self.loader_id * self.loader_every_n_ranks
         assert rank == self.my_rank
-        logger.info(
-            f"Sending {assignment.filename} from {rank} {self.loader_id} "
-            f"{flatten_tensor.shape=} {flatten_tensor.dtype=} {loaded_state_dict.keys()=}."
-        )
-        logger.info(f"Sending {assignment}")
-        dist.broadcast(flatten_tensor, src=rank, group=self.pg)
-        self.total_send_bytes += flatten_tensor.numel() * flatten_tensor.element_size()
+        
+        logger.info(f"Sending {assignment.filename} from {rank} {self.loader_id}")
+        
+        # Send each tensor individually
+        for fqn in assignment.fqns:
+            # Skip quantization tensors
+            if is_quantization_tensor(fqn):
+                continue
+                
+            tensor = loaded_state_dict[fqn].to(dtype=torch.bfloat16)
+            logger.info(f"Sending tensor {fqn} with shape {tensor.shape} and dtype {tensor.dtype}")
+            
+            # Send tensor shape first (needed for receiving side to allocate correctly)
+            tensor_shape = torch.tensor(tensor.shape, dtype=torch.long, device="cuda")
+            dist.broadcast(tensor_shape, src=rank, group=self.pg)
+            
+            # Flatten and send the actual tensor
+            flat_tensor = tensor.flatten()
+            dist.broadcast(flat_tensor, src=rank, group=self.pg)
+            self.total_send_bytes += flat_tensor.numel() * flat_tensor.element_size()
+            
         return loaded_state_dict
 
     def _reshard_receive(
         self, assignment: _Assignment, state_dict: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
-
-        for shape in assignment.shapes:
-            size = math.prod(shape)
-            print(f"In _reshard_receive, Shape: {shape}, Size: {size}, GB: {size * 2 / 1e9}")
-
-        flatten_tensor = torch.empty(
-            sum(math.prod(s) for s, d in zip(assignment.shapes, assignment.dtypes)),
-            dtype=assignment.dtypes[0],
-            device="cuda",
-        )
         rank = assignment.loader_id * self.loader_every_n_ranks
-        logger.info(
-            f"Receiving {assignment.filename} from {rank} "
-            f"{flatten_tensor.shape=} {flatten_tensor.dtype=}"
-        )
-        logger.info(f"Receiving {assignment}")
-        dist.broadcast(flatten_tensor, src=rank, group=self.pg)
-        self.total_recv_bytes += flatten_tensor.numel() * flatten_tensor.element_size()
-
+        logger.info(f"Receiving {assignment.filename} from {rank}")
+        
         ret: dict[str, torch.Tensor] = {}
-        loc = 0
-        for fqn, shape, dtype in zip(
+        
+        # Receive each tensor individually
+        for i, (fqn, expected_shape, dtype) in enumerate(zip(
             assignment.fqns, assignment.shapes, assignment.dtypes
-        ):
-            n_ele = math.prod(shape)
-            ret[fqn] = flatten_tensor[loc : loc + n_ele].view(shape)
-            loc += n_ele
+        )):
+            # Skip quantization tensors
+            if is_quantization_tensor(fqn):
+                continue
+                
+            # Log the tensor we're about to receive
+            size = math.prod(expected_shape)
+            logger.info(f"Receiving tensor {i+1}/{len(assignment.fqns)}: {fqn}, Shape: {expected_shape}, Size: {size}, GB: {size * 2 / 1e9}")
+            
+            # Receive tensor shape first
+            tensor_shape = torch.empty(len(expected_shape), dtype=torch.long, device="cuda")
+            dist.broadcast(tensor_shape, src=rank, group=self.pg)
+            actual_shape = tuple(tensor_shape.tolist())
+            
+            # Verify shape matches expected shape
+            if actual_shape != expected_shape:
+                logger.warning(f"Shape mismatch for {fqn}: expected {expected_shape}, got {actual_shape}")
+            
+            # Allocate memory for this tensor only
+            n_ele = math.prod(actual_shape)
+            flat_tensor = torch.empty(n_ele, dtype=dtype, device="cuda")
+            
+            # Receive the flattened tensor
+            dist.broadcast(flat_tensor, src=rank, group=self.pg)
+            self.total_recv_bytes += flat_tensor.numel() * flat_tensor.element_size()
+            
+            # Reshape and store
+            ret[fqn] = flat_tensor.view(actual_shape)
+            
         return ret
 
     def _reshard(
@@ -410,6 +560,31 @@ class CheckpointConverter:
             for titan_fqn, full_tensor in zip(titan_fqns, full_tensors):
                 dtensor = state_dict[titan_fqn]
                 assert isinstance(dtensor, DTensor)
+                
+                # Special handling for MoE expert weights
+                if "moe.experts" in titan_fqn:
+                    # Extract layer and projection type
+                    parts = titan_fqn.split(".")
+                    layer = int(parts[1])
+                    proj_type = parts[-1]  # w1, w2, or w3
+                    
+                    # Extract expert ID from the original fqn
+                    expert_match = re.search(r"experts\.(\d+)", fqn)
+                    if expert_match:
+                        expert_id = int(expert_match.group(1))
+                        
+                        # Store this expert tensor for later concatenation
+                        if layer not in expert_weights_by_layer:
+                            expert_weights_by_layer[layer] = {}
+                        if proj_type not in expert_weights_by_layer[layer]:
+                            expert_weights_by_layer[layer][proj_type] = {}
+                        
+                        expert_weights_by_layer[layer][proj_type][expert_id] = full_tensor
+                        
+                        # We'll handle the actual copying after collecting all experts
+                        continue
+                
+                # Regular tensor handling (non-MoE experts)
                 assert dtensor.shape == full_tensor.shape, (
                     (fqn, titan_fqn),
                     dtensor.shape,
@@ -432,6 +607,53 @@ class CheckpointConverter:
         for fqn, full_tensor in result.items():
             full_tensors = convert_to_titan_tensors(fqn, full_tensor)
             _inplace_copy(fqn, full_tensors)
+            
+        # After processing all tensors in this round, check if we can concatenate any expert weights
+        self._concatenate_expert_weights(state_dict)
+    
+    def _concatenate_expert_weights(self, state_dict: dict[str, torch.Tensor]) -> None:
+        """
+        Concatenate collected expert weights into 3D tensors for TorchTitan.
+        This should be called after all tensors for a layer have been processed.
+        """
+        for layer, proj_types in list(expert_weights_by_layer.items()):
+            for proj_type, experts in list(proj_types.items()):
+                # Check if we have collected all experts for this layer and projection type
+                titan_fqn = f"layers.{layer}.moe.experts.{proj_type}"
+                
+                # Get the expected number of experts from the state_dict tensor shape
+                if titan_fqn in state_dict:
+                    dtensor = state_dict[titan_fqn]
+                    expected_num_experts = dtensor.shape[0]
+                    
+                    # If we have all the experts, concatenate them
+                    if len(experts) == expected_num_experts:
+                        logger.info(f"Concatenating {len(experts)} experts for {titan_fqn}")
+                        
+                        # Sort experts by ID and stack them
+                        sorted_experts = [experts[i] for i in sorted(experts.keys())]
+                        
+                        # Create a 3D tensor with all experts, and transpose to match torchtian shape
+                        stacked_tensor = torch.stack(sorted_experts, dim=0).transpose(1, 2)
+                        
+                        # Copy to the state_dict
+                        shape, offset = compute_local_shape_and_global_offset(
+                            stacked_tensor.shape, dtensor.device_mesh, dtensor.placements
+                        )
+                        slices = [
+                            slice(cur_offset, cur_offset + cur_shape)
+                            for cur_shape, cur_offset in zip(shape, offset)
+                        ]
+
+                        # Target shape is (num_experts, hidden_size, hidden_size)
+                        # stack_tensor: ([256, 2048, 7168])
+                        logger.info(f"Copying concatenated experts to {titan_fqn} with stacked_tensor shape {stacked_tensor.shape}, titan dtensor_shape: {dtensor.shape}")
+                        dtensor.to_local().copy_(stacked_tensor[slices].to(dtensor.dtype))
+                        
+                        # Remove these experts from the tracking dict to free memory
+                        del expert_weights_by_layer[layer][proj_type]
+                        if not expert_weights_by_layer[layer]:
+                            del expert_weights_by_layer[layer]
 
 
 def _create_verified_state_dict(
@@ -506,7 +728,7 @@ if __name__ == "__main__":
         convert_hf_token: str = ""
         """Specify the HuggingFace token to use when downloading checkpoints."""
 
-        convert_load_every_n_ranks: int = 8
+        convert_load_every_n_ranks: int = 1
         """
         Specify the interval at which ranks are assigned to load checkpoints.
 
