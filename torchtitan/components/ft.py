@@ -116,15 +116,19 @@ def maybe_semi_sync_training(
             # Create the outer optimizer based on the inner optimizer parameters.
             params = [group["params"] for group in optimizer.param_groups]
             params = [param for sublist in params for param in sublist]
-            outer_optimizer = torch.optim.SGD(
-                params, lr=0.7, momentum=0.9, nesterov=True
-            )
+            outer_optimizers = []
+            for model in model_parts:
+                params = [p for p in model.parameters() if p.requires_grad]
+                outer_optimizer = torch.optim.SGD(
+                    params, lr=0.7, momentum=0.9, nesterov=True
+                )
+                outer_optimizers.append(outer_optimizer)
 
             return local_sgd.DiLoCo(
                 manager=ft_manager._manager,
                 model_fragments=model_parts,
                 inner_optimizer=optimizer,
-                outer_optimizer=outer_optimizer,
+                outer_optimizer=outer_optimizers,
                 sync_every=ft_config.sync_steps,
                 should_quantize=ft_config.should_quantize,
                 fragment_sync_delay=ft_config.fragment_sync_delay,
