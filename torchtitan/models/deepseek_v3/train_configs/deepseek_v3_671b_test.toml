@@ -21,7 +21,7 @@ enable_wandb = false
 
 [model]
 name = "deepseek_v3"
-flavor = "671B"
+flavor = "671B-half"
 tokenizer_path = "./assets/tokenizer/DeepSeek-V3"
 # converters = ["float8"]
 

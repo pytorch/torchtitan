@@ -22,23 +22,21 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
 
-def extract_layer_number(s):
+def extract_layer_number_expert_number(s):
     import re
 
-    match = re.search(r"layers\.(\d+)", s)
-    if match:
-        return int(match.group(1))
-    else:
-        return None
+    match_layer = re.search(r"layers\.(\d+)", s)
+    match_expert = re.search(r"experts\.(\d+)", s)
+    layer_id = int(match_layer.group(1)) if match_layer else None
+    expert_id = int(match_expert.group(1)) if match_expert else None
+    return layer_id, expert_id
 
+    
 
 def convert_to_titan_fqns(fqn: str) -> list[str]:
-    # From the stored checkpoint keys to TorchTitan keys.
-    if "language_model." not in fqn:
-        # TODO: Not support video model yet
-        return [fqn]
+    """Converts a fqn from the stored checkpoint to the fqn in the TorchTitan model."""
 
-    layer = extract_layer_number(fqn)
+    layer, expert = extract_layer_number_expert_number(fqn)
 
     if layer is None:
         if "embed_tokens.weight" in fqn:
@@ -50,30 +48,55 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
         else:
             raise ValueError(f"Unknown fqn {fqn}")
 
-    if "feed_forward.experts.down_proj" in fqn:
+    # MoE layer
+    # 1) Experts's weights -> Need to fuse to GroupedExperts
+    if f"mlp.experts.{expert}.down_proj.weight" in fqn:
         return [f"layers.{layer}.moe.experts.w2"]
-    elif "feed_forward.experts.gate_up_proj" in fqn:
-        return [f"layers.{layer}.moe.experts.w1", f"layers.{layer}.moe.experts.w3"]
-    elif "feed_forward.router.weight" in fqn:
+    elif f"mlp.experts.{expert}.gate_proj.weight" in fqn:
+        return [f"layers.{layer}.moe.experts.w1"]
+    elif f"mlp.experts.{expert}.up_proj.weight" in fqn:
+        return [f"layers.{layer}.moe.experts.w3"]
+    # 2) Router's weights
+    elif f"mlp.gate.weight" in fqn:
         return [f"layers.{layer}.moe.router.gate.weight"]
-    elif "feed_forward.shared_expert.down_proj.weight" in fqn:
+
+    # 3) Shared expert's weights
+    elif "mlp.shared_experts.down_proj.weight" in fqn:
         return [f"layers.{layer}.moe.shared_expert.w2"]
-    elif "feed_forward.shared_expert.gate_proj.weight" in fqn:
+    elif "mlp.shared_experts.gate_proj.weight" in fqn:
         return [f"layers.{layer}.moe.shared_expert.w3"]
-    elif "feed_forward.shared_expert.up_proj.weight" in fqn:
+    elif "mlp.shared_experts.up_proj.weight" in fqn:
         return [f"layers.{layer}.moe.shared_expert.w1"]
+
+    # Dense Layer
+    elif f"mlp.gate_proj.weight" in fqn:
+        return [f"layers.{layer}.feed_forward.w3.weight"]
+    elif f"mlp.down_proj.weight" in fqn:
+        return [f"layers.{layer}.feed_forward.w2.weight"]
+    elif f"mlp.up_proj.weight" in fqn:
+        return [f"layers.{layer}.feed_forward.w1.weight"]
+    
+    # Transformer layer
     elif "input_layernorm.weight" in fqn:
+        return [f"layers.{layer}.attention_norm.weight"]
+    elif "post_attention_layernorm.weight" in fqn:
         return [f"layers.{layer}.ffn_norm.weight"]
-    elif "self_attn.k_proj" in fqn:
-        return [f"layers.{layer}.attention.wk.weight"]
+    # Attention layer
+    elif "self_attn.q_a_proj" in fqn:
+        return [f"layers.{layer}.attention.wq_a.weight"]
+    elif "self_attn.q_a_layernorm" in fqn:
+        return [f"layers.{layer}.attention.q_norm.weight"]
+    elif "self_attn.q_b_proj" in fqn:
+        return [f"layers.{layer}.attention.wq_b.weight"]
+    elif "self_attn.kv_a_proj_with_mqa" in fqn:
+        return [f"layers.{layer}.attention.wkv_a.weight"]
+    elif "self_attn.kv_a_layernorm" in fqn:
+        return [f"layers.{layer}.attention.kv_norm.weight"]
+    elif "self_attn.kv_b_proj" in fqn:
+        return [f"layers.{layer}.attention.wkv_b.weight"]
     elif "self_attn.o_proj" in fqn:
         return [f"layers.{layer}.attention.wo.weight"]
-    elif "self_attn.q_proj" in fqn:
-        return [f"layers.{layer}.attention.wq.weight"]
-    elif "self_attn.v_proj" in fqn:
-        return [f"layers.{layer}.attention.wv.weight"]
-    elif "post_attention_layernorm.weight" in fqn:
-        return [f"layers.{layer}.attention_norm.weight"]
+    
     else:
         raise ValueError(f"Unknown fqn {fqn}")
 
@@ -167,6 +190,8 @@ class CheckpointConverter:
                     continue
                 loaded_state_dict = self._load_round(loader_assignments[i])
 
+                
+
             torch.cuda.synchronize()
             logger.info(f"Loading round {idx} finished")
             for i in range(self.total_loader):
@@ -202,6 +227,17 @@ class CheckpointConverter:
         metadata_path = os.path.join(self.path, "model.safetensors.index.json")
         with open(metadata_path, "r") as f:
             self.metadata = json.load(f)["weight_map"]
+        
+        # TODO: remove this hack. Drop all the parameter with layer_id > 10 
+        keys_to_remove = []
+        for key in self.metadata:
+            for layer in range(5, 62):
+                if f"model.layers.{layer}" in key:
+                    keys_to_remove.append(key)
+                    break
+        for key in keys_to_remove:
+            self.metadata.pop(key)
+        
 
     def _create_fqn_mappings(self, state_dict: dict[str, torch.Tensor]) -> None:
         if not self.metadata:
@@ -209,11 +245,14 @@ class CheckpointConverter:
 
         # Create the mapping from the stored checkpoint keys to TorchTitan keys.
         for fqn in list(self.metadata.keys()):
-            titan_fqns = convert_to_titan_fqns(fqn)
+
             # We don't know how to process _extra_state
-            if "_extra_state" in fqn:
+            # And we don't have e_score_correction_bias in torchtitan implementation
+            if "_extra_state" in fqn or "mlp.gate.e_score_correction_bias" in fqn or "tokens_per_expert" in fqn or "expert_bias" in fqn:
                 self.metadata.pop(fqn)
                 continue
+            
+            titan_fqns = convert_to_titan_fqns(fqn)
 
             if titan_fqns[0] not in state_dict:
                 for titan_fqn in titan_fqns:
@@ -225,13 +264,21 @@ class CheckpointConverter:
             for titan_fqn in titan_fqns:
                 self.titan_fqn_to_stored_fqn[titan_fqn] = fqn
 
+        # print("self.titan_fqn_to_stored_fqn.keys(): ", self.titan_fqn_to_stored_fqn.keys())
+
         torchtitan_extra = sorted(
             list(set(state_dict.keys()) - set(self.titan_fqn_to_stored_fqn.keys()))
         )
         converted_extra = sorted(
             list(set(self.titan_fqn_to_stored_fqn.keys()) - set(state_dict.keys()))
         )
-        assert set(state_dict.keys()) == set(self.titan_fqn_to_stored_fqn.keys()), (
+        state_dict_keys = [
+            x
+            for x in state_dict.keys()
+            if not "expert_bias" in x and not "tokens_per_expert" in x
+        ]
+
+        assert set(state_dict_keys) == set(self.titan_fqn_to_stored_fqn.keys()), (
             f"{pprint.pformat(torchtitan_extra)}",
             f"{pprint.pformat(converted_extra)}",
         )
@@ -243,6 +290,7 @@ class CheckpointConverter:
             filename_to_metas = defaultdict(list)
             for fqn, filename in self.metadata.items():
                 titan_fqns = self.stored_fqn_to_titan_fqn[fqn]
+                # The shape is wrong for the following keys. We need to convert it.
                 shape = convert_to_hf_shape(fqn, titan_fqns, state_dict[titan_fqns[0]])
                 meta = TensorMetadata(
                     fqn=fqn,
@@ -305,7 +353,7 @@ class CheckpointConverter:
         assignment: _Assignment,
         loaded_state_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        flatten_tensors = [t.flatten() for t in loaded_state_dict.values()]
+        flatten_tensors = [t.to(dtype=torch.bfloat16).flatten() for t in loaded_state_dict.values()]
         flatten_tensor = torch.concat(flatten_tensors)
         assert self.loader_id == assignment.loader_id
         rank = self.loader_id * self.loader_every_n_ranks
@@ -322,6 +370,11 @@ class CheckpointConverter:
     def _reshard_receive(
         self, assignment: _Assignment, state_dict: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
+
+        for shape in assignment.shapes:
+            size = math.prod(shape)
+            print(f"In _reshard_receive, Shape: {shape}, Size: {size}, GB: {size * 2 / 1e9}")
+
         flatten_tensor = torch.empty(
             sum(math.prod(s) for s, d in zip(assignment.shapes, assignment.dtypes)),
             dtype=assignment.dtypes[0],
@@ -451,7 +504,7 @@ if __name__ == "__main__":
         """Specify the path of the target checkpoint to convert."""
 
         convert_hf_token: str = ""
-        """Specify the Hugging Face token to use when downloading checkpoints."""
+        """Specify the HuggingFace token to use when downloading checkpoints."""
 
         convert_load_every_n_ranks: int = 8
         """
@@ -479,6 +532,7 @@ if __name__ == "__main__":
     trainer: Optional[Trainer] = None
 
     try:
+        # TODO: Can we set requires_grad to false for the model?
         trainer = Trainer(config)
         if os.path.exists(trainer.checkpointer.folder):
             raise RuntimeError(
@@ -487,10 +541,11 @@ if __name__ == "__main__":
             )
         if config.checkpoint.fake_model:
             state_dict = _create_verified_state_dict(
-                trainer.world_mesh.get_group(), trainer.world_mesh
+                trainer.parallel_dims.world_mesh.get_group(), trainer.parallel_dims.world_mesh
             )
         else:
             state_dict = trainer.checkpointer.states[MODEL].state_dict()
+            # print("Torchtitan state_dict keys: ", state_dict.keys())
 
         size = 0
         for v in state_dict.values():
@@ -498,10 +553,10 @@ if __name__ == "__main__":
         logger.info(f"Total size of the model: {size / 1e9:.2f} GB")
 
         # Our tokenizer is not up-to-date yet.
-        tok_embeddings_weight = state_dict.pop("tok_embeddings.weight")
-        output_weight = state_dict.pop("output.weight")
+        tok_embeddings_weight = state_dict.pop("tok_embeddings.weight", None)
+        output_weight = state_dict.pop("output.weight", None)
         state_dict = CheckpointConverter(
-            process_group=trainer.world_mesh.get_group(),
+            process_group=trainer.parallel_dims.world_mesh.get_group(),
             path=config.checkpoint.convert_path,
             token=config.checkpoint.convert_hf_token,
             loader_every_n_ranks=config.checkpoint.convert_load_every_n_ranks,
@@ -521,7 +576,7 @@ if __name__ == "__main__":
             _verify_state_dict(
                 state_dict,
                 config.checkpoint.convert_path,
-                trainer.world_mesh.get_rank(),
+                trainer.parallel_dims.world_mesh.get_rank(),
             )
             dist.barrier()
             logger.info(f"Verifies state_dict {time.time() - begin}.")

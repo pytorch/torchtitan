@@ -9,8 +9,3 @@ From HuggingFace format:
 ```bash
 CONFIG_FILE=../../torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml  ./convert_hf_to_dcp_with_gpus.sh --checkpoint.enable_checkpoint --checkpoint.convert_path=[checkpoint_folder] --checkpoint.convert_load_every_n_ranks=8
 ```
-
-
-```bash
-CONFIG_FILE=../../torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml  ./convert_hf_to_dcp_with_gpus.sh --checkpoint.enable_checkpoint --checkpoint.convert_path=data/users/jianiw/dsv3-weights/ --checkpoint.convert_load_every_n_ranks=8
-```
