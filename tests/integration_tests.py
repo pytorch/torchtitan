@@ -9,8 +9,9 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Dict, List, Sequence
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +20,13 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
+
+
+class TestSuite(Enum):
+    """Test suites for integration tests."""
+    CORE = "core"  # Core functionality tests
+    PARALLELISM = "parallelism"  # Model parallelism tests
+    ALL = "all"  # Run all tests
 
 
 @dataclass
@@ -31,20 +39,27 @@ class OverrideDefinitions:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
+    models: List[str] = field(default_factory=lambda: ["llama3"])  # Default to llama3
 
     def __repr__(self):
         return self.test_descr
 
 
-def build_test_list():
+def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
     """
-    key is the config file name and value is a list of OverrideDefinitions
-    that is used to generate variations of integration tests based on the
-    same root config file.
+    Build a dictionary of core functionality test configurations.
+    This test suite is aimed at testing the core functionality and components of torchtitan.
+    Core functionality tests only run on llama3 model.
+    
+    Returns:
+        A dictionary where:
+        - key is the config file name
+        - value is a list of OverrideDefinitions
     """
-    integration_tests_flavors = defaultdict(lambda: defaultdict(list))
-    # llama3 integration test list. This test is aimed for testing llama3 model and torchtitan core components.
-    integration_tests_flavors["llama3"]["debug_model.toml"] = [
+    core_tests = defaultdict(list)
+    
+    # ===== LLAMA3 CORE FUNCTIONALITY TESTS =====
+    core_tests["debug_model.toml"].extend([
         OverrideDefinitions(
             [
                 [
@@ -78,38 +93,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "2D eager",
-            "2d_eager",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "2D compile",
-            "2d_compile",
-        ),
-        # TODO: re-enable this test once the async TP issue is fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--compile.enable",
-        #             "--parallelism.tensor_parallel_degree 2",
-        #             "--parallelism.enable_async_tensor_parallel",
-        #         ],
-        #     ],
-        #     "2D async TP compile",
-        #     "2d_asynctp_compile",
-        # ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
+                    "--checkpoint.enable_checkpoint",
                 ],
                 [
                     "--checkpoint.enable",
@@ -316,166 +300,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=4",
-                ]
-            ],
-            "DDP",
-            "ddp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "HSDP",
-            "hsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode='full'",
-                    "--model.flavor=debugmodel_flex_attn",
-                ]
-            ],
-            "FSDP+FLEX_ATTN",
-            "fsdp+flex_attn",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--activation_checkpoint.mode=selective",
-                    "--activation_checkpoint.selective_ac_option=op",
-                    "--model.flavor=debugmodel_flex_attn",
-                ]
-            ],
-            "FSDP + FLEX + per op SAC",
-            "fsdp+flex_attn+per_op_sac",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='allgather'",
-                ]
-            ],
-            "CP (allgather)",
-            "cp_allgather",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree=4",
-                    "--parallelism.context_parallel_rotate_method='alltoall'",
-                ]
-            ],
-            "CP (alltoall)",
-            "cp_alltoall",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                ]
-            ],
-            "HSDP+TP",
-            "hsdp+tp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+CP",
-            "fsdp+cp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (without dp_shard)",
-            "hsdp+cp_without_dp_shard",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (with dp_shard)",
-            "hsdp+cp_with_dp_shard",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+TP+CP",
-            "fsdp+tp+cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-                [
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--memory_estimation.enable",
-        #         ]
-        #     ],
-        #     "FSDP2 Memory Tracking and Estimation",
-        #     "fsdp2_memory_estimation",
-        #     ngpu=2,
-        # ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
+                    "--checkpoint.enable_checkpoint",
                 ],
                 [
                     # placeholder for the generation script's generate step
@@ -484,34 +309,6 @@ def build_test_list():
             "Generation script test",
             "test_generate",
             ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.fsdp_reshard_after_forward always",
-                ],
-            ],
-            "Test always resharding after forward pass",
-            "fsdp_reshard_always",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--training.steps 10",
-                ],
-                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-                # excluded during loading to avoid errors caused by mismatched dp_degree.
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--training.steps 20",
-                ],
-            ],
-            "Optional checkpoint",
-            "optional_checkpoint",
         ),
         OverrideDefinitions(
             [
@@ -543,32 +340,43 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--validation.enable",
-                    "--validation.dataset c4_test",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                ],
+                    "--memory_estimation.enabled",
+                ]
             ],
-            "Validation test with tp, cp, pp",
-            "validation_tp_cp_pp",
-            ngpu=8,
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_memory_estimation",
+            ngpu=2,
         ),
-    ]
-
-    # deepseek v3 integration test list. This test is aimed for testing deepseek v3 model.
-    integration_tests_flavors["deepseek_v3"]["debug_model.toml"] = [
         OverrideDefinitions(
             [
                 [
-                    "--profiling.enable_profiling",
-                    "--metrics.enable_tensorboard",
+                    "--parallelism.fsdp_reshard_after_forward always",
                 ],
             ],
-            "default",
-            "default",
+            "Test always resharding after forward pass",
+            "fsdp_reshard_always",
+            ngpu=2,
         ),
+    ])
+
+    return core_tests
+
+
+def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
+    """
+    Build a dictionary of model parallelism test configurations.
+    This test suite is aimed at testing the model parallelism of torchtitan, and will broadly cover
+    all the supported model parallelism patterns on all the supported models.
+    
+    Returns:
+        A dictionary where:
+        - key is the config file name
+        - value is a list of OverrideDefinitions
+    """
+    parallelism_tests = defaultdict(list)
+    
+    # ===== LLAMA3 MODEL PARALLELISM TESTS =====
+    parallelism_tests["debug_model.toml"].extend([
         OverrideDefinitions(
             [
                 [
@@ -577,6 +385,7 @@ def build_test_list():
             ],
             "2D eager",
             "2d_eager",
+            models=["llama3", "deepseek_v3"],
         ),
         OverrideDefinitions(
             [
@@ -588,6 +397,7 @@ def build_test_list():
             "DDP",
             "ddp",
             ngpu=4,
+            models=["llama3", "deepseek_v3"],
         ),
         OverrideDefinitions(
             [
@@ -599,10 +409,369 @@ def build_test_list():
             "HSDP",
             "hsdp",
             ngpu=4,
+            models=["llama3", "deepseek_v3"],
         ),
-    ]
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "TP Only",
+            "tp_only",
+            models=["llama3", "deepseek_v3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.compile",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "2D compile",
+            "2d_compile",
+            models=["llama3"],
+        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 4",
+        #             "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+        #         ],
+        #     ],
+        #     "PP looped zero bubble test",
+        #     "pp_looped_zero_bubble",
+        #     ngpu=4,
+        #     models=["llama3"],
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+        #         ],
+        #     ],
+        #     "PP zero bubble test (v shaped)",
+        #     "pp_zbv",
+        #     ngpu=2,
+        #     models=["llama3"],
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule 1F1B",
+        #             "--parallelism.data_parallel_shard_degree 1",
+        #         ],
+        #     ],
+        #     "PP 1D test 1F1B",
+        #     "pp_1f1b",
+        #     ngpu=2,
+        #     models=["llama3"],
+        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule GPipe",
+                    "--parallelism.data_parallel_shard_degree 1",
+                ],
+            ],
+            "PP 1D test GPipe",
+            "pp_gpipe",
+            ngpu=2,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule 1F1B",
+                    "--parallelism.pipeline_parallel_layers_per_stage 4",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "PP+DP 1F1B 2D test",
+            "pp_dp_1f1b",
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule GPipe",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "PP+DP GPipe 2D test",
+            "pp_dp_gpipe",
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+TP 2D test",
+            "pp_tp",
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+                [
+                    "--training.steps 20",
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+DP+TP 3D test with save/load resume ckpt",
+            "pp_dp_tp",
+            ngpu=8,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.compile",
+                ],
+            ],
+            "PP+DP+TP 3D test with torch.compile",
+            "3d_compile",
+            ngpu=8,
+            models=["llama3", "deepseek_v3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                ],
+                [
+                    "--parallelism.pipeline_parallel_degree 4",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.pipeline_parallel_layers_per_stage 1",
+                ],
+            ],
+            "PP looped 1F1B test",
+            "pp_looped_1f1b",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
+        #             "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+        #         ],
+        #     ],
+        #     "PP with custom pipeline schedule loaded from CSV file",
+        #     "pp_custom_csv",
+        #     ngpu=2,
+        #     models=["llama3"],
+        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                ]
+            ],
+            "DDP",
+            "ddp",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                ]
+            ],
+            "HSDP",
+            "hsdp",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode='full'",
+                    "--model.flavor=debugmodel_flex_attn",
+                ]
+            ],
+            "FSDP+FLEX_ATTN",
+            "fsdp+flex_attn",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.context_parallel_degree=4",
+                    "--parallelism.context_parallel_rotate_method='allgather'",
+                ]
+            ],
+            "CP (allgather)",
+            "cp_allgather",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.context_parallel_degree=4",
+                    "--parallelism.context_parallel_rotate_method='alltoall'",
+                ]
+            ],
+            "CP (alltoall)",
+            "cp_alltoall",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_without_dp_shard",
+            ngpu=4,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (with dp_shard)",
+            "hsdp+cp_with_dp_shard",
+            ngpu=8,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+                [
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--training.enable_cpu_offload",
+                    "--optimizer.early_step_in_backward",
+                ],
+            ],
+            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+            "cpu_offload+opt_in_bwd+TP+DP+CP",
+            ngpu=8,
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--training.steps 10",
+                ],
+                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
+                # excluded during loading to avoid errors caused by mismatched dp_degree.
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
+            models=["llama3"],
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_test",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ],
+            ],
+            "Validation test with fsdp, tp, cp",
+            "validation_fsdp_tp_cp",
+            ngpu=8,
+            models=["llama3"],
+        ),
+    ])
 
-    return integration_tests_flavors
+    return parallelism_tests
 
 
 def _run_cmd(cmd):
@@ -649,29 +818,55 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
 
 def run_tests(args):
-    integration_tests_flavors = build_test_list()
+    # Determine which test suites to run based on the command-line argument
+    if args.test_suite == TestSuite.CORE.value:
+        test_suites = {"core": build_core_functionality_tests()}
+    elif args.test_suite == TestSuite.PARALLELISM.value:
+        test_suites = {"parallelism": build_model_parallelism_tests()}
+    else:  # ALL
+        test_suites = {
+            "core": build_core_functionality_tests(),
+            "parallelism": build_model_parallelism_tests()
+        }
+    
+    for test_suite_name, test_configs in test_suites.items():
+        logger.info(f"Running {test_suite_name} test suite...")
+        
+        for config_file in os.listdir(args.config_dir):
+            if config_file.endswith(".toml") and config_file in test_configs:
+                full_path = os.path.join(args.config_dir, config_file)
+                with open(full_path, "rb") as f:
+                    config = tomllib.load(f)
+                    model_name = config["model"].get("name", "llama3")
+                    
+                    if args.model != "all":
+                        assert model_name == args.model, f"Model mismatch with provided config: {model_name} != {args.model}"
 
-    for config_file in os.listdir(args.config_dir):
-        if config_file.endswith(".toml"):
-            full_path = os.path.join(args.config_dir, config_file)
-            with open(full_path, "rb") as f:
-                config = tomllib.load(f)
-                model_name = config["model"].get("name", "llama3")
-                is_integration_test = config["job"].get(
-                    "use_for_integration_test", False
-                )
-
-                if not is_integration_test:
-                    continue
-
-                if model_name not in integration_tests_flavors.keys():
-                    logger.info(
-                        f"Integration test not supported for model {model_name}, skipping {config_file}"
+                    is_integration_test = config["job"].get(
+                        "use_for_integration_test", False
                     )
-                    continue
 
-                for test_flavor in integration_tests_flavors[model_name][config_file]:
-                    if args.test == "all" or test_flavor.test_name == args.test:
+                    if not is_integration_test:
+                        continue
+
+                    for test_flavor in test_configs[config_file]:
+                        # Filter by test name if specified
+                        if args.test != "all" and test_flavor.test_name != args.test:
+                            continue
+                        
+                        # Filter by model if specified
+                        if args.model != "all" and args.model not in test_flavor.models:
+                            continue
+                            
+                        # Skip tests for models that don't match the current config
+                        if model_name not in test_flavor.models:
+                            logger.info(
+                                f"Skipping test {test_flavor.test_name} that supports {test_flavor.models} model,"
+                                f" because --model arg is {model_name}"
+                            )
+                            continue
+                            
+                        # Check if we have enough GPUs
                         if args.ngpu < test_flavor.ngpu:
                             logger.info(
                                 f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
@@ -683,16 +878,30 @@ def run_tests(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("output_dir")
+    parser.add_argument("output_dir", help="Directory to store test outputs")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/models/llama3/train_configs"
+        "--config_dir", default="./torchtitan/models/llama3/train_configs",
+        help="Directory containing model configuration files"
     )
     parser.add_argument(
-        "--test",
+        "--test_name",
         default="all",
-        help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
+        help="Specific test name to run (e.g., 'tp_only', 'full_checkpoint'). Use 'all' to run all tests (default: all)"
     )
-    parser.add_argument("--ngpu", default=8, type=int)
+    parser.add_argument(
+        "--test_suite",
+        default=TestSuite.ALL.value,
+        choices=[ts.value for ts in TestSuite],
+        help="Test suite to run: 'core' for TorchTitan core functionality tests, "
+             "'parallelism' for model parallelism tests, or 'all' for both (default: all)"
+    )
+    parser.add_argument(
+        "--model",
+        default="all",
+        choices=["all", "llama3", "deepseek_v3"],
+        help="Specific model to run tests for (default: all)"
+    )
+    parser.add_argument("--ngpu", default=8, type=int, help="Maximum number of GPUs to use")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
