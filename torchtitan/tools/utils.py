@@ -149,6 +149,12 @@ class NoColor:
     white = ""
     reset = ""
     orange = ""
+    turquoise = ""
+
+
+assert set(NoColor.__dataclass_fields__.keys()) == set(
+    Color.__dataclass_fields__.keys()
+), "NoColor must have the same fields as Color."
 
 
 def check_if_feature_in_pytorch(
