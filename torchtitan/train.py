@@ -13,10 +13,10 @@ from typing import Any, Generator, Iterable, Optional
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.components.ft as ft
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
+from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -50,7 +50,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     # non-swappable training components
     checkpointer: CheckpointManager
-    ft_manager: ft.FTManager
+    ft_manager: FTManager
 
     # runtime utilities
     device: torch.device
@@ -104,11 +104,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             dp_degree, dp_rank = 1, 0
 
-        self.ft_manager = ft.init_ft_manager(job_config)
-        # If TorchFT is enabled, the dp_rank and dp_degree, which are used for
-        # dataloader must be changed.
-        if self.ft_manager.enabled:
-            dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
+        self.ft_manager = FTManager(job_config.fault_tolerance)
+        dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -259,11 +256,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
 
-        if (
-            self.ft_manager.enabled
-            and job_config.fault_tolerance.semi_sync_method is None
-        ):
-            self.ft_manager.set_all_reduce_hook(self.model_parts)
+        self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -336,6 +329,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 loss_fn=self.train_spec.build_loss_fn(job_config),
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
+                metrics_processor=self.metrics_processor,
             )
 
         logger.info(
@@ -474,14 +468,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
-        if parallel_dims.dp_cp_enabled or self.ft_manager.enabled:
+        if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
-            # Skip ft manager communication when using semi sync training
-            use_ft_pg = (
-                self.ft_manager.enabled
-                and self.job_config.fault_tolerance.semi_sync_method is None
-            )
-            ft_pg = self.ft_manager.replicate_pg if use_ft_pg else None
+            ft_pg = self.ft_manager.loss_sync_pg
             global_avg_loss, global_max_loss = (
                 dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
@@ -508,8 +497,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             maybe_enable_memory_snapshot(
                 job_config, global_step=self.step
             ) as memory_profiler,
-            ft.maybe_semi_sync_training(
-                job_config,
+            maybe_semi_sync_training(
+                job_config.fault_tolerance,
                 ft_manager=self.ft_manager,
                 model_parts=self.model_parts,
                 optimizer=self.optimizers,
@@ -530,7 +519,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enabled
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts)
+                    self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

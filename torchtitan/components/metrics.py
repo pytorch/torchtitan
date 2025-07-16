@@ -403,7 +403,7 @@ class MetricsProcessor:
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
-            f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
@@ -412,6 +412,39 @@ class MetricsProcessor:
 
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+
+    def log_validation(self, loss: float, step: int):
+        time_delta = time.perf_counter() - self.time_last_log
+
+        device_mem_stats = self.device_memory_monitor.get_peak_stats()
+
+        # tokens per second per device, abbreviated as tps
+        tps = self.ntokens_since_last_log / (
+            time_delta * self.parallel_dims.non_data_parallel_size
+        )
+
+        metrics = {
+            "validation_metrics/loss": loss,
+            "validation_metrics/throughput(tps)": tps,
+            "validation_metrics/memory/max_active(GiB)": device_mem_stats.max_active_gib,
+            "validation_metrics/memory/max_active(%)": device_mem_stats.max_active_pct,
+            "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+            "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+        }
+        self.logger.log(metrics, step)
+
+        color = self.color
+        logger.info(
+            f"{color.yellow}validate step: {step:2}  "
+            f"{color.green}loss: {loss:7.4f}  "
+            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.blue}tps: {round(tps):,}{color.reset}"
+        )
+
+        self.ntokens_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
