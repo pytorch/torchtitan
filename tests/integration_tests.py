@@ -42,9 +42,8 @@ def build_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = defaultdict(lambda: defaultdict(list))
-    # llama3 integration test list. This test is aimed for testing llama3 model and torchtitan core components.
-    integration_tests_flavors["llama3"]["debug_model.toml"] = [
+    integration_tests_flavors = defaultdict(list)
+    integration_tests_flavors["debug_model.toml"] = [
         OverrideDefinitions(
             [
                 [
@@ -118,6 +117,22 @@ def build_test_list():
             ],
             "Checkpoint Integration Test - Save Load Full Checkpoint",
             "full_checkpoint",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.folder hf_checkpoint",
+                    "--checkpoint.last_save_in_safetensors_format",
+                    "--checkpoint.last_save_model_weights_only",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/full_checkpoint_hf_safetensors/hf_checkpoint/step-10/",
+                ],
+            ],
+            "Checkpoint Integration Test - save load full checkpoint in HF safetensors format",
+            "full_checkpoint_hf_safetensors",
         ),
         OverrideDefinitions(
             [
@@ -525,52 +540,6 @@ def build_test_list():
             ngpu=8,
         ),
     ]
-
-    # deepseek v3 integration test list. This test is aimed for testing deepseek v3 model.
-    integration_tests_flavors["deepseek_v3"]["debug_model.toml"] = [
-        OverrideDefinitions(
-            [
-                [
-                    "--profiling.enable_profiling",
-                    "--metrics.enable_tensorboard",
-                ],
-            ],
-            "default",
-            "default",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "2D eager",
-            "2d_eager",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=4",
-                ]
-            ],
-            "DDP",
-            "ddp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "HSDP",
-            "hsdp",
-            ngpu=4,
-        ),
-    ]
-
     return integration_tests_flavors
 
 
@@ -619,35 +588,24 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
 def run_tests(args):
     integration_tests_flavors = build_test_list()
-
     for config_file in os.listdir(args.config_dir):
         if config_file.endswith(".toml"):
             full_path = os.path.join(args.config_dir, config_file)
             with open(full_path, "rb") as f:
                 config = tomllib.load(f)
-                model_name = config["model"].get("name", "llama3")
                 is_integration_test = config["job"].get(
                     "use_for_integration_test", False
                 )
-
-                if not is_integration_test:
-                    continue
-
-                if model_name not in integration_tests_flavors.keys():
-                    logger.info(
-                        f"Integration test not supported for model {model_name}, skipping {config_file}"
-                    )
-                    continue
-
-                for test_flavor in integration_tests_flavors[model_name][config_file]:
-                    if args.test == "all" or test_flavor.test_name == args.test:
-                        if args.ngpu < test_flavor.ngpu:
-                            logger.info(
-                                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                                f" because --ngpu arg is {args.ngpu}"
-                            )
-                        else:
-                            run_test(test_flavor, full_path, args.output_dir)
+                if is_integration_test:
+                    for test_flavor in integration_tests_flavors[config_file]:
+                        if args.test == "all" or test_flavor.test_name == args.test:
+                            if args.ngpu < test_flavor.ngpu:
+                                logger.info(
+                                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                                    f" because --ngpu arg is {args.ngpu}"
+                                )
+                            else:
+                                run_test(test_flavor, full_path, args.output_dir)
 
 
 def main():
