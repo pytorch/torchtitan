@@ -30,7 +30,7 @@ class TransformerModelArgs(BaseModelArgs):
     vocab_size: int = 151936  # defined later by tokenizer
     # Question: where mulltiple of is being used?
     # We need to change the multiple of
-    hidden_dim: int = 2560
+    hidden_dim: int = 3072
     # multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2 #
     # ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-6  # 1e-6
