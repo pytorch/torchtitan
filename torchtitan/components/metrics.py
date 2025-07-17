@@ -378,7 +378,6 @@ class MetricsProcessor:
             "val_memory/num_ooms": device_mem_stats.num_ooms,
         }
 
-
         if extra_metrics:
             metrics.update(extra_metrics)
 
@@ -398,7 +397,7 @@ class MetricsProcessor:
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
-    
+
     def log(
         self,
         step: int,
@@ -448,17 +447,17 @@ class MetricsProcessor:
         self.logger.log(metrics, step)
 
         color = self.color
-        
+
         if self.log_to_console:
             logger.info(
-            f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
-            f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-            f"{color.blue}tps: {round(tps):,}  "
-            f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
-        )
+                f"{color.red}step: {step:2}  "
+                f"{color.green}loss: {global_avg_loss:7.4f}  "
+                f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+                f"{color.blue}tps: {round(tps):,}  "
+                f"{color.cyan}tflops: {tflops:,.2f}  "
+                f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            )
 
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()

@@ -48,19 +48,17 @@ def _coco_data_processor(
 
     # Extract id from JSON metadata if available
     sample_id = None
-    if "json" in sample:
-        try:
-            metadata = sample["json"]  # Already parsed as dict by webdataset
-            sample_id = metadata["id"]
-        except (KeyError, AttributeError):
-            # If metadata access fails or id is not found, fall back to None
-            pass
 
+    metadata = sample["json"]  # Already parsed as dict by webdataset
+    if "id" in metadata:
+        sample_id = metadata["id"]
+    timestep = metadata["timestep"]
     result = {
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
         "txt": sample["txt"],
+        "timestep": timestep,
     }
 
     # Add id if available
@@ -119,6 +117,7 @@ def _coco_data_processor_from_encodings(
     sample["clip_encodings"] = deserialize_numpy_array(sample["clip_encodings"])
     sample["mean"] = deserialize_numpy_array(sample["mean"])
     sample["logvar"] = deserialize_numpy_array(sample["logvar"])
+    sample["timestep"] = sample["timestep"]
     sample_id = sample.pop("__key__")
     if include_sample_id:
         sample["id"] = sample_id
@@ -138,16 +137,17 @@ def create_dummy_dataset(num_samples: int = 10000):
     # Create dummy images as PIL Images to ensure compatibility
 
     dummy_image = PIL.Image.fromarray(np.zeros((256, 256, 3), dtype=np.uint8))
-
+    timesteps = np.arange(num_samples) % 8
     data = {
         "txt": ["A photo of a cat"] * num_samples,
         "png": [dummy_image] * num_samples,
+        "json": [{"timestep": timestep} for timestep in timesteps],
     }
     return Dataset.from_dict(data)
 
 
 DATASETS["dummy"] = TextToImageDatasetConfig(
     path="dummy",
-    loader=lambda path: create_dummy_dataset(512),
+    loader=lambda path: create_dummy_dataset(128),
     data_processor=_coco_data_processor,
 )

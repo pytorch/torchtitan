@@ -68,7 +68,7 @@ The filter file is included in this repository. It was generated using `torchtit
 The number of samples is taken from the previous stable diffusion benchmark, but rounded slightly to be divisible by large powers of 2 (29,696).
 
 1. download coco-2014 validation dataset: `DOWNLOAD_PATH=/dataset/coco2014_raw bash torchtitan/experiments/flux/scripts/coco-2014-validation-download.sh`
-2. Create the validation subset, resize to 256x256 and convert to webdataset: `python torchtitan/experiments/flux/scripts/coco_to_webdataset.py --input-images-dir /dataset/coco2014_raw/val2014 --input-captions-file /dataset/coco2014_raw/annotations/captions_val2014.json --output-dir /dataset/coco --num-samples 29696 --width 256 --height 256 --samples-per-shard 1000 --output-tsv-file /dataset/val2014_30k.tsv`
+2. Create the validation subset, assign each sample a timestep, resize to 256x256 and convert to webdataset: `python torchtitan/experiments/flux/scripts/coco_to_webdataset.py --input-images-dir /dataset/coco2014_raw/val2014 --input-captions-file /dataset/coco2014_raw/annotations/captions_val2014.json --output-dir /dataset/coco --num-samples 29696 --width 256 --height 256 --samples-per-shard 1000 --output-tsv-file /dataset/val2014_30k.tsv`
 
 #### Download the encoders
 Download the autoencoder, t5 and clip models from HuggingFace. For the autoencoder, you must acquire your own access token from hf

@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 from concurrent.futures import as_completed, ProcessPoolExecutor
 
+import numpy as np
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
@@ -123,6 +124,10 @@ def main():
     # Sort by id for consistent ordering
     df = df.sort_values(by=["id"])
 
+    # assign a timestep to each sample
+    assert len(df) % 8 == 0, "Number of samples must be divisible by 8"
+    df["timestep"] = np.arange(len(df)) % 8
+
     # Save the subset to a TSV file
     print(f"Saving subset to {args.output_tsv_file}")
     df.to_csv(args.output_tsv_file, sep="\t", index=False)
@@ -139,7 +144,7 @@ def main():
     df_metadata["file_name"] = df_metadata["image_id"].apply(
         lambda x: f"COCO_val2014_{x:012}.png"
     )
-    df_metadata[["file_name", "caption", "image_id"]].to_csv(
+    df_metadata[["file_name", "caption", "image_id", "timestep"]].to_csv(
         os.path.join(validation_dir, "metadata.csv"), index=False
     )
 
@@ -197,7 +202,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Extract only the columns needed for WebDataset creation
-    df_webdataset = df_webdataset[["image_id", "caption"]].copy()
+    df_webdataset = df_webdataset[["image_id", "caption", "timestep"]].copy()
 
     # Group data by shard
     num_shards = math.ceil(len(df_webdataset) / args.samples_per_shard)
@@ -216,6 +221,7 @@ def main():
                 row = df_webdataset.iloc[idx]
                 image_id = row["image_id"]
                 caption = row["caption"]
+                timestep = row["timestep"]
 
                 # Define the base filename using image_id
                 base_name = f"{image_id:012d}"
@@ -245,6 +251,7 @@ def main():
                     "id": str(image_id),
                     "caption": caption,
                     "filename": f"COCO_val2014_{base_name}.png",
+                    "timestep": timestep,
                 }
                 json_info = tarfile.TarInfo(f"{base_name}.json")
                 json_data = json.dumps(metadata, indent=2)

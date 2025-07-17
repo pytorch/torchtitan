@@ -434,24 +434,7 @@ class FluxTrainer(Trainer):
             # Clean up large intermediate tensors immediately
             del pred, noise, target, latent_noise_pred, latents
 
-            # average the loss across timesteps
-            # might be useful to report this in the future, but currently not mechanism in torchtitan
-            # for distributed averaging with numel > 1
-            # loss_per_timestep = loss.view(7, -1).mean(dim=1)
-
-            # Initialize a tensor to accumulate losses for each timestep (0-7)
-            loss_per_timestep = torch.zeros(8, device=loss.device)
-            # Reshape loss to have one value per sample
-            loss_per_sample = loss.mean(dim=(1, 2, 3))
-
-            # Get integer timestep values from the timestep_values
-            timestep_indices = timesteps.long()
-
-            # Use scatter_add_ for vectorized accumulation of losses by timestep
-            loss_per_timestep.scatter_add_(0, timestep_indices, loss_per_sample)
-
-            # Count samples per timestep for averaging (using bincount)
-            timestep_counts = torch.bincount(timestep_indices, minlength=8)
+            loss = loss.mean()
 
             if (
                 parallel_dims.dp_replicate_enabled
@@ -462,24 +445,16 @@ class FluxTrainer(Trainer):
                 ft_pg = (
                     self.ft_manager.replicate_pg if self.ft_manager.enabled else None
                 )
-                # Use the new dist_collect function to gather tensors across devices
-                global_loss_per_timestep = dist_utils.dist_collect(
-                    loss_per_timestep, world_mesh["dp_cp"], ft_pg
-                )
-                global_timestep_counts = dist_utils.dist_collect(
-                    timestep_counts, world_mesh["dp_cp"], ft_pg
-                )
+                global_loss = dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg)
 
             else:
-                # For single device, just calculate locally
-                global_loss_per_timestep = loss_per_timestep
-                global_timestep_counts = timestep_counts
+                global_loss = loss.item()
 
         # if encoders are not loaded we cannot save images
         if save_imgs:
             if not self.t5_encoder or not self.clip_encoder:
                 logger.warning("Encoders are not loaded, cannot save images")
-                return global_loss_per_timestep, global_timestep_counts
+                return global_loss
 
             t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
             generate_and_save_images(
@@ -499,8 +474,7 @@ class FluxTrainer(Trainer):
                 dtype=self._dtype,
             )
 
-        # In the future, we could return avg_loss_per_timestep for more detailed reporting
-        return global_loss_per_timestep, global_timestep_counts
+        return global_loss
 
     def train_success(self, eval_loss: float):
         return (
@@ -523,7 +497,7 @@ class FluxTrainer(Trainer):
                 warmup_steps=self.job_config.lr_scheduler.warmup_steps,
                 gradient_clip_norm=self.job_config.training.max_norm,
                 optimizer_config=self.optimizers.optimizers[0].param_groups[0],
-                eval_freq=job_config.eval.eval_freq
+                eval_freq=job_config.eval.eval_freq,
             )
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
@@ -600,59 +574,30 @@ class FluxTrainer(Trainer):
             )
 
     def eval(self) -> float:
-        def generate_val_timesteps(cur_val_timestep, samples):
-            """
-            Generate timesteps for validation set
-
-            This is a helper function to generate timesteps 0 through 7, repeating as necessary.
-            """
-            first_offset = torch.arange(cur_val_timestep, 8, device=self.device)[
-                :samples
-            ]
-            samples_left = samples - first_offset.numel()
-            val_timesteps = torch.arange(
-                0, 8, dtype=torch.int8, device=self.device
-            ).repeat_interleave(math.ceil(samples_left / 8))[:samples_left]
-            val_timesteps = torch.cat([first_offset, val_timesteps])
-            cur_val_timestep = (val_timesteps[-1].item() + 1) % 8
-            return val_timesteps, cur_val_timestep
-
         if self.mlperf_logger:
             self.mlperf_logger.log_eval_start(self.step)
         self.model.eval()
 
-        # Follow procedure set out in Flux paper of stratified timestep sampling
-        cur_val_timestep = 0
         eval_step = 0
         eval_samples = 0
-        sum_loss_per_timestep = torch.zeros(8, device=self.device)
-        sum_timestep_counts = torch.zeros(8, device=self.device)
+        eval_loss = 0
         # Iterate through all validation batches
         # TODO: not sure how to handle profiling with validation
         for val_inputs, val_labels in self.batch_generator(self.val_dataloader):
             eval_step += 1
             samples = len(val_labels[0] if isinstance(val_labels, list) else val_labels)
-            val_timesteps, cur_val_timestep = generate_val_timesteps(
-                cur_val_timestep, samples
-            )
-            loss, counts = self.eval_step(
+            timesteps = val_inputs.pop("timestep")
+            loss = self.eval_step(
                 val_inputs,
                 val_labels,
-                val_timesteps,
+                timesteps,
                 save_imgs=eval_step == 1 and self.job_config.eval.save_img_folder,
             )
             eval_samples += samples
-            sum_loss_per_timestep += loss
-            sum_timestep_counts += counts
+            eval_loss += loss
+        # Different batches and timesteps may have different number of samples, so take the mean at the end
 
-        # Different batches and timesteps may have different number of samples, so we need to average the loss like this
-        # rather than taking the mean of the mean batch losses.
-        
-        # avoid division by zero
-        avg_loss_per_timestep = sum_loss_per_timestep / torch.maximum(
-            sum_timestep_counts, torch.ones_like(sum_timestep_counts)
-        )
-        avg_loss = avg_loss_per_timestep.mean()
+        avg_loss = eval_loss / eval_samples
         self.metrics_processor.val_log(self.step, avg_loss)
         self.model.train()
 
@@ -662,9 +607,9 @@ class FluxTrainer(Trainer):
             if isinstance(module, FSDPModule):
                 module.reshard()
         if self.mlperf_logger:
-            self.mlperf_logger.log_eval_end(self.step, avg_loss.item())
+            self.mlperf_logger.log_eval_end(self.step, avg_loss)
 
-        return avg_loss.item()
+        return avg_loss
 
 
 if __name__ == "__main__":

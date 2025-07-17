@@ -44,6 +44,7 @@ def process_with_streaming(trainer, global_id: int):
             ("clip_encodings", pa.binary()),
             ("mean", pa.binary()),
             ("logvar", pa.binary()),
+            ("timestep", pa.int32()),
         ]
     )
 
@@ -106,6 +107,9 @@ def process_with_streaming(trainer, global_id: int):
                     "logvar": inputs["logvar"].to(device="cpu", dtype=torch.bfloat16),
                 }
 
+                if "timestep" in inputs:
+                    cpu_tensors["timestep"] = inputs["timestep"]
+
                 for i in range(len(inputs["id"])):
                     batch_data.append(
                         {
@@ -118,6 +122,7 @@ def process_with_streaming(trainer, global_id: int):
                             ),
                             "mean": serialize_numpy_array(cpu_tensors["mean"][i]),
                             "logvar": serialize_numpy_array(cpu_tensors["logvar"][i]),
+                            "timestep": cpu_tensors["timestep"][i],
                         }
                     )
 
@@ -191,6 +196,8 @@ def deserialize_preprocessed_example(example):
     example["clip_encodings"] = deserialize_numpy_array(example["clip_encodings"])
     example["mean"] = deserialize_numpy_array(example["mean"])
     example["logvar"] = deserialize_numpy_array(example["logvar"])
+    if "timestep" in example:
+        example["timestep"] = example["timestep"]
     return example
 
 
@@ -217,12 +224,12 @@ def main():
         # Synchronize all processes after preprocessing
         if dist.is_initialized():
             print(f"Rank {global_id}: Preprocessing completed, synchronizing...")
-            
+
             # Set longer timeout for barrier - preprocessing can take hours on large datasets
             # and we need all processes to complete before merging
             old_timeout = os.environ.get("NCCL_TIMEOUT_MS", None)
             os.environ["NCCL_TIMEOUT_MS"] = str(4 * 60 * 60 * 1000)  # 4 hours
-            
+
             try:
                 dist.barrier()
                 print(f"Rank {global_id}: Preprocessing sync completed!")

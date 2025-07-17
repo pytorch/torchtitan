@@ -44,7 +44,7 @@ img_size = 256
 
 [encoder]
 t5_encoder = "google/t5-v1_1-small"
-context_in_dim = 512
+context_in_dim = 4096
 clip_encoder = "/models/clip"
 max_t5_encoding_len = 256
 autoencoder_path = "/models/autoencoder/ae.safetensors"  # Autoencoder to use for image
