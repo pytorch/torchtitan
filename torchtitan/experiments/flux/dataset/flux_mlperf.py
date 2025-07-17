@@ -136,7 +136,9 @@ def create_dummy_dataset(num_samples: int = 10000):
     """Create a dummy Hugging Face Dataset for testing."""
     # Create dummy images as PIL Images to ensure compatibility
 
-    dummy_image = PIL.Image.fromarray(np.zeros((256, 256, 3), dtype=np.uint8))
+    dummy_image = PIL.Image.fromarray(
+        np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
+    )
     timesteps = np.arange(num_samples) % 8
     data = {
         "txt": ["A photo of a cat"] * num_samples,

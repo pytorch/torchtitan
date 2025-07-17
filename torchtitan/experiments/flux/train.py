@@ -389,10 +389,6 @@ class FluxTrainer(Trainer):
             )
             labels = input_dict["img_encodings"]
 
-        world_mesh = self.world_mesh
-        parallel_dims = self.parallel_dims
-
-        # image in latent space transformed by self.auto_encoder
         clip_encodings = input_dict["clip_encodings"]
         t5_encodings = input_dict["t5_encodings"]
 
@@ -429,30 +425,17 @@ class FluxTrainer(Trainer):
                 # Convert sequence of patches to latent shape
                 pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
                 target = noise - labels
-                loss = self.loss_fn(pred, target)
-
+                loss = self.loss_fn(pred, target, reduction="none")
+                loss = loss.mean(dim=(1, 2, 3))
+                loss = loss.sum()
             # Clean up large intermediate tensors immediately
             del pred, noise, target, latent_noise_pred, latents
-
-            if (
-                parallel_dims.dp_replicate_enabled
-                or parallel_dims.dp_shard_enabled
-                or parallel_dims.cp_enabled
-            ):
-                # Collect loss sums and counts from all devices
-                ft_pg = (
-                    self.ft_manager.replicate_pg if self.ft_manager.enabled else None
-                )
-                global_loss = dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg)
-
-            else:
-                global_loss = loss.item()
 
         # if encoders are not loaded we cannot save images
         if save_imgs:
             if not self.t5_encoder or not self.clip_encoder:
                 logger.warning("Encoders are not loaded, cannot save images")
-                return global_loss
+                return loss
 
             t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
             generate_and_save_images(
@@ -472,7 +455,7 @@ class FluxTrainer(Trainer):
                 dtype=self._dtype,
             )
 
-        return global_loss
+        return loss
 
     def train_success(self, eval_loss: float):
         return (
@@ -577,10 +560,12 @@ class FluxTrainer(Trainer):
         self.model.eval()
 
         eval_step = 0
-        eval_loss = 0
+        eval_samples = 0
+        eval_loss = torch.tensor(0.0, device=self.device)
         # Iterate through all validation batches
         for val_inputs, val_labels in self.batch_generator(self.val_dataloader):
             eval_step += 1
+            samples = len(val_labels[0] if isinstance(val_labels, list) else val_labels)
             timesteps = val_inputs.pop("timestep")
             loss = self.eval_step(
                 val_inputs,
@@ -588,10 +573,29 @@ class FluxTrainer(Trainer):
                 timesteps,
                 save_imgs=eval_step == 1 and self.job_config.eval.save_img_folder,
             )
+            eval_samples += samples
             eval_loss += loss
 
+        world_mesh = self.world_mesh
+        parallel_dims = self.parallel_dims
+
+        if (
+            parallel_dims.dp_replicate_enabled
+            or parallel_dims.dp_shard_enabled
+            or parallel_dims.cp_enabled
+        ):
+            ft_pg = self.ft_manager.replicate_pg if self.ft_manager.enabled else None
+            global_loss = dist_utils.dist_collect(
+                eval_loss, world_mesh["dp_cp"], ft_pg
+            ).item()
+            global_samples = dist_utils.dist_collect(
+                torch.tensor(eval_samples), world_mesh["dp_cp"], ft_pg
+            ).item()
+        else:
+            global_loss = eval_loss.item()
+            global_samples = eval_samples
         # Different batches and timesteps may have different number of samples, so take the mean at the end
-        avg_loss = eval_loss / eval_step
+        avg_loss = global_loss / global_samples
         self.metrics_processor.val_log(self.step, avg_loss)
         self.model.train()
 
