@@ -23,7 +23,7 @@ class TransformerModelArgs(BaseModelArgs):
     # Vocab size: 151936
 
     dim: int = 1024  # 1024
-    n_layers: int = 36  # 36
+    n_layers: int = 28  # 36
     n_heads: int = 16  # 16 heads
     # n_kv_heads: int | None = None
     n_kv_heads: int = 8
@@ -46,7 +46,7 @@ class TransformerModelArgs(BaseModelArgs):
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.vocab_size = 151936  # tokenizer.n_words
+        self.vocab_size = 151936  # tokenizer.S
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = 0  # tokenizer.eos_id
 
