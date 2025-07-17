@@ -148,9 +148,9 @@ def parallelize_encoders(
                 fully_shard(block, **fsdp_config)
             fully_shard(t5_model.hf_module, **fsdp_config)
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied FSDP to the T5 and CLIP model")
-        else:
-            logger.info("Applied FSDP to the T5 and CLIP model")
+            if parallel_dims.dp_replicate_enabled:
+                logger.info("Applied HSDP to the T5 and CLIP model")
+            else:
+                logger.info("Applied FSDP to the T5 and CLIP model")
 
     return t5_model, clip_model

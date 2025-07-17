@@ -560,7 +560,7 @@ class FluxTrainer(Trainer):
         self.model.eval()
 
         eval_step = 0
-        eval_samples = 0
+        eval_samples = torch.tensor(0, device=self.device)
         eval_loss = torch.tensor(0.0, device=self.device)
         # Iterate through all validation batches
         for val_inputs, val_labels in self.batch_generator(self.val_dataloader):
@@ -589,11 +589,11 @@ class FluxTrainer(Trainer):
                 eval_loss, world_mesh["dp_cp"], ft_pg
             ).item()
             global_samples = dist_utils.dist_collect(
-                torch.tensor(eval_samples), world_mesh["dp_cp"], ft_pg
+                eval_samples, world_mesh["dp_cp"], ft_pg
             ).item()
         else:
             global_loss = eval_loss.item()
-            global_samples = eval_samples
+            global_samples = eval_samples.item()
         # Different batches and timesteps may have different number of samples, so take the mean at the end
         avg_loss = global_loss / global_samples
         self.metrics_processor.val_log(self.step, avg_loss)
