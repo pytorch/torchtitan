@@ -111,20 +111,20 @@ def process_with_streaming(trainer, global_id: int):
                     cpu_tensors["timestep"] = inputs["timestep"]
 
                 for i in range(len(inputs["id"])):
-                    batch_data.append(
-                        {
-                            "__key__": inputs["id"][i],
-                            "t5_encodings": serialize_numpy_array(
-                                cpu_tensors["t5_encodings"][i]
-                            ),
-                            "clip_encodings": serialize_numpy_array(
-                                cpu_tensors["clip_encodings"][i]
-                            ),
-                            "mean": serialize_numpy_array(cpu_tensors["mean"][i]),
-                            "logvar": serialize_numpy_array(cpu_tensors["logvar"][i]),
-                            "timestep": cpu_tensors["timestep"][i],
-                        }
-                    )
+                    single_sample = {
+                        "__key__": inputs["id"][i],
+                        "t5_encodings": serialize_numpy_array(
+                            cpu_tensors["t5_encodings"][i]
+                        ),
+                        "clip_encodings": serialize_numpy_array(
+                            cpu_tensors["clip_encodings"][i]
+                        ),
+                        "mean": serialize_numpy_array(cpu_tensors["mean"][i]),
+                        "logvar": serialize_numpy_array(cpu_tensors["logvar"][i]),
+                    }
+                    if "timestep" in inputs:
+                        single_sample["timestep"] = cpu_tensors["timestep"][i]
+                    batch_data.append(single_sample)
 
                 # Write batch to current parquet file
                 batch_table = pa.Table.from_pylist(batch_data, schema=schema)
@@ -219,6 +219,7 @@ def main():
 
     try:
         print(f"Rank {global_id}: Starting preprocessing...")
+        dist.barrier()
         process_with_streaming(trainer, global_id)
 
         # Synchronize all processes after preprocessing

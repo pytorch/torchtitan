@@ -251,7 +251,7 @@ def main():
                     "id": str(image_id),
                     "caption": caption,
                     "filename": f"COCO_val2014_{base_name}.png",
-                    "timestep": timestep,
+                    "timestep": int(timestep),
                 }
                 json_info = tarfile.TarInfo(f"{base_name}.json")
                 json_data = json.dumps(metadata, indent=2)

@@ -12,8 +12,9 @@ import torch
 from torch import Tensor
 
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.experiments.flux.model.autoencoder_utils import encode_with_mean_logvar
+from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
+
 
 def preprocess_data(
     # arguments from the recipe
@@ -58,6 +59,8 @@ def preprocess_data(
             img_encodings = autoencoder.encode(images)
             batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
 
+    if "timestep" in batch:
+        batch["timestep"] = batch["timestep"]
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
     batch["t5_encodings"] = t5_text_encodings.to(dtype)
 

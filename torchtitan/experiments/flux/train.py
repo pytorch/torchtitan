@@ -429,12 +429,10 @@ class FluxTrainer(Trainer):
                 # Convert sequence of patches to latent shape
                 pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
                 target = noise - labels
-                loss = self.loss_fn(pred, target, reduction="none")
+                loss = self.loss_fn(pred, target)
 
             # Clean up large intermediate tensors immediately
             del pred, noise, target, latent_noise_pred, latents
-
-            loss = loss.mean()
 
             if (
                 parallel_dims.dp_replicate_enabled
@@ -579,13 +577,10 @@ class FluxTrainer(Trainer):
         self.model.eval()
 
         eval_step = 0
-        eval_samples = 0
         eval_loss = 0
         # Iterate through all validation batches
-        # TODO: not sure how to handle profiling with validation
         for val_inputs, val_labels in self.batch_generator(self.val_dataloader):
             eval_step += 1
-            samples = len(val_labels[0] if isinstance(val_labels, list) else val_labels)
             timesteps = val_inputs.pop("timestep")
             loss = self.eval_step(
                 val_inputs,
@@ -593,11 +588,10 @@ class FluxTrainer(Trainer):
                 timesteps,
                 save_imgs=eval_step == 1 and self.job_config.eval.save_img_folder,
             )
-            eval_samples += samples
             eval_loss += loss
-        # Different batches and timesteps may have different number of samples, so take the mean at the end
 
-        avg_loss = eval_loss / eval_samples
+        # Different batches and timesteps may have different number of samples, so take the mean at the end
+        avg_loss = eval_loss / eval_step
         self.metrics_processor.val_log(self.step, avg_loss)
         self.model.train()
 
