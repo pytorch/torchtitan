@@ -175,7 +175,7 @@ class FlexAttention(torch.nn.Module):
 
             seq_len = batch.shape[1]
             block_mask = FlexAttention.compiled_create_block_mask(
-                mask_mod, batch_dimension, None, seq_len, seq_len
+                mask_mod, batch_dimension, None, seq_len, seq_len, device="cuda"
             )
             FlexAttention.block_masks[mask_key] = block_mask
 
