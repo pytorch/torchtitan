@@ -97,7 +97,68 @@ __all__ = [
     "TorchBF16GroupGEMM",
     "TorchAOBF16GroupGEMM",
     "TritonCGBF16GroupGEMM",
+    "ManualLoopGroupGEMM",
 ]
+
+
+class ManualLoopGroupGEMM(GroupGEMMStrategy):
+    """Manual looping baseline implementation for any arch (esp Blackwell) support"""
+
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        """Store weights in a stacked format"""
+        return torch.stack(all_weights)
+
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        """Execute using manual loops over experts"""
+        # Get weights
+
+        w_gate = module.get_parameter("gate_proj_weight")
+        w_up = module.get_parameter("up_proj_weight")
+        w_down = module.get_parameter("down_proj_weight")
+
+        # Prepare output tensor
+        hidden_size = w_gate.shape[
+            2
+        ]  # stacked weights shape [num_experts, out_dim, in_dim]
+        output = torch.zeros(
+            contig_tokens.shape[0],
+            hidden_size,
+            dtype=contig_tokens.dtype,
+            device=contig_tokens.device,
+        )
+
+        # Process each expert sequentially
+        offset = 0
+        for expert_idx, size in enumerate(m_sizes):
+            if size > 0:
+                # Get tokens for this expert
+                expert_tokens = contig_tokens[offset : offset + size]
+
+                # Get weights for this expert
+                gate_weight = w_gate[expert_idx]  # [out_dim, in_dim]
+                up_weight = w_up[expert_idx]
+                down_weight = w_down[expert_idx]
+
+                # Forward pass: gate and up projections
+                gate_out = torch.mm(expert_tokens, gate_weight.t())
+                up_out = torch.mm(expert_tokens, up_weight.t())
+
+                # Apply activation and combine
+                hidden = self.activation_function(gate_out) * up_out
+
+                # Down projection
+                expert_output = torch.mm(hidden, down_weight.t())
+
+                # Store results
+                output[offset : offset + size] = expert_output
+
+            offset += size
+
+        return output
+
+    @staticmethod
+    def is_available() -> bool:
+        return True
 
 
 class TritonCGBF16GroupGEMM(GroupGEMMStrategy):

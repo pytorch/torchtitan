@@ -122,6 +122,22 @@ def build_test_list():
             [
                 [
                     "--checkpoint.enable_checkpoint",
+                    "--checkpoint.folder hf_checkpoint",
+                    "--checkpoint.last_save_in_safetensors_format",
+                    "--checkpoint.last_save_model_weights_only",
+                ],
+                [
+                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/full_checkpoint_hf_safetensors/hf_checkpoint/step-10/",
+                ],
+            ],
+            "Checkpoint Integration Test - save load full checkpoint in HF safetensors format",
+            "full_checkpoint_hf_safetensors",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable_checkpoint",
                     "--checkpoint.last_save_model_weights_only",
                 ],
             ],
@@ -508,6 +524,20 @@ def build_test_list():
             "Gradient accumulation",
             "gradient_accumulation",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_test",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ],
+            ],
+            "Validation test with fsdp, tp, cp",
+            "validation_fsdp_tp_cp",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors

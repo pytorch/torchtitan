@@ -23,10 +23,8 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_device_info():
-    device_type = _get_available_device_type()
-    if device_type is None:
-        device_type = "cuda"  # default device_type: cuda
+def get_device_info() -> tuple[str, torch.device]:
+    device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
     return device_type, device_module
 
@@ -97,7 +95,7 @@ def get_peak_flops(device_name: str) -> int:
         return 989e12
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
-        return 4.5e15
+        return 2.25e15
     elif "MI300X" in device_name or "MI325X" in device_name:
         # MI300X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
         # MI325X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html
@@ -135,6 +133,8 @@ class Color:
     cyan = "\033[36m"
     white = "\033[37m"
     reset = "\033[39m"
+    orange = "\033[38;2;180;60;0m"
+    turquoise = "\033[38;2;54;234;195m"
 
 
 @dataclass(frozen=True)
@@ -148,6 +148,13 @@ class NoColor:
     cyan = ""
     white = ""
     reset = ""
+    orange = ""
+    turquoise = ""
+
+
+assert set(NoColor.__dataclass_fields__.keys()) == set(
+    Color.__dataclass_fields__.keys()
+), "NoColor must have the same fields as Color."
 
 
 def check_if_feature_in_pytorch(

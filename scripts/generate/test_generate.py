@@ -24,8 +24,8 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     RowwiseParallel,
 )
+from torchtitan.components.checkpoint import excluded_parameters_for_model_only
 from torchtitan.components.metrics import build_device_memory_monitor
-
 from torchtitan.config_manager import ConfigManager
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
@@ -106,14 +106,13 @@ def test_generate(
     # Tokenizer setup
     tokenizer = train_spec.build_tokenizer_fn(config)
 
-    model_cls = train_spec.cls
-    model_args = train_spec.config[config.model.flavor]
+    model_args = train_spec.model_args[config.model.flavor]
     model_args.update_from_config(config, tokenizer)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
-        model = model_cls(model_args)
+        model = train_spec.model_cls(model_args)
 
     world_mesh = None
     # Init distributed env
@@ -125,23 +124,26 @@ def test_generate(
             cp=1,
             tp=world_size,
             pp=1,
+            ep=1,
             world_size=world_size,
-            enable_loss_parallel=False,
         )
-        # Build world mesh for parallelism
-        world_mesh = parallel_dims.build_mesh(device_type=device_type)
+        world_mesh = parallel_dims.world_mesh
 
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
-        apply_tp_minus_sp(model, world_mesh["tp"])
+        apply_tp_minus_sp(model, parallel_dims.world_mesh["tp"])
 
     dist_utils.set_determinism(world_mesh, device, seed, deterministic)
 
     # materalize model
     model.to_empty(device=device_type)
+    with torch.no_grad():
+        model.init_weights()
     model.eval()
 
-    state_dict = {"model": model.state_dict()}
+    state_dict = model.state_dict()
+    for k in excluded_parameters_for_model_only:
+        state_dict.pop(k, None)
 
     # Checkpoint Loading
     begin = time.monotonic()
@@ -160,7 +162,7 @@ def test_generate(
     input_ids = (
         (
             torch.tensor(
-                tokenizer.encode(prompt, bos=True, eos=False), dtype=torch.long
+                tokenizer.encode(prompt, add_bos=True, add_eos=False), dtype=torch.long
             )
             .view(1, -1)
             .repeat(batch_size, 1)
