@@ -6,36 +6,37 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
-enable_tensorboard = true
+log_freq = 1
+enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
 flavor = "8B"
-tokenizer_path = "./assets/tokenizer/Llama-3.1-8B"
+# tokenizer_path = "./assets/tokenizer/Llama-3.1-8B"
+tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 3e-3
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up
+warmup_steps = 50  # lr scheduler warm up
 
 [training]
-local_batch_size = 1
+local_batch_size = 3
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 50
 compile = false
-dataset = "c4"
+dataset = "c4_test"
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -54,7 +55,7 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+selective_ac_option = "2"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
 enable_fsdp_float8_all_gather = false

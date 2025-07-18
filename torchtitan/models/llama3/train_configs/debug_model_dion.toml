@@ -22,22 +22,22 @@ enable_wandb = false
 
 [model]
 name = "llama3"
-flavor = "debugmodel"
+flavor = "8B" #"debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
 name = "DION"
-lr = 1e-3  # Reduced learning rate for stability
+lr = 3e-3  # TODO: tune this
 eps = 1e-8
-rank_factor = 0.75  # Lower rank factor for better numerical stability
+rank_factor = 0.55  # Lower rank factor for better numerical stability
 momentum = 0.95  # Slightly lower momentum
 scalar_optimizer = "adamw"
 weight_decay = 0.01  # Explicit weight decay
 
 [lr_scheduler]
-warmup_steps = 20  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 50  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 lr_min = 0.0

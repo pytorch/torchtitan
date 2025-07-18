@@ -315,7 +315,7 @@ def build_optimizers(
                 "momentum": job_config.optimizer.momentum,
                 "rank_factor": job_config.optimizer.rank_factor,
                 "scalar_optimizer": job_config.optimizer.scalar_optimizer,
-                "distributed": False,  # Always use distributed mode in torchtitan
+                "distributed": True,  # Always use distributed mode in torchtitan
             }
         )
 

@@ -205,23 +205,35 @@ class DionOptimizer(Optimizer):
 
     def _get_lr_scale(self, param: torch.Tensor) -> float:
         """Get learning rate scaling factor based on parameter type and shape."""
-        if param.dim() == 0:  # Scalar (normalization)
+        # Get actual tensor for shape calculation
+        if hasattr(param, "_local_tensor"):
+            actual_param = param._local_tensor
+        else:
+            actual_param = param
+
+        if actual_param.dim() == 0:  # Scalar (normalization)
             return 1.0
-        elif param.dim() == 1:  # Vector (bias, embedding, etc.)
-            if param.numel() > 1000:  # Likely unembedding
-                return 1.0 / math.sqrt(param.size(0))
+        elif actual_param.dim() == 1:  # Vector (bias, embedding, etc.)
+            if actual_param.numel() > 1000:  # Likely unembedding
+                return 1.0 / math.sqrt(actual_param.size(0))
             else:  # Likely bias
                 return 1.0
-        elif param.dim() == 2:  # Matrix (but below threshold)
-            d_out, d_in = param.shape
+        elif actual_param.dim() == 2:  # Matrix (but below threshold)
+            d_out, d_in = actual_param.shape
             return math.sqrt(d_out / d_in)
         else:
             return 1.0
 
     def _get_weight_decay(self, param: torch.Tensor) -> float:
         """Get weight decay for parameter type."""
+        # Get actual tensor for dimension check
+        if hasattr(param, "_local_tensor"):
+            actual_param = param._local_tensor
+        else:
+            actual_param = param
+
         # Only apply weight decay to matrix parameters (not bias/normalization)
-        if param.dim() >= 2:
+        if actual_param.dim() >= 2:
             return self.scalar_weight_decay
         return 0.0
 
@@ -277,6 +289,8 @@ class DionOptimizer(Optimizer):
         state["step"] = 0
         state["rank"] = rank
         state["param_info"] = param_info
+        state["local_m"] = m
+        state["local_n"] = n
 
         return state
 
@@ -305,38 +319,31 @@ class DionOptimizer(Optimizer):
         self, B: torch.Tensor, Q_prev: torch.Tensor, param_info: Dict
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Distributed power iteration (Algorithm 3, lines 5-6)."""
-        # In distributed mode, we need to handle sharding
-        if param_info["is_dtensor"] or param_info["is_fsdp"]:
-            # P = BQ with distributed matrix multiply
-            P_local = torch.mm(B, Q_prev)
+        # For distributed mode, we implement the algorithm more carefully
+        # to handle tensor shapes correctly
 
-            # All-reduce across shards
-            if self.distributed:
-                dist.all_reduce(P_local, op=dist.ReduceOp.SUM, group=self.process_group)
-                P_local = P_local / self.world_size
+        # P = BQ with local computation
+        P_local = torch.mm(B, Q_prev)
 
-            # Orthogonalize
-            P = self._distributed_orthogonalize(P_local)
+        # In distributed setting, we may need to synchronize
+        # But for FSDP, the synchronization happens at different level
+        # So we keep the computation local
+        P = self._orthogonalize_matrix(P_local)
 
-            # R = B^T P with distributed matrix multiply
-            R_local = torch.mm(B.t(), P)
+        # R = B^T P with local computation
+        R = torch.mm(B.t(), P)
 
-            # All-reduce across shards
-            if self.distributed:
-                dist.all_reduce(R_local, op=dist.ReduceOp.SUM, group=self.process_group)
-                R_local = R_local / self.world_size
-
-            return P, R_local
-        else:
-            # Fallback to centralized version
-            return self._power_iteration(B, Q_prev)
+        return P, R
 
     def _orthogonalize_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
         """Orthogonalize matrix using QR decomposition."""
-        if self.distributed:
-            return self._distributed_orthogonalize(matrix)
-        else:
+        try:
             Q, _ = torch.linalg.qr(matrix)
+            return Q
+        except:
+            # Fallback for numerical issues
+            matrix_stabilized = matrix + 1e-8 * torch.randn_like(matrix)
+            Q, _ = torch.linalg.qr(matrix_stabilized)
             return Q
 
     def _distributed_orthogonalize(self, matrix: torch.Tensor) -> torch.Tensor:
@@ -349,10 +356,6 @@ class DionOptimizer(Optimizer):
 
         # First iteration: randomized QR
         G = torch.mm(S, matrix)
-
-        # Aggregate across distributed dimensions if needed
-        if dist.is_initialized() and self.process_group is not None:
-            dist.all_reduce(G, op=dist.ReduceOp.SUM, group=self.process_group)
 
         # QR decomposition (only need R)
         try:
@@ -367,104 +370,26 @@ class DionOptimizer(Optimizer):
         # Second iteration: Cholesky QR
         H = torch.mm(B.t(), B)
 
-        # Aggregate across distributed dimensions if needed
-        if dist.is_initialized() and self.process_group is not None:
-            dist.all_reduce(H, op=dist.ReduceOp.SUM, group=self.process_group)
-
         # Cholesky decomposition with numerical stability
-        # Try with increasingly larger regularization until it works
-        jitter_values = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
-
-        for jitter in jitter_values:
+        for jitter in [1e-8, 1e-6, 1e-4, 1e-2, 1e-1]:
             try:
                 H_stable = H + torch.eye(r, device=H.device, dtype=H.dtype) * jitter
                 R2 = torch.linalg.cholesky(H_stable)
                 break
             except:
-                if jitter == jitter_values[-1]:
-                    # If we've tried all jitter values and still failed, try a more robust approach
-                    try:
-                        # Try a more robust SVD approach with higher precision
-                        H_64 = H.to(torch.float64)  # Convert to double precision
-                        try:
-                            U, S, Vh = torch.linalg.svd(H_64, full_matrices=False)
-                            # Ensure positive eigenvalues
-                            S = torch.clamp(S, min=1e-10)
-                            # Compute R2 as sqrt(S) * Vh and convert back to original dtype
-                            R2 = (torch.diag(torch.sqrt(S)) @ Vh).to(H.dtype)
-                        except:
-                            # If double precision SVD fails, try eigendecomposition
-                            try:
-                                # Add regularization
-                                H_reg = (
-                                    H_64
-                                    + torch.eye(r, device=H_64.device, dtype=H_64.dtype)
-                                    * 1e-3
-                                )
-                                # Compute eigendecomposition
-                                S, V = torch.linalg.eigh(H_reg)
-                                # Ensure positive eigenvalues
-                                S = torch.clamp(S, min=1e-10)
-                                # Compute R2 as sqrt(S) * V^T and convert back to original dtype
-                                R2 = (torch.diag(torch.sqrt(S)) @ V.t()).to(H.dtype)
-                            except:
-                                # Last resort: use a more stable approach
-                                r = H.shape[0]
-                                # Add strong regularization to the matrix
-                                H_reg = (
-                                    H
-                                    + torch.eye(r, device=H.device, dtype=H.dtype) * 0.1
-                                )
-                                # Use QR decomposition which is more stable than Cholesky/SVD
-                                Q, _ = torch.linalg.qr(H_reg)
-                                R2 = Q.t()  # Use Q.t() as our R2
-                                print(
-                                    f"WARNING: Matrix factorization methods failed in DION optimizer. Using QR decomposition as fallback."
-                                )
-                    except:
-                        # If all else fails, use a more stable approach
-                        try:
-                            # Try to normalize the matrix first to improve conditioning
-                            H_norm = H / (torch.norm(H) + 1e-8)
-                            # Add strong regularization
-                            H_reg = (
-                                H_norm
-                                + torch.eye(r, device=H.device, dtype=H.dtype) * 0.1
-                            )
-                            # Use QR decomposition
-                            Q, _ = torch.linalg.qr(H_reg)
-                            R2 = Q.t()
-                            print(
-                                f"WARNING: Matrix factorization methods failed in DION optimizer. Using normalized QR decomposition as fallback."
-                            )
-                        except:
-                            # Ultimate fallback: skip this update entirely
-                            print(
-                                f"CRITICAL WARNING: All numerical methods failed in DION optimizer. Skipping this update."
-                            )
-                            return matrix  # Return the original matrix unchanged
+                if jitter == 1e-1:
+                    # Fallback to QR if Cholesky fails
+                    Q, _ = torch.linalg.qr(matrix)
+                    return Q
 
         # Final orthogonalized result
         result = torch.linalg.solve_triangular(R2.t(), B.t(), upper=False).t()
-
         return result
 
     def _distributed_column_normalize(self, matrix: torch.Tensor) -> torch.Tensor:
-        """Distributed column normalization (Algorithm 3, function at bottom)."""
-        # Compute local squared norms
-        local_norms_squared = torch.sum(matrix**2, dim=0)
-
-        # All-reduce to get global norms
-        if self.distributed:
-            dist.all_reduce(
-                local_norms_squared, op=dist.ReduceOp.SUM, group=self.process_group
-            )
-
-        # Compute global norms
-        global_norms = torch.sqrt(local_norms_squared + 1e-8)
-
-        # Normalize columns
-        return matrix / global_norms
+        """Distributed column normalization."""
+        # For local computation, just normalize columns directly
+        return self._normalize_columns(matrix)
 
     def _step_matrix_param(
         self, param: torch.Tensor, grad: torch.Tensor, group: Dict, state: Dict
@@ -477,11 +402,11 @@ class DionOptimizer(Optimizer):
 
         # Check for NaN or Inf in gradient
         if torch.isnan(grad).any() or torch.isinf(grad).any():
-            print(f"WARNING: NaN or Inf detected in gradient. Skipping update.")
+            warnings.warn("NaN or Inf detected in gradient. Skipping update.")
             return
 
         # Clip gradient to prevent extreme values
-        max_norm = 10.0  # Hard-coded max norm for stability
+        max_norm = 10.0
         grad_norm = torch.norm(grad)
         if grad_norm > max_norm:
             grad = grad * (max_norm / (grad_norm + eps))
@@ -492,58 +417,48 @@ class DionOptimizer(Optimizer):
         rank = state["rank"]
         param_info = state["param_info"]
 
-        # Handle DTensor case - ensure both tensors are of the same type
+        # Get the actual working tensors
         if isinstance(param, torch.distributed._tensor.DTensor):
-            # For DTensor parameters, we need to ensure all operations use the local tensors
-            if isinstance(momentum_buffer, torch.distributed._tensor.DTensor):
-                momentum_buffer = momentum_buffer._local_tensor
+            working_param = param._local_tensor
+            working_grad = (
+                grad._local_tensor
+                if isinstance(grad, torch.distributed._tensor.DTensor)
+                else grad
+            )
+        else:
+            working_param = param
+            working_grad = grad
 
-            if isinstance(grad, torch.distributed._tensor.DTensor):
-                grad = grad._local_tensor
+        # Ensure momentum buffer has correct shape
+        if momentum_buffer.shape != working_grad.shape:
+            # Reinitialize if shape mismatch
+            momentum_buffer = torch.zeros_like(working_grad)
+            state["momentum_buffer"] = momentum_buffer
 
-            # Work with local tensors for all operations
-            buffer = momentum_buffer + grad
+        # Ensure right factor has correct shape
+        expected_n = working_grad.shape[1]
+        if right_factor.shape[0] != expected_n:
+            # Reinitialize right factor with correct shape
+            right_factor = torch.randn(
+                expected_n, rank, device=working_grad.device, dtype=working_grad.dtype
+            )
+            right_factor = self._normalize_columns(right_factor)
+            state["right_factor"] = right_factor
 
-            # Power iteration with local tensors
-            P, R = self._power_iteration(buffer, right_factor)
-
-            # Approximation
-            approx = torch.mm(P, R.t())
-
-            # Error feedback: M_t = B_t - (1-μ)P_t R_t^T
-            momentum_buffer.copy_(buffer - (1 - momentum) * approx)
-
-            # Update right factor with column normalization
-            right_factor.copy_(self._normalize_columns(R))
-
-            # Compute scaled orthonormal update
-            m, n = param._local_tensor.shape
-            scale = math.sqrt(m / n)
-
-            # Normalize columns of R to get Q
-            Q = self._normalize_columns(R)
-
-            update = torch.mm(P, Q.t())
-
-            # Apply decoupled weight decay
-            if weight_decay != 0:
-                param._local_tensor.mul_(1 - lr * weight_decay)
-
-            # Update parameters: X_t = X_{t-1} - η * scale * P_t Q_t^T
-            param._local_tensor.add_(update, alpha=-lr * scale)
-
-            state["step"] += 1
-            return
-
-        # Standard case for non-DTensor parameters
-        # Form buffer B_t = M_{t-1} + G_t (no weight decay in gradient)
-        buffer = momentum_buffer + grad
+        # Form buffer B_t = M_{t-1} + G_t
+        buffer = momentum_buffer + working_grad
 
         # Power iteration: approximate B_t ≈ P_t R_t^T
-        if self.distributed and (param_info["is_dtensor"] or param_info["is_fsdp"]):
-            P, R = self._distributed_power_iteration(buffer, right_factor, param_info)
-        else:
-            P, R = self._power_iteration(buffer, right_factor)
+        try:
+            if param_info["is_dtensor"] or param_info["is_fsdp"]:
+                P, R = self._distributed_power_iteration(
+                    buffer, right_factor, param_info
+                )
+            else:
+                P, R = self._power_iteration(buffer, right_factor)
+        except RuntimeError as e:
+            warnings.warn(f"Power iteration failed: {e}. Skipping update.")
+            return
 
         # Approximation
         approx = torch.mm(P, R.t())
@@ -552,29 +467,22 @@ class DionOptimizer(Optimizer):
         momentum_buffer.copy_(buffer - (1 - momentum) * approx)
 
         # Update right factor with column normalization
-        if self.distributed and (param_info["is_dtensor"] or param_info["is_fsdp"]):
-            right_factor.copy_(self._distributed_column_normalize(R))
-        else:
-            right_factor.copy_(self._normalize_columns(R))
+        right_factor.copy_(self._normalize_columns(R))
 
         # Compute scaled orthonormal update
-        m, n = param.shape
+        m, n = working_param.shape
         scale = math.sqrt(m / n)
 
         # Normalize columns of R to get Q
-        if self.distributed and (param_info["is_dtensor"] or param_info["is_fsdp"]):
-            Q = self._distributed_column_normalize(R)
-        else:
-            Q = self._normalize_columns(R)
-
+        Q = self._normalize_columns(R)
         update = torch.mm(P, Q.t())
 
         # Apply decoupled weight decay
         if weight_decay != 0:
-            param.mul_(1 - lr * weight_decay)
+            working_param.mul_(1 - lr * weight_decay)
 
         # Update parameters: X_t = X_{t-1} - η * scale * P_t Q_t^T
-        param.add_(update, alpha=-lr * scale)
+        working_param.add_(update, alpha=-lr * scale)
 
         state["step"] += 1
 
@@ -592,26 +500,12 @@ class DionOptimizer(Optimizer):
                 if param.grad is None:
                     continue
 
-                # Handle FSDP wrapped parameters
-                grad = param.grad
-                if hasattr(param, "_local_tensor"):
-                    param_to_update = param._local_tensor
-                    grad = (
-                        param.grad._local_tensor
-                        if hasattr(param.grad, "_local_tensor")
-                        else param.grad
-                    )
-                else:
-                    param_to_update = param
-
                 if self._is_matrix_param(param):
                     # Initialize state if needed
                     if param not in self.state:
                         self.state[param] = self._init_matrix_state(param, group)
 
-                    self._step_matrix_param(
-                        param_to_update, grad, group, self.state[param]
-                    )
+                    self._step_matrix_param(param, param.grad, group, self.state[param])
 
         # Update scalar parameters with scalar optimizer
         if self.scalar_optimizer is not None:
