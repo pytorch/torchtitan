@@ -352,6 +352,10 @@ class Transformer(nn.Module, ModelProtocol):
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
+        if model_args.tied_embeddings:
+            # Tie weights between output and tok_embeddings
+            self.output.weight = self.tok_embeddings.weight
+
     def init_weights(
         self,
         buffer_device: torch.device | None = None,

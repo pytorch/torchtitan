@@ -37,6 +37,10 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
+    # If `True`, then the output layer is tied to the input embedding layer.
+    # This is a common practice in language models to reduce the number of parameters.
+    tied_embeddings: bool = False
+
     def update_from_config(
         self, job_config: JobConfig, tokenizer: BaseTokenizer
     ) -> None:
