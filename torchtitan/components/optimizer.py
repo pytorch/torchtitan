@@ -21,6 +21,7 @@ from torchtitan.components.dion_optimizer import DionOptimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -280,6 +281,7 @@ def build_optimizers(
             )
 
     name = job_config.optimizer.name
+    logger.info(f"Using optimizer {name}")
     lr = job_config.optimizer.lr
     beta1 = job_config.optimizer.beta1
     beta2 = job_config.optimizer.beta2
@@ -315,7 +317,7 @@ def build_optimizers(
                 "momentum": job_config.optimizer.momentum,
                 "rank_factor": job_config.optimizer.rank_factor,
                 "scalar_optimizer": job_config.optimizer.scalar_optimizer,
-                "distributed": True,  # Always use distributed mode in torchtitan
+                "distributed": True,  # Always use distributed mode in torchtitan,
             }
         )
 
