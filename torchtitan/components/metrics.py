@@ -261,6 +261,12 @@ def _build_metric_logger(
         dump_dir, metrics_config.save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
     )
 
+    if job_config.fault_tolerance.enable:
+        base_log_dir = os.path.join(
+            base_log_dir,
+            f"replica_{job_config.fault_tolerance.replica_id}",
+        )
+
     if metrics_config.save_for_all_ranks:
         base_log_dir = os.path.join(
             base_log_dir, f"rank_{torch.distributed.get_rank()}"
