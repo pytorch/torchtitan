@@ -399,6 +399,20 @@ class MetricsProcessor:
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
 
+        if self.lr_schedulers:
+            # Log learning rate for each scheduler
+            lr_metrics = {}
+            for i, scheduler in enumerate(self.lr_schedulers.schedulers):
+                for j, lr in enumerate(scheduler.get_last_lr()):
+                    lr_metrics[f"lr_scheduler/{i}/param_group_{j}/lr"] = lr
+
+            if len(lr_metrics) == 1:
+                # If there's only one learning rate, log it directly
+                metrics.update({"lr": list(lr_metrics.values())[0]})
+            else:
+                # Otherwise, log all learning rates under the lr_scheduler key
+                metrics.update(lr_metrics)
+
         if extra_metrics:
             metrics.update(extra_metrics)
 
