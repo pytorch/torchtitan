@@ -10,7 +10,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as DCP
-from torchtitan.models.llama.model import precompute_freqs_cis
 from torchtitan.tools.logging import init_logger, logger
 
 
@@ -123,17 +122,10 @@ def convert_llama_weights(input_dir, output_dir, max_seq_len: int):
         for i in range(len(shards)):
             del shards[i]["output.weight"]
 
-    # NOTE: precompute freqs_cis because must be persisted by default in torchtitan
-    state_dict["freqs_cis"] = precompute_freqs_cis(
-        dims_per_head,
-        max_seq_len,
-        params.get("rope_theta", 500000),
-    )
-
     logger.info(f"Writing to DCP at '{output_dir}'")
     output_dir.mkdir(parents=True, exist_ok=True)
     storage_writer = DCP.filesystem.FileSystemWriter(output_dir, thread_count=8)
-    DCP.save({"model": state_dict}, storage_writer=storage_writer)
+    DCP.save(state_dict, storage_writer=storage_writer)
 
 
 if __name__ == "__main__":

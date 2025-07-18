@@ -46,6 +46,7 @@ from attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from group_gemms import (
     DSGroupGEMM,
+    ManualLoopGroupGEMM,
     TorchAOBF16GroupGEMM,
     TorchBF16GroupGEMM,
     TorchFP8GroupGEMM,
@@ -474,7 +475,7 @@ class MoE(nn.Module):
     # Group GEMM strategies
     group_gemm_strategies = None
     # which group gemm to use?
-    group_mm = "torch"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg"]
+    group_mm = "manual"  # fp8 options = ["torchfp8", "dsgemm"] bf16 = ["torch", , "torchao", "tritoncg", "manual"]
 
     def __init__(self, config):
         super().__init__()
@@ -527,7 +528,10 @@ class MoE(nn.Module):
     def _initialize_group_gemm_strategies(cls):
         """Initialize available group GEMM strategies"""
         cls.group_gemm_strategies = {
+            # torch._group_MM
             "torch": TorchBF16GroupGEMM(MLP.act_fn),
+            # torch.mm with looping
+            "manual": ManualLoopGroupGEMM(MLP.act_fn),
             "torchao": (
                 TorchAOBF16GroupGEMM(MLP.act_fn)
                 if TorchAOBF16GroupGEMM.is_available()

@@ -21,7 +21,6 @@ from torchtitan.tools.logging import logger
 
 def parallelize_flux(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -36,7 +35,7 @@ def parallelize_flux(
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
@@ -117,7 +116,6 @@ def apply_ac(model: nn.Module, ac_config):
 def parallelize_encoders(
     t5_model: nn.Module,
     clip_model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -132,7 +130,7 @@ def parallelize_encoders(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
         fsdp_config = {
-            "mesh": world_mesh[tuple(dp_mesh_dim_names)],
+            "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             "mp_policy": mp_policy,
         }
         if job_config.training.enable_cpu_offload:

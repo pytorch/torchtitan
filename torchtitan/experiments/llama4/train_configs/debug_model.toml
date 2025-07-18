@@ -22,7 +22,7 @@ enable_wandb = false
 name = "llama4"
 flavor = "debugmodel"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/test_tiktoken.model"
+tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
@@ -52,6 +52,7 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
+expert_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false
@@ -69,3 +70,4 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
+moe_fqns = ["experts"]

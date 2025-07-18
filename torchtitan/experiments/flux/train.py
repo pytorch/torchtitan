@@ -36,7 +36,7 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.world_mesh,
+            self.parallel_dims.world_mesh,
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
@@ -54,11 +54,11 @@ class FluxTrainer(Trainer):
         )
 
         # load components
-        model_config = self.train_spec.config[job_config.model.flavor]
+        model_args = self.train_spec.model_args[job_config.model.flavor]
 
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
-            model_config.autoencoder_params,
+            model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
             random_init=job_config.training.test_mode,
@@ -77,7 +77,6 @@ class FluxTrainer(Trainer):
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
-            world_mesh=self.world_mesh,
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
@@ -221,14 +220,15 @@ if __name__ == "__main__":
             assert (
                 config.checkpoint.enable_checkpoint
             ), "Must enable checkpointing when creating a seed checkpoint."
-            trainer.checkpointer.save(curr_step=0, force=True)
+            trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
-    finally:
+    except Exception:
         if trainer:
             trainer.close()
-
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
-            logger.info("Process group destroyed.")
+        raise
+    else:
+        trainer.close()
+        torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed.")

@@ -46,7 +46,7 @@ class TestGenerateImage:
                 "./outputs",
                 "--training.seed",
                 "0",
-                "--training.classifer_free_guidance_prob",
+                "--training.classifier_free_guidance_prob",
                 "0.447",
                 "--encoder.t5_encoder",
                 "google/t5-v1_1-base",
@@ -59,7 +59,7 @@ class TestGenerateImage:
                 # eval params
                 "--eval.denoising_steps",
                 str(num_steps),
-                "--eval.enable_classifer_free_guidance",
+                "--eval.enable_classifier_free_guidance",
                 "--eval.classifier_free_guidance_scale",
                 str(classifier_free_guidance_scale),
                 "--eval.save_img_folder",

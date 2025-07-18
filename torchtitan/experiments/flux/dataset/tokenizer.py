@@ -11,20 +11,19 @@
 from typing import List
 
 import torch
-from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config_manager import JobConfig
-from torchtitan.datasets.tokenizer.tiktoken import TikTokenizer
 from transformers import CLIPTokenizer, T5Tokenizer
 
 
-class FluxTestTokenizer(Tokenizer):
+class FluxTestTokenizer(BaseTokenizer):
     """
     Flux Tokenizer for test purpose. This is a simple wrapper around the TikTokenizer,
      to make it has same interface as the T5 and CLIP tokenizer used for Flux.
     """
 
     def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
-        self.tiktokenizer = TikTokenizer(model_path, **hf_kwargs)
+        self.tiktokenizer = HuggingFaceTokenizer(model_path, **hf_kwargs)
         self._max_length = max_length
         self.pad_id = 0
 
@@ -43,11 +42,14 @@ class FluxTestTokenizer(Tokenizer):
 
         return tokens
 
+    def get_vocab_size(self) -> int:
+        return self.tiktokenizer.vocab_size
+
     def encode(self, text: str) -> torch.Tensor:
         """
         Use TikTokenizer to encode the text into tokens, and then pad and chunk the tokens to max_length.
         """
-        tokens = self.tiktokenizer.encode(text, bos=True, eos=True)
+        tokens = self.tiktokenizer.encode(text, add_bos=True, add_eos=True)
         tokens = self._pad_and_chunk_tokens(tokens, self._max_length, self.pad_id)
         return torch.tensor(tokens)
 
@@ -58,7 +60,7 @@ class FluxTestTokenizer(Tokenizer):
         return self.tiktokenizer.decode(t)
 
 
-class FluxTokenizer(Tokenizer):
+class FluxTokenizer(BaseTokenizer):
     """
     Tokenizing and encoding/decoding text using the T5 or Clip tokenizer.
 
@@ -82,6 +84,9 @@ class FluxTokenizer(Tokenizer):
             self._tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
                 model_path, max_length=max_length, **hf_kwargs
             )
+
+    def get_vocab_size(self) -> int:
+        return self._tokenizer.vocab_size
 
     def encode(
         self,
@@ -108,7 +113,7 @@ class FluxTokenizer(Tokenizer):
         return self._tokenizer.decode(t)
 
 
-def build_flux_tokenizer(job_config: JobConfig) -> tuple[Tokenizer, Tokenizer]:
+def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseTokenizer]:
     """
     Build the tokenizer for Flux.
     """

@@ -6,9 +6,12 @@
 
 [![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
-[![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
+[![ICLR](https://img.shields.io/badge/ICLR-2025-violet.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
+[![pip](https://img.shields.io/pypi/v/torchtitan?color=blue)](https://pypi.org/project/torchtitan/)
+[![conda](https://img.shields.io/conda/vn/conda-forge/torchtitan?color=green)](https://anaconda.org/conda-forge/torchtitan)
+
 
 </div>
 
@@ -86,12 +89,36 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+> [Install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
+
+### Stable
+
+Via pip:
+```sh
+pip install torchtitan
+```
+Or via conda:
+```sh
+conda install conda-forge::torchtitan
+```
+
+### Nightly
+
+> This method requires the nightly build of PyTorch.
+
+```sh
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+```
+You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
+
+### From source
+
+> This method requires the nightly build of PyTorch or PyTorch built from source.
+
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-[For AMD GPU] pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --force-reinstall
 ```
 
 ### Downloading a tokenizer
@@ -103,8 +130,8 @@ Once you have confirmed access, you can run the following command to download th
 ```bash
 # Get your HF token from https://huggingface.co/settings/tokens
 
-# Llama 3.1 tokenizer.model
-python scripts/download_tokenizer.py --repo_id meta-llama/Meta-Llama-3.1-8B --tokenizer_path "original" --hf_token=...
+# Llama 3.1 tokenizer
+python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B --hf_token=...
 ```
 
 ### Start a training run

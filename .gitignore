@@ -6,6 +6,7 @@ build
 outputs
 dist/*
 .vscode
+.vs
 
 # data
 data
@@ -13,10 +14,29 @@ out
 wandb
 
 torchtitan/datasets/**/*.model
+
+# tokenizer models
 assets/**/*.model
+assets/**/*.json
+assets/**/*.txt
 torchtitan/experiments/flux/assets/*
 
 # temp files
 *.log
 error.json
 _remote_module_non_scriptable.py
+
+# Editor temporaries (VIM)
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+*~
+.~lock.*
+
+# macOS dir files
+.DS_Store
