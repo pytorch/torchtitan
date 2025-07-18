@@ -31,7 +31,7 @@ tokenizer_path = "./tests/assets/tokenizer"
 name = "DION"
 lr = 8e-4
 eps = 1e-8
-rank_factor = 0.25
+rank_factor = 0.5
 momentum = 0.95
 scalar_optimizer = "adamw"
 

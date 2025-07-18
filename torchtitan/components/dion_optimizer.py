@@ -254,20 +254,22 @@ class DionOptimizer(Optimizer):
         state = {}
         param_info = self._get_param_info(param)
 
-        # Use local shape for sharded parameters
-        if param_info["is_dtensor"] or param_info["is_fsdp"]:
-            m, n = param_info["local_shape"]
+        # Get the actual tensor to work with (local tensor for DTensor)
+        if isinstance(param, torch.distributed._tensor.DTensor):
+            actual_param = param._local_tensor
         else:
-            m, n = param.shape
+            actual_param = param
 
+        # Use local shape
+        m, n = actual_param.shape
         rank = min(m, n, max(1, int(min(m, n) * self.rank_factor)))
 
-        # Momentum buffer (same shape as parameter)
-        state["momentum_buffer"] = torch.zeros_like(param)
+        # Create momentum buffer with same shape as actual parameter
+        state["momentum_buffer"] = torch.zeros_like(actual_param)
 
-        # Right factor Q for warm-starting power iteration
+        # Create right factor for warm-starting power iteration
         state["right_factor"] = torch.randn(
-            n, rank, device=param.device, dtype=param.dtype
+            n, rank, device=actual_param.device, dtype=actual_param.dtype
         )
         state["right_factor"] = self._normalize_columns(state["right_factor"])
 
@@ -413,6 +415,50 @@ class DionOptimizer(Optimizer):
         rank = state["rank"]
         param_info = state["param_info"]
 
+        # Handle DTensor case - ensure both tensors are of the same type
+        if isinstance(param, torch.distributed._tensor.DTensor):
+            # For DTensor parameters, we need to ensure all operations use the local tensors
+            if isinstance(momentum_buffer, torch.distributed._tensor.DTensor):
+                momentum_buffer = momentum_buffer._local_tensor
+
+            if isinstance(grad, torch.distributed._tensor.DTensor):
+                grad = grad._local_tensor
+
+            # Work with local tensors for all operations
+            buffer = momentum_buffer + grad
+
+            # Power iteration with local tensors
+            P, R = self._power_iteration(buffer, right_factor)
+
+            # Approximation
+            approx = torch.mm(P, R.t())
+
+            # Error feedback: M_t = B_t - (1-μ)P_t R_t^T
+            momentum_buffer.copy_(buffer - (1 - momentum) * approx)
+
+            # Update right factor with column normalization
+            right_factor.copy_(self._normalize_columns(R))
+
+            # Compute scaled orthonormal update
+            m, n = param._local_tensor.shape
+            scale = math.sqrt(m / n)
+
+            # Normalize columns of R to get Q
+            Q = self._normalize_columns(R)
+
+            update = torch.mm(P, Q.t())
+
+            # Apply decoupled weight decay
+            if weight_decay != 0:
+                param._local_tensor.mul_(1 - lr * weight_decay)
+
+            # Update parameters: X_t = X_{t-1} - η * scale * P_t Q_t^T
+            param._local_tensor.add_(update, alpha=-lr * scale)
+
+            state["step"] += 1
+            return
+
+        # Standard case for non-DTensor parameters
         # Form buffer B_t = M_{t-1} + G_t (no weight decay in gradient)
         buffer = momentum_buffer + grad
 
