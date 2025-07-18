@@ -33,8 +33,8 @@ llama3_configs = {
         dim=256, n_layers=6, n_heads=16, rope_theta=500000
     ),
     "debugmodel_flex_attn": TransformerModelArgs(
-        dim=256,
-        n_layers=6,
+        dim=2048,
+        n_layers=12,
         n_heads=16,
         rope_theta=500000,
         use_flex_attn=True,

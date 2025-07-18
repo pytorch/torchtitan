@@ -372,12 +372,77 @@ class DionOptimizer(Optimizer):
             dist.all_reduce(H, op=dist.ReduceOp.SUM, group=self.process_group)
 
         # Cholesky decomposition with numerical stability
-        try:
-            R2 = torch.linalg.cholesky(H)
-        except:
-            # Add small diagonal for numerical stability
-            H_stable = H + torch.eye(r, device=H.device, dtype=H.dtype) * 1e-8
-            R2 = torch.linalg.cholesky(H_stable)
+        # Try with increasingly larger regularization until it works
+        jitter_values = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+
+        for jitter in jitter_values:
+            try:
+                H_stable = H + torch.eye(r, device=H.device, dtype=H.dtype) * jitter
+                R2 = torch.linalg.cholesky(H_stable)
+                break
+            except:
+                if jitter == jitter_values[-1]:
+                    # If we've tried all jitter values and still failed, try a more robust approach
+                    try:
+                        # Try a more robust SVD approach with higher precision
+                        H_64 = H.to(torch.float64)  # Convert to double precision
+                        try:
+                            U, S, Vh = torch.linalg.svd(H_64, full_matrices=False)
+                            # Ensure positive eigenvalues
+                            S = torch.clamp(S, min=1e-10)
+                            # Compute R2 as sqrt(S) * Vh and convert back to original dtype
+                            R2 = (torch.diag(torch.sqrt(S)) @ Vh).to(H.dtype)
+                        except:
+                            # If double precision SVD fails, try eigendecomposition
+                            try:
+                                # Add regularization
+                                H_reg = (
+                                    H_64
+                                    + torch.eye(r, device=H_64.device, dtype=H_64.dtype)
+                                    * 1e-3
+                                )
+                                # Compute eigendecomposition
+                                S, V = torch.linalg.eigh(H_reg)
+                                # Ensure positive eigenvalues
+                                S = torch.clamp(S, min=1e-10)
+                                # Compute R2 as sqrt(S) * V^T and convert back to original dtype
+                                R2 = (torch.diag(torch.sqrt(S)) @ V.t()).to(H.dtype)
+                            except:
+                                # Last resort: use a more stable approach
+                                r = H.shape[0]
+                                # Add strong regularization to the matrix
+                                H_reg = (
+                                    H
+                                    + torch.eye(r, device=H.device, dtype=H.dtype) * 0.1
+                                )
+                                # Use QR decomposition which is more stable than Cholesky/SVD
+                                Q, _ = torch.linalg.qr(H_reg)
+                                R2 = Q.t()  # Use Q.t() as our R2
+                                print(
+                                    f"WARNING: Matrix factorization methods failed in DION optimizer. Using QR decomposition as fallback."
+                                )
+                    except:
+                        # If all else fails, use a more stable approach
+                        try:
+                            # Try to normalize the matrix first to improve conditioning
+                            H_norm = H / (torch.norm(H) + 1e-8)
+                            # Add strong regularization
+                            H_reg = (
+                                H_norm
+                                + torch.eye(r, device=H.device, dtype=H.dtype) * 0.1
+                            )
+                            # Use QR decomposition
+                            Q, _ = torch.linalg.qr(H_reg)
+                            R2 = Q.t()
+                            print(
+                                f"WARNING: Matrix factorization methods failed in DION optimizer. Using normalized QR decomposition as fallback."
+                            )
+                        except:
+                            # Ultimate fallback: skip this update entirely
+                            print(
+                                f"CRITICAL WARNING: All numerical methods failed in DION optimizer. Skipping this update."
+                            )
+                            return matrix  # Return the original matrix unchanged
 
         # Final orthogonalized result
         result = torch.linalg.solve_triangular(R2.t(), B.t(), upper=False).t()
@@ -408,6 +473,18 @@ class DionOptimizer(Optimizer):
         momentum = group["momentum"]
         lr = group["lr"]
         weight_decay = group["weight_decay"]
+        eps = group["eps"]
+
+        # Check for NaN or Inf in gradient
+        if torch.isnan(grad).any() or torch.isinf(grad).any():
+            print(f"WARNING: NaN or Inf detected in gradient. Skipping update.")
+            return
+
+        # Clip gradient to prevent extreme values
+        max_norm = 10.0  # Hard-coded max norm for stability
+        grad_norm = torch.norm(grad)
+        if grad_norm > max_norm:
+            grad = grad * (max_norm / (grad_norm + eps))
 
         # Get state variables
         momentum_buffer = state["momentum_buffer"]

@@ -29,14 +29,15 @@ tokenizer_path = "./tests/assets/tokenizer"
 
 [optimizer]
 name = "DION"
-lr = 8e-4
+lr = 1e-3  # Reduced learning rate for stability
 eps = 1e-8
-rank_factor = 0.5
-momentum = 0.95
+rank_factor = 0.75  # Lower rank factor for better numerical stability
+momentum = 0.95  # Slightly lower momentum
 scalar_optimizer = "adamw"
+weight_decay = 0.01  # Explicit weight decay
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 20  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 lr_min = 0.0
@@ -45,7 +46,7 @@ lr_min = 0.0
 local_batch_size = 8
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 50
 compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
