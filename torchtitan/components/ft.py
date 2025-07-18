@@ -6,6 +6,7 @@
 
 import importlib
 from contextlib import nullcontext
+from datetime import timedelta
 from typing import ContextManager, Optional, TYPE_CHECKING, Union
 
 import torch
@@ -37,7 +38,15 @@ class FTManager:
         if not has_torchft:
             raise ImportError("torchft is not installed. Please install it.")
 
-        pg = ft.ProcessGroupNCCL()
+        process_group_timeout = timedelta(
+            milliseconds=ft_config.process_group_timeout_ms
+        )
+        if ft_config.process_group == "gloo":
+            pg = ft.ProcessGroupGloo(timeout=process_group_timeout)
+        elif ft_config.process_group == "nccl":
+            pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
+        else:
+            raise ValueError(f"Unsuported process group: {ft_config.process_group}")
 
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = ft_config.semi_sync_method is None
