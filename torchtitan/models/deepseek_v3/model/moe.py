@@ -238,6 +238,10 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
+        if self.use_sigmoid:
+            denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
+            top_scores = top_scores / denominator
+
         top_scores = (
             top_scores * self.route_sclaing_factor
         )  # must multiply the scaling factor
