@@ -3,8 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from abc import abstractmethod
 from collections.abc import Callable
@@ -25,6 +23,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
 @dataclass
@@ -102,6 +101,7 @@ class TrainSpec:
     build_loss_fn: LossFunctionBuilder
     build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
+    state_dict_adapter: type[StateDictAdapter] | None = None
 
 
 _train_specs = {}

@@ -24,12 +24,12 @@ interval = 500
 ```
 
 
-2. SAVE ONLY MODEL WEIGHTS
-By setting `last_save_model_weights_only` to `True`, the checkpoint will only contain the model weights and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
+2. SAVE MODEL ONLY
+By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
 ```
 [checkpoint]
 enable_checkpoint = true
-last_save_model_weights_only = true
+last_save_model_only = true
 ```
 
 3. CHOOSE DESIRED EXPORT PRECISION
@@ -37,7 +37,7 @@ The default model states are in `float32`. You can choose to export the checkpoi
 ```
 [checkpoint]
 enable_checkpoint = true
-last_save_model_weights_only = true
+last_save_model_only = true
 export_dtype = "bfloat16"
 ```
 
@@ -48,12 +48,12 @@ enable_checkpoint = true
 folder = "checkpoint"
 interval = 10
 load_step = 5
-last_save_model_weights_only = true
+last_save_model_only = true
 export_dtype = "bfloat16"
 ```
 
 5. SAVE THE FINAL CHECKPOINT\
-Once the above have been set, the final checkpoint at the end of the training step will consist of model weights only with the desired export dtype. However, if the final step has not been reached yet, full checkpoints will still be saved so that training can be resumed.
+Once the above have been set, the final checkpoint at the end of the training step will consist of model only with the desired export dtype. However, if the final step has not been reached yet, full checkpoints will still be saved so that training can be resumed.
 
 6. CONVERT SHARDED CHECKPOINTS TO A SINGLE FILE\
 Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file that can be loaded into torchtune:
@@ -88,5 +88,5 @@ NGPU=1 CONFIG=<path_to_model_config> ./run_train.sh --checkpoint.enable_checkpoi
 
 
 ## How to load / save a checkpoint in HF safetensors format
-For save, users need to set `--checkpoint.last_save_in_safetensors_format` and `--checkpoint.last_save_model_weights_only` to save the last checkpoint in HF format (intermediate ones are always in DCP format).
-For load, users need to either put the checkpoint in the `step-0` folder if using `--checkpoint.folder`, or specify `--checkpoint.initial_load_path` to load from a different folder. They also need to set `--checkpoint.initial_load_model_weights_only` to load the checkpoint in HF format.
+For save, users need to set `--checkpoint.last_save_in_safetensors_format` and `--checkpoint.last_save_model_only` to save the last checkpoint in HF format (intermediate ones are always in DCP format).
+For load, users need to either put the checkpoint in the `step-0` folder if using `--checkpoint.folder`, or specify `--checkpoint.initial_load_path` to load from a different folder. They also need to set `--checkpoint.initial_load_model_only` to load the checkpoint in HF format.

@@ -3,8 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -18,6 +16,7 @@ from .infra.parallelize import parallelize_llama
 from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
+from .model.state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
     "parallelize_llama",
@@ -83,5 +82,6 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=Llama3StateDictAdapter,
     )
 )
