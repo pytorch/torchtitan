@@ -20,6 +20,16 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
+# tests skipped for ROCm
+skip_for_rocm_test_list = [
+    "pp_looped_zero_bubble",
+    "pp_zbv",
+    "pp_custom_csv",
+    "last_save_model_weights_only_bf16",
+    "last_save_model_weights_only_fp32",
+]
+TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
+
 
 @dataclass
 class OverrideDefinitions:
@@ -598,6 +608,11 @@ def run_tests(args):
                 )
                 if is_integration_test:
                     for test_flavor in integration_tests_flavors[config_file]:
+                        if (
+                            TEST_WITH_ROCM
+                            and test_flavor.test_name in skip_for_rocm_test_list
+                        ):
+                            continue
                         if args.test == "all" or test_flavor.test_name == args.test:
                             if args.ngpu < test_flavor.ngpu:
                                 logger.info(
