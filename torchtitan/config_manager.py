@@ -120,8 +120,8 @@ class Model:
 
 @dataclass
 class Optimizer:
-    name: str = "AdamW"
-    """Optimizer to use"""
+    name: Literal["AdamW", "Adam", "DION"] = "AdamW"
+    """Optimizer to use (AdamW, Adam, or DION)"""
 
     lr: float = 8e-4
     """Learning rate to use"""
@@ -144,6 +144,16 @@ class Optimizer:
     - 'for-loop': Use the default implementation for the optimizer (slowest).
     - more info: https://pytorch.org/docs/stable/optim.html
     """
+
+    # DION optimizer specific parameters
+    rank_factor: float = 0.25
+    """Rank fraction for DION optimizer low-rank approximation (default: 0.25)"""
+
+    momentum: float = 0.95
+    """Momentum factor for DION optimizer (default: 0.95)"""
+
+    scalar_optimizer: Literal["adam", "adamw"] = "adamw"
+    """Scalar optimizer for DION optimizer non-matrix parameters (default: adamw)"""
 
     early_step_in_backward: bool = False
     """
