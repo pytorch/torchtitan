@@ -177,13 +177,6 @@ def create_context_parallel_ctx(
     torch.distributed.tensor.experimental._attention._dispatch_mode = (
         _DispatchMode.TORCH_FUNCTION
     )
-    """
-    _set_dispatch_mode("torch_dispatch")
-    assert (
-        torch.distributed.tensor.experimental._attention._dispatch_mode
-        == _DispatchMode.TORCH_DISPATCH
-    )
-    """
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
@@ -432,9 +425,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

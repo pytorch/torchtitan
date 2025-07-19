@@ -397,7 +397,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 mask_mod, batch_dimension, None, seq_len, seq_len
             )
 
-            torch.distributed.tensor.experimental._attention._block_mask = block_mask
             torch.distributed.tensor.experimental._attention._cp_rank = (
                 parallel_dims.world_mesh["cp"].get_rank()
             )
@@ -407,6 +406,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             torch.distributed.tensor.experimental._attention._device_type = (
                 parallel_dims.world_mesh["cp"].device_type
             )
+            torch.distributed.tensor.experimental._attention._cp_shard_dim = 1
             shard_q_size = seq_len // parallel_dims.world_mesh["cp"].size()
             torch.distributed.tensor.experimental._attention._cp_block_mask = torch.distributed.tensor.experimental._attention.rewrite_context_parallel_block_mask(
                 block_mask,
