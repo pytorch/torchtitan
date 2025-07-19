@@ -1,13 +1,21 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
-Dion: Distributed Orthonormalized Updates Optimizer
+Dion in PyTorch: Distributed Orthonormalized Updates Optimizer
 
-An unofficial PyTorch implementation of the Dion optimizer from the paper:
+An *unofficial* PyTorch implementation of the Dion optimizer from the paper:
 "Dion: Distributed Orthonormalized Updates" by Ahn et al.
+https://arxiv.org/abs/2504.05295
 
 
-This implementation supports:
+Supports:
 - Single gpu and distributed training
-- 3D parallelisms (DP, FSDP2, TP)
+- 1D parallelisms (DP, FSDP2)
+- TP will need more testing
 """
 
 import math
@@ -43,7 +51,7 @@ except ImportError:
 
 
 class ShardingStrategy(Enum):
-    """Sharding strategies for distributed Dion."""
+    """Sharding strategies supported atm distributed Dion."""
 
     NO_SHARD = "no_shard"
     SHARD_GRAD_OP = "shard_grad_op"  # Zero2
@@ -54,16 +62,16 @@ class DionOptimizer(Optimizer):
     """
     Dion (DIstributed OrthoNormalization) Optimizer
 
-    Implements the Dion optimizer with support for both centralized and distributed training.
-    Uses orthonormalized updates for matrix parameters and configurable scalar optimizers
-    for non-matrix parameters.
+    Unofficial - Implements the Dion optimizer with support for both centralized and distributed training.
+    Orthonormalized updates for matrix parameters via low rank decomposition, and configurable scalar optimizers
+    (ala AdamW) for non-matrix parameters.
 
     Args:
         params: Iterable of parameters to optimize
         lr: Learning rate (default: 0.01)
         momentum: Momentum factor μ (default: 0.95)
         rank_factor: Rank fraction r/d for low-rank approximation (default: .75, full rank = 1.0)
-        scalar_optimizer: Optimizer class for non-matrix parameters ('adam', 'adamw', 'lion')
+        scalar_optimizer: Optimizer class for non-matrix parameters ('adamw', 'lion')
 
         scalar_lr: Learning rate for scalar optimizer (default: None, uses lr)
 
@@ -94,7 +102,7 @@ class DionOptimizer(Optimizer):
         distributed: Optional[bool] = None,  # None = auto-detect
         matrix_threshold: int = 32,  # 32 = default in paper
         process_group: Optional[dist.ProcessGroup] = None,  # basically auto-detect
-        sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,  # FSDP2
+        sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,  # FSDP2, this is for state dict only atm
         max_norm: float = 10.0,  # Maximum gradient norm for clipping
         **scalar_kwargs,
     ):
@@ -270,7 +278,7 @@ class DionOptimizer(Optimizer):
         param_info = self._get_param_info(param)
 
         # Get the actual tensor to work with (local tensor for DTensor)
-        # TODO - check with Wei on this...just dumping to local tensor for now
+        # TODO - check on this...just dumping to local tensor for now
         if isinstance(param, torch.distributed._tensor.DTensor):
             actual_param = param._local_tensor
         else:
@@ -322,16 +330,13 @@ class DionOptimizer(Optimizer):
     def _distributed_power_iteration(
         self, B: torch.Tensor, Q_prev: torch.Tensor, param_info: Dict
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Distributed power iteration (Algorithm 3, lines 5-6)."""
-        # For distributed mode, we implement the algorithm more carefully
-        # to handle tensor shapes correctly
+        """Distributed power iteration (Algorithm 3, lines 5-6 in the paper)."""
 
         # P = BQ with local computation
         P_local = torch.mm(B, Q_prev)
 
-        # In distributed setting, we may need to synchronize
-        # But for FSDP, the synchronization happens at different level
-        # So we keep the computation local
+        # In some distributed settings, we may need to synchronize
+        # For FSDP2, we keep the computation local
         P = self._orthogonalize_matrix(P_local)
 
         # R = B^T P with local computation
@@ -351,7 +356,7 @@ class DionOptimizer(Optimizer):
             return Q
 
     def _distributed_orthogonalize(self, matrix: torch.Tensor) -> torch.Tensor:
-        """Distributed orthogonalization using randomized Cholesky QR (Algorithm 2)."""
+        """Distributed orthogonalization using randomized Cholesky QR (Algorithm 2 in the paper)."""
         m, r = matrix.shape
         k = max(r, int(self.oversampling_factor * r))
 
@@ -392,7 +397,7 @@ class DionOptimizer(Optimizer):
 
     def _distributed_column_normalize(self, matrix: torch.Tensor) -> torch.Tensor:
         """Distributed column normalization."""
-        # For local computation ala FSDP2, just normalize columns directly
+        # For local computation ala FSDP2, we just normalize columns directly (unlike Muon)
         return self._normalize_columns(matrix)
 
     def _step_matrix_param(
@@ -422,6 +427,7 @@ class DionOptimizer(Optimizer):
         param_info = state["param_info"]
 
         # Get the actual working tensors
+        # TODO - check with Wei on this...just dumping to local tensor for now
         if isinstance(param, torch.distributed._tensor.DTensor):
             working_param = param._local_tensor
             working_grad = (
@@ -524,7 +530,8 @@ class DionOptimizer(Optimizer):
             self.scalar_optimizer.zero_grad(set_to_none)
 
     def state_dict(self) -> Dict[str, Any]:
-        """Return state dict for checkpointing."""
+        """Return state dict for checkpointing.
+        TODO - this needs more testing..."""
         state_dict = super().state_dict()
         if self.scalar_optimizer is not None:
             state_dict["scalar_optimizer"] = self.scalar_optimizer.state_dict()
@@ -562,7 +569,8 @@ class DionOptimizer(Optimizer):
         self._init_scalar_optimizers()
 
 
-# Utility functions for easy integration
+# Utility functions for testing
+# -----------------------------
 
 
 def create_dion_optimizer(
@@ -584,7 +592,7 @@ def create_dion_optimizer(
         **kwargs: Additional arguments for DionOptimizer
 
     Returns:
-        Configured DionOptimizer instance
+        Configured DionOptimizer
     """
     return DionOptimizer(
         model.parameters(),
