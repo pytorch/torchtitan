@@ -347,6 +347,19 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode=selective",
+                    "--activation_checkpoint.selective_ac_option=op",
+                    "--model.flavor=debugmodel_flex_attn",
+                ]
+            ],
+            "FSDP + FLEX + per op SAC",
+            "fsdp+flex_attn+per_op_sac",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
