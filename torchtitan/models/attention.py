@@ -150,7 +150,7 @@ class FlexAttention(torch.nn.Module):
 
     @staticmethod
     @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
+    def init_attention_mask(batch: torch.Tensor, eos_id: int | None) -> None:
         # batch is [b, s, h, d] shape
         for mask_key in FlexAttention.used_attn_mask_types:
             attn_mask_type, fixed_block_size = mask_key
@@ -239,5 +239,5 @@ def build_attention(
         return ScaledDotProductAttention(attn_mask_type)
 
 
-def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
+def init_attention_mask(batch: torch.Tensor, eos_id: int | None) -> None:
     FlexAttention.init_attention_mask(batch, eos_id)

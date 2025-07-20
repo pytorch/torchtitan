@@ -40,6 +40,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     train_spec: train_spec_module.TrainSpec
 
     # swappable training components in TrainSpec
+    tokenizer: train_spec_module.BaseTokenizer
     dataloader: train_spec_module.BaseDataLoader
     model_parts: list[torch.nn.Module]
     loss_fn: train_spec_module.LossFunction
@@ -122,24 +123,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
-        # build dataloader
-        tokenizer = (
-            self.train_spec.build_tokenizer_fn(job_config)
-            if self.train_spec.build_tokenizer_fn is not None
-            else None
-        )
+        # build tokenizer and dataloader
+        if self.train_spec.build_tokenizer_fn is not None:
+            self.tokenizer = self.train_spec.build_tokenizer_fn(job_config)
 
         self.dataloader = self.train_spec.build_dataloader_fn(
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
-            tokenizer=tokenizer,
+            tokenizer=self.tokenizer,
             job_config=job_config,
         )
 
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config, tokenizer)
+        model_args.update_from_config(job_config)
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
@@ -325,7 +323,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 job_config=job_config,
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
-                tokenizer=tokenizer,
+                tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.train_spec.build_loss_fn(job_config),
                 validation_context=self.train_context,
@@ -401,11 +399,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs, target=targets, losses=losses, input_batch=inputs
+                        inputs,
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -420,7 +423,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs)
+                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred

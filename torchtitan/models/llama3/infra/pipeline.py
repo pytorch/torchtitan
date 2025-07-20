@@ -37,14 +37,14 @@ def pipeline_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: torch.device,
-    model_config: TransformerModelArgs,
+    model_args: TransformerModelArgs,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.world_mesh["pp"]
 
     stages, model_parts = pipeline_llama_manual_split(
-        model, pp_mesh, parallel_dims, job_config, device, model_config
+        model, pp_mesh, parallel_dims, job_config, device, model_args
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -78,7 +78,7 @@ def pipeline_llama_manual_split(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
     device: torch.device,
-    model_config: TransformerModelArgs,
+    model_args: TransformerModelArgs,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API extracts one torch.nn.Module objects for the part of the model configured to run inside this stage.
@@ -95,7 +95,7 @@ def pipeline_llama_manual_split(
     splits = parallelism_config.pipeline_parallel_split_points or generate_split_points(
         parallelism_config.pipeline_parallel_schedule,
         parallel_dims.pp,
-        model_config.n_layers,
+        model_args.n_layers,
         parallelism_config.pipeline_parallel_layers_per_stage,
     )
 

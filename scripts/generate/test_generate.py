@@ -107,7 +107,7 @@ def test_generate(
     tokenizer = train_spec.build_tokenizer_fn(config)
 
     model_args = train_spec.model_args[config.model.flavor]
-    model_args.update_from_config(config, tokenizer)
+    model_args.update_from_config(config)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
