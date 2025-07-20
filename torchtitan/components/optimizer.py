@@ -291,8 +291,9 @@ def build_optimizers(
     optim_implementation = job_config.optimizer.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
 
-    fused = optim_implementation == "fused"
-    foreach = optim_implementation == "foreach"
+    fused = False  # optim_implementation == "fused"
+    foreach = True  # optim_implementation == "foreach"
+    # assert not (fused or foreach), "Only for-loop is supported."
 
     # Base optimizer kwargs
     optimizer_kwargs = {

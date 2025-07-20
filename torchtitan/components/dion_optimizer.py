@@ -26,11 +26,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed._tensor import DTensor, Replicate, Shard
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp._common_utils import _FSDPState
 from torch.optim import Optimizer
 from torch.optim.adamw import AdamW
+
 
 try:
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP2
@@ -48,14 +46,6 @@ try:
 except ImportError:
     LION_AVAILABLE = False
     Lion = None
-
-
-class ShardingStrategy(Enum):
-    """Sharding strategies supported atm distributed Dion."""
-
-    NO_SHARD = "no_shard"
-    SHARD_GRAD_OP = "shard_grad_op"  # Zero2
-    FULL_SHARD = "full_shard"  # FSDP2 (Zero3)
 
 
 class DionOptimizer(Optimizer):
@@ -84,7 +74,7 @@ class DionOptimizer(Optimizer):
         matrix_threshold: Minimum size for treating parameter as matrix (default: 32)
 
         process_group: Process group for distributed training (default: None)
-        sharding_strategy: Sharding strategy for FSDP2 (default: FULL_SHARD)
+
     """
 
     def __init__(
@@ -99,11 +89,11 @@ class DionOptimizer(Optimizer):
         scalar_weight_decay: float = 0.0,
         eps: float = 1e-8,
         oversampling_factor: float = 1.25,
-        distributed: Optional[bool] = None,  # None = auto-detect
-        matrix_threshold: int = 32,  # 32 = default in paper
-        process_group: Optional[dist.ProcessGroup] = None,  # basically auto-detect
-        sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,  # FSDP2, this is for state dict only atm
-        max_norm: float = 10.0,  # Maximum gradient norm for clipping
+        distributed: Optional[bool] = None,
+        matrix_threshold: int = 32,
+        process_group: Optional[dist.ProcessGroup] = None,
+        max_norm: float = 10.0,
+        use_randomized_cholesky_qr: bool = False,
         **scalar_kwargs,
     ):
         if not 0.0 <= lr:
@@ -119,8 +109,8 @@ class DionOptimizer(Optimizer):
         self.oversampling_factor = oversampling_factor
         self.matrix_threshold = matrix_threshold
         self.process_group = process_group
-        self.sharding_strategy = sharding_strategy
         self.max_norm = max_norm
+        self.use_randomized_cholesky_qr = use_randomized_cholesky_qr
 
         # Auto-detect distributed mode
         if distributed is None:
@@ -135,7 +125,7 @@ class DionOptimizer(Optimizer):
             self.world_size = 1
             self.rank = 0
 
-        # Setup scalar optimizer  (default: AdamW)
+        # Setup scalar optimizer
         self.scalar_lr = scalar_lr if scalar_lr is not None else lr
         self.scalar_weight_decay = scalar_weight_decay
         self.scalar_optimizer_class = self._get_scalar_optimizer_class(scalar_optimizer)
@@ -150,17 +140,12 @@ class DionOptimizer(Optimizer):
 
     def _get_scalar_optimizer_class(self, optimizer_name: str):
         """Get scalar optimizer class by name."""
-        optimizer_map = {
-            # "adam": Adam,  # no reason to not use AdamW imo
-            "adamw": AdamW,
-        }
+        optimizer_map = {"adamw": AdamW}
 
         if LION_AVAILABLE:
             optimizer_map["lion"] = Lion
         elif optimizer_name == "lion":
-            raise ImportError(
-                "Lion optimizer not available. Install torch>=2.0 or use 'adam'/'adamw'"
-            )
+            raise ImportError("Lion optimizer not available. Use 'adamw' instead")
 
         if optimizer_name not in optimizer_map:
             raise ValueError(f"Unsupported scalar optimizer: {optimizer_name}")
@@ -169,7 +154,7 @@ class DionOptimizer(Optimizer):
 
     def _is_matrix_param(self, param: torch.Tensor) -> bool:
         """Determine if parameter should be treated as a matrix."""
-        # Handle DTensor and FSDP wrapped parameters
+        # Handle FSDP wrapped parameters
         if hasattr(param, "_local_tensor"):
             local_param = param._local_tensor
         else:
@@ -215,8 +200,7 @@ class DionOptimizer(Optimizer):
         self.scalar_optimizer = self.scalar_optimizer_class(scalar_groups)
 
     def _get_lr_scale(self, param: torch.Tensor) -> float:
-        """Get learning rate scaling factor based on parameter type and shape."""
-        # Get actual tensor for shape calculation
+        """Get learning rate scaling factor based on parameter type."""
         if hasattr(param, "_local_tensor"):
             actual_param = param._local_tensor
         else:
@@ -225,7 +209,7 @@ class DionOptimizer(Optimizer):
         if actual_param.dim() == 0:  # Scalar (normalization)
             return 1.0
         elif actual_param.dim() == 1:  # Vector (bias, embedding, etc.)
-            if actual_param.numel() > 1000:  # Likely unembedding / output
+            if actual_param.numel() > 1000:  # Likely unembedding
                 return 1.0 / math.sqrt(actual_param.size(0))
             else:  # Likely bias
                 return 1.0
@@ -237,54 +221,26 @@ class DionOptimizer(Optimizer):
 
     def _get_weight_decay(self, param: torch.Tensor) -> float:
         """Get weight decay for parameter type."""
-        # Get actual tensor for dimension check
         if hasattr(param, "_local_tensor"):
             actual_param = param._local_tensor
         else:
             actual_param = param
 
-        # Only apply weight decay to matrix parameters (not bias/normalization)
+        # Only apply weight decay to matrix parameters
         if actual_param.dim() >= 2:
             return self.scalar_weight_decay
         return 0.0
 
-    def _get_param_info(self, param: torch.Tensor) -> Dict[str, Any]:
-        """Get sharding information for a parameter."""
-        info = {
-            "is_dtensor": isinstance(param, DTensor),
-            "is_fsdp": False,
-            "shard_dims": [],
-            "local_shape": param.shape,
-            "global_shape": param.shape,
-        }
-
-        if info["is_dtensor"]:
-            info["local_shape"] = param._local_tensor.shape
-            info["global_shape"] = param.shape
-            placements = param.placements
-            for i, placement in enumerate(placements):
-                if isinstance(placement, Shard):
-                    info["shard_dims"].append(placement.dim)
-
-        # Check if parameter is part of FSDP module
-        if hasattr(param, "_fsdp_wrapped") or hasattr(param, "_is_fsdp"):
-            info["is_fsdp"] = True
-
-        return info
-
     def _init_matrix_state(self, param: torch.Tensor, group: Dict) -> Dict:
         """Initialize state for matrix parameter."""
         state = {}
-        param_info = self._get_param_info(param)
 
-        # Get the actual tensor to work with (local tensor for DTensor)
-        # TODO - check on this...just dumping to local tensor for now
-        if isinstance(param, torch.distributed._tensor.DTensor):
+        # Get the actual tensor to work with
+        if hasattr(param, "_local_tensor"):
             actual_param = param._local_tensor
         else:
             actual_param = param
 
-        # Use local shape
         m, n = actual_param.shape
         rank = min(m, n, max(1, int(min(m, n) * self.rank_factor)))
 
@@ -300,7 +256,6 @@ class DionOptimizer(Optimizer):
         # Step counter and metadata
         state["step"] = 0
         state["rank"] = rank
-        state["param_info"] = param_info
         state["local_m"] = m
         state["local_n"] = n
 
@@ -320,7 +275,10 @@ class DionOptimizer(Optimizer):
         P = torch.mm(B, Q_prev)
 
         # Orthogonalize P using QR decomposition
-        P = self._orthogonalize_matrix(P)
+        if self.use_randomized_cholesky_qr:
+            P = self._distributed_orthogonalize_matrix(P)
+        else:
+            P = self._orthogonalize_matrix(P)
 
         # R = B^T P (right factor)
         R = torch.mm(B.t(), P)
@@ -328,24 +286,45 @@ class DionOptimizer(Optimizer):
         return P, R
 
     def _distributed_power_iteration(
-        self, B: torch.Tensor, Q_prev: torch.Tensor, param_info: Dict
+        self, B: torch.Tensor, Q_prev: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Distributed power iteration (Algorithm 3, lines 5-6 in the paper)."""
+        """
+        Distributed power iteration for FSDP2.
 
-        # P = BQ with local computation
+        Key additions:
+        1. All-reduce P after local computation
+        2. All-reduce R after local computation
+        """
+        # Step 1: Local computation P_hat = B_local * Q
         P_local = torch.mm(B, Q_prev)
 
-        # In some distributed settings, we may need to synchronize
-        # For FSDP2, we keep the computation local
-        P = self._orthogonalize_matrix(P_local)
+        # Step 2: Synchronize P across all ranks (FSDP shards + DP ranks)
+        # This implements E_DP[Σ_FS[P̂]] from Algorithm 3
+        P_sync = P_local.clone()
+        if self.distributed:
+            dist.all_reduce(P_sync, op=dist.ReduceOp.SUM, group=self.process_group)
+            P_sync = P_sync / self.world_size
 
-        # R = B^T P with local computation
-        R = torch.mm(B.t(), P)
+        # Step 3: Orthogonalize the synchronized P
+        if self.use_randomized_cholesky_qr:
+            P = self._distributed_orthogonalize_matrix(P_sync)
+        else:
+            P = self._orthogonalize_matrix(P_sync)
+
+        # Step 4: Local computation R_hat = B_local^T * P
+        R_local = torch.mm(B.t(), P)
+
+        # Step 5: Synchronize R across all ranks
+        # This implements E_DP[R̂] from Algorithm 3
+        R = R_local.clone()
+        if self.distributed:
+            dist.all_reduce(R, op=dist.ReduceOp.SUM, group=self.process_group)
+            R = R / self.world_size
 
         return P, R
 
     def _orthogonalize_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
-        """Orthogonalize matrix using QR decomposition."""
+        """Orthogonalize matrix using QR decomposition (proven stable version)."""
         try:
             Q, _ = torch.linalg.qr(matrix)
             return Q
@@ -355,7 +334,7 @@ class DionOptimizer(Optimizer):
             Q, _ = torch.linalg.qr(matrix_stabilized)
             return Q
 
-    def _distributed_orthogonalize(self, matrix: torch.Tensor) -> torch.Tensor:
+    def _distributed_orthogonalize_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
         """Distributed orthogonalization using randomized Cholesky QR (Algorithm 2 in the paper)."""
         m, r = matrix.shape
         k = max(r, int(self.oversampling_factor * r))
@@ -396,9 +375,19 @@ class DionOptimizer(Optimizer):
         return result
 
     def _distributed_column_normalize(self, matrix: torch.Tensor) -> torch.Tensor:
-        """Distributed column normalization."""
-        # For local computation ala FSDP2, we just normalize columns directly (unlike Muon)
-        return self._normalize_columns(matrix)
+        """Distributed column normalization for FSDP2."""
+        # Compute local column norms squared
+        local_norms_sq = torch.sum(matrix * matrix, dim=0)
+
+        # All-reduce sum to get global column norms
+        if self.distributed:
+            dist.all_reduce(
+                local_norms_sq, op=dist.ReduceOp.SUM, group=self.process_group
+            )
+
+        # Take square root and normalize
+        global_norms = torch.sqrt(torch.clamp(local_norms_sq, min=1e-16))
+        return matrix / torch.clamp(global_norms, min=1e-8)
 
     def _step_matrix_param(
         self, param: torch.Tensor, grad: torch.Tensor, group: Dict, state: Dict
@@ -415,7 +404,6 @@ class DionOptimizer(Optimizer):
             return
 
         # Clip gradient to prevent extreme values
-        # TODO - check if this is needed given that we have a global clipping norm in toml...
         grad_norm = torch.norm(grad)
         if grad_norm > self.max_norm:
             grad = grad * (self.max_norm / (grad_norm + eps))
@@ -424,16 +412,12 @@ class DionOptimizer(Optimizer):
         momentum_buffer = state["momentum_buffer"]
         right_factor = state["right_factor"]
         rank = state["rank"]
-        param_info = state["param_info"]
 
         # Get the actual working tensors
-        # TODO - check with Wei on this...just dumping to local tensor for now
-        if isinstance(param, torch.distributed._tensor.DTensor):
+        if hasattr(param, "_local_tensor"):
             working_param = param._local_tensor
             working_grad = (
-                grad._local_tensor
-                if isinstance(grad, torch.distributed._tensor.DTensor)
-                else grad
+                grad._local_tensor if hasattr(grad, "_local_tensor") else grad
             )
         else:
             working_param = param
@@ -441,50 +425,52 @@ class DionOptimizer(Optimizer):
 
         # Ensure momentum buffer has correct shape
         if momentum_buffer.shape != working_grad.shape:
-            # Reinitialize if shape mismatch
             momentum_buffer = torch.zeros_like(working_grad)
             state["momentum_buffer"] = momentum_buffer
 
         # Ensure right factor has correct shape
         expected_n = working_grad.shape[1]
         if right_factor.shape[0] != expected_n:
-            # Reinitialize right factor with correct shape
             right_factor = torch.randn(
                 expected_n, rank, device=working_grad.device, dtype=working_grad.dtype
             )
             right_factor = self._normalize_columns(right_factor)
             state["right_factor"] = right_factor
 
-        # Form buffer B_t = M_{t-1} + G_t
+        # Form buffer B_t = M_{t-1} + G_t (Algorithm 1, line 3)
         buffer = momentum_buffer + working_grad
 
-        # Power iteration: approximate B_t ≈ P_t R_t^T
+        # Power iteration: approximate B_t ≈ P_t R_t^T (Algorithm 1, line 4)
         try:
-            if param_info["is_dtensor"] or param_info["is_fsdp"]:
-                P, R = self._distributed_power_iteration(
-                    buffer, right_factor, param_info
-                )
+            if self.distributed:
+                P, R = self._distributed_power_iteration(buffer, right_factor)
             else:
                 P, R = self._power_iteration(buffer, right_factor)
         except RuntimeError as e:
             warnings.warn(f"Power iteration failed: {e}. Skipping update.")
             return
 
-        # Approximation
+        # Approximation for error feedback
         approx = torch.mm(P, R.t())
 
-        # Error feedback: M_t = B_t - (1-μ)P_t R_t^T
+        # Error feedback: M_t = B_t - (1-μ)P_t R_t^T (Algorithm 1, line 6)
         momentum_buffer.copy_(buffer - (1 - momentum) * approx)
 
-        # Update right factor with column normalization
-        right_factor.copy_(self._normalize_columns(R))
+        # Update right factor with column normalization (Algorithm 1, line 8)
+        if self.distributed:
+            right_factor.copy_(self._distributed_column_normalize(R))
+        else:
+            right_factor.copy_(self._normalize_columns(R))
 
-        # Compute scaled orthonormal update
+        # Compute scaled orthonormal update (Algorithm 1, line 9)
         m, n = working_param.shape
         scale = math.sqrt(m / n)
 
         # Normalize columns of R to get Q
-        Q = self._normalize_columns(R)
+        if self.distributed:
+            Q = self._distributed_column_normalize(R)
+        else:
+            Q = self._normalize_columns(R)
         update = torch.mm(P, Q.t())
 
         # Apply decoupled weight decay
@@ -530,8 +516,7 @@ class DionOptimizer(Optimizer):
             self.scalar_optimizer.zero_grad(set_to_none)
 
     def state_dict(self) -> Dict[str, Any]:
-        """Return state dict for checkpointing.
-        TODO - this needs more testing..."""
+        """Return state dict for checkpointing."""
         state_dict = super().state_dict()
         if self.scalar_optimizer is not None:
             state_dict["scalar_optimizer"] = self.scalar_optimizer.state_dict()
@@ -539,7 +524,6 @@ class DionOptimizer(Optimizer):
             "distributed": self.distributed,
             "world_size": self.world_size,
             "rank": self.rank,
-            "sharding_strategy": self.sharding_strategy.value,
         }
         return state_dict
 
@@ -553,24 +537,22 @@ class DionOptimizer(Optimizer):
         if scalar_state is not None and self.scalar_optimizer is not None:
             self.scalar_optimizer.load_state_dict(scalar_state)
 
-        # Verify distributed configuration matches
         if distributed_config is not None:
             if distributed_config["distributed"] != self.distributed:
                 warnings.warn(
-                    f"Distributed mode mismatch: checkpoint has distributed={distributed_config['distributed']}, "
-                    f"current has distributed={self.distributed}"
+                    f"Distributed mode mismatch: checkpoint has distributed="
+                    f"{distributed_config['distributed']}, current has distributed={self.distributed}"
                 )
 
     def add_param_group(self, param_group: Dict):
         """Add a parameter group to the optimizer."""
         super().add_param_group(param_group)
-        # Re-classify parameters and reinitialize scalar optimizers
         self._classify_parameters()
         self._init_scalar_optimizers()
 
 
-# Utility functions for testing
-# -----------------------------
+# Utility functions
+# probably not needed, but keeping for now
 
 
 def create_dion_optimizer(
@@ -578,7 +560,6 @@ def create_dion_optimizer(
     lr: float = 0.01,
     rank_factor: float = 0.25,
     scalar_optimizer: str = "adamw",
-    sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,
     **kwargs,
 ) -> DionOptimizer:
     """
@@ -608,35 +589,16 @@ def create_dion_optimizer_fsdp2(
     lr: float = 0.01,
     rank_factor: float = 0.25,
     scalar_optimizer: str = "adamw",
-    sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,
     process_group: Optional[dist.ProcessGroup] = None,
     **kwargs,
 ) -> DionOptimizer:
-    """
-    Create a Dion optimizer configured for FSDP2 training.
-
-    Args:
-        model: PyTorch model (should be wrapped with FSDP2)
-        lr: Learning rate
-        rank_factor: Rank fraction for low-rank approximation
-        scalar_optimizer: Optimizer for non-matrix parameters
-        sharding_strategy: FSDP2 sharding strategy
-        process_group: Process group for distributed training
-        **kwargs: Additional arguments for DionOptimizer
-
-    Returns:
-        Configured DionOptimizer instance for FSDP2
-    """
-    if not FSDP2_AVAILABLE:
-        raise RuntimeError("FSDP2 is not available in this PyTorch version")
-
+    """Create a Dion optimizer configured for FSDP2 training."""
     return DionOptimizer(
         model.parameters(),
         lr=lr,
         rank_factor=rank_factor,
         scalar_optimizer=scalar_optimizer,
         distributed=True,
-        sharding_strategy=sharding_strategy,
         process_group=process_group,
         **kwargs,
     )
