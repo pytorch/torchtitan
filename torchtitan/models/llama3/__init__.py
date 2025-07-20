@@ -40,6 +40,9 @@ llama3_configs = {
         use_flex_attn=True,
         attn_mask_type="block_causal",
     ),
+    # NOTE: The original model checkpoints of Llama 3.2 1B and 3B are provided 
+    # with weight-tying between the embedding layer and the output layer, 
+    # which is not supported in torchtitan.
     "1B": TransformerModelArgs(
         dim=2048,
         n_layers=16,
