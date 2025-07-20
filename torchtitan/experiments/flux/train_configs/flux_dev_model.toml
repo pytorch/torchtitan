@@ -67,6 +67,6 @@ mode = "full"
 enable_checkpoint = false
 folder = "checkpoint"
 interval = 1_000
-last_save_model_weights_only = false
+last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
