@@ -2,8 +2,9 @@
 
 [job]
 dump_folder = "./outputs"
-description = "DeepSeek-V3 debug training"
+description = "model debug training for integration test"
 print_args = false
+use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -52,14 +53,12 @@ fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 expert_parallel_degree = 1
-pipeline_parallel_degree = 1
-pipeline_parallel_schedule = "1F1B"
 
 [checkpoint]
 enable_checkpoint = false
 folder = "checkpoint"
 interval = 10
-last_save_model_only = false
+last_save_model_weights_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 

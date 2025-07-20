@@ -10,8 +10,9 @@ import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import Dict, List, Sequence
+
+from torchtitan.models.deepseek_v3.model.model import DeepSeekV3Model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,15 +23,8 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
-class TestSuite(Enum):
-    """Test suites for integration tests."""
-    CORE = "core"  # Core functionality tests
-    PARALLELISM = "parallelism"  # Model parallelism tests
-    ALL = "all"  # Run all tests
-
-
 @dataclass
-class OverrideDefinitions:
+class TestCaseConfigs:
     """
     This class is used to define the override definitions for the integration tests.
     """
@@ -39,28 +33,26 @@ class OverrideDefinitions:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
-    models: List[str] = field(default_factory=lambda: ["llama3"])  # Default to llama3
+    supported_models: List[str] = field(default_factory=lambda: ["llama3"])  # Default to llama3
 
     def __repr__(self):
         return self.test_descr
 
 
-def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
+
+def build_core_functionality_tests() -> List[TestCaseConfigs]:
     """
     Build a dictionary of core functionality test configurations.
     This test suite is aimed at testing the core functionality and components of torchtitan.
     Core functionality tests only run on llama3 model.
     
     Returns:
-        A dictionary where:
-        - key is the config file name
-        - value is a list of OverrideDefinitions
+        A list where each item is a TestCaseConfigs object
     """
-    core_tests = defaultdict(list)
+    core_tests = []
     
-    # ===== LLAMA3 CORE FUNCTIONALITY TESTS =====
-    core_tests["debug_model.toml"].extend([
-        OverrideDefinitions(
+    core_tests.extend([
+        TestCaseConfigs(
             [
                 [
                     "--profiling.enable_profiling",
@@ -70,7 +62,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "default",
             "default",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--training.compile",
@@ -79,7 +71,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "1D compile",
             "1d_compile",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--training.compile",
@@ -90,7 +82,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "1D compile with selective op AC",
             "1d_compile_sac_op",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -103,7 +95,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Checkpoint Integration Test - Save Load Full Checkpoint",
             "full_checkpoint",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -119,7 +111,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
             "model_only_hf_checkpoint",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -140,153 +132,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
         ),
-        # TODO: re-enable PP tests once the issue is fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 4",
-        #             "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-        #         ],
-        #     ],
-        #     "PP looped zero bubble test",
-        #     "pp_looped_zero_bubble",
-        #     ngpu=4,
-        # ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-        #         ],
-        #     ],
-        #     "PP zero bubble test (v shaped)",
-        #     "pp_zbv",
-        #     ngpu=2,
-        # ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule 1F1B",
-        #             "--parallelism.data_parallel_shard_degree 1",
-        #         ],
-        #     ],
-        #     "PP 1D test 1F1B",
-        #     "pp_1f1b",
-        #     ngpu=2,
-        # ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 1",
-                ],
-            ],
-            "PP 1D test GPipe",
-            "pp_gpipe",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.pipeline_parallel_layers_per_stage 4",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-            ],
-            "PP+DP 1F1B 2D test",
-            "pp_dp_1f1b",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-            ],
-            "PP+DP GPipe 2D test",
-            "pp_dp_gpipe",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "PP+TP 2D test",
-            "pp_tp",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-                [
-                    "--training.steps 20",
-                    "--checkpoint.enable_checkpoint",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "PP+DP+TP 3D test with save/load resume ckpt",
-            "pp_dp_tp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--training.compile",
-                ],
-            ],
-            "PP+DP+TP 3D test with torch.compile",
-            "3d_compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                ],
-                [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.pipeline_parallel_layers_per_stage 1",
-                ],
-            ],
-            "PP looped 1F1B test",
-            "pp_looped_1f1b",
-            ngpu=4,
-        ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-        #             "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-        #         ],
-        #     ],
-        #     "PP with custom pipeline schedule loaded from CSV file",
-        #     "pp_custom_csv",
-        #     ngpu=2,
-        # ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--optimizer.name AdamW --optimizer.implementation foreach",
@@ -296,7 +142,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "optimizer_foreach",
             ngpu=2,
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -309,7 +155,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "test_generate",
             ngpu=2,
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--model.converters float8",
@@ -322,7 +168,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Float8 emulation test",
             "float8_emulation",
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     # Local batch size = 8, and `ngpu=2`, so default
@@ -337,7 +183,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "gradient_accumulation",
             ngpu=2,
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--memory_estimation.enabled",
@@ -347,7 +193,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
             "fsdp2_memory_estimation",
             ngpu=2,
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.fsdp_reshard_after_forward always",
@@ -362,7 +208,7 @@ def build_core_functionality_tests() -> Dict[str, List[OverrideDefinitions]]:
     return core_tests
 
 
-def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
+def build_model_parallelism_tests() -> Dict[str, List[TestCaseConfigs]]:
     """
     Build a dictionary of model parallelism test configurations.
     This test suite is aimed at testing the model parallelism of torchtitan, and will broadly cover
@@ -370,14 +216,14 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
     
     Returns:
         A dictionary where:
-        - key is the config file name
-        - value is a list of OverrideDefinitions
+        - key is the model name
+        - value is a list of TestCaseConfigs
     """
     parallelism_tests = defaultdict(list)
     
     # ===== LLAMA3 MODEL PARALLELISM TESTS =====
     parallelism_tests["debug_model.toml"].extend([
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.tensor_parallel_degree 2",
@@ -385,9 +231,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "2D eager",
             "2d_eager",
-            models=["llama3", "deepseek_v3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=1",
@@ -397,9 +242,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "DDP",
             "ddp",
             ngpu=4,
-            models=["llama3", "deepseek_v3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -409,9 +253,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "HSDP",
             "hsdp",
             ngpu=4,
-            models=["llama3", "deepseek_v3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.tensor_parallel_degree 2",
@@ -419,9 +262,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "TP Only",
             "tp_only",
-            models=["llama3", "deepseek_v3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--training.compile",
@@ -430,9 +272,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "2D compile",
             "2d_compile",
-            models=["llama3"],
         ),
-        # OverrideDefinitions(
+        # TestCaseConfigs(
         #     [
         #         [
         #             "--parallelism.pipeline_parallel_degree 4",
@@ -442,9 +283,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
         #     "PP looped zero bubble test",
         #     "pp_looped_zero_bubble",
         #     ngpu=4,
-        #     models=["llama3"],
         # ),
-        # OverrideDefinitions(
+        # TestCaseConfigs(
         #     [
         #         [
         #             "--parallelism.pipeline_parallel_degree 2",
@@ -454,9 +294,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
         #     "PP zero bubble test (v shaped)",
         #     "pp_zbv",
         #     ngpu=2,
-        #     models=["llama3"],
         # ),
-        # OverrideDefinitions(
+        # TestCaseConfigs(
         #     [
         #         [
         #             "--parallelism.pipeline_parallel_degree 2",
@@ -467,9 +306,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
         #     "PP 1D test 1F1B",
         #     "pp_1f1b",
         #     ngpu=2,
-        #     models=["llama3"],
         # ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 2",
@@ -480,9 +318,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "PP 1D test GPipe",
             "pp_gpipe",
             ngpu=2,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 2",
@@ -498,9 +335,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 2",
@@ -510,9 +346,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "PP+DP GPipe 2D test",
             "pp_dp_gpipe",
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 2",
@@ -521,9 +356,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "PP+TP 2D test",
             "pp_tp",
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -542,9 +376,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "PP+DP+TP 3D test with save/load resume ckpt",
             "pp_dp_tp",
             ngpu=8,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 2",
@@ -556,9 +389,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "PP+DP+TP 3D test with torch.compile",
             "3d_compile",
             ngpu=8,
-            models=["llama3", "deepseek_v3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.pipeline_parallel_degree 4",
@@ -573,9 +405,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "PP looped 1F1B test",
             "pp_looped_1f1b",
             ngpu=4,
-            models=["llama3"],
         ),
-        # OverrideDefinitions(
+        # TestCaseConfigs(
         #     [
         #         [
         #             "--parallelism.pipeline_parallel_degree 2",
@@ -586,9 +417,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
         #     "PP with custom pipeline schedule loaded from CSV file",
         #     "pp_custom_csv",
         #     ngpu=2,
-        #     models=["llama3"],
         # ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=1",
@@ -598,9 +428,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "DDP",
             "ddp",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -610,9 +439,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "HSDP",
             "hsdp",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=4",
@@ -623,9 +451,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "FSDP+FLEX_ATTN",
             "fsdp+flex_attn",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.context_parallel_degree=4",
@@ -635,9 +462,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "CP (allgather)",
             "cp_allgather",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.context_parallel_degree=4",
@@ -647,9 +473,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "CP (alltoall)",
             "cp_alltoall",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -660,9 +485,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "HSDP+TP",
             "hsdp+tp",
             ngpu=8,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -672,9 +496,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "FSDP+CP",
             "fsdp+cp",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=1",
@@ -685,9 +508,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "HSDP+CP (without dp_shard)",
             "hsdp+cp_without_dp_shard",
             ngpu=4,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -698,9 +520,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "HSDP+CP (with dp_shard)",
             "hsdp+cp_with_dp_shard",
             ngpu=8,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--parallelism.data_parallel_shard_degree=2",
@@ -711,9 +532,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "FSDP+TP+CP",
             "fsdp+tp+cp",
             ngpu=8,
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -733,9 +553,9 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
-            models=["llama3"],
+            
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--checkpoint.enable_checkpoint",
@@ -752,9 +572,8 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             ],
             "Optional checkpoint",
             "optional_checkpoint",
-            models=["llama3"],
         ),
-        OverrideDefinitions(
+        TestCaseConfigs(
             [
                 [
                     "--validation.enabled",
@@ -767,7 +586,6 @@ def build_model_parallelism_tests() -> Dict[str, List[OverrideDefinitions]]:
             "Validation test with fsdp, tp, cp",
             "validation_fsdp_tp_cp",
             ngpu=8,
-            models=["llama3"],
         ),
     ])
 
@@ -778,7 +596,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: TestCaseConfigs, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -819,6 +637,13 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
 
 def run_tests(args):
     # Determine which test suites to run based on the command-line argument
+    assert args.config_path.endswith(".toml"), "Base config path must end with .toml"
+    assert os.path.exists(args.config_path), f"Base config path {args.config_path} does not exist"
+    
+    # If user specifies a specific test name, the test_suite argument is ignored
+    if args.test_name != "all":
+        args.test_suite = TestSuite.ALL.value
+    
     if args.test_suite == TestSuite.CORE.value:
         test_suites = {"core": build_core_functionality_tests()}
     elif args.test_suite == TestSuite.PARALLELISM.value:
@@ -830,58 +655,36 @@ def run_tests(args):
         }
     
     for test_suite_name, test_configs in test_suites.items():
-        logger.info(f"Running {test_suite_name} test suite...")
-        
-        for config_file in os.listdir(args.config_dir):
-            if config_file.endswith(".toml") and config_file in test_configs:
-                full_path = os.path.join(args.config_dir, config_file)
-                with open(full_path, "rb") as f:
-                    config = tomllib.load(f)
-                    model_name = config["model"].get("name", "llama3")
+        logger.info(f"Running {test_suite_name} test suite...")    
+        with open(args.config_path, "rb") as f:
+            config = tomllib.load(f)
+            model_name = config["model"].get("name", "llama3")
+
+            for test_flavor in test_configs[config_file]:
+                # Filter by test name if specified
+                if args.test != "all" and test_flavor.test_name != args.test:
+                    continue
+                
+                # All tests now run on all models, no need to filter by model
                     
-                    if args.model != "all":
-                        assert model_name == args.model, f"Model mismatch with provided config: {model_name} != {args.model}"
-
-                    is_integration_test = config["job"].get(
-                        "use_for_integration_test", False
+                # Check if we have enough GPUs
+                    
+                # Check if we have enough GPUs
+                if args.ngpu < test_flavor.ngpu:
+                    logger.info(
+                        f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                        f" because --ngpu arg is {args.ngpu}"
                     )
-
-                    if not is_integration_test:
-                        continue
-
-                    for test_flavor in test_configs[config_file]:
-                        # Filter by test name if specified
-                        if args.test != "all" and test_flavor.test_name != args.test:
-                            continue
-                        
-                        # Filter by model if specified
-                        if args.model != "all" and args.model not in test_flavor.models:
-                            continue
-                            
-                        # Skip tests for models that don't match the current config
-                        if model_name not in test_flavor.models:
-                            logger.info(
-                                f"Skipping test {test_flavor.test_name} that supports {test_flavor.models} model,"
-                                f" because --model arg is {model_name}"
-                            )
-                            continue
-                            
-                        # Check if we have enough GPUs
-                        if args.ngpu < test_flavor.ngpu:
-                            logger.info(
-                                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                                f" because --ngpu arg is {args.ngpu}"
-                            )
-                        else:
-                            run_test(test_flavor, full_path, args.output_dir)
+                else:
+                    run_single_test(test_flavor, full_path, args.output_dir)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory to store test outputs")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/models/llama3/train_configs",
-        help="Directory containing model configuration files"
+        "--config_path", default="./tests/integration_tests/base_config.toml",
+        help="Base config path for integration tests. This is the config that will be used as a base for all tests."
     )
     parser.add_argument(
         "--test_name",
@@ -898,9 +701,9 @@ def main():
     parser.add_argument(
         "--model",
         default="all",
-        choices=["all", "llama3", "deepseek_v3"],
-        help="Specific model to run tests for (default: all)"
+        help="Specify the model to run tests on (default: llama3)"
     )
+
     parser.add_argument("--ngpu", default=8, type=int, help="Maximum number of GPUs to use")
     args = parser.parse_args()
 
