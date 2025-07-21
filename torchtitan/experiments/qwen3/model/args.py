@@ -66,7 +66,7 @@ class TransformerModelArgs(BaseModelArgs):
             )
 
     # This needs to be reviewed - I didn't find any major differences between calculating the number of parameters
-    # between the two LLMs of Llama3 and Qwen3.S
+    # between the two LLMs of Llama3 and Qwen3
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(
