@@ -21,7 +21,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "deepseek_v3"
+name = "llama3"  # option: llama3, deepseek_v3
 flavor = "debugmodel"
 # test tokenizer, for debug purpose only
 tokenizer_path = "./tests/assets/tokenizer"

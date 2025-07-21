@@ -15,10 +15,6 @@ from .integration_tests import OverrideDefinitions
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
 
 
 def build_test_list():
@@ -27,32 +23,32 @@ def build_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = defaultdict(list)
-    integration_tests_flavors["debug_model.toml"] = [
-        OverrideDefinitions(
-            [
+    integration_tests_flavors = []
+    integration_tests_flavors.extend(
+        [
+            TestCaseConfigs(
                 [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
+                    [
+                        "--training.compile",
+                        "--parallelism.tensor_parallel_degree 2",
+                        "--parallelism.enable_async_tensor_parallel",
+                    ],
                 ],
-            ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
-        ),
-        OverrideDefinitions(
-            [
+                "2D async TP compile",
+                "2d_asynctp_compile",
+                supported_models=["llama3"],
+            ),
+            TestCaseConfigs(
                 [
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
-            ],
-            "Float8 test",
-            "float8",
-        ),
-        OverrideDefinitions(
-            [
+                "Float8 test",
+                "float8",
+                supported_models=["llama3"],
+            ),
+            TestCaseConfigs(
                 [
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree=2",
@@ -88,81 +84,59 @@ def build_test_list():
     return integration_tests_flavors
 
 
-def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True)
+def run_h100_tests(args):
+    # If user specifies a specific test name, the test_suite argument is ignored
+    if args.test_name != "all":
+        args.test_suite = "all"
 
+    # build integration tests list
+    test_list = build_h100_test_list()
 
-def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
-    # run_test supports sequence of tests.
-    test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+    for test_flavor in test_list:
+        model_names = test_flavor.supported_models
+        for model_name in model_names:
+            # Filter by test_name if specified
+            if args.test_name != "all" and test_flavor.test_name != args.test_name:
+                continue
 
-    for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
-        # dump compile trace for debugging purpose
-        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
-        if test_name == "fsdp2_memory_estimation":
-            cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                "./scripts/estimate/run_memory_estimation.sh"
-            )
-        cmd += " " + dump_folder_arg
-        if override_arg:
-            cmd += " " + " ".join(override_arg)
-        logger.info(
-            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-        )
+            # Check if config file exists
+            assert args.config_path.endswith(
+                ".toml"
+            ), "Base config path must end with .toml"
+            assert os.path.exists(
+                args.config_path
+            ), f"Base config path {args.config_path} does not exist"
 
-        # save checkpoint (idx == 0) and load it for generation (idx == 1)
-        if test_name == "test_generate" and idx == 1:
-            cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
-                "PROMPT='What is the meaning of life?' "
-                f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
-            )
-
-        result = _run_cmd(cmd)
-        logger.info(result.stdout)
-        if result.returncode != 0:
-            raise Exception(
-                f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
-            )
-
-
-def run_tests(args):
-    integration_tests_flavors = build_test_list()
-    for config_file in os.listdir(args.config_dir):
-        if config_file.endswith(".toml"):
-            full_path = os.path.join(args.config_dir, config_file)
-            with open(full_path, "rb") as f:
-                config = tomllib.load(f)
-                is_integration_test = config["job"].get(
-                    "use_for_integration_test", False
+            # Check if we have enough GPUs
+            if args.ngpu < test_flavor.ngpu:
+                logger.info(
+                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                    f" because --ngpu arg is {args.ngpu}"
                 )
-                if is_integration_test:
-                    for test_flavor in integration_tests_flavors[config_file]:
-                        if args.test == "all" or test_flavor.test_name == args.test:
-                            if args.ngpu < test_flavor.ngpu:
-                                logger.info(
-                                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                                    f" because --ngpu arg is {args.ngpu}"
-                                )
-                            else:
-                                run_test(test_flavor, full_path, args.output_dir)
+            else:
+                run_single_test(
+                    test_flavor, model_name, args.config_path, args.output_dir
+                )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/models/llama3/train_configs"
+        "--config_path",
+        default="./tests/integration_tests/base_config.toml",
+        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
-        "--test",
+        "--test_name",
         default="all",
-        help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
+        help="Specific test name to run (e.g., 'tp_only', 'full_checkpoint'). Use 'all' to run all tests (default: all)",
+    )
+    parser.add_argument(
+        "--model",
+        default="all",
+        choices=["all", "llama3", "deepseek_v3"],
+        help="Specify the model to run tests on (default: llama3)",
     )
     parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
@@ -171,7 +145,7 @@ def main():
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
-    run_tests(args)
+    run_h100_tests(args)
 
 
 if __name__ == "__main__":
