@@ -11,9 +11,10 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -138,6 +139,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
+        # NOTE (xilunwu): need to store model_args.use_flex_attn for train_step
+        self.model_args = model_args
         # set the model args from training job configs
         model_args.update_from_config(job_config, tokenizer)
 
@@ -381,6 +384,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
+
+        # TODO: move this into `create_context_parallel_ctx`
+        # init block_mask for flex_attention
+        block_mask = None
+        if self.model_args.use_flex_attn:
+            from torchtitan.models.attention import FlexAttention
+
+            mask_mod = FlexAttention._get_causal_mask_mod()
+            batch_dimension = 1
+            seq_len = inputs.shape[1]
+            block_mask = FlexAttention.compiled_create_block_mask(
+                mask_mod, batch_dimension, None, seq_len, seq_len
+            )
+
+            torch.distributed.tensor.experimental._attention._cp_rank = (
+                parallel_dims.world_mesh["cp"].get_rank()
+            )
+            torch.distributed.tensor.experimental._attention._cp_group_size = (
+                parallel_dims.world_mesh["cp"].size()
+            )
+            torch.distributed.tensor.experimental._attention._device_type = (
+                parallel_dims.world_mesh["cp"].device_type
+            )
+            torch.distributed.tensor.experimental._attention._cp_shard_dim = 1
+            shard_q_size = seq_len // parallel_dims.world_mesh["cp"].size()
+            torch.distributed.tensor.experimental._attention._cp_block_mask = torch.distributed.tensor.experimental._attention.rewrite_context_parallel_block_mask(
+                block_mask,
+                shard_q_size,
+                parallel_dims.world_mesh["cp"].get_rank(),
+                parallel_dims.world_mesh["cp"].size(),
+                parallel_dims.world_mesh["cp"].device_type,
+            )
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],

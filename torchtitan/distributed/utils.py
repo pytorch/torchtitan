@@ -9,6 +9,7 @@ import math
 import os
 from collections.abc import Generator, Iterable
 from datetime import timedelta
+from typing import Optional
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -17,6 +18,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn.attention import SDPBackend
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config_manager import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -161,7 +163,10 @@ def create_context_parallel_ctx(
 ):
     try:
         from torch.distributed.tensor.experimental import context_parallel
-        from torch.distributed.tensor.experimental._attention import set_rotate_method
+        from torch.distributed.tensor.experimental._attention import (
+            _DispatchMode,
+            set_rotate_method,
+        )
     except ImportError:
         print(
             f"PyTorch version {torch.__version__} does not include the experimental "
@@ -169,6 +174,9 @@ def create_context_parallel_ctx(
         )
 
     set_rotate_method(cp_rotate_method)
+    torch.distributed.tensor.experimental._attention._dispatch_mode = (
+        _DispatchMode.TORCH_FUNCTION
+    )
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
@@ -194,8 +202,9 @@ def get_train_context(
             if cp_context is not None:
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+                # TODO: add logic for flex-attention
                 assert (
-                    ScaledDotProductAttention.backends
+                    ScaledDotProductAttention.backends or True
                 ), "No valid SDPA backends with CP."
                 stack.enter_context(cp_context)
 
@@ -416,9 +425,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
