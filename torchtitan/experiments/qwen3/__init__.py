@@ -15,7 +15,6 @@ from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
-from .infra.pipeline import pipeline_qwen3
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 

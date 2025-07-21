@@ -94,10 +94,10 @@ class Metrics:
 
 @dataclass
 class Model:
-    name: str = "qwen3"
+    name: str = "llama3"
     """Which model to train"""
 
-    flavor: str = "0.6B"
+    flavor: str = "debugmodel"
     """Which model config to train"""
 
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"

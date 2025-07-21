@@ -23,12 +23,11 @@ class TransformerModelArgs(BaseModelArgs):
 
     # Vocab size: 151936
 
-    dim: int = 1024  # 1024
-    n_layers: int = 28  # 36
-    n_heads: int = 16  # 16 heads
+    dim: int = 1024
+    n_layers: int = 28
+    n_heads: int = 16
     n_kv_heads: int = 8
     vocab_size: int = -1  # defined later by tokenizer
-    # Another check I need to do is to see if the vocab_size is being read correctly from the tokenizer
 
     hidden_dim: int = 3072
 
@@ -44,14 +43,7 @@ class TransformerModelArgs(BaseModelArgs):
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
 
-        # Another check I need to do is to see if the vocab_size is being read correctly from the tokenizer get_vocab_size()
-        # For Qwen3 the vocab_size is 151936
         self.vocab_size = tokenizer.get_vocab_size()
-
-        print(
-            "vocab_size_is", self.vocab_size
-        )  # tesstingS if the vocab_size is being read correctly from the tokenizer
-
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = tokenizer.eos_id
 
@@ -95,6 +87,3 @@ class TransformerModelArgs(BaseModelArgs):
         )  # Going over the math of this formula for Qwen3
 
         return nparams, num_flops_per_token
-
-
-S
