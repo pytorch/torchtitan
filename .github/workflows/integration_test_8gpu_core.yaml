@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test
+name: 8 GPU Integration Test - Core Functionality
 
 on:
   push:
