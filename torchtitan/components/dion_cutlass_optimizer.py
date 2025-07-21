@@ -29,11 +29,6 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.adamw import AdamW
 
-from .gemm_utils import CutlassGemmManager
-
-
-# optional
-torch.backends.cuda.matmul.allow_tf32 = True
 
 try:
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP2
@@ -138,15 +133,6 @@ class DionOptimizer(Optimizer):
 
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay, eps=eps)
         super(DionOptimizer, self).__init__(params, defaults)
-
-        # Initialize CUTLASS GEMM manager for optimized matrix operations
-        try:
-            self.cutlass_gemm_manager = CutlassGemmManager()
-        except Exception as e:
-            warnings.warn(
-                f"Failed to initialize CutlassGemmManager: {e}. Falling back to torch.mm"
-            )
-            self.cutlass_gemm_manager = None
 
         # Initialize parameter classification and scalar optimizers
         self._classify_parameters()
@@ -465,6 +451,7 @@ class DionOptimizer(Optimizer):
             return
 
         # Approximation for error feedback
+        # TODO - let's swap in cutlass here
         approx = torch.mm(P, R.t())
 
         # Error feedback: M_t = B_t - (1-μ)P_t R_t^T (Algorithm 1, line 6)
@@ -485,16 +472,7 @@ class DionOptimizer(Optimizer):
             Q = self._distributed_column_normalize(R)
         else:
             Q = self._normalize_columns(R)
-
-        # Use CUTLASS GEMM for the critical update computation (good candidate for epilogue fusion)
-        if self.cutlass_gemm_manager is not None:
-            try:
-                update = self.cutlass_gemm_manager.gemm(P, Q, transpose_B=True)
-            except Exception as e:
-                warnings.warn(f"CUTLASS GEMM failed: {e}. Falling back to torch.mm")
-                update = torch.mm(P, Q.t())
-        else:
-            update = torch.mm(P, Q.t())
+        update = torch.mm(P, Q.t())
 
         # Apply decoupled weight decay
         if weight_decay != 0:
