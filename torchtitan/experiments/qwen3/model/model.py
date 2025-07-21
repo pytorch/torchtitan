@@ -137,7 +137,8 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        # RMSNorm added here to the original code
+        # RMSNorm added here to the here to include the q-k norm
+        # This is one of the main differences between Llama3 and Qwen3
         if model_args.qk_norm:
             self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
             self.k_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
@@ -231,16 +232,10 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         hidden_dim: int,
-        # multiple_of: int,
-        # ffn_dim_multiplier: float | None,
     ):
         super().__init__()
-        # hidden_dim = int(2 * hidden_dim / 3)
-        # custom dim factor multiplier
-        # if ffn_dim_multiplier is not None:
-        # hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        # hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        # Hidden dimension is directly added from the model argsS
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)

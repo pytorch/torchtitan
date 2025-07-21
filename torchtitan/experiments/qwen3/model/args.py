@@ -8,6 +8,7 @@
 
 
 from dataclasses import dataclass
+from re import S
 
 from torch import nn
 
@@ -25,20 +26,16 @@ class TransformerModelArgs(BaseModelArgs):
     dim: int = 1024  # 1024
     n_layers: int = 28  # 36
     n_heads: int = 16  # 16 heads
-    # n_kv_heads: int | None = None
     n_kv_heads: int = 8
-    vocab_size: int = 151936  # defined later by tokenizer
-    # Question: where mulltiple of is being used?
-    # We need to change the multiple of
+    vocab_size: int = -1  # defined later by tokenizer
+    # Another check I need to do is to see if the vocab_size is being read correctly from the tokenizer
+
     hidden_dim: int = 3072
-    # multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2 #
-    # ffn_dim_multiplier: float | None = None
+
     norm_eps: float = 1e-6  # 1e-6
     rope_theta: float = 1000000  # 1000000
     qk_norm: bool = True
-    max_seq_len: int = 4096  # Question this one? it's 4096
-    # If `True`, then each transformer block init uses its layer ID, and if
-    # `False`, each uses the total number of transformer blocks
+    max_seq_len: int = 4096
     depth_init: bool = True
 
     use_flex_attn: bool = False
@@ -46,9 +43,17 @@ class TransformerModelArgs(BaseModelArgs):
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        self.vocab_size = 151936  # tokenizer.S
+
+        # Another check I need to do is to see if the vocab_size is being read correctly from the tokenizer get_vocab_size()
+        # For Qwen3 the vocab_size is 151936
+        self.vocab_size = tokenizer.get_vocab_size()
+
+        print(
+            "vocab_size_is", self.vocab_size
+        )  # tesstingS if the vocab_size is being read correctly from the tokenizer
+
         self.max_seq_len = job_config.training.seq_len
-        self.eos_id = 0  # tokenizer.eos_id
+        self.eos_id = tokenizer.eos_id
 
         if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
             raise ValueError(
@@ -62,6 +67,8 @@ class TransformerModelArgs(BaseModelArgs):
                 "We are still working on this."
             )
 
+    # This needs to be reviewed - I didn't find any major differences between calculating the number of parameters
+    # between the two LLMs of Llama3 and Qwen3.S
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(
@@ -88,3 +95,6 @@ class TransformerModelArgs(BaseModelArgs):
         )  # Going over the math of this formula for Qwen3
 
         return nparams, num_flops_per_token
+
+
+S

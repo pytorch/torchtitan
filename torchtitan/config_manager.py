@@ -97,7 +97,7 @@ class Model:
     name: str = "qwen3"
     """Which model to train"""
 
-    flavor: str = "debugmodel"
+    flavor: str = "0.6B"
     """Which model config to train"""
 
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"

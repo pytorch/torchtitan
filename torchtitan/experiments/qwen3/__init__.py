@@ -27,18 +27,76 @@ __all__ = [
     "qwen3_configs",
 ]
 
+
+# Adding different variants of the model
+
 qwen3_configs = {
     "0.6B": TransformerModelArgs(
-        vocab_size=151_936,
-        max_seq_len=40_960,
+        vocab_size=151936,
+        max_seq_len=4096,
         dim=1024,
-        n_layers=36,
+        n_layers=28,
         n_heads=16,
         n_kv_heads=8,
         qk_norm=True,
-        hidden_dim=2560,
+        hidden_dim=3072,
         rope_theta=1000000,
-    )
+    ),
+    "1.7B": TransformerModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        dim=2048,
+        n_layers=28,
+        n_heads=16,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=6144,
+        rope_theta=1000000,
+    ),
+    "4B": TransformerModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        dim=2560,
+        n_layers=36,
+        n_heads=32,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=9728,
+        rope_theta=1000000,
+    ),
+    "8B": TransformerModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        dim=4096,
+        n_layers=36,
+        n_heads=32,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=12288,
+        rope_theta=1000000,
+    ),
+    "14B": TransformerModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        dim=5120,
+        n_layers=40,
+        n_heads=40,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=17408,
+        rope_theta=1000000,
+    ),
+    "32B": TransformerModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        dim=5120,
+        n_layers=64,
+        n_heads=64,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=25600,
+        rope_theta=1000000,
+    ),
 }
 
 

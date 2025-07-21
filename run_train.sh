@@ -13,7 +13,7 @@ set -ex
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 #qwen3_0.6b.toml --- llama3_8b.toml
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/qwen3/train_configs/qwen3_0.6b.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/qwen3/train_configs/qwen3_0.6b.toml"}
 
 overrides=""
 if [ $# -ne 0 ]; then
