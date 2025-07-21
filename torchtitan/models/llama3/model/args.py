@@ -44,12 +44,6 @@ class TransformerModelArgs(BaseModelArgs):
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = tokenizer.eos_id
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with CP yet. "
-                "We are still working on this."
-            )
-
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(
