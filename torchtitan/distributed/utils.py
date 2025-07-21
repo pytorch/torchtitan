@@ -161,7 +161,10 @@ def create_context_parallel_ctx(
 ):
     try:
         from torch.distributed.tensor.experimental import context_parallel
-        from torch.distributed.tensor.experimental._attention import set_rotate_method
+        from torch.distributed.tensor.experimental._attention import (
+            _DispatchMode,
+            set_rotate_method,
+        )
     except ImportError:
         print(
             f"PyTorch version {torch.__version__} does not include the experimental "
@@ -169,6 +172,9 @@ def create_context_parallel_ctx(
         )
 
     set_rotate_method(cp_rotate_method)
+    torch.distributed.tensor.experimental._attention._dispatch_mode = (
+        _DispatchMode.TORCH_FUNCTION
+    )
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
