@@ -21,19 +21,17 @@ from torchtitan.protocols.train_spec import BaseModelArgs
 class TransformerModelArgs(BaseModelArgs):
     # Changing the model parameters to qwen 3
 
-    # Vocab size: 151936
-
-    dim: int = 1024  # 1024
-    n_layers: int = 28  # 36
-    n_heads: int = 16  # 16 heads
+    dim: int = 1024  
+    n_layers: int = 28  
+    n_heads: int = 16  
     n_kv_heads: int = 8
     vocab_size: int = -1  # defined later by tokenizer
     # Another check I need to do is to see if the vocab_size is being read correctly from the tokenizer
 
     hidden_dim: int = 3072
 
-    norm_eps: float = 1e-6  # 1e-6
-    rope_theta: float = 1000000  # 1000000
+    norm_eps: float = 1e-6  
+    rope_theta: float = 1000000 
     qk_norm: bool = True
     max_seq_len: int = 4096
     depth_init: bool = True
