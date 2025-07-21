@@ -15,11 +15,6 @@ from tests.integration_tests import OverrideDefinitions
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
 
 def build_test_list():
     """
@@ -141,21 +136,15 @@ def run_tests(args):
     for config_file in os.listdir(args.config_dir):
         if config_file.endswith(".toml"):
             full_path = os.path.join(args.config_dir, config_file)
-            with open(full_path, "rb") as f:
-                config = tomllib.load(f)
-                is_integration_test = config["job"].get(
-                    "use_for_integration_test", False
-                )
-                if is_integration_test:
-                    for test_flavor in integration_tests_flavors[config_file]:
-                        if args.test == "all" or test_flavor.test_name == args.test:
-                            if args.ngpu < test_flavor.ngpu:
-                                logger.info(
-                                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                                    f" because --ngpu arg is {args.ngpu}"
-                                )
-                            else:
-                                run_test(test_flavor, full_path, args.output_dir)
+            for test_flavor in integration_tests_flavors[config_file]:
+                if args.test == "all" or test_flavor.test_name == args.test:
+                    if args.ngpu < test_flavor.ngpu:
+                        logger.info(
+                            f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                            f" because --ngpu arg is {args.ngpu}"
+                        )
+                    else:
+                        run_test(test_flavor, full_path, args.output_dir)
 
 
 def main():

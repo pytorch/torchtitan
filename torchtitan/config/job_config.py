@@ -19,9 +19,6 @@ class Job:
     description: str = "default job"
     """Description of the job"""
 
-    use_for_integration_test: bool = False
-    """Add this config to the integration test suite"""
-
     print_args: bool = False
     """Print the args to terminal"""
 
