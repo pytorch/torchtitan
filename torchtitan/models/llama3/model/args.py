@@ -44,12 +44,6 @@ class TransformerModelArgs(BaseModelArgs):
         self.max_seq_len = job_config.training.seq_len
         self.eos_id = tokenizer.eos_id
 
-        if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with selective AC yet. "
-                "See https://github.com/pytorch/pytorch/issues/147879"
-            )
-
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(

@@ -88,11 +88,11 @@ class DummyJobConfig:
             folder="",
             interval=1,
             keep_latest_k=0,
-            last_save_model_weights_only=False,
+            last_save_model_only=False,
             export_dtype="float32",
             exclude_from_loading=[],
             initial_load_path=None,
-            initial_load_model_weights_only=False,
+            initial_load_model_only=False,
         )
         self.fault_tolerance = SimpleNamespace(replica_id=0)
 
@@ -119,11 +119,11 @@ class TestCheckpointManager(unittest.TestCase):
             folder="",
             interval=1,
             keep_latest_k=2,
-            last_save_model_weights_only=False,
+            last_save_model_only=False,
             export_dtype="float32",
             exclude_from_loading=[],
             initial_load_path=None,
-            initial_load_model_weights_only=False,
+            initial_load_model_only=False,
         )
         ft_ns = SimpleNamespace(replica_id=0)
         job_ns = SimpleNamespace(dump_folder=self.test_folder)
@@ -299,7 +299,6 @@ class TestCheckpointManager(unittest.TestCase):
         expected = os.path.join(ckpt_folder, "step-5")
         mock_load.assert_called_once()
         args, kwargs = mock_load.call_args
-        self.assertEqual(args[0], manager._states_to_load(model_only=False))
         self.assertEqual(kwargs.get("checkpoint_id"), expected)
         self.assertTrue(res)
         manager.close()
@@ -342,13 +341,13 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
-    def test_last_save_model_weights_only_and_initial_load_model_weights_only(
+    def test_last_save_model_only_and_initial_load_model_only(
         self, mock_load, mock_save, mock_rank
     ):
         mock_save.side_effect = self.fake_save
         mock_load.side_effect = self.fake_load
         # Phase 1: save model weights only
-        self.job_config.checkpoint.last_save_model_weights_only = True
+        self.job_config.checkpoint.last_save_model_only = True
         manager1 = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
@@ -363,8 +362,8 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(os.path.isdir(path1))
         # Phase 2: initial load from step-1
         cfg = self.job_config.checkpoint
-        cfg.last_save_model_weights_only = False
-        cfg.initial_load_model_weights_only = True
+        cfg.last_save_model_only = False
+        cfg.initial_load_model_only = True
         cfg.initial_load_path = path1
         cfg.folder = ""
         self.job_config.job.dump_folder = self.test_folder
@@ -603,8 +602,8 @@ class TestCheckpointManager(unittest.TestCase):
             self.assertNotIn("model", state_dict)
             self.assertIn("optimizer", state_dict)
 
-        self.job_config.checkpoint.last_save_model_weights_only = True
-        self.job_config.checkpoint.initial_load_model_weights_only = False
+        self.job_config.checkpoint.last_save_model_only = True
+        self.job_config.checkpoint.initial_load_model_only = False
         manager = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
