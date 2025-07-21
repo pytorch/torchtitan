@@ -31,6 +31,7 @@ class FTManager:
         self,
         ft_config: FTConfig,
     ) -> None:
+        self.config = ft_config
         if not ft_config.enable:
             self._manager = None
             return
