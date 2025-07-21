@@ -6,6 +6,7 @@
 
 import importlib
 from contextlib import nullcontext
+from datetime import timedelta
 from typing import ContextManager, Optional, TYPE_CHECKING, Union
 
 import torch
@@ -37,7 +38,15 @@ class FTManager:
         if not has_torchft:
             raise ImportError("torchft is not installed. Please install it.")
 
-        pg = ft.ProcessGroupNCCL()
+        process_group_timeout = timedelta(
+            milliseconds=ft_config.process_group_timeout_ms
+        )
+        if ft_config.process_group == "gloo":
+            pg = ft.ProcessGroupGloo(timeout=process_group_timeout)
+        elif ft_config.process_group == "nccl":
+            pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
+        else:
+            raise ValueError(f"Unsuported process group: {ft_config.process_group}")
 
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = ft_config.semi_sync_method is None
@@ -116,15 +125,19 @@ def maybe_semi_sync_training(
             # Create the outer optimizer based on the inner optimizer parameters.
             params = [group["params"] for group in optimizer.param_groups]
             params = [param for sublist in params for param in sublist]
-            outer_optimizer = torch.optim.SGD(
-                params, lr=0.7, momentum=0.9, nesterov=True
-            )
+            outer_optimizers = []
+            for model in model_parts:
+                params = [p for p in model.parameters() if p.requires_grad]
+                outer_optimizer = torch.optim.SGD(
+                    params, lr=0.7, momentum=0.9, nesterov=True
+                )
+                outer_optimizers.append(outer_optimizer)
 
             return local_sgd.DiLoCo(
                 manager=ft_manager._manager,
                 model_fragments=model_parts,
                 inner_optimizer=optimizer,
-                outer_optimizer=outer_optimizer,
+                outer_optimizer=outer_optimizers,
                 sync_every=ft_config.sync_steps,
                 should_quantize=ft_config.should_quantize,
                 fragment_sync_delay=ft_config.fragment_sync_delay,
