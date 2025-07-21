@@ -243,7 +243,7 @@ def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     parallel_dims: ParallelDims,
-    ft_manager: FTManager,
+    ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -273,7 +273,7 @@ def build_optimizers(
             raise NotImplementedError(
                 "Optimizers in backward is not supported with Pipeline Parallel."
             )
-        if ft_manager.enabled:
+        if ft_manager and ft_manager.enabled:
             raise NotImplementedError(
                 "TorchFT is not supported with optimizers in backward."
             )
@@ -313,7 +313,7 @@ def build_optimizers(
             model_parts, optimizer_cls, optimizer_kwargs
         )
 
-    if ft_manager.enabled:
+    if ft_manager and ft_manager.enabled:
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
