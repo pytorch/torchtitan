@@ -46,6 +46,8 @@ deepseekv3_configs = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
+        use_flex_attn=True,
+        attn_mask_type="causal",
     ),
     "16B": DeepSeekV3ModelArgs(
         vocab_size=102400,
@@ -65,6 +67,8 @@ deepseekv3_configs = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
+        use_flex_attn=True,
+        attn_mask_type="causal",
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
