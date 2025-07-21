@@ -67,6 +67,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     n_dense_layers: int = 1
     n_heads: int = 16
     norm_eps: float = 1e-5  # eps used for RMSNorm
+    eos_id: int = 0
     # MoE
     n_routed_experts: int = 64
     n_shared_experts: int = 2
@@ -99,6 +100,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         """
         self.vocab_size = tokenizer.vocab_size
         self.max_seq_len = job_config.training.seq_len
+        self.eos_id = tokenizer.eos_id
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """
