@@ -8,7 +8,7 @@ description = "Llama 3 8B training"
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 10
 
 [metrics]
 log_freq = 10
@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 20
 compile = false
 dataset = "c4"
 
@@ -42,7 +42,7 @@ data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
-context_parallel_degree = 1
+context_parallel_degree = 8
 
 [checkpoint]
 enable_checkpoint = false
