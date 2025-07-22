@@ -175,6 +175,8 @@ class CheckpointManager:
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous 4 components.
         checkpoint_config (Checkpoint): The config used to configure the checkpointing.
+        base_folder (str): The base folder to save the checkpoint. Will be concatenated
+            with checkpoint_config.folder
         sd_adapter (Optional[type[StateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
@@ -189,9 +191,9 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: Checkpoint,
+        base_folder: str,
         sd_adapter: type[StateDictAdapter] | None = None,
         ft_manager: FTManager | None = None,
-        checkpoint_path: str | None = None,
     ) -> None:
         self.enable_checkpoint = checkpoint_config.enable_checkpoint
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
@@ -226,7 +228,7 @@ class CheckpointManager:
 
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
             if ft_manager is not None:
-                self.ft_replica_id = ft_manager.config.replica_id
+                self.ft_replica_id = ft_manager.replica_id
 
         async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
@@ -253,7 +255,7 @@ class CheckpointManager:
         self.cpu_offload_state_dict = None
         self.stager = None
 
-        self.folder = checkpoint_path
+        self.folder = os.path.join(base_folder, checkpoint_config.folder)
 
         # Checkpoint policy related fields.
         self.initial_load_path = checkpoint_config.initial_load_path

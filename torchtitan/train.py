@@ -297,11 +297,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
+            base_folder=job_config.job.dump_folder,
             sd_adapter=self.train_spec.state_dict_adapter,
             ft_manager=self.ft_manager,
-            checkpoint_path=os.path.join(
-                job_config.job.dump_folder, job_config.checkpoint.folder
-            ),
         )
 
         loss_parallel_enabled = (
