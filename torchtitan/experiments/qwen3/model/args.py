@@ -19,13 +19,11 @@ from torchtitan.protocols.train_spec import BaseModelArgs
 
 @dataclass
 class TransformerModelArgs(BaseModelArgs):
-    # Changing the model parameters to qwen 3
 
-    # Vocab size: 151936
 
-    dim: int = 1024  # 1024
-    n_layers: int = 28  # 36
-    n_heads: int = 16  # 16 heads
+    dim: int = 1024  
+    n_layers: int = 28  
+    n_heads: int = 16 
     n_kv_heads: int = 8
     vocab_size: int = -1  # defined later by tokenizer
 
@@ -59,8 +57,7 @@ class TransformerModelArgs(BaseModelArgs):
                 "We are still working on this."
             )
 
-    # This needs to be reviewed - I didn't find any major differences between calculating the number of parameters
-    # between the two LLMs of Llama3 and Qwen3
+
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(
