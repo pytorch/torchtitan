@@ -20,7 +20,6 @@ from .model.model import Transformer
 
 __all__ = [
     "parallelize_qwen3",
-    "pipeline_qwen3",
     "TransformerModelArgs",
     "Transformer",
     "qwen3_configs",
