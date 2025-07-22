@@ -71,12 +71,6 @@ class TransformerModelArgs(BaseModelArgs):
             )
             self.use_grouped_mm = False
 
-        if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with selective AC yet. "
-                "See https://github.com/pytorch/pytorch/issues/147879"
-            )
-
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise ValueError(
                 "FlexAttention is not compatible with CP yet. "

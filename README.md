@@ -89,9 +89,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
-### Nightly
-
-Coming soon.
+> [Install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
 
 ### Stable
 
@@ -103,14 +101,24 @@ Or via conda:
 ```sh
 conda install conda-forge::torchtitan
 ```
-### Sources
-   
+
+### Nightly
+
+> This method requires the nightly build of PyTorch.
+
+```sh
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+```
+You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
+
+### From source
+
+> This method requires the nightly build of PyTorch or PyTorch built from source.
+
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-[For AMD GPU] pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --force-reinstall
 ```
 
 ### Downloading a tokenizer

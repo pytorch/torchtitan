@@ -9,7 +9,7 @@ from typing import Tuple
 
 import torch
 from torch import nn
-from torchtitan.models.attention import build_attention
+from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
@@ -230,10 +230,7 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        # TODO: Need to pass softmax_scale to sdpa() interface.
-        # For mask, DeepseekV3 uses causal mask, so we can use the default mask in sdpa
-        # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L17
-        output = self.sdpa(q, k, v)
+        output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(1, 2)  # (bsz, seqlen, n_heads, v_head_dim)
@@ -357,20 +354,32 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
         """
         Forward pass for the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
+                If pipeline parallelism is enabled, this will be the input token indices
+                for the ranks on the first pipeline stage. This will be the activation of the
+                previous pipeline stage if the current rank is not on the first stage.
+            input_batch (torch.Tensor): The input batch read from the dataloader.
+                This will always be the input batch regardless of the pipeline stage.
+                This field is required for non-first PP stages to perform document
+                masking attention (to analyze the boundary of the document).
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        h = self.tok_embeddings(tokens)
+        if self.model_args.use_flex_attn:
+            init_attention_mask(
+                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
+            )
+
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)
-        h = self.norm(h)
-        output = self.output(h)
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output

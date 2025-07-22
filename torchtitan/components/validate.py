@@ -11,12 +11,12 @@ import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
+from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
 
 
 class BaseValidator:
@@ -53,6 +53,7 @@ class Validator(BaseValidator):
         loss_fn: LossFunction,
         validation_context: Generator[None, None, None],
         maybe_enable_amp: Generator[None, None, None],
+        metrics_processor: MetricsProcessor,
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
@@ -65,11 +66,13 @@ class Validator(BaseValidator):
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
+        self.metrics_processor = metrics_processor
 
     @torch.no_grad()
     def validate(
         self,
         model_parts: list[nn.Module],
+        step: int,
     ) -> dict[str, float]:
         # Set model to eval mode
         # TODO: currently does not support pipeline parallelism
@@ -89,6 +92,7 @@ class Validator(BaseValidator):
             ):
                 break
 
+            self.metrics_processor.ntokens_since_last_log += labels.numel()
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
             inputs = input_dict["input"]
@@ -124,11 +128,9 @@ class Validator(BaseValidator):
                 loss, parallel_dims.world_mesh["dp_cp"]
             )
         else:
-            global_avg_loss = loss
+            global_avg_loss = loss.item()
 
-        logger.info(
-            f"Validation completed. Average loss: {global_avg_loss:.4f} over {num_steps} batches"
-        )
+        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
         # Reshard after run forward pass
         # This is to ensure the model weights are sharded the same way for checkpoint saving.
@@ -149,6 +151,7 @@ def build_validator(
     loss_fn: LossFunction,
     validation_context: Generator[None, None, None],
     maybe_enable_amp: Generator[None, None, None],
+    metrics_processor: MetricsProcessor | None = None,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
     return Validator(
@@ -160,4 +163,5 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
+        metrics_processor=metrics_processor,
     )

@@ -23,16 +23,16 @@ class TransformerModelArgs(BaseModelArgs):
 
     # Vocab size: 151936
 
-    dim: int = 1024
-    n_layers: int = 28
-    n_heads: int = 16
+    dim: int = 1024  # 1024
+    n_layers: int = 28  # 36
+    n_heads: int = 16  # 16 heads
     n_kv_heads: int = 8
     vocab_size: int = -1  # defined later by tokenizer
 
     hidden_dim: int = 3072
 
-    norm_eps: float = 1e-6  # 1e-6
-    rope_theta: float = 1000000  # 1000000
+    norm_eps: float = 1e-6
+    rope_theta: float = 1000000
     qk_norm: bool = True
     max_seq_len: int = 4096
     depth_init: bool = True
@@ -60,7 +60,7 @@ class TransformerModelArgs(BaseModelArgs):
             )
 
     # This needs to be reviewed - I didn't find any major differences between calculating the number of parameters
-    # between the two LLMs of Llama3 and Qwen3.S
+    # between the two LLMs of Llama3 and Qwen3
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
         nparams_embedding = sum(

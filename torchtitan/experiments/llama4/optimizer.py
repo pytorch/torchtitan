@@ -48,7 +48,7 @@ def build_llama4_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     parallel_dims: ParallelDims,
-    ft_manager: FTManager,
+    ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     optimizers = build_optimizers(
         model_parts=model_parts,
