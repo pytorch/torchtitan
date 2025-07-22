@@ -188,10 +188,18 @@ def apply_non_moe_tp(
                 input_layouts=(Shard(1), Replicate()),
                 desired_input_layouts=(Replicate(), Replicate()),
             ),
-            # use_local_output=False make the output to be a DTensor instead of a plain Tensor
+            # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
+            # so that the intermedidate results k is generated as a DTensor and its gradient is
+            # correctly handled by the autograd engine.
             "attention.wkv_a": NoParallel(use_local_output=False),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
             "attention.kv_norm": NoParallel(use_local_output=False),
+            # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
+            "attention.sdpa": prepare_module_input(
+                input_layouts=(Shard(1), Shard(1), Shard(1)),
+                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+                use_local_output=True,
+            ),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
