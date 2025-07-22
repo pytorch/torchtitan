@@ -105,7 +105,6 @@ def pipeline_llama_manual_split(
         stop_layer: str | None,
         is_first: bool = False,
         is_last: bool = False,
-        tied_embeddings: bool = False,
     ) -> tuple[PipelineStage, nn.Module]:
         model = copy.deepcopy(whole_model)
         if not is_first:
@@ -121,15 +120,9 @@ def pipeline_llama_manual_split(
             if drop_layers:
                 del model.layers[name]
 
-        if tied_embeddings:
-            if not is_first:
-                # If tied_embeddings is enables, then embeddings and outputs are placed in the first stage.
-                model.norm = None
-                model.output = None
-        else:
-            if not is_last:
-                model.norm = None
-                model.output = None
+        if not is_last:
+            model.norm = None
+            model.output = None
 
         stage = PipelineStage(
             model,
@@ -158,7 +151,6 @@ def pipeline_llama_manual_split(
             stop_layer,
             is_first=stage_idx == 0,
             is_last=stage_idx == num_stages - 1,
-            tied_embeddings=model_config.tied_embeddings,
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx}"

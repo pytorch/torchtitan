@@ -349,12 +349,12 @@ class Transformer(nn.Module, ModelProtocol):
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.output = (
+            nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+            if not model_args.tied_embeddings
+            else self.tok_embeddings
+        )
         self.init_weights()
-
-        if model_args.tied_embeddings:
-            # Tie weights between output and tok_embeddings
-            self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
@@ -383,7 +383,7 @@ class Transformer(nn.Module, ModelProtocol):
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        if self.output is not None:
+        if self.output is not None and not self.model_args.tied_embeddings:
             nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
@@ -432,5 +432,11 @@ class Transformer(nn.Module, ModelProtocol):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
-        output = self.output(h) if self.output else h
+        if self.output:
+            if self.model_args.tied_embeddings:
+                output = F.linear(h, self.output.weight)
+            else:
+                output = self.output(h)
+        else:
+            output = h
         return output
