@@ -220,6 +220,10 @@ class TokenChoiceTopKRouter(nn.Module):
                 scores, k=self.top_k, dim=1
             )
 
+        if self.use_sigmoid:
+            denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
+            top_scores = top_scores / denominator
+
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),

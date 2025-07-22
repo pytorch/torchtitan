@@ -77,10 +77,14 @@ class FlexAttention(torch.nn.Module):
         return (self.attn_mask_type, self.fixed_block_size)
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float | None = None,
     ) -> torch.Tensor:
         block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
+        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
 
     @staticmethod
     def _get_causal_mask_mod() -> _mask_mod_signature:
