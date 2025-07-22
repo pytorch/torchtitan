@@ -412,7 +412,8 @@ class TestCheckpointManager(unittest.TestCase):
         """
         # Configure async mode
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "async"
+        checkpoint_config = job_config.checkpoint
+        checkpoint_config.async_mode = "async"
         ft_manager = DummyFTManager()
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
@@ -421,7 +422,7 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=states,
-            checkpoint_config=self.job_config.checkpoint,
+            checkpoint_config=checkpoint_config,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -454,7 +455,8 @@ class TestCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "async"
+        checkpoint_config = job_config.checkpoint
+        checkpoint_config.async_mode = "async"
         ft_manager = mock.Mock()
         ft_manager.manager.return_value = mock.Mock()
         ft_manager.manager.participating_rank = mock.Mock(return_value=0)
@@ -465,7 +467,7 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            checkpoint_config=self.job_config.checkpoint,
+            checkpoint_config=checkpoint_config,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
