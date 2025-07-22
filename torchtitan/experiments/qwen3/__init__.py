@@ -104,7 +104,6 @@ register_train_spec(
         model_cls=Transformer,
         model_args=qwen3_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,
-        pipelining_fn=pipeline_qwen3,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
