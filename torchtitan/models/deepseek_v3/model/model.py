@@ -330,6 +330,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             bias=False,
         )
         self.model_args = model_args
+        self.eos_id = model_args.eos_id
         self.init_weights()
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
