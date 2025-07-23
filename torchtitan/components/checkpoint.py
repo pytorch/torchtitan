@@ -347,7 +347,9 @@ class CheckpointManager:
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
         if to_hf:
-            assert self.sd_adapter is not None
+            assert (
+                self.sd_adapter is not None
+            ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = {}
@@ -623,7 +625,7 @@ class CheckpointManager:
         """
 
         for filename in os.listdir(checkpoint_id):
-            if filename == "model.safetensors.index.json":
+            if filename.endswith(".safetensors"):
                 return True
         return False
 

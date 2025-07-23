@@ -12,10 +12,10 @@ from typing import Literal
 
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
@@ -92,14 +92,34 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
-    eos_id: int = 0
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        """
-        Update the model_config config from the given job config.
-        """
-        self.vocab_size = tokenizer.vocab_size
-        self.max_seq_len = job_config.training.seq_len
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
+
+        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+            logger.warning(
+                "Failed to use grouped mm, which is only supported on SM90 or later",
+            )
+            self.use_grouped_mm = False
+
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
+            )
+
+        if (
+            job_config.parallelism.pipeline_parallel_degree > 1
+            and self.use_flex_attn
+            and self.attn_mask_type == "block_causal"
+        ):
+            raise RuntimeError(
+                "PP + block causal FlexAttention support will be fixed soon."
+            )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """

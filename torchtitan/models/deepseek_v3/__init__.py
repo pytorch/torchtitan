@@ -29,7 +29,7 @@ __all__ = [
 
 deepseekv3_configs = {
     "debugmodel": DeepSeekV3ModelArgs(
-        vocab_size=102400,
+        vocab_size=2000,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
@@ -48,7 +48,7 @@ deepseekv3_configs = {
         mscale=0.70,
     ),
     "debugmodel_flex_attn": DeepSeekV3ModelArgs(
-        vocab_size=102400,
+        vocab_size=2000,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,

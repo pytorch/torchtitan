@@ -11,9 +11,9 @@ from dataclasses import dataclass
 
 from torch import nn
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
+from torchtitan.tools.logging import logger
 
 
 @dataclass
@@ -22,13 +22,13 @@ class TransformerModelArgs(BaseModelArgs):
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: int | None = None
-    vocab_size: int = -1  # defined later by tokenizer
+    vocab_size: int = 128256
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
 
-    max_seq_len: int = 2048
+    max_seq_len: int = 131072
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
@@ -37,17 +37,26 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
-    def update_from_config(
-        self, job_config: JobConfig, tokenizer: BaseTokenizer
-    ) -> None:
-        self.vocab_size = tokenizer.get_vocab_size()
-        self.max_seq_len = job_config.training.seq_len
-        self.eos_id = tokenizer.eos_id
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with CP yet. "
-                "We are still working on this."
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
+            )
+
+        if (
+            job_config.parallelism.pipeline_parallel_degree > 1
+            and self.use_flex_attn
+            and self.attn_mask_type == "block_causal"
+        ):
+            raise RuntimeError(
+                "PP + block causal FlexAttention support will be fixed soon."
             )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
