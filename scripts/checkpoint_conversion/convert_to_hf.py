@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
@@ -12,8 +13,6 @@ import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.config_manager import ConfigManager
 
 
 @torch.inference_mode()
@@ -22,20 +21,11 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        [
-            "--model.tokenizer-path",
-            "./assets/tokenizer/Llama-3.1-8B",
-        ]
-    )
-    tokenizer = build_hf_tokenizer(config)
-    model_args.update_from_config(config, tokenizer)
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
-    sd_adapter = train_spec.state_dict_adapter
+    sd_adapter = train_spec.state_dict_adapter(model_args)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
@@ -48,7 +38,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
     )
 
     # convert state dict tt->hf
-    hf_state_dict = sd_adapter.to_hf(state_dict, model_args)
+    hf_state_dict, config_json = sd_adapter.to_hf(state_dict)
 
     fqn_to_index_mapping = {}
     num_fqns_per_file = 30
@@ -69,6 +59,10 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
         hf_state_dict,
         storage_writer=storage_writer,
     )
+
+    config_path = output_dir / "config.json"
+    with config_path.open("w") as f:
+        json.dump(config_json, f, indent=4)
 
 
 if __name__ == "__main__":

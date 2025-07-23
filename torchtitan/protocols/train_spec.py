@@ -21,28 +21,8 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import JobConfig, LRScheduler
+from torchtitan.protocols.model_args import BaseModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
-
-@dataclass
-class BaseModelArgs:
-    """All ModelArgs should inherit from this class.
-
-    The only usage of this class is type checking but allows us to extend common
-    arguments to all models in the future.
-    """
-
-    _enforced: str = "This field is used to enforce all fields have defaults."
-
-    @abstractmethod
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        pass
-
-    @abstractmethod
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
-        pass
 
 
 class ModelProtocol(Protocol):

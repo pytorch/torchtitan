@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import re
-from typing import Any
+from typing import Any, Tuple
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -13,26 +13,26 @@ from .args import TransformerModelArgs
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
-    from_hf_map = {
-        "model.embed_tokens.weight": "tok_embeddings.weight",
-        "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-        "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-        "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-        "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-        "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-        "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-        "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-        "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-        "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-        "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-        "model.norm.weight": "norm.weight",
-        "lm_head.weight": "output.weight",
-    }
-    to_hf_map = {v: k for k, v in from_hf_map.items()}
+    def __init__(self, model_args: TransformerModelArgs):
+        self.model_args = model_args
+        self.from_hf_map = {
+            "model.embed_tokens.weight": "tok_embeddings.weight",
+            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
+            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
+            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
+            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
+            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.norm.weight": "norm.weight",
+            "lm_head.weight": "output.weight",
+        }
 
     # HuggingFace permutation function (exact copy from their conversion script)
-    @staticmethod
-    def _permute(w, n_heads_arg, dim1=None, dim2=None):
+    def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
         if dim1 is None:
             dim1 = w.shape[0]
         if dim2 is None:
@@ -44,8 +44,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
             .clone()
         )
 
-    @staticmethod
-    def _reverse_permute(w, n_heads_arg, dim1=None, dim2=None):
+    def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
         if dim1 is None:
             dim1 = w.shape[0]
         if dim2 is None:
@@ -56,16 +55,18 @@ class Llama3StateDictAdapter(StateDictAdapter):
             .reshape(dim1, dim2)
         )
 
-    @staticmethod
     def to_hf(
-        state_dict: dict[str, Any], model_args: TransformerModelArgs
-    ) -> dict[str, Any]:
+        self, state_dict: dict[str, Any]
+    ) -> Tuple[dict[str, Any], dict[str, Any]]:
+        to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
-        n_heads = model_args.n_heads
+        n_heads = self.model_args.n_heads
         n_kv_heads = (
-            model_args.n_kv_heads if model_args.n_kv_heads is not None else n_heads
+            self.model_args.n_kv_heads
+            if self.model_args.n_kv_heads is not None
+            else n_heads
         )
-        dim = model_args.dim
+        dim = self.model_args.dim
         head_dim = dim // n_heads
         hf_state_dict = {}
 
@@ -73,35 +74,53 @@ class Llama3StateDictAdapter(StateDictAdapter):
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
-                new_key = Llama3StateDictAdapter.to_hf_map[abstract_key]
+                new_key = to_hf_map[abstract_key]
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # the native Llama and huggingface RoPE implementation.
                 if abstract_key == "layers.{}.attention.wq.weight":
-                    value = Llama3StateDictAdapter._permute(value, n_heads)
+                    value = self._permute(value, n_heads)
                 if abstract_key == "layers.{}.attention.wk.weight":
                     key_value_dim = head_dim * n_kv_heads
-                    value = Llama3StateDictAdapter._permute(
-                        value, n_kv_heads, key_value_dim, dim
-                    )
+                    value = self._permute(value, n_kv_heads, key_value_dim, dim)
 
                 if new_key is None:
                     continue
                 new_key = new_key.format(layer_num)
             else:
-                new_key = Llama3StateDictAdapter.to_hf_map[key]
+                new_key = to_hf_map[key]
 
             hf_state_dict[new_key] = value
-        return hf_state_dict
 
-    @staticmethod
-    def from_hf(
-        hf_state_dict: dict[str, Any], model_args: TransformerModelArgs
-    ) -> dict[str, Any]:
-        n_heads = model_args.n_heads
+        ffn_hidden_dim = int(self.model_args.dim * 4 * 2 / 3)
+        if self.model_args.ffn_dim_multiplier:
+            ffn_hidden_dim = int(ffn_hidden_dim * self.model_args.ffn_dim_multiplier)
+        multiple_of = self.model_args.multiple_of
+        ffn_hidden_dim = multiple_of * (
+            (ffn_hidden_dim + multiple_of - 1) // multiple_of
+        )  # hacky way to get ffn_hidden_dim, follows the calculation in models.TransformerBlock and model.FeedForward
+
+        config_json = {
+            "architectures": ["LlamaForCausalLM"],
+            "hidde": "silu",
+            "hidden_size": self.model_args.dim,
+            "intermediate_size": ffn_hidden_dim,
+            "model_type": "llama",
+            "num_attention_heads": self.model_args.n_heads,
+            "num_hidden_layers": self.model_args.n_layers,
+            "num_key_value_heads": self.model_args.n_kv_heads,
+            "vocab_size": self.model_args.vocab_size,
+        }
+
+        return hf_state_dict, config_json
+
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        n_heads = self.model_args.n_heads
         n_kv_heads = (
-            model_args.n_kv_heads if model_args.n_kv_heads is not None else n_heads
+            self.model_args.n_kv_heads
+            if self.model_args.n_kv_heads is not None
+            else n_heads
         )
-        dim = model_args.dim
+        dim = self.model_args.dim
         head_dim = dim // n_heads
         state_dict = {}
 
@@ -109,24 +128,21 @@ class Llama3StateDictAdapter(StateDictAdapter):
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
-                new_key = Llama3StateDictAdapter.from_hf_map[abstract_key]
-                print(f"{new_key} in layer {layer_num}")
+                new_key = self.from_hf_map[abstract_key]
 
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # the native Llama and huggingface RoPE implementation.
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
-                    value = Llama3StateDictAdapter._reverse_permute(value, n_heads)
+                    value = self._reverse_permute(value, n_heads)
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
                     key_value_dim = head_dim * n_kv_heads
-                    value = Llama3StateDictAdapter._reverse_permute(
-                        value, n_kv_heads, key_value_dim, dim
-                    )
+                    value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
 
                 if new_key is None:
                     continue
                 new_key = new_key.format(layer_num)
             else:
-                new_key = Llama3StateDictAdapter.from_hf_map[key]
+                new_key = self.from_hf_map[key]
 
             state_dict[new_key] = value
         return state_dict

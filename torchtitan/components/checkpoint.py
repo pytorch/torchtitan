@@ -6,6 +6,7 @@
 
 import enum
 import functools
+import json
 import os
 import queue
 import re
@@ -13,6 +14,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -191,7 +193,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
-        sd_adapter: type[StateDictAdapter] | None,
+        sd_adapter: StateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
@@ -201,7 +203,7 @@ class CheckpointManager:
             assert (
                 sd_adapter is not None
             ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-        self.sd_adapter = sd_adapter
+            self.sd_adapter = sd_adapter
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -357,7 +359,7 @@ class CheckpointManager:
             assert (
                 self.sd_adapter is not None
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
-            state_dict = self.sd_adapter.to_hf(state_dict)
+            state_dict, config_json = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = {}
             num_fqns_per_file = 30
@@ -375,6 +377,7 @@ class CheckpointManager:
                 enable_consolidation=True,
                 thread_count_consolidation=5,
             )
+
         else:
             checkpoint_save_id = checkpoint_id
 
@@ -401,6 +404,11 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
+        if to_hf:
+            config_path = Path(checkpoint_id) / "config.json"
+            with config_path.open("w") as f:
+                json.dump(config_json, f, indent=4)
+
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
 
@@ -424,18 +432,14 @@ class CheckpointManager:
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(
-                state_dict, self.states["train_state"].model_args
-            )
+            hf_state_dict, _ = self.sd_adapter.to_hf(state_dict)
 
             dcp.load(
                 hf_state_dict,
                 storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
             )
 
-            state_dict = self.sd_adapter.from_hf(
-                hf_state_dict, self.states["train_state"].model_args
-            )
+            state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)

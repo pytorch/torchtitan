@@ -11,9 +11,9 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -137,7 +137,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.dataloader = self.train_spec.build_dataloader_fn(
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
-            tokenizer=tokenizer,
+            tokenizer=self.tokenizer,
             job_config=job_config,
         )
 
@@ -302,7 +302,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            sd_adapter=self.train_spec.state_dict_adapter,
+            sd_adapter=(
+                self.train_spec.state_dict_adapter(self.model_args)
+                if self.train_spec.state_dict_adapter
+                else None
+            ),
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
