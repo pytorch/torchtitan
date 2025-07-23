@@ -67,7 +67,10 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         device_module.set_device(self.device)
 
         # init distributed and build meshes
-        dist_utils.init_distributed(job_config)
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+        )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
@@ -199,10 +202,10 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config, parallel_dims
+            self.model_parts, job_config.optimizer, parallel_dims
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config
+            self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )
 
         self.checkpointer = CheckpointManager(

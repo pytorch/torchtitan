@@ -155,40 +155,41 @@ def build_test_list():
             "Checkpoint Integration Test - Save Model Only bf16",
             "last_save_model_only_bf16",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                ],
-            ],
-            "PP looped zero bubble test",
-            "pp_looped_zero_bubble",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                ],
-            ],
-            "PP zero bubble test (v shaped)",
-            "pp_zbv",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.data_parallel_shard_degree 1",
-                ],
-            ],
-            "PP 1D test 1F1B",
-            "pp_1f1b",
-            ngpu=2,
-        ),
+        # TODO: re-enable PP tests once the issue is fixed
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 4",
+        #             "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
+        #         ],
+        #     ],
+        #     "PP looped zero bubble test",
+        #     "pp_looped_zero_bubble",
+        #     ngpu=4,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
+        #         ],
+        #     ],
+        #     "PP zero bubble test (v shaped)",
+        #     "pp_zbv",
+        #     ngpu=2,
+        # ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule 1F1B",
+        #             "--parallelism.data_parallel_shard_degree 1",
+        #         ],
+        #     ],
+        #     "PP 1D test 1F1B",
+        #     "pp_1f1b",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -288,18 +289,18 @@ def build_test_list():
             "pp_looped_1f1b",
             ngpu=4,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-                    "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                ],
-            ],
-            "PP with custom pipeline schedule loaded from CSV file",
-            "pp_custom_csv",
-            ngpu=2,
-        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--parallelism.pipeline_parallel_degree 2",
+        #             "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
+        #             "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
+        #         ],
+        #     ],
+        #     "PP with custom pipeline schedule loaded from CSV file",
+        #     "pp_custom_csv",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [

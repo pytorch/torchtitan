@@ -117,7 +117,7 @@ def test_generate(
     world_mesh = None
     # Init distributed env
     if world_size > 1:
-        dist_utils.init_distributed(config)
+        dist_utils.init_distributed(config.comm)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,

@@ -11,7 +11,7 @@ import time
 
 import torch
 
-from torchtitan.config import JobConfig
+from torchtitan.config import Profiling as ProfilingConfig
 from torchtitan.tools.logging import logger
 
 # the number of warmup steps before the active step in each profiling cycle
@@ -22,21 +22,21 @@ MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 
 @contextlib.contextmanager
-def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
+def maybe_enable_profiling(
+    profiling_config: ProfilingConfig,
+    *,
+    global_step: int = 0,
+    base_folder: str = "",
+    leaf_folder: str = "",
+):
     # get user defined profiler settings
-    enable_profiling = config.profiling.enable_profiling
+    enable_profiling = profiling_config.enable_profiling
 
     if enable_profiling:
-        dump_dir = config.job.dump_folder
-        save_trace_dir = config.profiling.save_traces_folder
-        trace_dir = os.path.join(dump_dir, save_trace_dir)
-        profile_freq = config.profiling.profile_freq
+        trace_dir = os.path.join(base_folder, profiling_config.save_traces_folder)
+        profile_freq = profiling_config.profile_freq
 
         rank = torch.distributed.get_rank()
-
-        replica_id = None
-        if config.fault_tolerance.enable:
-            replica_id = config.fault_tolerance.replica_id
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
@@ -47,11 +47,9 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
             logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
 
-            output_file = curr_trace_dir
-            if replica_id is not None:
-                output_file = os.path.join(output_file, f"replica{replica_id}")
-            output_file = os.path.join(output_file, f"rank{rank}_trace.json")
-
+            output_file = os.path.join(
+                curr_trace_dir, leaf_folder, f"rank{rank}_trace.json"
+            )
             prof.export_chrome_trace(output_file)
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
@@ -89,11 +87,18 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
 
 
 @contextlib.contextmanager
-def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
-    enable_snapshot = config.profiling.enable_memory_snapshot
+def maybe_enable_memory_snapshot(
+    profiling_config: ProfilingConfig,
+    *,
+    global_step: int = 0,
+    base_folder: str = "",
+    leaf_folder: str = "",
+):
+    enable_snapshot = profiling_config.enable_memory_snapshot
     if enable_snapshot:
-        snapshot_folder = config.profiling.save_memory_snapshot_folder
-        snapshot_dir = os.path.join(config.job.dump_folder, snapshot_folder)
+        snapshot_dir = os.path.join(
+            base_folder, profiling_config.save_memory_snapshot_folder
+        )
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
         rank = torch.distributed.get_rank()
@@ -123,16 +128,17 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                     os.makedirs(curr_snapshot_dir, exist_ok=True)
                 logger.info(f"Dumping memory snapshot at step {curr_step}")
                 begin = time.monotonic()
-                with open(
-                    f"{curr_snapshot_dir}/rank{rank}_memory_snapshot.pickle", "wb"
-                ) as output:
+                output_file = os.path.join(
+                    curr_snapshot_dir, leaf_folder, f"rank{rank}_memory_snapshot.pickle"
+                )
+                with open(output_file, "wb") as output:
                     pickle.dump(torch.cuda.memory._snapshot(), output)
                 logger.info(
                     f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
                 )
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
-        profiler = MemoryProfiler(global_step, config.profiling.profile_freq)
+        profiler = MemoryProfiler(global_step, profiling_config.profile_freq)
         try:
             yield profiler
         except torch.OutOfMemoryError as e:

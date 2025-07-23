@@ -112,8 +112,10 @@ def estimate_memory(job_config: JobConfig):
         model.train()
 
         # build optimizer after applying parallelisms to the model
-        optimizers = build_optimizers([model], job_config, parallel_dims)
-        lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
+        optimizers = build_optimizers([model], job_config.optimizer, parallel_dims)
+        lr_schedulers = build_lr_schedulers(
+            optimizers.optimizers, job_config.lr_scheduler, job_config.training.steps
+        )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
         # where it issues a single all-reduce for all parameters at once for better performance

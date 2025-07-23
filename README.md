@@ -93,7 +93,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 One can choose to install `torchtitan` from a stable release, a nightly build, or directly run the source code. Please [install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
 
 ### Stable releases
-One can install the latest [stable release]((https://github.com/pytorch/torchtitan/releases)) of `torchtitan` via `pip` or `conda`.
+One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `pip` or `conda`.
 ```sh
 pip install torchtitan
 ```

@@ -85,7 +85,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         device_module.set_device(self.device)
 
         # init distributed and build meshes
-        dist_utils.init_distributed(job_config)
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            base_folder=job_config.job.dump_folder,
+        )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
@@ -272,10 +276,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config, parallel_dims, self.ft_manager
+            self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
         )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config
+            self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -500,10 +504,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
+        leaf_folder = (
+            ""
+            if not self.ft_manager.enabled
+            else f"replica_{self.ft_manager.replica_id}"
+        )
         with (
-            maybe_enable_profiling(job_config, global_step=self.step) as torch_profiler,
+            maybe_enable_profiling(
+                job_config.profiling,
+                global_step=self.step,
+                base_folder=job_config.job.dump_folder,
+                leaf_folder=leaf_folder,
+            ) as torch_profiler,
             maybe_enable_memory_snapshot(
-                job_config, global_step=self.step
+                job_config.profiling,
+                global_step=self.step,
+                base_folder=job_config.job.dump_folder,
+                leaf_folder=leaf_folder,
             ) as memory_profiler,
             maybe_semi_sync_training(
                 job_config.fault_tolerance,
