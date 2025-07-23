@@ -11,9 +11,9 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -137,20 +137,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.dataloader = self.train_spec.build_dataloader_fn(
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             job_config=job_config,
         )
 
         # build model (using meta init)
-        model_args = self.train_spec.model_args[job_config.model.flavor]
+        self.model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        self.model_args.update_from_config(job_config)
 
         logger.info(
-            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Building {self.train_spec.name} {job_config.model.flavor} with {self.model_args}"
         )
         with torch.device("meta"):
-            model = self.train_spec.model_cls(model_args)
+            model = self.train_spec.model_cls(self.model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -163,7 +163,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else self.train_spec.build_metrics_processor_fn
         )
         self.metrics_processor = build_metrics_processor_fn(
-            job_config, parallel_dims, model_args
+            job_config, parallel_dims, self.model_args
         )
         color = self.metrics_processor.color
 
@@ -171,7 +171,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        ) = self.model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
             f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
@@ -234,7 +234,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 parallel_dims,
                 job_config,
                 self.device,
-                model_args,
+                self.model_args,
                 self.train_spec.parallelize_fn,
                 self.loss_fn,
             )
@@ -331,7 +331,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 job_config=job_config,
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
-                tokenizer=self.tokenizer,
+                tokenizer=tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.train_spec.build_loss_fn(job_config),
                 validation_context=self.train_context,
@@ -407,16 +407,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs,
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
+                        inputs, target=targets, losses=losses, input_batch=inputs
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
+                        target=targets, losses=losses, input_batch=inputs
                     )
 
             # accumulate losses across pipeline microbatches
@@ -431,7 +426,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
+                    pred = model_parts[0](inputs)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
