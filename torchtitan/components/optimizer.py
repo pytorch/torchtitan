@@ -16,10 +16,12 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
+from torchtitan.components.dion_optimizer import DionOptimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config_manager import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -279,6 +281,7 @@ def build_optimizers(
             )
 
     name = job_config.optimizer.name
+    logger.info(f"Using optimizer {name}")
     lr = job_config.optimizer.lr
     beta1 = job_config.optimizer.beta1
     beta2 = job_config.optimizer.beta2
@@ -288,21 +291,41 @@ def build_optimizers(
     optim_implementation = job_config.optimizer.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
 
-    fused = optim_implementation == "fused"
-    foreach = optim_implementation == "foreach"
+    fused = False  # optim_implementation == "fused"
+    foreach = True  # optim_implementation == "foreach"
+    # assert not (fused or foreach), "Only for-loop is supported."
 
+    # Base optimizer kwargs
     optimizer_kwargs = {
         "lr": lr,
         "betas": (beta1, beta2),
         "eps": eps,
         "weight_decay": weight_decay,
-        "fused": fused,
-        "foreach": foreach,
     }
+
+    # Add implementation-specific kwargs for Adam/AdamW
+    if name in ["Adam", "AdamW"]:
+        optimizer_kwargs.update(
+            {
+                "fused": fused,
+                "foreach": foreach,
+            }
+        )
+    # Add DION-specific kwargs
+    elif name == "DION":
+        optimizer_kwargs.update(
+            {
+                "momentum": job_config.optimizer.momentum,
+                "rank_factor": job_config.optimizer.rank_factor,
+                "scalar_optimizer": job_config.optimizer.scalar_optimizer,
+                "distributed": True,  # Always use distributed mode in torchtitan,
+            }
+        )
 
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
+        "DION": DionOptimizer,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
