@@ -9,7 +9,7 @@ import time
 
 import torch
 
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.experiments.flux import flux_configs
 
 from torchtitan.experiments.flux.dataset.tokenizer import FluxTokenizer

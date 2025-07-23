@@ -18,7 +18,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn.attention import SDPBackend
 
-from torchtitan.config_manager import TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger

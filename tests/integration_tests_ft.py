@@ -10,8 +10,8 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Sequence
+
+from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,22 +20,6 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
-
-
-@dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
-
-    override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = "default"
-    test_name: str = "default"
-    ngpu: int = 4
-    model_flavor: str = "debugmodel"
-
-    def __repr__(self):
-        return self.test_descr
 
 
 def build_test_list():
@@ -52,6 +36,7 @@ def build_test_list():
             ],
             "Default TorchFT integration test",
             "default_torchft",
+            ngpu=8,
         )
     ]
     return integration_tests_flavors
@@ -65,7 +50,6 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    model_flavor_arg = f"--model.flavor {test_flavor.model_flavor}"
 
     # Use all 8 GPUs in a single replica
     # TODO: Use two replica groups
@@ -79,14 +63,13 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         for replica_id, ranks in enumerate(all_ranks):
             cmd = (
                 f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" '
-                + f"CUDA_VISIBLE_DEVICES={ranks}"
-                + f"CONFIG_FILE={full_path} NGPU={len(ranks)} ./run_train.sh "
+                + f"CUDA_VISIBLE_DEVICES={ranks} "
+                + f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} ./run_train.sh "
                 + "--fault_tolerance.enable "
-                + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={len(all_ranks)}"
+                + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={test_flavor.ngpu}"
             )
 
             cmd += " " + dump_folder_arg
-            cmd += " " + model_flavor_arg
             if override_arg:
                 cmd += " " + " ".join(override_arg)
 

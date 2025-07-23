@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config_manager import Checkpoint as CheckpointConfig
+from torchtitan.config.job_config import Checkpoint as CheckpointConfig
 
 
 class FakeOptimizersContainer:
@@ -175,7 +175,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -207,7 +209,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -247,7 +251,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
@@ -269,7 +275,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         self.assertFalse(manager.load(step=-1))
@@ -292,7 +300,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         res = manager.load(step=-1)
@@ -321,7 +331,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
@@ -354,7 +366,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -373,7 +387,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
         r1 = manager2.load(step=1)
@@ -404,7 +420,8 @@ class TestCheckpointManager(unittest.TestCase):
         """
         # Configure async mode
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "async"
+        checkpoint_config = job_config.checkpoint
+        checkpoint_config.async_mode = "async"
         ft_manager = DummyFTManager()
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
@@ -413,8 +430,10 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=states,
-            job_config=job_config,
-            ft_manager=ft_manager,
+            checkpoint_config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
         )
 
         # First save schedules async
@@ -445,7 +464,8 @@ class TestCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         job_config = DummyJobConfig(job=self.job_config.job)
-        job_config.checkpoint.async_mode = "async"
+        checkpoint_config = job_config.checkpoint
+        checkpoint_config.async_mode = "async"
         ft_manager = mock.Mock()
         ft_manager.manager.return_value = mock.Mock()
         ft_manager.manager.participating_rank = mock.Mock(return_value=0)
@@ -456,8 +476,10 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=job_config,
-            ft_manager=ft_manager,
+            checkpoint_config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
         )
 
         # Initially no future
@@ -491,7 +513,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -516,7 +540,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -561,7 +587,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -610,7 +638,9 @@ class TestCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            job_config=self.job_config,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 

@@ -10,11 +10,11 @@ import torch
 import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
-from torchtitan.config_manager import ActivationCheckpoint as ACConfig
+from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.models.llama3.infra.parallelize import apply_ac
 
 
-class TestModule(nn.Module):
+class ToyModule(nn.Module):
     def __init__(self):
         super().__init__()
         self.layers = nn.ModuleDict({"0": TransformerBlock()})
@@ -56,12 +56,12 @@ class TestApplyAC(unittest.TestCase):
             return mode.get_total_flops() / (512**3 * 2)
 
         # 1. No AC
-        model_no_ac = TestModule()
+        model_no_ac = ToyModule()
         flops_no_ac = get_bw_flops(model_no_ac)
 
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
-        model_selective_ac = TestModule()
+        model_selective_ac = ToyModule()
         ac_config_no_force = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -72,7 +72,7 @@ class TestApplyAC(unittest.TestCase):
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
-        model_with_force_first = TestModule()
+        model_with_force_first = ToyModule()
         ac_config_with_force_first = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -82,7 +82,7 @@ class TestApplyAC(unittest.TestCase):
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
-        model_with_force_last = TestModule()
+        model_with_force_last = ToyModule()
         ac_config_with_force_last = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -92,7 +92,7 @@ class TestApplyAC(unittest.TestCase):
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
         # 5. Full AC
-        model_with_full_ac = TestModule()
+        model_with_full_ac = ToyModule()
         ac_config_full_ac = ACConfig(
             mode="full",
         )
@@ -122,12 +122,12 @@ class TestApplyAC(unittest.TestCase):
             return act_mem
 
         # 1. No AC
-        model_no_ac = TestModule().cuda()
+        model_no_ac = ToyModule().cuda()
         mem_no_ac = get_act_mem(model_no_ac)
 
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
-        model_selective_ac = TestModule().cuda()
+        model_selective_ac = ToyModule().cuda()
         ac_config_no_force = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -138,7 +138,7 @@ class TestApplyAC(unittest.TestCase):
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
-        model_with_force_first = TestModule().cuda()
+        model_with_force_first = ToyModule().cuda()
         ac_config_with_force_first = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -148,7 +148,7 @@ class TestApplyAC(unittest.TestCase):
         mem_with_force_first = get_act_mem(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
-        model_with_force_last = TestModule().cuda()
+        model_with_force_last = ToyModule().cuda()
         ac_config_with_force_last = ACConfig(
             mode="selective",
             selective_ac_option="op",
@@ -158,7 +158,7 @@ class TestApplyAC(unittest.TestCase):
         mem_with_force_last = get_act_mem(model_with_force_last)
 
         # 5. Full AC
-        model_with_full_ac = TestModule().cuda()
+        model_with_full_ac = ToyModule().cuda()
         ac_config_full_ac = ACConfig(
             mode="full",
         )
@@ -175,9 +175,9 @@ class TestApplyAC(unittest.TestCase):
         # the size of the other two mms.
 
     def test_correctness(self):
-        model_no_ac = TestModule()
+        model_no_ac = ToyModule()
 
-        model_selective_ac = TestModule()
+        model_selective_ac = ToyModule()
         model_selective_ac.load_state_dict(model_no_ac.state_dict())
         apply_ac(
             model_selective_ac,
@@ -187,7 +187,7 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=[],
             ),
         )
-        model_force_first = TestModule()
+        model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
         apply_ac(
             model_force_first,
@@ -198,7 +198,7 @@ class TestApplyAC(unittest.TestCase):
             ),
         )
 
-        model_force_last = TestModule()
+        model_force_last = ToyModule()
         model_force_last.load_state_dict(model_no_ac.state_dict())
         apply_ac(
             model_force_last,

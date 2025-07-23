@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 import tomli_w
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 
 
 class TestJobConfig(unittest.TestCase):

@@ -11,7 +11,7 @@ from typing import Any, List
 
 import torch.nn as nn
 
-from torchtitan.config_manager import JobConfig, MX
+from torchtitan.config.job_config import JobConfig, MX
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,

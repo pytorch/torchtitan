@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from torchtitan.components.ft import FTManager
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 
 

@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torchtitan.components.checkpoint import MODEL
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 

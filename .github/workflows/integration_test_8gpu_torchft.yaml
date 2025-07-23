@@ -49,5 +49,5 @@ jobs:
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         echo "ft_integration_test"
         # Getting error - Cuda failure 217 'peer access is not supported between these two devices'
-        python ./tests/integration_tests_ft.py artifacts-to-be-uploaded --ngpu 8
+        python -m tests.integration_tests_ft artifacts-to-be-uploaded --ngpu 8
         # pkill -9 torchft_lighthouse
