@@ -52,10 +52,18 @@ class TestJobConfig(unittest.TestCase):
         )
         assert config.job.dump_folder == "/tmp/test_tt/"
 
-    def test_parse_pp_split_points(self):
-        toml_splits = ["layers.2", "layers.4", "layers.6"]
-        cmdline_splits = ["layers.1", "layers.3", "layers.5"]
-        # no split points specified
+    def test_parse_module_names_per_model_chunk(self):
+        toml_chunks = [
+            ["tok_embeddings", "layers.0"],
+            ["layers.1", "layers.2"],
+            ["layers.3", "norm", "output"],
+        ]
+        cmdline_chunks = [
+            ["tok_embeddings", "layers.0", "layers.1"],
+            ["layers.2", "layers.3", "norm", "output"],
+        ]
+
+        # no module names specified
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
@@ -63,29 +71,15 @@ class TestJobConfig(unittest.TestCase):
                 "./torchtitan/models/llama3/train_configs/debug_model.toml",
             ]
         )
-        assert config.parallelism.pipeline_parallel_split_points == []
+        assert config.parallelism.module_names_per_model_chunk == []
 
-        # toml has no split points, but cmdline splits are specified
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
-                "--parallelism.pipeline_parallel_split_points",
-                ",".join(cmdline_splits),
-            ]
-        )
-        assert (
-            config.parallelism.pipeline_parallel_split_points == cmdline_splits
-        ), config.parallelism.pipeline_parallel_split_points
-
-        # toml has split points, cmdline does not
+        # toml has module names, cmdline does not
         with tempfile.NamedTemporaryFile() as fp:
             with open(fp.name, "wb") as f:
                 tomli_w.dump(
                     {
                         "parallelism": {
-                            "pipeline_parallel_split_points": toml_splits,
+                            "module_names_per_model_chunk": toml_chunks,
                         }
                     },
                     f,
@@ -93,32 +87,43 @@ class TestJobConfig(unittest.TestCase):
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
-                config.parallelism.pipeline_parallel_split_points == toml_splits
-            ), config.parallelism.pipeline_parallel_split_points
+                config.parallelism.module_names_per_model_chunk == toml_chunks
+            ), config.parallelism.module_names_per_model_chunk
 
-        # toml has split points, cmdline overrides them
+        # test that the field accepts list of lists structure
         with tempfile.NamedTemporaryFile() as fp:
             with open(fp.name, "wb") as f:
                 tomli_w.dump(
                     {
                         "parallelism": {
-                            "pipeline_parallel_split_points": toml_splits,
+                            "module_names_per_model_chunk": cmdline_chunks,
                         }
                     },
                     f,
                 )
             config_manager = ConfigManager()
-            config = config_manager.parse_args(
-                [
-                    "--job.config_file",
-                    fp.name,
-                    "--parallelism.pipeline_parallel_split_points",
-                    ",".join(cmdline_splits),
-                ]
-            )
+            config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
-                config.parallelism.pipeline_parallel_split_points == cmdline_splits
-            ), config.parallelism.pipeline_parallel_split_points
+                config.parallelism.module_names_per_model_chunk == cmdline_chunks
+            ), config.parallelism.module_names_per_model_chunk
+
+        # test empty chunks are handled correctly
+        empty_chunks = [[], ["tok_embeddings"], []]
+        with tempfile.NamedTemporaryFile() as fp:
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
+                    {
+                        "parallelism": {
+                            "module_names_per_model_chunk": empty_chunks,
+                        }
+                    },
+                    f,
+                )
+            config_manager = ConfigManager()
+            config = config_manager.parse_args(["--job.config_file", fp.name])
+            assert (
+                config.parallelism.module_names_per_model_chunk == empty_chunks
+            ), config.parallelism.module_names_per_model_chunk
 
     def test_parse_exclude_from_loading(self):
         toml_splits = ["optimizer", "dataloader"]

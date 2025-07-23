@@ -312,6 +312,7 @@ class Parallelism:
 
     pipeline_parallel_split_points: list[str] = field(default_factory=list)
     """
+    DEPRECATED: Use module_names_per_model_chunk instead.
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
     the first containing all the layers up to layers.0,
@@ -319,6 +320,16 @@ class Parallelism:
     the third containing layers.2 and all the remaining layers.
     Note: fully-automated splitting may be enabled in the future,
     but currently the split points must be specified manually.
+    """
+
+    module_names_per_model_chunk: list[list[str]] = field(default_factory=list)
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk compared to split points.
     """
 
     pipeline_parallel_layers_per_stage: int | None = None
