@@ -12,6 +12,7 @@ from torch.optim import Adam
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config import ConfigManager
 
 
 class TestLRScheduler(unittest.TestCase):
@@ -39,8 +40,6 @@ class TestLRScheduler(unittest.TestCase):
         lr_min=None,
     ):
         # Create a job config with the specified parameters
-        from torchtitan.config_manager import ConfigManager
-
         args = [
             "--training.steps",
             str(training_steps),

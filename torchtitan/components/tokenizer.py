@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
 from tokenizers import AddedToken, Tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 from typing_extensions import override
 

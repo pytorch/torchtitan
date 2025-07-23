@@ -8,7 +8,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.config_manager import Float8, JobConfig
+from torchtitan.config.job_config import Float8, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,

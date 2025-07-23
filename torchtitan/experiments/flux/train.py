@@ -10,7 +10,7 @@ from typing import Iterable, Optional
 import torch
 from torch.distributed.fsdp import FSDPModule
 
-from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer

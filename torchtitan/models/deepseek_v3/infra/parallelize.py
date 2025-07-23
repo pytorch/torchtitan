@@ -15,7 +15,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.llama4.infra.expert_parallel import NoParallel
 from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp, apply_moe_ep_tp
@@ -39,6 +39,12 @@ def parallelize_deepseekv3(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    if (
+        job_config.parallelism.context_parallel_degree > 1
+        and model.model_args.use_flex_attn
+    ):
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:

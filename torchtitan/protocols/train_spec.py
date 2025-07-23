@@ -14,15 +14,13 @@ import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.ft import FTManager
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
-from torchtitan.config_manager import JobConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.config import JobConfig
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
@@ -74,10 +72,7 @@ PipeliningFunction: TypeAlias = Callable[
 DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
-OptimizersBuilder: TypeAlias = Callable[
-    [list[nn.Module], JobConfig, ParallelDims, FTManager | None],
-    OptimizersContainer,
-]
+OptimizersBuilder: TypeAlias = Callable[..., OptimizersContainer]
 LRSchedulersBuilder: TypeAlias = Callable[
     [OptimizersContainer, JobConfig], LRSchedulersContainer
 ]

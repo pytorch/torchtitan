@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.quantization.float8 import Float8Converter
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     build_model_converters,

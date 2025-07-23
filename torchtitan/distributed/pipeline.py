@@ -15,7 +15,7 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.pipelining.stage import PipelineStage
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 

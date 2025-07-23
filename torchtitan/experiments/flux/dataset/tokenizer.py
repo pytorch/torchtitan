@@ -12,7 +12,7 @@ from typing import List
 
 import torch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from transformers import CLIPTokenizer, T5Tokenizer
 
 
