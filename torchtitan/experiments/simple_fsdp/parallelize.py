@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_tp
 from torchtitan.tools.logging import logger

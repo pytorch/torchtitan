@@ -9,7 +9,7 @@ from typing import Callable, TypeAlias
 
 import torch
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]

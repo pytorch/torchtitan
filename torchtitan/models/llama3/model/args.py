@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from torch import nn
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
 
@@ -58,6 +58,7 @@ class TransformerModelArgs(BaseModelArgs):
             raise RuntimeError(
                 "PP + block causal FlexAttention support will be fixed soon."
             )
+        self.max_seq_len = seq_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())

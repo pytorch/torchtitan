@@ -22,7 +22,7 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -40,7 +40,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     train_spec: train_spec_module.TrainSpec
 
     # swappable training components in TrainSpec
-    tokenizer: train_spec_module.BaseTokenizer
+    tokenizer: train_spec_module.BaseTokenizer | None
     dataloader: train_spec_module.BaseDataLoader
     model_parts: list[torch.nn.Module]
     loss_fn: train_spec_module.LossFunction
@@ -124,8 +124,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # build tokenizer and dataloader
-        if self.train_spec.build_tokenizer_fn is not None:
-            self.tokenizer = self.train_spec.build_tokenizer_fn(job_config)
+        self.tokenizer = (
+            self.train_spec.build_tokenizer_fn(job_config)
+            if self.train_spec.build_tokenizer_fn is not None
+            else None
+        )
 
         self.dataloader = self.train_spec.build_dataloader_fn(
             dp_world_size=dp_degree,
@@ -295,8 +298,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            base_folder=job_config.job.dump_folder,
             sd_adapter=self.train_spec.state_dict_adapter,
+            base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
 

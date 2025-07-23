@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config_manager import Checkpoint as CheckpointConfig
+from torchtitan.config.job_config import Checkpoint as CheckpointConfig
 
 
 class FakeOptimizersContainer:
@@ -176,6 +176,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -209,6 +210,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -250,6 +252,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -273,6 +276,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -297,6 +301,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -327,6 +332,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -361,6 +367,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -381,6 +388,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -423,6 +431,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=states,
             checkpoint_config=checkpoint_config,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -468,6 +477,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=checkpoint_config,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -504,6 +514,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -530,6 +541,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -576,6 +588,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -626,6 +639,7 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
             base_folder=self.job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )

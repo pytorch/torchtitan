@@ -9,7 +9,7 @@ import unittest
 import torch
 from datasets import load_dataset
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.datasets.hf_datasets import build_hf_dataloader, DatasetConfig, DATASETS
 
 

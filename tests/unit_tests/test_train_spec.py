@@ -14,7 +14,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import parallelize_llama, pipeline_llama

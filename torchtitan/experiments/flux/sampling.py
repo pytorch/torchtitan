@@ -15,7 +15,7 @@ from PIL import ExifTags, Image
 from torch import Tensor
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 from .model.autoencoder import AutoEncoder
