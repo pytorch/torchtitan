@@ -36,7 +36,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config_manager import Checkpoint, TORCH_DTYPE_MAP
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -174,10 +174,13 @@ class CheckpointManager:
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous 4 components.
-        job_config (JobConfig): The job config used to configure the checkpointing.
+        checkpoint_config (Checkpoint): The config used to configure the checkpointing.
+        base_folder (str): The base folder to save the checkpoint. Will be concatenated
+            with checkpoint_config.folder
         sd_adapter (Optional[type[StateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
+
     """
 
     def __init__(
@@ -187,13 +190,13 @@ class CheckpointManager:
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        job_config: JobConfig,
+        checkpoint_config: Checkpoint,
+        base_folder: str,
         sd_adapter: type[StateDictAdapter] | None = None,
         ft_manager: FTManager | None = None,
     ) -> None:
-        ckpt_config = job_config.checkpoint
-        self.enable_checkpoint = ckpt_config.enable_checkpoint
-        self.last_save_in_hf = ckpt_config.last_save_in_hf
+        self.enable_checkpoint = checkpoint_config.enable_checkpoint
+        self.last_save_in_hf = checkpoint_config.last_save_in_hf
         if self.last_save_in_hf:
             assert (
                 sd_adapter is not None
@@ -224,9 +227,9 @@ class CheckpointManager:
                     self.states[k].load_state_dict(v)
 
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
-            self.ft_replica_id = job_config.fault_tolerance.replica_id
+            self.ft_replica_id = ft_manager.replica_id
 
-        async_mode = ckpt_config.async_mode.lower()
+        async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
             self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.ft_manager
@@ -251,19 +254,21 @@ class CheckpointManager:
         self.cpu_offload_state_dict = None
         self.stager = None
 
-        self.folder = os.path.join(job_config.job.dump_folder, ckpt_config.folder)
+        self.folder = os.path.join(base_folder, checkpoint_config.folder)
 
         # Checkpoint policy related fields.
-        self.initial_load_path = ckpt_config.initial_load_path
-        self.initial_load_model_only = ckpt_config.initial_load_model_only
-        self.last_save_model_only = ckpt_config.last_save_model_only
-        self.export_dtype = TORCH_DTYPE_MAP[ckpt_config.export_dtype]
-        self.exclude_from_loading = ckpt_config.exclude_from_loading
-        self.interval = ckpt_config.interval
-        self.enable_first_step_checkpoint = ckpt_config.enable_first_step_checkpoint
+        self.initial_load_path = checkpoint_config.initial_load_path
+        self.initial_load_model_only = checkpoint_config.initial_load_model_only
+        self.last_save_model_only = checkpoint_config.last_save_model_only
+        self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
+        self.exclude_from_loading = checkpoint_config.exclude_from_loading
+        self.interval = checkpoint_config.interval
+        self.enable_first_step_checkpoint = (
+            checkpoint_config.enable_first_step_checkpoint
+        )
 
         # Async checkpoint related fields.
-        async_mode = ckpt_config.async_mode.lower()
+        async_mode = checkpoint_config.async_mode.lower()
         if (
             async_mode == AsyncMode.ASYNC
             or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -271,7 +276,7 @@ class CheckpointManager:
         ):
             self.pg = dist.new_group(backend="gloo")
 
-        self.keep_latest_k = ckpt_config.keep_latest_k
+        self.keep_latest_k = checkpoint_config.keep_latest_k
         if self.keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
@@ -296,7 +301,9 @@ class CheckpointManager:
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
         else:
-            raise ValueError(f"Unkown checkpoint async_mode {ckpt_config.async_mode}")
+            raise ValueError(
+                f"Unkown checkpoint async_mode {checkpoint_config.async_mode}"
+            )
 
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
