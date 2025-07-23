@@ -107,12 +107,13 @@ Note that each stable release pins the nightly versions of `torch` and `torchao`
 This method requires the nightly build of PyTorch. You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
 
 ```sh
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
 pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
 
 ### From source
 
-This method requires the nightly build of PyTorch or the latest PyTorch built from source.
+This method requires the nightly build of PyTorch or the latest PyTorch built [from source](https://github.com/pytorch/pytorch?tab=readme-ov-file#from-source).
 
 ```bash
 git clone https://github.com/pytorch/torchtitan
