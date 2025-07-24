@@ -26,7 +26,7 @@ lr = 4e-3
 eps = 1e-15
 
 [lr_scheduler]
-warmup_steps = 600
+warmup_steps = 10
 lr_min = 0.1
 
 [training]
