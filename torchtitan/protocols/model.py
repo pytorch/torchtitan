@@ -6,7 +6,9 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Protocol
 
+import torch
 import torch.nn as nn
 
 from torchtitan.config import JobConfig
@@ -30,4 +32,24 @@ class BaseModelArgs:
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
+        pass
+
+
+class ModelProtocol(Protocol):
+    """Defines the interface for a model class.
+
+    This is used to enforce that all model classes have some methods that are
+    required by the trainer.
+    """
+
+    def __init__(self, model_args: BaseModelArgs) -> None:
+        pass
+
+    @abstractmethod
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        """Initialize model weights.
+
+        Args:
+            buffer_device: Optional device to place buffers on during initialization.
+        """
         pass

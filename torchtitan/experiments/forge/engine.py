@@ -8,13 +8,13 @@ import os
 from typing import Generator
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.protocols.train_spec import BaseModelArgs
+from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools import utils
 
 from .job_config import ForgeJobConfig

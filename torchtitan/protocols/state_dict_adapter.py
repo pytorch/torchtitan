@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Tuple
 
-from torchtitan.protocols.model_args import BaseModelArgs
+from torchtitan.protocols import BaseModelArgs
 
 
 class StateDictAdapter(ABC):

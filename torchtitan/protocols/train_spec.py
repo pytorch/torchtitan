@@ -4,12 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias
+from typing import TypeAlias
 
-import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
@@ -20,29 +18,8 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
-from torchtitan.config import JobConfig, LRScheduler
-from torchtitan.protocols.model_args import BaseModelArgs
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-
-
-class ModelProtocol(Protocol):
-    """Defines the interface for a model class.
-
-    This is used to enforce that all model classes have some methods that are
-    required by the trainer.
-    """
-
-    def __init__(self, model_args: BaseModelArgs) -> None:
-        pass
-
-    @abstractmethod
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        """Initialize model weights.
-
-        Args:
-            buffer_device: Optional device to place buffers on during initialization.
-        """
-        pass
+from torchtitan.config import LRScheduler
+from torchtitan.protocols import BaseModelArgs, ModelProtocol, StateDictAdapter
 
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
