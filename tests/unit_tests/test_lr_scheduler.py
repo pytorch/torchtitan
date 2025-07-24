@@ -78,7 +78,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -118,7 +120,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -157,7 +161,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Step through all steps
         for _ in range(10):
@@ -178,7 +184,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -212,7 +220,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -252,7 +262,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [

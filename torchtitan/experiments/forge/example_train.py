@@ -272,9 +272,15 @@ class Trainer(ForgeEngine):
         logger.info(f"Training starts at step {self.step + 1}.")
 
         with (
-            maybe_enable_profiling(job_config, global_step=self.step) as torch_profiler,
+            maybe_enable_profiling(
+                job_config.profiling,
+                global_step=self.step,
+                base_folder=job_config.job.dump_folder,
+            ) as torch_profiler,
             maybe_enable_memory_snapshot(
-                job_config, global_step=self.step
+                job_config.profiling,
+                global_step=self.step,
+                base_folder=job_config.job.dump_folder,
             ) as memory_profiler,
         ):
             data_iterator = self.batch_generator(self.dataloader)

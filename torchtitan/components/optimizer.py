@@ -18,7 +18,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
-from torchtitan.config import JobConfig
+from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
 __all__ = [
@@ -241,14 +241,14 @@ class FTOptimizersContainer(OptimizersContainer):
 
 def build_optimizers(
     model_parts: list[nn.Module],
-    job_config: JobConfig,
+    optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
     ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
     This function creates a ``OptimizersContainer`` for the given model parts.
-    ``job_config`` should define the correct optimizer name and parameters.
+    ``optimizer_config`` should define the correct optimizer name and parameters.
     This function currently supports creating ``OptimizersContainer`` and
     ``OptimizersInBackwardContainer``.
 
@@ -260,10 +260,10 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        job_config (JobConfig): Job config containing the optimizer name and parameters.
+        optimizer_config (OptimizerConfig): Optimizer config containing the optimizer name and parameters.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
-    optim_in_bwd = job_config.optimizer.early_step_in_backward
+    optim_in_bwd = optimizer_config.early_step_in_backward
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
             raise NotImplementedError(
@@ -278,14 +278,14 @@ def build_optimizers(
                 "TorchFT is not supported with optimizers in backward."
             )
 
-    name = job_config.optimizer.name
-    lr = job_config.optimizer.lr
-    beta1 = job_config.optimizer.beta1
-    beta2 = job_config.optimizer.beta2
-    eps = job_config.optimizer.eps
-    weight_decay = job_config.optimizer.weight_decay
+    name = optimizer_config.name
+    lr = optimizer_config.lr
+    beta1 = optimizer_config.beta1
+    beta2 = optimizer_config.beta2
+    eps = optimizer_config.eps
+    weight_decay = optimizer_config.weight_decay
 
-    optim_implementation = job_config.optimizer.implementation
+    optim_implementation = optimizer_config.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
 
     fused = optim_implementation == "fused"
@@ -319,7 +319,7 @@ def build_optimizers(
             optimizer_cls,
             optimizer_kwargs,
             ft_manager.manager,
-            use_ft_optimizer=job_config.fault_tolerance.semi_sync_method is None,
+            use_ft_optimizer=ft_manager.use_async_quorum,
         )
 
     return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)

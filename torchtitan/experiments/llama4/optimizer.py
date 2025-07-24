@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from torchtitan.components.ft import FTManager
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
-from torchtitan.config import JobConfig
+from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
 
@@ -46,13 +46,13 @@ def _update_expert_bias(
 
 def build_llama4_optimizers(
     model_parts: list[nn.Module],
-    job_config: JobConfig,
+    optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
     ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     optimizers = build_optimizers(
         model_parts=model_parts,
-        job_config=job_config,
+        optimizer_config=optimizer_config,
         parallel_dims=parallel_dims,
         ft_manager=ft_manager,
     )

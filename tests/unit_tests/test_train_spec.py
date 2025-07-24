@@ -14,7 +14,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.config import JobConfig
+from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import parallelize_llama, pipeline_llama
@@ -42,7 +42,7 @@ class FakeModel(nn.Module, ModelProtocol):
 
 def fake_build_optimizers(
     model_parts: list[nn.Module],
-    job_config: JobConfig,
+    optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
@@ -117,12 +117,12 @@ class TestTrainSpec:
 
             def my_build_optimizer_fn(
                 model_parts: list[nn.Module],
-                job_config: JobConfig,
+                optimizer_config: OptimizerConfig,
                 parallel_dims: ParallelDims,
                 ft_manager: FTManager,
             ) -> OptimizersContainer:
                 optimizers = original_build_optimizers_fn(
-                    model_parts, job_config, parallel_dims, ft_manager
+                    model_parts, optimizer_config, parallel_dims, ft_manager
                 )
                 optimizers.register_step_post_hook(
                     partial(my_hook, model_parts=model_parts)
