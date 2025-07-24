@@ -7,6 +7,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from torchtitan.protocols import BaseModelArgs
+
 
 class StateDictAdapter(ABC):
     """Abstract base class for state dict transformations.
@@ -15,9 +17,12 @@ class StateDictAdapter(ABC):
     state dict format and other model state dict formats.
     """
 
-    @staticmethod
     @abstractmethod
-    def to_hf(state_dict: dict[str, Any]) -> dict[str, Any]:
+    def __init__(self, model_args: BaseModelArgs):
+        pass
+
+    @abstractmethod
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
         Args:
@@ -28,9 +33,8 @@ class StateDictAdapter(ABC):
         """
         pass
 
-    @staticmethod
     @abstractmethod
-    def from_hf(hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Obtain native model state dict from HuggingFace format.
 
         Args:
