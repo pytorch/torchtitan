@@ -30,6 +30,7 @@ __all__ = [
     "stage_ids_this_rank",
     "generate_module_names_per_stage",
     "pipeline_module_split",
+    "module_split",
 ]
 
 
@@ -333,3 +334,95 @@ def pipeline_module_split(
         models.append(model_chunk)
 
     return stages, models
+
+def module_split(
+    model: nn.Module,
+    module_names_per_stage: list[list[str]],
+) -> list[nn.Module]:
+    """
+    This API creates pipeline stages based on specified module names for each stage.
+    This method updates the model in place.
+
+    Args:
+        model: The complete model to be split
+        module_names_per_stage: List of lists, where each inner list contains the module names
+                               that should be included in that stage. Module names should be
+                               dot-separated paths. Examples:
+                               - "tok_embeddings" for token embeddings
+                               - "layers.0", "layers.1" for specific transformer layers
+                               - "norm" for the final normalization layer
+                               - "output" for the output projection layer
+
+    Returns:
+        List of model chunks
+
+    Example usage:
+        module_names_per_stage = [
+            ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
+            ["layers.1", "layers.2"],           # Stage 1: middle layers
+            ["norm", "output"]                  # Stage 2: final norm + output
+        ]
+    """
+    def _build_stage_from_modules(
+        stage_idx: int, module_names: list[str]
+    ) -> nn.Module:
+        stage_model = nn.Module()
+        # Create a set of modules to keep for faster lookup
+        modules_to_keep = set(module_names)
+        print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
+        for module_name, module_value in model.named_children():
+            # Handle layer-like structures (e.g., "layers.0", "layers.1")
+            if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
+                layers_to_keep = {
+                    name.split(".", 1)[1]
+                    for name in modules_to_keep
+                    if name.startswith(f"{module_name}.")
+                }
+
+                if not layers_to_keep:
+                    continue
+
+                # Keep only specified layers
+                if isinstance(module_value, nn.ModuleDict):
+                    for layer_name in list(module_value.keys()):
+                        if layer_name in layers_to_keep:
+                            setattr(stage_model, f"{module_name}.{layer_name}", module_value[layer_name])
+                else:
+                    indices_to_keep = {
+                        int(idx) for idx in layers_to_keep if idx.isdigit()
+                    }
+                    new_layers = nn.ModuleList(
+                        [
+                            layer
+                            for i, layer in enumerate(module_value)
+                            if i in indices_to_keep
+                        ]
+                    )
+                    setattr(stage_model, module_name, new_layers)
+
+                continue
+
+            # Handle simple module attributes (e.g., "linear", "norm")
+            if module_name not in modules_to_keep:
+                continue
+
+            setattr(stage_model, module_name, module_value)
+
+        return stage_model
+
+    num_stages = len(module_names_per_stage)
+    models = []
+
+    for stage_idx in range(num_stages):
+        module_names = module_names_per_stage[stage_idx]
+        model_chunk = _build_stage_from_modules(
+            stage_idx,
+            module_names,
+        )
+        logger.info(
+            f"building stage_idx {stage_idx} "
+            f"with modules {module_names}"
+        )
+        models.append(model_chunk)
+
+    return models

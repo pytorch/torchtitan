@@ -691,6 +691,18 @@ class FaultTolerance:
     This is only used when "semi_sync_method" is set.
     """
 
+    module_names_per_model_chunk: list[list[str]] = field(default_factory=list)
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk compared to split points.
+    """
+
+    num_fragments: int = 1
+
 
 @dataclass
 class Experimental:

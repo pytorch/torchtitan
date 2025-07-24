@@ -10,10 +10,11 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import FaultTolerantTrainSpec, register_train_spec
 
 from .infra.parallelize import parallelize_llama
 from .infra.pipeline import pipeline_llama
+from .infra.fault_tolerance import fragment_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama3StateDictAdapter
@@ -70,12 +71,13 @@ llama3_configs = {
 
 
 register_train_spec(
-    TrainSpec(
+    FaultTolerantTrainSpec(
         name="llama3",
         model_cls=Transformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
+        fragment_fn=fragment_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,

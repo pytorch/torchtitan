@@ -104,6 +104,16 @@ class TrainSpec:
     state_dict_adapter: type[StateDictAdapter] | None = None
 
 
+FragmentFunction: TypeAlias = Callable[
+    ..., list[nn.Module]
+]
+
+
+@dataclass
+class FaultTolerantTrainSpec(TrainSpec):
+    fragment_fn: FragmentFunction | None = None
+
+
 _train_specs = {}
 
 
