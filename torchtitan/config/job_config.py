@@ -499,14 +499,6 @@ class Float8:
     precompute_float8_dynamic_scale_for_fsdp: bool = False
     """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
 
-    force_recompute_fp8_weight_in_bwd: bool = False
-    """
-    Whether to force the recomputation of FP8 weights during backward pass.
-    When using FSDP with tensorwise scaling, it is recommended to enable
-    `force_recompute_fp8_weight_in_bwd` to prevent saving unsharded FP8 weights
-    for backward computation.
-    """
-
     recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
     """If specified, creates float8 config from recipe name"""
 
