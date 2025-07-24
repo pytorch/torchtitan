@@ -20,7 +20,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
-from torchtitan.config import JobConfig
+from torchtitan.config import JobConfig, LRScheduler
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
@@ -74,7 +74,7 @@ TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[..., OptimizersContainer]
 LRSchedulersBuilder: TypeAlias = Callable[
-    [OptimizersContainer, JobConfig], LRSchedulersContainer
+    [OptimizersContainer, LRScheduler, int], LRSchedulersContainer
 ]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
 ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]

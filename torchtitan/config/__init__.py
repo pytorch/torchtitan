@@ -12,7 +12,43 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-from torchtitan.config.job_config import JobConfig
-from torchtitan.config.manager import ConfigManager
+from .job_config import (
+    ActivationCheckpoint,
+    Checkpoint,
+    Comm,
+    FaultTolerance,
+    Float8,
+    Job,
+    JobConfig,
+    LRScheduler,
+    Metrics,
+    Model,
+    MX,
+    Optimizer,
+    Parallelism,
+    Profiling,
+    Training,
+    Validation,
+)
+from .manager import ConfigManager
 
-__all__ = ["JobConfig", "ConfigManager", "TORCH_DTYPE_MAP"]
+__all__ = [
+    "JobConfig",
+    "ConfigManager",
+    "TORCH_DTYPE_MAP",
+    "Job",
+    "Model",
+    "MX",
+    "Optimizer",
+    "LRScheduler",
+    "Metrics",
+    "Checkpoint",
+    "ActivationCheckpoint",
+    "FaultTolerance",
+    "Float8",
+    "Parallelism",
+    "Comm",
+    "Profiling",
+    "Training",
+    "Validation",
+]

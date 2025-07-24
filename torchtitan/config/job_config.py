@@ -563,6 +563,9 @@ class Comm:
     trace_buf_size: int = 20000
     """Flight recorder ring buffer size, >0 means recording by default, 0 means disabled"""
 
+    save_traces_folder: str = "comm_traces"
+    """Flight recorder trace files location"""
+
 
 @dataclass
 class MemoryEstimation:

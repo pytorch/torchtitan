@@ -18,7 +18,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.nn.attention import SDPBackend
 
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
@@ -227,7 +227,9 @@ def maybe_enable_amp(
             )
 
 
-def init_distributed(job_config):
+def init_distributed(
+    comm_config: CommConfig, enable_cpu_backend: bool = False, base_folder: str = ""
+):
     def _warn_overwrite_env(env, val):
         if env in os.environ:
             logger.warning(
@@ -235,13 +237,13 @@ def init_distributed(job_config):
             )
         os.environ[env] = val
 
-    def _get_distributed_backend(job_config):
+    def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
         if device_type in torch.distributed.Backend.default_device_backend_map:
             backend = torch.distributed.Backend.default_device_backend_map.get(
                 device_type
             )
-        if job_config.training.enable_cpu_offload:
+        if enable_cpu_backend:
             backend = f"{device_type}:{backend},cpu:gloo"
         return backend
 
@@ -258,17 +260,17 @@ def init_distributed(job_config):
     _warn_overwrite_env(ASYNC_ERROR_HANDLING, SKIP_CLEANUP)
 
     # enable torch nccl flight recorder in the mode that would dump files if timeout is detected
-    _warn_overwrite_env(TRACE_BUFFER_SIZE, str(job_config.comm.trace_buf_size))
-    if job_config.comm.trace_buf_size > 0:
+    _warn_overwrite_env(TRACE_BUFFER_SIZE, str(comm_config.trace_buf_size))
+    if comm_config.trace_buf_size > 0:
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
-        dump_dir = f"{job_config.job.dump_folder}/comm_trace"
+        dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
 
     torch.distributed.init_process_group(
-        backend=_get_distributed_backend(job_config),
-        timeout=timedelta(seconds=job_config.comm.init_timeout_seconds),
+        backend=_get_distributed_backend(enable_cpu_backend),
+        timeout=timedelta(seconds=comm_config.init_timeout_seconds),
     )
 
 
