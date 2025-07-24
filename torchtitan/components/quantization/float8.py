@@ -72,11 +72,6 @@ class Float8Converter(ModelConverter):
                 "with `float8_config.recipe_name` is not supported"
             )
 
-            assert not float8_config.force_recompute_fp8_weight_in_bwd, (
-                "using `float8_config.force_recompute_fp8_weight_in_bwd` together "
-                "with `float8_config.recipe_name` is not supported"
-            )
-
             self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
             self.precompute_scale = False
             logger.info(
@@ -97,7 +92,6 @@ class Float8Converter(ModelConverter):
             )
             self.config = Float8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-                force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
                 emulate=float8_config.emulate,
             )
             # for precompute_float8_dynamic_scale_for_fsdp
