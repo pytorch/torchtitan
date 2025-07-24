@@ -203,7 +203,7 @@ class CheckpointManager:
             assert (
                 sd_adapter is not None
             ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-            self.sd_adapter = sd_adapter
+        self.sd_adapter = sd_adapter
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
