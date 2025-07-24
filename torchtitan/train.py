@@ -142,15 +142,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # build model (using meta init)
-        self.model_args = self.train_spec.model_args[job_config.model.flavor]
+        model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        self.model_args.update_from_config(job_config)
+        model_args.update_from_config(job_config)
 
         logger.info(
-            f"Building {self.train_spec.name} {job_config.model.flavor} with {self.model_args}"
+            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = self.train_spec.model_cls(self.model_args)
+            model = self.train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -163,7 +163,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else self.train_spec.build_metrics_processor_fn
         )
         self.metrics_processor = build_metrics_processor_fn(
-            job_config, parallel_dims, self.model_args
+            job_config, parallel_dims, model_args
         )
         color = self.metrics_processor.color
 
@@ -171,7 +171,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = self.model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
             f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
@@ -234,7 +234,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 parallel_dims,
                 job_config,
                 self.device,
-                self.model_args,
+                model_args,
                 self.train_spec.parallelize_fn,
                 self.loss_fn,
             )
@@ -303,7 +303,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
-                self.train_spec.state_dict_adapter(self.model_args)
+                self.train_spec.state_dict_adapter(model_args)
                 if self.train_spec.state_dict_adapter
                 else None
             ),
@@ -335,7 +335,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 job_config=job_config,
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
-                tokenizer=tokenizer,
+                tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.train_spec.build_loss_fn(job_config),
                 validation_context=self.train_context,
@@ -430,7 +430,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs)
+                    pred = model_parts[0](inputs, self.tokenizer.eos_id)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred

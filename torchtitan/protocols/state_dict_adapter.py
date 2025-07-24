@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from typing import Any, Tuple
+from typing import Any
 
 from torchtitan.protocols import BaseModelArgs
 
@@ -22,9 +22,7 @@ class StateDictAdapter(ABC):
         pass
 
     @abstractmethod
-    def to_hf(
-        self, state_dict: dict[str, Any]
-    ) -> Tuple[dict[str, Any], dict[str, Any]]:
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
         Args:

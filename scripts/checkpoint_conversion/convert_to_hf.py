@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import json
 from pathlib import Path
 
 import torch
@@ -38,7 +37,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
     )
 
     # convert state dict tt->hf
-    hf_state_dict, config_json = sd_adapter.to_hf(state_dict)
+    hf_state_dict = sd_adapter.to_hf(state_dict)
 
     fqn_to_index_mapping = {}
     num_fqns_per_file = 30
@@ -60,17 +59,15 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
         storage_writer=storage_writer,
     )
 
-    config_path = output_dir / "config.json"
-    with config_path.open("w") as f:
-        json.dump(config_json, f, indent=4)
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert Llama weights to HF format.")
+    parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument(
-        "input_dir", type=Path, help="Input directory with original Llama weights."
+        "input_dir", type=Path, help="Input directory with DCP weights."
     )
-    parser.add_argument("output_dir", type=Path, help="Output directory for DCP.")
+    parser.add_argument(
+        "output_dir", type=Path, help="Output directory for HF checkpoint."
+    )
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
     args = parser.parse_args()

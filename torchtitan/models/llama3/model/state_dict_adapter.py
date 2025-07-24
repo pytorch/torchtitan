@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import re
-from typing import Any, Tuple
+from typing import Any
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -55,9 +55,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
             .reshape(dim1, dim2)
         )
 
-    def to_hf(
-        self, state_dict: dict[str, Any]
-    ) -> Tuple[dict[str, Any], dict[str, Any]]:
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         n_heads = self.model_args.n_heads
@@ -91,27 +89,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
             hf_state_dict[new_key] = value
 
-        ffn_hidden_dim = int(self.model_args.dim * 4 * 2 / 3)
-        if self.model_args.ffn_dim_multiplier:
-            ffn_hidden_dim = int(ffn_hidden_dim * self.model_args.ffn_dim_multiplier)
-        multiple_of = self.model_args.multiple_of
-        ffn_hidden_dim = multiple_of * (
-            (ffn_hidden_dim + multiple_of - 1) // multiple_of
-        )  # hacky way to get ffn_hidden_dim, follows the calculation in models.TransformerBlock and model.FeedForward
-
-        config_json = {
-            "architectures": ["LlamaForCausalLM"],
-            "hidde": "silu",
-            "hidden_size": self.model_args.dim,
-            "intermediate_size": ffn_hidden_dim,
-            "model_type": "llama",
-            "num_attention_heads": self.model_args.n_heads,
-            "num_hidden_layers": self.model_args.n_layers,
-            "num_key_value_heads": self.model_args.n_kv_heads,
-            "vocab_size": self.model_args.vocab_size,
-        }
-
-        return hf_state_dict, config_json
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         n_heads = self.model_args.n_heads

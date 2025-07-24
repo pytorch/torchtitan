@@ -6,7 +6,6 @@
 
 import enum
 import functools
-import json
 import os
 import queue
 import re
@@ -14,7 +13,6 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -359,7 +357,7 @@ class CheckpointManager:
             assert (
                 self.sd_adapter is not None
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
-            state_dict, config_json = self.sd_adapter.to_hf(state_dict)
+            state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = {}
             num_fqns_per_file = 30
@@ -404,11 +402,6 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
-        if to_hf:
-            config_path = Path(checkpoint_id) / "config.json"
-            with config_path.open("w") as f:
-                json.dump(config_json, f, indent=4)
-
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
 
@@ -432,7 +425,7 @@ class CheckpointManager:
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict, _ = self.sd_adapter.to_hf(state_dict)
+            hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
             dcp.load(
                 hf_state_dict,

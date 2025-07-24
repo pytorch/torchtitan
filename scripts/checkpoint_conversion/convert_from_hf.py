@@ -31,7 +31,7 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     # get state dict in tt format with allocated memory
     state_dict = model._get_state_dict()
     # convert empty state dict to hf format so that hf weights can be loaded into it
-    hf_state_dict, _ = sd_adapter.to_hf(state_dict)
+    hf_state_dict = sd_adapter.to_hf(state_dict)
     dcp.load(
         hf_state_dict,
         storage_reader=HuggingFaceStorageReader(path=input_dir),
@@ -45,9 +45,9 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert Llama weights to DCP format.")
+    parser = argparse.ArgumentParser(description="Convert HF checkpoint to DCP format.")
     parser.add_argument(
-        "input_dir", type=Path, help="Input directory with original Llama weights."
+        "input_dir", type=Path, help="Input directory with HF checkpoint"
     )
     parser.add_argument("output_dir", type=Path, help="Output directory for DCP.")
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
