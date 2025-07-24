@@ -8,16 +8,14 @@ import math
 import os
 import pprint
 import re
-import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torchtitan.components.checkpoint import MODEL
 from torchtitan.config_manager import ConfigManager, JobConfig
@@ -87,7 +85,7 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
                 return [titan_fqn]
 
     # 2) Router's weights
-    elif f"mlp.gate.weight" in fqn:
+    elif "mlp.gate.weight" in fqn:
         return [f"layers.{layer}.moe.router.gate.weight"]
 
     # 3) Shared expert's weights
@@ -101,11 +99,11 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
     # Dense Layer
     # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
     # self.w2(F.silu(self.w1(x)) * self.w3(x))
-    elif f"mlp.gate_proj.weight" in fqn:
+    elif "mlp.gate_proj.weight" in fqn:
         return [f"layers.{layer}.feed_forward.w1.weight"]
-    elif f"mlp.down_proj.weight" in fqn:
+    elif "mlp.down_proj.weight" in fqn:
         return [f"layers.{layer}.feed_forward.w2.weight"]
-    elif f"mlp.up_proj.weight" in fqn:
+    elif "mlp.up_proj.weight" in fqn:
         return [f"layers.{layer}.feed_forward.w3.weight"]
 
     # Transformer layer
@@ -331,7 +329,7 @@ class CheckpointConverter:
         state_dict_keys = [
             x
             for x in state_dict.keys()
-            if not "expert_bias" in x and not "tokens_per_expert" in x
+            if "expert_bias" not in x and "tokens_per_expert" not in x
         ]
 
         assert set(state_dict_keys) == set(self.titan_fqn_to_stored_fqn.keys()), (
@@ -617,7 +615,8 @@ class CheckpointConverter:
             # Log the tensor we're about to receive
             size = math.prod(expected_shape)
             logger.info(
-                f"Receiving tensor {i+1}/{len(assignment.fqns)}: {fqn}, Shape: {expected_shape}, Size: {size}, GB: {size * 2 / 1e9}, expected dtype: {dtype}"
+                f"Receiving tensor {i + 1}/{len(assignment.fqns)}: {fqn}, Shape: {expected_shape}, Size: {size}, \
+                    GB: {size * 2 / 1e9}, expected dtype: {dtype}"
             )
 
             # Receive tensor shape first
@@ -738,7 +737,8 @@ class CheckpointConverter:
                         # print info
                         for i in range(len(sorted_experts)):
                             logger.info(
-                                f"Expert {sorted_expert_ids[i]} - Shape: {sorted_experts[i].shape}, Dtype: {sorted_experts[i].dtype}, Device: {sorted_experts[i].device}"
+                                f"Expert {sorted_expert_ids[i]} - Shape: {sorted_experts[i].shape}, \
+                                    Dtype: {sorted_experts[i].dtype}, Device: {sorted_experts[i].device}"
                             )
 
                         stacked_tensor = torch.stack(sorted_experts, dim=0).transpose(
@@ -759,7 +759,8 @@ class CheckpointConverter:
                         # Target shape is (num_experts, hidden_size, hidden_size)
                         # stack_tensor: ([256, 2048, 7168])
                         logger.info(
-                            f"Copying concatenated experts to {titan_fqn} with stacked_tensor shape {stacked_tensor.shape}, titan dtensor_shape: {dtensor.shape}"
+                            f"Copying concatenated experts to {titan_fqn} with stacked_tensor shape {stacked_tensor.shape}, \
+                                titan dtensor_shape: {dtensor.shape}"
                         )
                         dtensor.to_local().copy_(
                             stacked_tensor[slices].to(dtensor.dtype)
