@@ -2,7 +2,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "DeepSeek-V3 debug training"
+description = "model debug training for integration test"
 print_args = false
 
 [profiling]
@@ -20,9 +20,9 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "deepseek_v3"
+name = "llama3"
 flavor = "debugmodel"
-# test tokenizer, for debug purpose only
+# test folder with tokenizer.json, for debug purpose only
 tokenizer_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
@@ -51,9 +51,8 @@ data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
-expert_parallel_degree = 1
 pipeline_parallel_degree = 1
-pipeline_parallel_schedule = "1F1B"
+context_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false
@@ -64,11 +63,16 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "none"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
-filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+filter_fqns = ["output"]
+
+[validation]
+enabled = false
+dataset = "c4_validation"
+freq = 5
+steps = 10
