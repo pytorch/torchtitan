@@ -22,7 +22,7 @@ def build_test_list():
     same root config file.
     """
     integration_tests_flavors = []
-    integration_tests_flavors.append(
+    integration_tests_flavors.extend(
         [
             TestCaseConfigs(
                 [
