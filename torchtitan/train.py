@@ -120,8 +120,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # TODO(whc)
         # I do this becuase otherwise sometimes inductor will skip re-running passes like comms reordering
         torch._inductor.config.force_disable_caches = True
+        # this is necessary for working with reordering passes. Just leave it set for all the jobs for now.
+        torch._inductor.config.allow_buffer_reuse = False
 
         # allow configuring inductor comms optimizations from torchtitan commandline
+        torch._inductor.config.bucket_all_gathers_fx = (
+            job_config.experimental.bucket_all_gathers_fx
+        )
+        torch._inductor.config.bucket_reduce_scatters_fx = (
+            job_config.experimental.bucket_reduce_scatters_fx
+        )
         torch._inductor.config.reorder_for_compute_comm_overlap = (
             job_config.experimental.reorder_for_compute_comm_overlap
         )

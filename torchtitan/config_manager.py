@@ -664,6 +664,12 @@ class Experimental:
     needs to ensure that the path can be imported.
     """
 
+    # "none", "all", "only_fsdp"
+    bucket_all_gathers_fx: str | None = None
+
+    # "none", "all"
+    bucket_reduce_scatters_fx: str | None = None
+
     reorder_for_compute_comm_overlap: bool = False
     """
     Whether to enable inductor comm reordering passes
@@ -671,7 +677,7 @@ class Experimental:
 
     reorder_for_compute_comm_overlap_passes: list[str] = field(
         default_factory=lambda: [
-            "sink_waits",
+            "sink_waits_iterative",
             "reorder_communication_preserving_peak_memory",
         ]
     )
