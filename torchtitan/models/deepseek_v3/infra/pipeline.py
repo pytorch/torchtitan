@@ -6,124 +6,28 @@
 
 # This file applies the PT-D pipeline parallelism to the Llama model.
 
-import copy
+import math
 
 import torch
 import torch.nn as nn
-from torch.distributed import DeviceMesh
-from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     get_schedule_class,
     PipelineScheduleSingle,
-    ScheduleZBVZeroBubble,
 )
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline import build_pipeline_schedule, stage_ids_this_rank
+from torchtitan.distributed.pipeline import (
+    build_pipeline_schedule,
+    generate_llm_fqn_per_model_part,
+    pipeline_module_split,
+)
 from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 from ..model.args import DeepSeekV3ModelArgs
-
-
-def generate_module_names_per_stage(
-    num_stages: int,
-    num_layers: int,
-    input_weight: int = 1,
-    output_weight: int = 1,
-) -> list[list[str]]:
-    """
-    Programmatically generates module names per stage for pipeline parallelism with weighting.
-
-    Args:
-        num_stages: Number of pipeline stages
-        num_layers: Total number of transformer layers in the model
-        input_weight: Weight for input modules (tok_embeddings) in layer calculation
-        output_weight: Weight for output modules (norm + output) in layer calculation
-
-    Returns:
-        List of lists containing module names for each stage
-
-    Example:
-        generate_module_names_per_stage(2, 3, input_weight=2, output_weight=2)
-        treats embeddings as 2 layers and norm+output as 2 layers for distribution
-    """
-    if num_stages < 1:
-        raise ValueError("Number of stages must be at least 1")
-
-    if num_stages == 1:
-        # Single stage gets everything
-        layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output"]]
-
-    # Calculate effective layers including weights
-    num_effective_layers = num_layers + input_weight + output_weight
-
-    if num_stages > num_effective_layers:
-        raise ValueError(
-            f"Number of stages ({num_stages}) cannot be greater than effective layers ({num_effective_layers})"
-        )
-
-    # Calculate layers per stage (distribute evenly)
-    layers_per_stage = num_effective_layers // num_stages
-    extra_layers = num_effective_layers % num_stages
-
-    # Ensure each stage gets at least the weight of input/output modules
-    if layers_per_stage < max(input_weight, output_weight):
-        raise ValueError(
-            f"Layers per stage ({layers_per_stage}) must be >= max(input_weight={input_weight}, output_weight={output_weight})"
-        )
-
-    module_names_per_stage = []
-    current_layer = 0
-
-    for stage_idx in range(num_stages):
-        stage_modules = []
-
-        # Calculate effective layers for this stage
-        effective_layers_for_stage = layers_per_stage
-        if stage_idx < extra_layers:
-            effective_layers_for_stage += 1
-
-        # First stage: handle input modules with weighting
-        if stage_idx == 0:
-            stage_modules.append("tok_embeddings")
-            # Account for input weight in layer distribution
-            remaining_layers_for_stage = effective_layers_for_stage - input_weight
-
-            # Add transformer layers
-            for _ in range(remaining_layers_for_stage):
-                if current_layer < num_layers:
-                    stage_modules.append(f"layers.{current_layer}")
-                    current_layer += 1
-
-        # Last stage: handle output modules with weighting
-        elif stage_idx == num_stages - 1:
-            # Account for output weight in layer distribution
-            remaining_layers_for_stage = effective_layers_for_stage - output_weight
-
-            # Add transformer layers
-            for _ in range(remaining_layers_for_stage):
-                if current_layer < num_layers:
-                    stage_modules.append(f"layers.{current_layer}")
-                    current_layer += 1
-
-            # Add output modules
-            stage_modules.extend(["norm", "output"])
-
-        # Middle stages: only transformer layers
-        else:
-            for _ in range(effective_layers_for_stage):
-                if current_layer < num_layers:
-                    stage_modules.append(f"layers.{current_layer}")
-                    current_layer += 1
-
-        module_names_per_stage.append(stage_modules)
-
-    return module_names_per_stage
 
 
 def pipeline_deepseekv3(
@@ -135,6 +39,12 @@ def pipeline_deepseekv3(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    if job_config.parallelism.pipeline_parallel_split_points != []:
+        raise ValueError(
+            "pipeline_parallel_split_points is deprecated. Please use module_fqns_per_model_part instead."
+            "You can generate module_fqns_per_model_part programmatically with generate_llm_fqn_per_model_part"
+        )
+
     pp_mesh = parallel_dims.world_mesh["pp"]
 
     # Determine the number of virtual stages based on schedule type
@@ -142,25 +52,68 @@ def pipeline_deepseekv3(
         job_config.parallelism.pipeline_parallel_schedule
     )
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-
-    # For multi-stage schedules, default is 2 virtual stages per rank
-    # For single-stage schedules, default is 1 virtual stage per rank
-    stages_per_rank = 1 if is_single_stage_schedule else 2
-    num_virtual_stages = parallel_dims.pp * stages_per_rank
-
-    # Generate module names per stage programmatically with weighting
+    layers_per_stage = job_config.parallelism.pipeline_parallel_layers_per_stage
     num_layers = model_config.n_layers
+
+    # Calculate number of virtual stages
+    if layers_per_stage is not None:
+
+        # Calculate number of virtual stages needed (using ceiling division)
+        # This allows for unequal distribution where stages can differ by at most 1 layer
+        num_virtual_stages = math.ceil(num_layers / layers_per_stage)
+
+        # Validation: check stages per rank based on schedule type
+        # Common error message components to reduce duplication
+        model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
+        stage_distribution_info = (
+            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
+        )
+
+        if num_virtual_stages % parallel_dims.pp != 0:
+            raise ValueError(
+                f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
+                f"pipeline parallel size ({parallel_dims.pp}). "
+                f"{model_config_info}. "
+                f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
+                f"divisible by {parallel_dims.pp}."
+            )
+
+        stages_per_rank = num_virtual_stages // parallel_dims.pp
+
+        if is_single_stage_schedule and stages_per_rank != 1:
+            raise ValueError(
+                f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
+                f"to achieve 1 stage per rank."
+            )
+
+        if not is_single_stage_schedule and stages_per_rank < 2:
+            raise ValueError(
+                f"Multi-stage schedule requires at least 2 stages per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please decrease pipeline_parallel_layers_per_stage to {num_layers // (2 * parallel_dims.pp)} or lower "
+                f"to achieve at least 2 stages per rank."
+            )
+    else:
+        # Fallback to default behavior when layers_per_stage is not provided
+        # For multi-stage schedules, default is 2 virtual stages per rank
+        # For single-stage schedules, default is 1 virtual stage per rank
+        stages_per_rank = 1 if is_single_stage_schedule else 2
+        num_virtual_stages = parallel_dims.pp * stages_per_rank
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution
     input_weight = 1  # Weight for tok_embeddings
     output_weight = 1  # Weight for norm + output layers
 
-    module_names_per_stage = generate_module_names_per_stage(
-        num_virtual_stages, num_layers, input_weight, output_weight
-    )
+    module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
+    if module_names_per_stage == []:
+        module_names_per_stage = generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight
+        )
     for i, stage_ms in enumerate(module_names_per_stage):
-        logger.info(f"Stage {i}: {stage_ms}")
+        logger.debug(f"Stage {i}: {stage_ms}")
 
     stages, model_parts = pipeline_module_split(
         model,
@@ -193,118 +146,3 @@ def pipeline_deepseekv3(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
-
-
-def pipeline_module_split(
-    whole_model: nn.Module,
-    pp_mesh: DeviceMesh,
-    pp_schedule: str,
-    device: torch.device,
-    module_names_per_stage: list[list[str]],
-) -> tuple[list[PipelineStage], list[nn.Module]]:
-    """
-    This API creates pipeline stages based on specified module names for each stage.
-
-    Args:
-        whole_model: The complete model to be split
-        pp_mesh: Pipeline parallel device mesh
-        pp_schedule: Name of pipeline parallelism schedule
-        device: Device type
-        module_names_per_stage: List of lists, where each inner list contains the module names
-                               that should be included in that stage. Module names should be
-                               dot-separated paths. Examples:
-                               - "tok_embeddings" for token embeddings
-                               - "layers.0", "layers.1" for specific transformer layers
-                               - "norm" for the final normalization layer
-                               - "output" for the output projection layer
-
-    Returns:
-        Tuple of (stages, models) where stages are PipelineStage objects and models are the
-        corresponding model chunks
-
-    Example usage:
-        module_names_per_stage = [
-            ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
-            ["layers.1", "layers.2"],           # Stage 1: middle layers
-            ["norm", "output"]                  # Stage 2: final norm + output
-        ]
-    """
-    pp_rank = pp_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
-
-    def _build_stage_from_modules(
-        stage_idx: int, module_names: list[str], num_stages: int
-    ) -> tuple[PipelineStage, nn.Module]:
-        model = copy.deepcopy(whole_model)
-
-        # Create a set of modules to keep for faster lookup
-        modules_to_keep = set(module_names)
-        print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
-        for module_name, module_value in model.named_children():
-            # Handle layer-like structures (e.g., "layers.0", "layers.1")
-            if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
-                layers_to_keep = {
-                    name.split(".", 1)[1]
-                    for name in modules_to_keep
-                    if name.startswith(f"{module_name}.")
-                }
-                if layers_to_keep:
-                    # Keep only specified layers
-                    if isinstance(module_value, nn.ModuleDict):
-                        for layer_name in list(module_value.keys()):
-                            if layer_name not in layers_to_keep:
-                                del module_value[layer_name]
-                    elif isinstance(module_value, nn.ModuleList):
-                        indices_to_keep = {
-                            int(idx) for idx in layers_to_keep if idx.isdigit()
-                        }
-                        new_layers = nn.ModuleList(
-                            [
-                                layer
-                                for i, layer in enumerate(module_value)
-                                if i in indices_to_keep
-                            ]
-                        )
-                        setattr(model, module_name, new_layers)
-                else:
-                    # No layers from this structure needed, set to empty structure
-                    if isinstance(module_value, nn.ModuleDict):
-                        setattr(model, module_name, nn.ModuleDict())
-                    elif isinstance(module_value, nn.ModuleList):
-                        setattr(model, module_name, nn.ModuleList())
-            # Handle simple module attributes (e.g., "linear", "norm")
-            elif module_name not in modules_to_keep:
-                # Replace with None
-                setattr(model, module_name, None)
-
-        stage = PipelineStage(
-            model,
-            stage_idx,
-            num_stages,
-            device,
-            group=pp_mesh.get_group("pp"),
-        )
-        return stage, model
-
-    num_stages = len(module_names_per_stage)
-    stages = []
-    models = []
-
-    schedule_class = get_schedule_class(pp_schedule)
-    style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
-
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
-        module_names = module_names_per_stage[stage_idx]
-        stage, model_chunk = _build_stage_from_modules(
-            stage_idx,
-            module_names,
-            num_stages,
-        )
-        logger.info(
-            f"PP rank {pp_rank} is building stage_idx {stage_idx} "
-            f"with modules {module_names}"
-        )
-        stages.append(stage)
-        models.append(model_chunk)
-
-    return stages, models
