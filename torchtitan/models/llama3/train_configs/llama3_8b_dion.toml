@@ -27,13 +27,13 @@ tokenizer_path = "./tests/assets/tokenizer"
 name = "DION"
 lr = 3e-3  # TODO: tune this
 eps = 1e-8
-rank_factor = 0.75  # 1.0 = full rank, 0.0 = no rank
+rank_factor = 0.25  # 1.0 = full rank, 0.0 = no rank
 momentum = 0.95  # same as AdamW
 scalar_optimizer = "adamw"
 weight_decay = 0.01  # Explicit weight decay
 
 [lr_scheduler]
-warmup_steps = 100  # lr scheduler warm up
+warmup_steps = 40  # lr scheduler warm up
 
 [training]
 local_batch_size = 2

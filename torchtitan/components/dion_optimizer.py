@@ -54,63 +54,6 @@ except ImportError:
     Lion = None
 
 
-def create_model_head_exclusion_fn(
-    vocab_size: int, min_vocab_ratio: float = 0.8
-) -> Callable[[torch.Tensor], bool]:
-    """
-    Create a function to identify and exclude model head parameters from matrix treatment.
-
-    Args:
-        vocab_size: Expected vocabulary size of the model
-        min_vocab_ratio: Minimum ratio to consider a dimension as vocab dimension (default: 0.8)
-
-    Returns:
-        Function that returns True if parameter should be excluded from matrix treatment
-    """
-
-    def should_exclude(param: torch.Tensor) -> bool:
-        if param.dim() != 2:
-            return False
-
-        # Check if either dimension is close to vocab_size (accounting for sharding)
-        h, w = param.shape
-
-        # Check if this looks like a model head (one dimension is vocab-like)
-        vocab_like_h = (
-            abs(h - vocab_size) / vocab_size < (1 - min_vocab_ratio)
-            or h >= vocab_size * min_vocab_ratio
-        )
-        vocab_like_w = (
-            abs(w - vocab_size) / vocab_size < (1 - min_vocab_ratio)
-            or w >= vocab_size * min_vocab_ratio
-        )
-
-        return vocab_like_h or vocab_like_w
-
-    return should_exclude
-
-
-def create_shape_based_exclusion_fn(
-    excluded_shapes: List[Tuple[int, int]]
-) -> Callable[[torch.Tensor], bool]:
-    """
-    Create a function to exclude parameters based on their exact shapes.
-
-    Args:
-        excluded_shapes: List of (height, width) tuples to exclude from matrix treatment
-
-    Returns:
-        Function that returns True if parameter should be excluded from matrix treatment
-    """
-
-    def should_exclude(param: torch.Tensor) -> bool:
-        if param.dim() != 2:
-            return False
-        return tuple(param.shape) in excluded_shapes
-
-    return should_exclude
-
-
 def create_fqn_based_exclusion_fn(
     model: nn.Module,
     head_names: Optional[List[str]] = None,
@@ -329,9 +272,6 @@ class DionOptimizer(Optimizer):
         auto_exclude_heads: bool = True,
         head_names: Optional[List[str]] = None,
         head_suffixes: Optional[List[str]] = None,
-        vocab_size: Optional[int] = None,
-        excluded_shapes: Optional[List[Tuple[int, int]]] = None,
-        use_fqn_detection: bool = True,
         debug_classification: bool = False,
         report_detected_heads: bool = True,
         process_group: Optional[dist.ProcessGroup] = None,
@@ -357,49 +297,20 @@ class DionOptimizer(Optimizer):
         self.debug_classification = debug_classification
         self.report_detected_heads = report_detected_heads
 
-        # Auto head detection setup
+        # Auto head detection setup - only use FQN-based detection
         if exclude_from_matrix is None and auto_exclude_heads:
             if model is not None:
-                # Use FQN-based detection when model is available
-                if use_fqn_detection:
-                    # Use pure FQN-based detection without shape-based fallback
-                    exclude_from_matrix = create_fqn_based_exclusion_fn(
-                        model=model,
-                        head_names=head_names,
-                        head_suffixes=head_suffixes,
-                    )
-                else:
-                    # Legacy shape-based detection
-                    if vocab_size is None:
-                        if hasattr(model, "output") and hasattr(
-                            model.output, "out_features"
-                        ):
-                            vocab_size = model.output.out_features
-                        elif hasattr(model, "lm_head") and hasattr(
-                            model.lm_head, "out_features"
-                        ):
-                            vocab_size = model.lm_head.out_features
-                        else:
-                            warnings.warn(
-                                "vocab_size not provided and could not auto-detect from model. "
-                                "Model head exclusion may not work correctly."
-                            )
-                            vocab_size = 50000  # fallback
-
-                    exclude_from_matrix = create_model_head_exclusion_fn(vocab_size)
+                # Use FQN-based detection for reliable head identification
+                exclude_from_matrix = create_fqn_based_exclusion_fn(
+                    model=model,
+                    head_names=head_names,
+                    head_suffixes=head_suffixes,
+                )
             else:
-                # Model not provided - use shape-based detection only
-                if vocab_size is not None:
-                    exclude_from_matrix = create_model_head_exclusion_fn(vocab_size)
-                elif excluded_shapes is not None:
-                    exclude_from_matrix = create_shape_based_exclusion_fn(
-                        excluded_shapes
-                    )
-                else:
-                    warnings.warn(
-                        "auto_exclude_heads=True but no model, vocab_size, or excluded_shapes provided. "
-                        "Cannot perform automatic head detection. Set auto_exclude_heads=False to disable this warning."
-                    )
+                warnings.warn(
+                    "auto_exclude_heads=True but no model provided. "
+                    "Cannot perform automatic head detection. Set auto_exclude_heads=False to disable this warning."
+                )
 
         self.exclude_from_matrix = exclude_from_matrix
 
