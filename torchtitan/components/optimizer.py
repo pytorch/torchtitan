@@ -319,6 +319,9 @@ def build_optimizers(
                 "rank_factor": job_config.optimizer.rank_factor,
                 "scalar_optimizer": job_config.optimizer.scalar_optimizer,
                 "distributed": True,  # Always use distributed mode in torchtitan,
+                "model": (
+                    model_parts[0] if model_parts else None
+                ),  # Pass model for automatic head detection
             }
         )
 

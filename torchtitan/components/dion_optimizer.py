@@ -16,6 +16,7 @@ Supports:
 - Single gpu and distributed training
 - 1D parallelisms (DP, FSDP2)
 - TP will need more testing
+- Model head exclusion from matrix param treatment
 """
 
 import math
@@ -53,6 +54,180 @@ except ImportError:
     Lion = None
 
 
+def create_model_head_exclusion_fn(
+    vocab_size: int, min_vocab_ratio: float = 0.8
+) -> Callable[[torch.Tensor], bool]:
+    """
+    Create a function to identify and exclude model head parameters from matrix treatment.
+
+    Args:
+        vocab_size: Expected vocabulary size of the model
+        min_vocab_ratio: Minimum ratio to consider a dimension as vocab dimension (default: 0.8)
+
+    Returns:
+        Function that returns True if parameter should be excluded from matrix treatment
+    """
+
+    def should_exclude(param: torch.Tensor) -> bool:
+        if param.dim() != 2:
+            return False
+
+        # Check if either dimension is close to vocab_size (accounting for sharding)
+        h, w = param.shape
+
+        # Check if this looks like a model head (one dimension is vocab-like)
+        vocab_like_h = (
+            abs(h - vocab_size) / vocab_size < (1 - min_vocab_ratio)
+            or h >= vocab_size * min_vocab_ratio
+        )
+        vocab_like_w = (
+            abs(w - vocab_size) / vocab_size < (1 - min_vocab_ratio)
+            or w >= vocab_size * min_vocab_ratio
+        )
+
+        return vocab_like_h or vocab_like_w
+
+    return should_exclude
+
+
+def create_shape_based_exclusion_fn(
+    excluded_shapes: List[Tuple[int, int]]
+) -> Callable[[torch.Tensor], bool]:
+    """
+    Create a function to exclude parameters based on their exact shapes.
+
+    Args:
+        excluded_shapes: List of (height, width) tuples to exclude from matrix treatment
+
+    Returns:
+        Function that returns True if parameter should be excluded from matrix treatment
+    """
+
+    def should_exclude(param: torch.Tensor) -> bool:
+        if param.dim() != 2:
+            return False
+        return tuple(param.shape) in excluded_shapes
+
+    return should_exclude
+
+
+def create_fqn_based_exclusion_fn(
+    model: nn.Module,
+    head_names: Optional[List[str]] = None,
+    head_suffixes: Optional[List[str]] = None,
+) -> Callable[[torch.Tensor], bool]:
+    """
+    Create a function to exclude parameters based on their fully qualified names (FQNs).
+
+    Args:
+        model: PyTorch model to analyze
+        head_names: List of exact parameter names to exclude (e.g., ['output.weight', 'lm_head.weight'])
+        head_suffixes: List of parameter name suffixes to exclude (e.g., ['output', 'lm_head', 'classifier'])
+
+    Returns:
+        Function that returns True if parameter should be excluded from matrix treatment
+    """
+    if head_names is None:
+        head_names = []
+
+    if head_suffixes is None:
+        head_suffixes = [
+            "output",
+            "lm_head",
+            "classifier",
+            "head",
+            "prediction_head",
+            "decoder",
+            "output_projection",
+        ]
+
+    # Create mapping from parameter tensor to its FQN
+    param_to_name = {}
+    for name, param in model.named_parameters():
+        param_to_name[param] = name
+
+    def should_exclude(param: torch.Tensor) -> bool:
+        if param.dim() != 2:
+            return False
+
+        param_name = param_to_name.get(param, "")
+
+        # Check exact name matches
+        if param_name in head_names:
+            return True
+
+        # Check if parameter name ends with any of the head suffixes
+        for suffix in head_suffixes:
+            if param_name.endswith(f".{suffix}.weight") or param_name.endswith(
+                f".{suffix}"
+            ):
+                return True
+            # Also check if the parameter name is exactly the suffix (for top-level parameters)
+            if param_name == f"{suffix}.weight" or param_name == suffix:
+                return True
+
+        return False
+
+    return should_exclude
+
+
+def create_combined_exclusion_fn(
+    model: nn.Module,
+    vocab_size: Optional[int] = None,
+    head_names: Optional[List[str]] = None,
+    head_suffixes: Optional[List[str]] = None,
+    excluded_shapes: Optional[List[Tuple[int, int]]] = None,
+    prefer_fqn: bool = True,
+) -> Callable[[torch.Tensor], bool]:
+    """
+    Create a combined exclusion function that uses multiple strategies.
+
+    Args:
+        model: PyTorch model to analyze
+        vocab_size: Vocabulary size for shape-based detection
+        head_names: List of exact parameter names to exclude
+        head_suffixes: List of parameter name suffixes to exclude
+        excluded_shapes: List of exact shapes to exclude
+        prefer_fqn: If True, prioritize FQN-based detection over shape-based
+
+    Returns:
+        Function that returns True if parameter should be excluded from matrix treatment
+    """
+    fqn_fn = create_fqn_based_exclusion_fn(model, head_names, head_suffixes)
+
+    shape_fn = None
+    if vocab_size is not None:
+        shape_fn = create_model_head_exclusion_fn(vocab_size)
+
+    exact_shape_fn = None
+    if excluded_shapes:
+        exact_shape_fn = create_shape_based_exclusion_fn(excluded_shapes)
+
+    def should_exclude(param: torch.Tensor) -> bool:
+        if param.dim() != 2:
+            return False
+
+        # Always check FQN first if prefer_fqn is True
+        if prefer_fqn and fqn_fn(param):
+            return True
+
+        # Check exact shapes
+        if exact_shape_fn and exact_shape_fn(param):
+            return True
+
+        # Check vocab-based shape detection
+        if shape_fn and shape_fn(param):
+            return True
+
+        # If not prefer_fqn, check FQN last as fallback
+        if not prefer_fqn and fqn_fn(param):
+            return True
+
+        return False
+
+    return should_exclude
+
+
 class DionOptimizer(Optimizer):
     """
     Dion (DIstributed OrthoNormalization) Optimizer
@@ -67,18 +242,62 @@ class DionOptimizer(Optimizer):
         momentum: Momentum factor μ (default: 0.95)
         rank_factor: Rank fraction r/d for low-rank approximation (default: .75, full rank = 1.0)
         scalar_optimizer: Optimizer class for non-matrix parameters ('adamw', 'lion')
-
         scalar_lr: Learning rate for scalar optimizer (default: None, uses lr)
-
         weight_decay: Weight decay coefficient (default: 0.01)
         scalar_weight_decay: Weight decay for scalar parameters (default: 0.0)
         eps: Small constant for numerical stability (default: 1e-8)
         oversampling_factor: Factor for randomized QR oversampling (default: 1.25), based on paper settings
         distributed: Whether to use distributed implementation (default: auto-detect)
-
         matrix_threshold: Minimum size for treating parameter as matrix (default: 32)
-
+        exclude_from_matrix: Optional callable to exclude specific parameters from matrix treatment.
+                           Takes a parameter tensor and returns True if it should be excluded.
+                           If None and auto_exclude_heads=True, will be automatically created.
+        model: Optional model reference for automatic head detection (default: None)
+        auto_exclude_heads: Whether to automatically exclude model heads from matrix treatment (default: True)
+        head_names: List of exact parameter names to exclude (e.g., ['output.weight', 'lm_head.weight'])
+        head_suffixes: List of parameter name suffixes to exclude (default: ['output', 'lm_head', 'classifier', etc.])
+        vocab_size: Vocabulary size for shape-based model head detection (default: auto-detect from model)
+        excluded_shapes: List of exact (height, width) shapes to exclude from matrix treatment
+        use_fqn_detection: Whether to use FQN-based detection over shape-based (default: True)
+        debug_classification: Whether to print parameter classification details (default: False)
+        report_detected_heads: Whether to report detected model heads to user (default: True)
         process_group: Process group for distributed training (default: None)
+        max_norm: Maximum gradient norm for clipping (default: 10.0)
+        use_randomized_cholesky_qr: Whether to use randomized Cholesky QR for orthogonalization (default: False)
+        **scalar_kwargs: Additional arguments for scalar optimizer
+
+    Examples:
+        # Basic usage with auto head detection
+        optimizer = DionOptimizer(model.parameters(), model=model, lr=0.01)
+        # Output:
+        # Dion: Detected 1 model head(s) → using AdamW optimization:
+        #   output.weight: (32000, 4096) (131,072,000 params)
+        #   Total excluded: 131,072,000 parameters
+        #   Remaining matrix parameters: 24 → using Dion optimization
+
+        # Manual head exclusion
+        optimizer = DionOptimizer(
+            model.parameters(),
+            model=model,
+            head_suffixes=['output', 'lm_head'],
+            debug_classification=True
+        )
+
+        # Disable reporting
+        optimizer = DionOptimizer(
+            model.parameters(),
+            model=model,
+            report_detected_heads=False
+        )
+
+        # Disable auto detection and use manual exclusion
+        def my_exclusion_fn(param):
+            return param.shape == (vocab_size, hidden_size)
+        optimizer = DionOptimizer(
+            model.parameters(),
+            auto_exclude_heads=False,
+            exclude_from_matrix=my_exclusion_fn
+        )
 
     """
 
@@ -96,6 +315,16 @@ class DionOptimizer(Optimizer):
         oversampling_factor: float = 1.25,
         distributed: Optional[bool] = None,
         matrix_threshold: int = 32,
+        exclude_from_matrix: Optional[Callable[[torch.Tensor], bool]] = None,
+        model: Optional[nn.Module] = None,
+        auto_exclude_heads: bool = True,
+        head_names: Optional[List[str]] = None,
+        head_suffixes: Optional[List[str]] = None,
+        vocab_size: Optional[int] = None,
+        excluded_shapes: Optional[List[Tuple[int, int]]] = None,
+        use_fqn_detection: bool = True,
+        debug_classification: bool = False,
+        report_detected_heads: bool = True,
         process_group: Optional[dist.ProcessGroup] = None,
         max_norm: float = 10.0,
         use_randomized_cholesky_qr: bool = False,
@@ -116,6 +345,57 @@ class DionOptimizer(Optimizer):
         self.process_group = process_group
         self.max_norm = max_norm
         self.use_randomized_cholesky_qr = use_randomized_cholesky_qr
+        self.debug_classification = debug_classification
+        self.report_detected_heads = report_detected_heads
+
+        # Auto head detection setup
+        if exclude_from_matrix is None and auto_exclude_heads:
+            if model is not None:
+                # Use FQN-based detection when model is available
+                if use_fqn_detection:
+                    # Use pure FQN-based detection without shape-based fallback
+                    exclude_from_matrix = create_fqn_based_exclusion_fn(
+                        model=model,
+                        head_names=head_names,
+                        head_suffixes=head_suffixes,
+                    )
+                else:
+                    # Legacy shape-based detection
+                    if vocab_size is None:
+                        if hasattr(model, "output") and hasattr(
+                            model.output, "out_features"
+                        ):
+                            vocab_size = model.output.out_features
+                        elif hasattr(model, "lm_head") and hasattr(
+                            model.lm_head, "out_features"
+                        ):
+                            vocab_size = model.lm_head.out_features
+                        else:
+                            warnings.warn(
+                                "vocab_size not provided and could not auto-detect from model. "
+                                "Model head exclusion may not work correctly."
+                            )
+                            vocab_size = 50000  # fallback
+
+                    exclude_from_matrix = create_model_head_exclusion_fn(vocab_size)
+            else:
+                # Model not provided - use shape-based detection only
+                if vocab_size is not None:
+                    exclude_from_matrix = create_model_head_exclusion_fn(vocab_size)
+                elif excluded_shapes is not None:
+                    exclude_from_matrix = create_shape_based_exclusion_fn(
+                        excluded_shapes
+                    )
+                else:
+                    warnings.warn(
+                        "auto_exclude_heads=True but no model, vocab_size, or excluded_shapes provided. "
+                        "Cannot perform automatic head detection. Set auto_exclude_heads=False to disable this warning."
+                    )
+
+        self.exclude_from_matrix = exclude_from_matrix
+
+        # Store model reference for later use
+        self.model = model
 
         # Auto-detect distributed mode
         if distributed is None:
@@ -139,6 +419,16 @@ class DionOptimizer(Optimizer):
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay, eps=eps)
         super(DionOptimizer, self).__init__(params, defaults)
 
+        # Create parameter name mapping for reporting (after param_groups is available)
+        self._param_groups_with_names = []
+        if model is not None:
+            # Create mapping from parameter tensor to its name for better reporting
+            param_to_name = {param: name for name, param in model.named_parameters()}
+            for group in self.param_groups:
+                for param in group["params"]:
+                    name = param_to_name.get(param, f"unknown_param_{id(param)}")
+                    self._param_groups_with_names.append((name, param))
+
         # Initialize CUTLASS GEMM manager for optimized matrix operations
         try:
             self.cutlass_gemm_manager = CutlassGemmManager()
@@ -151,6 +441,9 @@ class DionOptimizer(Optimizer):
         # Initialize parameter classification and scalar optimizers
         self._classify_parameters()
         self._init_scalar_optimizers()
+
+        # Report detected heads to user
+        self._report_detected_heads()
 
     def _get_scalar_optimizer_class(self, optimizer_name: str):
         """Get scalar optimizer class by name."""
@@ -169,6 +462,10 @@ class DionOptimizer(Optimizer):
     def _is_matrix_param(self, param: torch.Tensor) -> bool:
         """Determine if parameter should be treated as a matrix."""
 
+        # First check if this parameter should be explicitly excluded
+        if self.exclude_from_matrix is not None and self.exclude_from_matrix(param):
+            return False
+
         # Must be 2D and both dimensions >= threshold
         return (
             param.dim() == 2
@@ -180,13 +477,96 @@ class DionOptimizer(Optimizer):
         """Classify parameters into matrix and scalar types."""
         self.matrix_params = []
         self.scalar_params = []
+        self.excluded_params_info = []  # Store info about excluded parameters
+
+        # Create parameter name mapping for excluded parameter tracking
+        param_to_name = {}
+        if hasattr(self, "_param_groups_with_names"):
+            # If we have named parameters, use them
+            for name, param in self._param_groups_with_names:
+                param_to_name[param] = name
 
         for group in self.param_groups:
             for p in group["params"]:
+                param_name = param_to_name.get(p, f"param_shape_{p.shape}")
+
                 if self._is_matrix_param(p):
                     self.matrix_params.append(p)
                 else:
                     self.scalar_params.append(p)
+
+                    # Check if this was excluded from matrix treatment
+                    if (
+                        p.dim() == 2
+                        and p.size(0) >= self.matrix_threshold
+                        and p.size(1) >= self.matrix_threshold
+                        and self.exclude_from_matrix is not None
+                        and self.exclude_from_matrix(p)
+                    ):
+                        self.excluded_params_info.append(
+                            (param_name, p.shape, p.numel())
+                        )
+
+        # Log classification for debugging
+        if self.debug_classification:
+            print(f"=== Dion Optimizer Internal Classification ===")
+
+            # Show matrix parameters with names if available
+            print(f"Matrix parameters (Dion): {len(self.matrix_params)}")
+            matrix_param_names = []
+            for p in self.matrix_params:
+                param_name = param_to_name.get(p, f"param_shape_{p.shape}")
+                matrix_param_names.append((param_name, p.shape, p.numel()))
+
+            for name, shape, numel in matrix_param_names:
+                print(f"  {name}: {shape} ({numel:,} params)")
+
+            # Show excluded parameters
+            if self.excluded_params_info:
+                print(
+                    f"\nExcluded from matrix treatment (AdamW): {len(self.excluded_params_info)}"
+                )
+                for name, shape, numel in self.excluded_params_info:
+                    print(f"  {name}: {shape} ({numel:,} params)")
+
+            # Show remaining scalar parameters
+            remaining_scalar_count = len(self.scalar_params) - len(
+                self.excluded_params_info
+            )
+            if remaining_scalar_count > 0:
+                print(f"\nOther scalar parameters (AdamW): {remaining_scalar_count}")
+                for p in self.scalar_params:
+                    param_name = param_to_name.get(p, f"param_shape_{p.shape}")
+                    # Only show if not already shown in excluded
+                    if not any(
+                        name == param_name for name, _, _ in self.excluded_params_info
+                    ):
+                        print(f"  {param_name}: {p.shape} ({p.numel():,} params)")
+
+            print("=" * 48)
+
+    def _report_detected_heads(self):
+        """Report detected model heads to the user."""
+        if (
+            self.excluded_params_info
+            and self.exclude_from_matrix is not None
+            and self.report_detected_heads
+        ):
+
+            head_names = [name for name, _, _ in self.excluded_params_info]
+            total_head_params = sum(numel for _, _, numel in self.excluded_params_info)
+
+            if (
+                not self.debug_classification
+            ):  # Only print if not already shown in debug
+                print(f"Dion: Detected {len(head_names)} model head(s) → using AdamW:")
+                for name, shape, numel in self.excluded_params_info:
+                    print(f"  {name}: {shape} ({numel:,} params)")
+
+                print(
+                    f"  Transformer layers using Dion: {len(self.matrix_params)} matrix parameters"
+                )
+                print()
 
     def _init_scalar_optimizers(self):
         """Initialize scalar optimizers for non-matrix parameters."""
@@ -222,8 +602,13 @@ class DionOptimizer(Optimizer):
                 return 1.0 / math.sqrt(actual_param.size(0))
             else:  # Likely bias
                 return 1.0
-        elif actual_param.dim() == 2:  # Matrix (but below threshold)
+        elif actual_param.dim() == 2:  # Matrix (but excluded from matrix treatment)
             d_out, d_in = actual_param.shape
+            # For model heads, use standard scaling
+            if self.exclude_from_matrix is not None and self.exclude_from_matrix(
+                actual_param
+            ):
+                return 1.0 / math.sqrt(d_in)  # Standard initialization scaling
             return math.sqrt(d_out / d_in)
         else:
             return 1.0
@@ -231,7 +616,8 @@ class DionOptimizer(Optimizer):
     def _get_weight_decay(self, param: torch.Tensor) -> float:
         """Get weight decay for parameter type."""
 
-        # Only apply weight decay to matrix parameters
+        # Apply scalar weight decay to all scalar parameters
+        # For excluded 2D parameters (like model heads), still apply weight decay
         if param.dim() >= 2:
             return self.scalar_weight_decay
         return 0.0
@@ -550,7 +936,6 @@ class DionOptimizer(Optimizer):
 
 
 # Utility functions
-# probably not needed, but keeping for now
 
 
 def create_dion_optimizer(
@@ -568,13 +953,14 @@ def create_dion_optimizer(
         lr: Learning rate
         rank_factor: Rank fraction for low-rank approximation
         scalar_optimizer: Optimizer for non-matrix parameters
-        **kwargs: Additional arguments for DionOptimizer
+        **kwargs: Additional arguments for DionOptimizer (see DionOptimizer.__init__ for full list)
 
     Returns:
         Configured DionOptimizer
     """
     return DionOptimizer(
         model.parameters(),
+        model=model,
         lr=lr,
         rank_factor=rank_factor,
         scalar_optimizer=scalar_optimizer,
@@ -593,6 +979,7 @@ def create_dion_optimizer_fsdp2(
     """Create a Dion optimizer configured for FSDP2 training."""
     return DionOptimizer(
         model.parameters(),
+        model=model,
         lr=lr,
         rank_factor=rank_factor,
         scalar_optimizer=scalar_optimizer,
@@ -602,13 +989,20 @@ def create_dion_optimizer_fsdp2(
     )
 
 
-def get_parameter_info(model: nn.Module, matrix_threshold: int = 32) -> Dict[str, Any]:
+def get_parameter_info(
+    model: nn.Module,
+    matrix_threshold: int = 32,
+    exclude_from_matrix: Optional[Callable[[torch.Tensor], bool]] = None,
+    show_details: bool = False,
+) -> Dict[str, Any]:
     """
     Analyze model parameters for Dion optimization.
 
     Args:
         model: PyTorch model
         matrix_threshold: Minimum size for matrix classification
+        exclude_from_matrix: Optional exclusion function
+        show_details: Whether to print detailed parameter breakdown
 
     Returns:
         Dictionary with parameter counts and memory usage
@@ -618,28 +1012,45 @@ def get_parameter_info(model: nn.Module, matrix_threshold: int = 32) -> Dict[str
     matrix_memory = 0
     scalar_memory = 0
     distributed_params = 0
+    excluded_matrix_params = 0
 
-    for param in model.parameters():
+    matrix_param_details = []
+    scalar_param_details = []
+    excluded_param_details = []
+
+    for name, param in model.named_parameters():
         param_memory = param.numel() * param.element_size()
 
         # Check if distributed
-        if isinstance(param, DTensor) or hasattr(param, "_fsdp_wrapped"):
+        if hasattr(param, "_local_tensor") or hasattr(param, "_fsdp_wrapped"):
             distributed_params += param.numel()
 
-        if (
+        # Check if would be matrix but is excluded
+        would_be_matrix = (
             param.dim() == 2
             and param.size(0) >= matrix_threshold
             and param.size(1) >= matrix_threshold
-        ):
+        )
+
+        is_excluded = exclude_from_matrix is not None and exclude_from_matrix(param)
+
+        if would_be_matrix and not is_excluded:
             matrix_params += param.numel()
             matrix_memory += param_memory
+            matrix_param_details.append((name, param.shape, param.numel()))
         else:
             scalar_params += param.numel()
             scalar_memory += param_memory
+            if would_be_matrix and is_excluded:
+                excluded_matrix_params += param.numel()
+                excluded_param_details.append((name, param.shape, param.numel()))
+            else:
+                scalar_param_details.append((name, param.shape, param.numel()))
 
-    return {
+    result = {
         "matrix_params": matrix_params,
         "scalar_params": scalar_params,
+        "excluded_matrix_params": excluded_matrix_params,
         "matrix_memory_mb": matrix_memory / 1024**2,
         "scalar_memory_mb": scalar_memory / 1024**2,
         "total_params": matrix_params + scalar_params,
@@ -650,3 +1061,30 @@ def get_parameter_info(model: nn.Module, matrix_threshold: int = 32) -> Dict[str
             else 0
         ),
     }
+
+    if show_details:
+        print("=== Parameter Analysis Details ===")
+        print(f"Matrix parameters (Dion optimization): {len(matrix_param_details)}")
+        for name, shape, numel in matrix_param_details:
+            print(f"  {name}: {shape} ({numel:,} params)")
+
+        print(f"\nExcluded matrix parameters (AdamW): {len(excluded_param_details)}")
+        for name, shape, numel in excluded_param_details:
+            print(f"  {name}: {shape} ({numel:,} params)")
+
+        print(f"\nScalar parameters (AdamW): {len(scalar_param_details)}")
+        for name, shape, numel in scalar_param_details:
+            print(f"  {name}: {shape} ({numel:,} params)")
+
+        print(f"\nSummary:")
+        print(f"  Total parameters: {result['total_params']:,}")
+        print(
+            f"  Matrix parameters: {result['matrix_params']:,} ({result['matrix_fraction']:.1%})"
+        )
+        print(f"  Excluded matrix parameters: {result['excluded_matrix_params']:,}")
+        print(f"  Scalar parameters: {result['scalar_params']:,}")
+        print(f"  Matrix memory: {result['matrix_memory_mb']:.1f} MB")
+        print(f"  Scalar memory: {result['scalar_memory_mb']:.1f} MB")
+        print("=" * 35)
+
+    return result
