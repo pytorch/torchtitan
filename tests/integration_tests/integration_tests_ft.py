@@ -23,16 +23,18 @@ def build_test_list():
     same root config file.
     """
     integration_tests_flavors = []
-    integration_tests_flavors.extend([
-        TestCaseConfigs(
-            [
-                ["--training.steps 10", "--checkpoint.enable"],
-            ],
-            "Default TorchFT integration test",
-            "default_torchft",
-            ngpu=8,
-        )
-    ])
+    integration_tests_flavors.extend(
+        [
+            TestCaseConfigs(
+                [
+                    ["--training.steps 10", "--checkpoint.enable_checkpoint"],
+                ],
+                "Default TorchFT integration test",
+                "default_torchft",
+                ngpu=8,
+            )
+        ]
+    )
     return integration_tests_flavors
 
 
@@ -40,7 +42,9 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(test_flavor: TestCaseConfigs, model_name: str, full_path: str, output_dir: str):
+def run_single_test(
+    test_flavor: TestCaseConfigs, model_name: str, full_path: str, output_dir: str
+):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -96,7 +100,7 @@ def run_tests(args):
     if args.ngpu < 8:
         logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return
-    
+
     for test_flavor in integration_tests_flavors:
         model_names = test_flavor.supported_models
         for model_name in model_names:
