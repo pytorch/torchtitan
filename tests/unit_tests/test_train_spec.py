@@ -18,11 +18,10 @@ from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import parallelize_llama, pipeline_llama
+from torchtitan.protocols import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.train_spec import (
     apply_to_train_specs,
-    BaseModelArgs,
     get_train_spec,
-    ModelProtocol,
     register_train_spec,
     TrainSpec,
 )

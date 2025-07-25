@@ -20,6 +20,7 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 
 ## Latest News
+- [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
 - [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
 - [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
@@ -37,7 +38,7 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 Our mission is to accelerate innovation in the field of generative AI by empowering researchers and developers to explore new modeling architectures and infrastructure techniques.
 
-The guiding principles when building `torchtitan`
+The Guiding Principles when building `torchtitan`
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.

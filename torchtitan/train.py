@@ -302,7 +302,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
-            sd_adapter=self.train_spec.state_dict_adapter,
+            sd_adapter=(
+                self.train_spec.state_dict_adapter(model_args)
+                if self.train_spec.state_dict_adapter
+                else None
+            ),
             base_folder=job_config.job.dump_folder,
             ft_manager=self.ft_manager,
         )
@@ -407,16 +411,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs,
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
+                        inputs, target=targets, losses=losses, input_batch=inputs
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
+                        target=targets, losses=losses, input_batch=inputs
                     )
 
             # accumulate losses across pipeline microbatches
@@ -431,7 +430,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
+                    pred = model_parts[0](inputs, self.tokenizer.eos_id)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
