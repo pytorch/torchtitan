@@ -787,8 +787,9 @@ class CheckpointManager:
             discovered_checkpoints = []
             for filename in os.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
-                path = os.path.join(self.folder, filename)
-                discovered_checkpoints.append((int(match.group(1)), path))
+                if match:
+                    path = os.path.join(self.folder, filename)
+                    discovered_checkpoints.append((int(match.group(1)), path))
 
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
