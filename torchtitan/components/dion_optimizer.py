@@ -242,17 +242,24 @@ class DionOptimizer(Optimizer):
         momentum: Momentum factor μ (default: 0.95)
         rank_factor: Rank fraction r/d for low-rank approximation (default: .75, full rank = 1.0)
         scalar_optimizer: Optimizer class for non-matrix parameters ('adamw', 'lion')
+
         scalar_lr: Learning rate for scalar optimizer (default: None, uses lr)
         weight_decay: Weight decay coefficient (default: 0.01)
         scalar_weight_decay: Weight decay for scalar parameters (default: 0.0)
+
         eps: Small constant for numerical stability (default: 1e-8)
         oversampling_factor: Factor for randomized QR oversampling (default: 1.25), based on paper settings
         distributed: Whether to use distributed implementation (default: auto-detect)
+
         matrix_threshold: Minimum size for treating parameter as matrix (default: 32)
         exclude_from_matrix: Optional callable to exclude specific parameters from matrix treatment.
                            Takes a parameter tensor and returns True if it should be excluded.
                            If None and auto_exclude_heads=True, will be automatically created.
+
         model: Optional model reference for automatic head detection (default: None)
+
+        TODO: this might be a bit verbose...not sure we want to expose all these options but lets see how well autodetect works
+        ------ head detection options ------
         auto_exclude_heads: Whether to automatically exclude model heads from matrix treatment (default: True)
         head_names: List of exact parameter names to exclude (e.g., ['output.weight', 'lm_head.weight'])
         head_suffixes: List of parameter name suffixes to exclude (default: ['output', 'lm_head', 'classifier', etc.])
@@ -261,9 +268,11 @@ class DionOptimizer(Optimizer):
         use_fqn_detection: Whether to use FQN-based detection over shape-based (default: True)
         debug_classification: Whether to print parameter classification details (default: False)
         report_detected_heads: Whether to report detected model heads to user (default: True)
+        ------ end head detection options ------
+
         process_group: Process group for distributed training (default: None)
         max_norm: Maximum gradient norm for clipping (default: 10.0)
-        use_randomized_cholesky_qr: Whether to use randomized Cholesky QR for orthogonalization (default: False)
+        use_randomized_cholesky_qr: Whether to use randomized Cholesky QR for orthogonalization (default: True)
         **scalar_kwargs: Additional arguments for scalar optimizer
 
     Examples:
@@ -306,7 +315,7 @@ class DionOptimizer(Optimizer):
         params,
         lr: float = 0.01,
         momentum: float = 0.95,
-        rank_factor: float = 0.75,
+        rank_factor: float = 0.55,
         scalar_optimizer: str = "adamw",
         scalar_lr: Optional[float] = None,
         weight_decay: float = 0.01,
@@ -327,7 +336,7 @@ class DionOptimizer(Optimizer):
         report_detected_heads: bool = True,
         process_group: Optional[dist.ProcessGroup] = None,
         max_norm: float = 10.0,
-        use_randomized_cholesky_qr: bool = False,
+        use_randomized_cholesky_qr: bool = True,
         **scalar_kwargs,
     ):
         if not 0.0 <= lr:
