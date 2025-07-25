@@ -16,7 +16,7 @@ from torchtitan.experiments.flux.model.layers import (
     timestep_embedding,
 )
 
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.protocols import ModelProtocol
 
 from .args import FluxModelArgs
 

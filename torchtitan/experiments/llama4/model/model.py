@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.protocols import ModelProtocol
 
 from .args import TransformerModelArgs
 from .moe import MoE

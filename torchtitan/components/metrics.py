@@ -21,7 +21,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.train_spec import BaseModelArgs
+    from torchtitan.protocols import BaseModelArgs
 
 
 # named tuple for passing device memory stats for logging

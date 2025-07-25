@@ -8,13 +8,11 @@ from dataclasses import dataclass
 
 # Import torchtitan.models to ensure all train specs are registered
 import torchtitan.models  # noqa: F401
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.protocols import BaseModelArgs, ModelProtocol, StateDictAdapter
 from torchtitan.protocols.train_spec import (
     _train_specs,
-    BaseModelArgs,
     LossFunctionBuilder,
     LRSchedulersBuilder,
-    ModelProtocol,
     OptimizersBuilder,
     ParallelizeFunction,
     PipeliningFunction,

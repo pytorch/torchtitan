@@ -37,7 +37,7 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.protocols import StateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -191,7 +191,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
-        sd_adapter: type[StateDictAdapter] | None,
+        sd_adapter: StateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
@@ -375,6 +375,7 @@ class CheckpointManager:
                 enable_consolidation=True,
                 thread_count_consolidation=5,
             )
+
         else:
             checkpoint_save_id = checkpoint_id
 
