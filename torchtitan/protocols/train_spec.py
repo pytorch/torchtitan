@@ -19,7 +19,9 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
 from torchtitan.config import LRScheduler
-from torchtitan.protocols import BaseModelArgs, ModelProtocol, StateDictAdapter
+
+from .model import BaseModelArgs, ModelProtocol
+from .state_dict_adapter import StateDictAdapter
 
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
