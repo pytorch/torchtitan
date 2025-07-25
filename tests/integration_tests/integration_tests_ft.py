@@ -9,7 +9,6 @@ import concurrent.futures
 import logging
 import os
 import subprocess
-from collections import defaultdict
 
 from .integration_tests import TestCaseConfigs
 
@@ -24,7 +23,7 @@ def build_test_list():
     same root config file.
     """
     integration_tests_flavors = []
-    integration_tests_flavors.append([
+    integration_tests_flavors.extend([
         TestCaseConfigs(
             [
                 ["--training.steps 10", "--checkpoint.enable"],
