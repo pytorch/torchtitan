@@ -40,10 +40,12 @@ class MXConverter(ModelConverter):
                 "torchao is not installed. Please install it to use MXFP8 linear layers."
             )
         torchao_version = version("torchao")
-        mxfp8_min_version = "0.11.0"
-        if torchao_version < mxfp8_min_version:
+
+        # Last torchao release was 0.12.0, so nightly build starts with 0.13.0+git...
+        is_nightly_build = torchao_version.startswith("0.13.0")
+        if not is_nightly_build:
             raise ImportError(
-                f"torchao version {torchao_version} is too old, please install torchao {mxfp8_min_version} or later and try again"
+                f"torchao version {torchao_version} is too old, please install torchao nightly build and try again"
             )
 
         # Can be removed if we enable the emulated versions
@@ -51,19 +53,26 @@ class MXConverter(ModelConverter):
             10, 0
         ), "MXFP8 is only supported on SM100 or architectures"
 
-        self.enabled = True
-        mx_job_config: MX = job_config.mx
-        self.filter_fqns = mx_job_config.filter_fqns
+        # TP not yet supported with torch.compile
+        assert not (
+            job_config.training.compile
+            and job_config.parallelism.tensor_parallel_degree > 1
+        ), "TP not yet supported with torch.compile for mxfp8"
 
         # Configure MXFP8
-        from torchao.prototype.mx_formats.config import MXLinearConfig
-
-        config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
-        config.use_fp8_dim1_cast_triton_kernel = (
-            mx_job_config.use_fp8_dim1_cast_triton_kernel
+        from torchao.prototype.mx_formats.config import (
+            MXFP8Dim1CastKernelChoice,
+            MXLinearConfig,
         )
-        self.config = config
 
+        mx_job_config: MX = job_config.mx
+        config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
+        config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
+            mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
+        ]
+        self.filter_fqns = mx_job_config.filter_fqns
+        self.config = config
+        self.enabled = True
         logger.info(f"Float8 training active with recipe {mx_job_config.recipe_name}")
 
     def convert(self, model: nn.Module):
