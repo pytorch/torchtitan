@@ -114,63 +114,6 @@ def create_fqn_based_exclusion_fn(
     return should_exclude
 
 
-def create_combined_exclusion_fn(
-    model: nn.Module,
-    vocab_size: Optional[int] = None,
-    head_names: Optional[List[str]] = None,
-    head_suffixes: Optional[List[str]] = None,
-    excluded_shapes: Optional[List[Tuple[int, int]]] = None,
-    prefer_fqn: bool = True,
-) -> Callable[[torch.Tensor], bool]:
-    """
-    Create a combined exclusion function that uses multiple strategies.
-
-    Args:
-        model: PyTorch model to analyze
-        vocab_size: Vocabulary size for shape-based detection
-        head_names: List of exact parameter names to exclude
-        head_suffixes: List of parameter name suffixes to exclude
-        excluded_shapes: List of exact shapes to exclude
-        prefer_fqn: If True, prioritize FQN-based detection over shape-based
-
-    Returns:
-        Function that returns True if parameter should be excluded from matrix treatment
-    """
-    fqn_fn = create_fqn_based_exclusion_fn(model, head_names, head_suffixes)
-
-    shape_fn = None
-    if vocab_size is not None:
-        shape_fn = create_model_head_exclusion_fn(vocab_size)
-
-    exact_shape_fn = None
-    if excluded_shapes:
-        exact_shape_fn = create_shape_based_exclusion_fn(excluded_shapes)
-
-    def should_exclude(param: torch.Tensor) -> bool:
-        if param.dim() != 2:
-            return False
-
-        # Always check FQN first if prefer_fqn is True
-        if prefer_fqn and fqn_fn(param):
-            return True
-
-        # Check exact shapes
-        if exact_shape_fn and exact_shape_fn(param):
-            return True
-
-        # Check vocab-based shape detection
-        if shape_fn and shape_fn(param):
-            return True
-
-        # If not prefer_fqn, check FQN last as fallback
-        if not prefer_fqn and fqn_fn(param):
-            return True
-
-        return False
-
-    return should_exclude
-
-
 class DionOptimizer(Optimizer):
     """
     Dion (DIstributed OrthoNormalization) Optimizer
