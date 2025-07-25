@@ -78,6 +78,19 @@ def parallelize_llama(
 
     if job_config.training.compile:
         torch._inductor.config.reorder_for_peak_memory = False
+        torch._inductor.config.allow_buffer_reuse = False
+        torch._inductor.config.bucket_all_gathers_fx = "fsdp"
+        torch._inductor.config.bucket_reduce_scatters_fx = "fsdp"
+        from torch._inductor.comms import (
+            reorder_communication_preserving_peak_memory,
+            sink_waits_iterative,
+        )
+
+        torch._inductor.config.reorder_for_compute_comm_overlap = True
+        torch._inductor.config.reorder_for_compute_comm_overlap_passes = [
+            sink_waits_iterative,
+            reorder_communication_preserving_peak_memory,
+        ]
         parallel_mod = torch.compile(parallel_mod, fullgraph=True)
 
     return parallel_mod
