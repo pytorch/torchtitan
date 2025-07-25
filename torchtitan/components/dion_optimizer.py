@@ -201,17 +201,14 @@ class DionOptimizer(Optimizer):
 
         model: Optional model reference for automatic head detection (default: None)
 
-        TODO: this might be a bit verbose...not sure we want to expose all these options but lets see how well autodetect works
-        ------ head detection options ------
+
         auto_exclude_heads: Whether to automatically exclude model heads from matrix treatment (default: True)
         head_names: List of exact parameter names to exclude (e.g., ['output.weight', 'lm_head.weight'])
         head_suffixes: List of parameter name suffixes to exclude (default: ['output', 'lm_head', 'classifier', etc.])
-        vocab_size: Vocabulary size for shape-based model head detection (default: auto-detect from model)
-        excluded_shapes: List of exact (height, width) shapes to exclude from matrix treatment
-        use_fqn_detection: Whether to use FQN-based detection over shape-based (default: True)
+
         debug_classification: Whether to print parameter classification details (default: False)
         report_detected_heads: Whether to report detected model heads to user (default: True)
-        ------ end head detection options ------
+
 
         process_group: Process group for distributed training (default: None)
         max_norm: Maximum gradient norm for clipping (default: 10.0)
@@ -546,48 +543,17 @@ class DionOptimizer(Optimizer):
         """Initialize state for matrix parameter."""
         state = {}
 
-        # Get global shape for DTensor or local shape for regular tensor
-        if hasattr(param, 'shape'):
-            m, n = param.shape
-        else:
-            m, n = param.size()
-            
+        m, n = param.shape
         rank = min(m, n, max(1, int(min(m, n) * self.rank_factor)))
 
-        # Create momentum buffer with same shape and type as actual parameter
+        # Create momentum buffer with same shape as actual parameter
         state["momentum_buffer"] = torch.zeros_like(param)
 
         # Create right factor for warm-starting power iteration
-        # If param is a DTensor, create right_factor as DTensor too
-        if hasattr(param, '_spec') or hasattr(param, 'device_mesh'):
-            # This is a DTensor - create right_factor with compatible distribution
-            try:
-                # Try to create a DTensor with the same device mesh and sharding
-                from torch.distributed._tensor import DTensor, Shard, Replicate
-                
-                # Create a regular tensor first
-                right_factor_local = torch.randn(n, rank, device=param.device, dtype=param.dtype)
-                right_factor_local = self._normalize_columns(right_factor_local)
-                
-                # Convert to DTensor with appropriate sharding
-                # For right factor (n, rank), we typically want to shard along the first dimension
-                if hasattr(param, '_spec') and hasattr(param, 'device_mesh'):
-                    placements = [Shard(0)] if len(param.device_mesh.mesh.shape) == 1 else [Shard(0), Replicate()]
-                    state["right_factor"] = DTensor.from_local(
-                        right_factor_local, 
-                        device_mesh=param.device_mesh, 
-                        placements=placements
-                    )
-                else:
-                    state["right_factor"] = right_factor_local
-            except Exception as e:
-                # Fallback to regular tensor if DTensor creation fails
-                state["right_factor"] = torch.randn(n, rank, device=param.device, dtype=param.dtype)
-                state["right_factor"] = self._normalize_columns(state["right_factor"])
-        else:
-            # Regular tensor
-            state["right_factor"] = torch.randn(n, rank, device=param.device, dtype=param.dtype)
-            state["right_factor"] = self._normalize_columns(state["right_factor"])
+        state["right_factor"] = torch.randn(
+            n, rank, device=param.device, dtype=param.dtype
+        )
+        state["right_factor"] = self._normalize_columns(state["right_factor"])
 
         # Step counter and metadata
         state["step"] = 0
@@ -596,15 +562,6 @@ class DionOptimizer(Optimizer):
         state["local_n"] = n
 
         return state
-
-    def _get_local_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Extract local tensor from DTensor if needed, otherwise return as-is."""
-        if hasattr(tensor, '_local_tensor'):
-            return tensor._local_tensor
-        elif hasattr(tensor, 'to_local'):
-            return tensor.to_local()
-        else:
-            return tensor
 
     def _normalize_columns(self, matrix: torch.Tensor) -> torch.Tensor:
         """Normalize columns of matrix to unit norm."""
@@ -640,12 +597,8 @@ class DionOptimizer(Optimizer):
         1. All-reduce P after local computation
         2. All-reduce R after local computation
         """
-        # Handle DTensor/Tensor compatibility
-        B_local = self._get_local_tensor(B)
-        Q_prev_local = self._get_local_tensor(Q_prev)
-        
         # Step 1: Local computation P_hat = B_local * Q
-        P_local = torch.mm(B_local, Q_prev_local)
+        P_local = torch.mm(B, Q_prev)
 
         # Step 2: Synchronize P across all ranks (FSDP shards + DP ranks)
         # This implements E_DP[Σ_FS[P̂]] from Algorithm 3
@@ -661,7 +614,7 @@ class DionOptimizer(Optimizer):
             P = self._orthogonalize_matrix(P_sync)
 
         # Step 4: Local computation R_hat = B_local^T * P
-        R_local = torch.mm(B_local.t(), P)
+        R_local = torch.mm(B.t(), P)
 
         # Step 5: Synchronize R across all ranks
         # This implements E_DP[R̂] from Algorithm 3
