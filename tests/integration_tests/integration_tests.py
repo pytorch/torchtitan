@@ -85,27 +85,6 @@ def build_core_functionality_tests() -> List[TestCaseConfigs]:
                 [
                     [
                         "--checkpoint.enable_checkpoint",
-                        "--checkpoint.last_save_model_weights_only",
-                    ],
-                ],
-                "Checkpoint Integration Test - Save Model Weights Only fp32",
-                "last_save_model_weights_only_fp32",
-            ),
-            TestCaseConfigs(
-                [
-                    [
-                        "--checkpoint.enable_checkpoint",
-                        "--checkpoint.last_save_model_weights_only",
-                        "--checkpoint.export_dtype bfloat16",
-                    ],
-                ],
-                "Checkpoint Integration Test - Save Model Weights Only bf16",
-                "last_save_model_weights_only_bf16",
-            ),
-            TestCaseConfigs(
-                [
-                    [
-                        "--checkpoint.enable_checkpoint",
                         "--checkpoint.folder hf_checkpoint",
                         "--checkpoint.last_save_in_hf",
                         "--checkpoint.last_save_model_only",

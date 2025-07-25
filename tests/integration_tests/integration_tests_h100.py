@@ -7,28 +7,16 @@
 import argparse
 import logging
 import os
-<<<<<<< HEAD
-import subprocess
-from collections import defaultdict
-
-from .integration_tests import OverrideDefinitions
-=======
 
 from .integration_tests import run_single_test, TestCaseConfigs
->>>>>>> 2dfda3e (refactor v1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-<<<<<<< HEAD
-
-def build_test_list():
-=======
 def build_h100_test_list():
->>>>>>> 2dfda3e (refactor v1)
     """
-    key is the config file name and value is a list of OverrideDefinitions
+    key is the config file name and value is a list of TestCaseConfigs
     that is used to generate variations of integration tests based on the
     same root config file.
     """
@@ -102,11 +90,8 @@ def build_h100_test_list():
     return integration_tests_flavors
 
 
-def run_h100_tests(args):
-    # If user specifies a specific test name, the test_suite argument is ignored
-    if args.test_name != "all":
-        args.test_suite = "all"
-
+def run_tests(args):
+    """Run all H100 integration tests"""
     # build integration tests list
     test_list = build_h100_test_list()
 
