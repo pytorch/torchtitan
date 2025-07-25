@@ -228,7 +228,7 @@ def run_full_model(
 
             global_avg_loss = global_max_loss = loss  # .detach().item()
 
-            metrics_processor.log(step, global_avg_loss, global_max_loss)
+            metrics_processor.log(step, global_avg_loss, global_max_loss, grad_norm=0, lr=lr_scheduler.get_last_lr()[0])
 
         optimizer.step()
         lr_scheduler.step()

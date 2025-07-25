@@ -359,6 +359,7 @@ class MetricsProcessor:
         global_avg_loss: float,
         global_max_loss: float,
         grad_norm: float,
+        lr: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
@@ -397,6 +398,7 @@ class MetricsProcessor:
             "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
+            "learning_rate": lr,
         }
 
         if extra_metrics:

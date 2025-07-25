@@ -488,12 +488,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
-
+        
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
             global_max_loss,
             grad_norm.item(),
+            lr=self.lr_schedulers.schedulers[0].get_last_lr()[0],
         )
 
     @record
