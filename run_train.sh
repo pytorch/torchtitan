@@ -12,7 +12,7 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/llama3_8b_dion.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/llama3_8b.toml"}
 
 overrides=""
 if [ $# -ne 0 ]; then

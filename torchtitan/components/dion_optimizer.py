@@ -168,17 +168,12 @@ class DionOptimizer(Optimizer):
 
     def _is_matrix_param(self, param: torch.Tensor) -> bool:
         """Determine if parameter should be treated as a matrix."""
-        # Handle FSDP wrapped parameters
-        if hasattr(param, "_local_tensor"):
-            local_param = param._local_tensor
-        else:
-            local_param = param
 
         # Must be 2D and both dimensions >= threshold
         return (
-            local_param.dim() == 2
-            and local_param.size(0) >= self.matrix_threshold
-            and local_param.size(1) >= self.matrix_threshold
+            param.dim() == 2
+            and param.size(0) >= self.matrix_threshold
+            and param.size(1) >= self.matrix_threshold
         )
 
     def _classify_parameters(self):
@@ -235,13 +230,9 @@ class DionOptimizer(Optimizer):
 
     def _get_weight_decay(self, param: torch.Tensor) -> float:
         """Get weight decay for parameter type."""
-        if hasattr(param, "_local_tensor"):
-            actual_param = param._local_tensor
-        else:
-            actual_param = param
 
         # Only apply weight decay to matrix parameters
-        if actual_param.dim() >= 2:
+        if param.dim() >= 2:
             return self.scalar_weight_decay
         return 0.0
 
@@ -249,21 +240,15 @@ class DionOptimizer(Optimizer):
         """Initialize state for matrix parameter."""
         state = {}
 
-        # Get the actual tensor to work with
-        if hasattr(param, "_local_tensor"):
-            actual_param = param._local_tensor
-        else:
-            actual_param = param
-
-        m, n = actual_param.shape
+        m, n = param.shape
         rank = min(m, n, max(1, int(min(m, n) * self.rank_factor)))
 
         # Create momentum buffer with same shape as actual parameter
-        state["momentum_buffer"] = torch.zeros_like(actual_param)
+        state["momentum_buffer"] = torch.zeros_like(param)
 
         # Create right factor for warm-starting power iteration
         state["right_factor"] = torch.randn(
-            n, rank, device=actual_param.device, dtype=actual_param.dtype
+            n, rank, device=param.device, dtype=param.dtype
         )
         state["right_factor"] = self._normalize_columns(state["right_factor"])
 
@@ -427,32 +412,22 @@ class DionOptimizer(Optimizer):
         right_factor = state["right_factor"]
         rank = state["rank"]
 
-        # Get the actual working tensors
-        if hasattr(param, "_local_tensor"):
-            working_param = param._local_tensor
-            working_grad = (
-                grad._local_tensor if hasattr(grad, "_local_tensor") else grad
-            )
-        else:
-            working_param = param
-            working_grad = grad
-
         # Ensure momentum buffer has correct shape
-        if momentum_buffer.shape != working_grad.shape:
-            momentum_buffer = torch.zeros_like(working_grad)
+        if momentum_buffer.shape != grad.shape:
+            momentum_buffer = torch.zeros_like(grad)
             state["momentum_buffer"] = momentum_buffer
 
         # Ensure right factor has correct shape
-        expected_n = working_grad.shape[1]
+        expected_n = grad.shape[1]
         if right_factor.shape[0] != expected_n:
             right_factor = torch.randn(
-                expected_n, rank, device=working_grad.device, dtype=working_grad.dtype
+                expected_n, rank, device=grad.device, dtype=grad.dtype
             )
             right_factor = self._normalize_columns(right_factor)
             state["right_factor"] = right_factor
 
         # Form buffer B_t = M_{t-1} + G_t (Algorithm 1, line 3)
-        buffer = momentum_buffer + working_grad
+        buffer = momentum_buffer + grad
 
         # Power iteration: approximate B_t ≈ P_t R_t^T (Algorithm 1, line 4)
         try:
@@ -477,7 +452,7 @@ class DionOptimizer(Optimizer):
             right_factor.copy_(self._normalize_columns(R))
 
         # Compute scaled orthonormal update (Algorithm 1, line 9)
-        m, n = working_param.shape
+        m, n = param.shape
         scale = math.sqrt(m / n)
 
         # Normalize columns of R to get Q
@@ -498,10 +473,10 @@ class DionOptimizer(Optimizer):
 
         # Apply decoupled weight decay
         if weight_decay != 0:
-            working_param.mul_(1 - lr * weight_decay)
+            param.mul_(1 - lr * weight_decay)
 
         # Update parameters: X_t = X_{t-1} - η * scale * P_t Q_t^T
-        working_param.add_(update, alpha=-lr * scale)
+        param.add_(update, alpha=-lr * scale)
 
         state["step"] += 1
 

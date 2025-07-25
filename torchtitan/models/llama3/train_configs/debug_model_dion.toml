@@ -29,9 +29,9 @@ tokenizer_path = "./tests/assets/tokenizer"
 
 [optimizer]
 name = "DION"
-lr = 8e-4  # TODO: tune this
+lr = 3e-3  # TODO: tune this
 eps = 1e-8
-rank_factor = 0.55  # 1.0 = full rank, 0.0 = no rank
+rank_factor = 0.5  # 1.0 = full rank, 0.0 = no rank
 momentum = 0.95  # same as AdamW
 scalar_optimizer = "adamw"
 weight_decay = 0.01  # Explicit weight decay
