@@ -123,12 +123,14 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.folder hf_checkpoint",
-                    "--checkpoint.last_save_in_hf",
                     "--checkpoint.last_save_model_only",
+                    "--checkpoint.last_save_in_hf",
                 ],
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+                    "--checkpoint.initial_load_model_only",
+                    "--checkpoint.initial_load_in_hf",
                 ],
             ],
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",

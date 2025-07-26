@@ -196,12 +196,6 @@ class CheckpointManager:
         ft_manager: FTManager | None = None,
     ) -> None:
         self.enable_checkpoint = checkpoint_config.enable_checkpoint
-        self.last_save_in_hf = checkpoint_config.last_save_in_hf
-        if self.last_save_in_hf:
-            assert (
-                sd_adapter is not None
-            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-        self.sd_adapter = sd_adapter
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -257,9 +251,16 @@ class CheckpointManager:
         self.folder = os.path.join(base_folder, checkpoint_config.folder)
 
         # Checkpoint policy related fields.
-        self.initial_load_path = checkpoint_config.initial_load_path
         self.initial_load_model_only = checkpoint_config.initial_load_model_only
+        self.initial_load_in_hf = checkpoint_config.initial_load_in_hf
+        self.initial_load_path = checkpoint_config.initial_load_path
         self.last_save_model_only = checkpoint_config.last_save_model_only
+        self.last_save_in_hf = checkpoint_config.last_save_in_hf
+        if self.last_save_in_hf:
+            assert (
+                sd_adapter is not None
+            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+        self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
         self.interval = checkpoint_config.interval
@@ -536,6 +537,7 @@ class CheckpointManager:
             return False
 
         model_only = False
+        from_hf = False
         if not os.path.exists(self.folder):
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
@@ -544,13 +546,18 @@ class CheckpointManager:
                         "checkpoint.initial_load_path is specified but the path is not valid."
                     )
                 model_only = self.initial_load_model_only
+                from_hf = self.initial_load_in_hf
+                if from_hf:
+                    assert (
+                        model_only
+                    ), "Only model can be loaded when loading from HF's safetensors checkpoint."
             else:
                 return False
         else:
             if self.initial_load_path:
-                logger.info(
+                logger.warning(
                     "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
-                    "Checkpointer will use the checkpoints from the checkpoint.folder."
+                    f"Checkpointer will use the checkpoints from the checkpoint.folder {self.folder}."
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:
@@ -563,11 +570,6 @@ class CheckpointManager:
                     f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
                 )
 
-        from_hf = self._load_checkpoint_in_hf_format(checkpoint_id)
-        if from_hf:
-            assert (
-                model_only
-            ), "Only model can be loaded when loading from HF's safetensors checkpoint."
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
@@ -621,21 +623,6 @@ class CheckpointManager:
         if not step_counts:
             return -1
         return max(step_counts)
-
-    def _load_checkpoint_in_hf_format(self, checkpoint_id: str) -> bool:
-        """Find the checkpoint type for the given id.
-
-        Args:
-            checkpoint_id (str): The folder to find the checkpoint type for.
-
-        Returns:
-            CheckpointType: The checkpoint type for the given folder.
-        """
-
-        for filename in os.listdir(checkpoint_id):
-            if filename.endswith(".safetensors"):
-                return True
-        return False
 
     def _ft_folder(self) -> str:
         return os.path.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
