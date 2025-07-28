@@ -244,7 +244,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # the new FQN structures in autoparallel.
             # TODO: make it possible to more easily reuse the existing 'init_weights' functions on the auto_p module
             def param(name):
-                return model.get_parameter(f"{name.sub('/', '.')}")
+                return model.get_parameter(f"{name.replace('/', '.')}")
 
             from torchtitan.models.llama3.model.model import precompute_freqs_cis
 
