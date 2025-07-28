@@ -53,28 +53,28 @@ def parallelize_llama(
     # model = model_fn()
     # return model
 
-    autop = AutoParallel(model, input_fn, world_mesh)
-    autop.add_parameter_memory_constraint(low=None, high=None)
+    with AutoParallel(model, input_fn, world_mesh) as autop:
+        autop.add_parameter_memory_constraint(low=None, high=None)
 
-    possible_input_shardings = {
-        # maps relative to mesh dim names used in torchtitan
-        "dp_replicate": Shard(0),
-        "dp_shard": Shard(0),
-        "tp": Replicate(),
-    }
-    assert all(
-        name in possible_input_shardings for name in world_mesh.mesh_dim_names
-    ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
-    x_sharding = tuple(
-        possible_input_shardings[name] for name in world_mesh.mesh_dim_names
-    )
-    autop.add_input_constraints([x_sharding])
-    autop.add_output_constraints([x_sharding])
-    t0 = time.time()
-    sharding_placement = autop.optimize_placement()
-    t1 = time.time()
-    logger.info(f"AutoParallel took {t1 - t0} seconds")
-    parallel_mod = autop.apply_placement(sharding_placement)
+        possible_input_shardings = {
+            # maps relative to mesh dim names used in torchtitan
+            "dp_replicate": Shard(0),
+            "dp_shard": Shard(0),
+            "tp": Replicate(),
+        }
+        assert all(
+            name in possible_input_shardings for name in world_mesh.mesh_dim_names
+        ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
+        x_sharding = tuple(
+            possible_input_shardings[name] for name in world_mesh.mesh_dim_names
+        )
+        autop.add_input_constraints([x_sharding])
+        autop.add_output_constraints([x_sharding])
+        t0 = time.time()
+        sharding_placement = autop.optimize_placement()
+        t1 = time.time()
+        logger.info(f"AutoParallel took {t1 - t0} seconds")
+        parallel_mod = autop.apply_placement(sharding_placement)
 
     if job_config.training.compile:
         torch._inductor.config.reorder_for_peak_memory = False
