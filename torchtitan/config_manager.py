@@ -692,6 +692,7 @@ class Experimental:
     pass is enabled. default of None means unlimited
     """
 
+    autop_force_bf16: bool = False
 
 @dataclass
 class Validation:

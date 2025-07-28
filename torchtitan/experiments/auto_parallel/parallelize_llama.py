@@ -52,6 +52,9 @@ def parallelize_llama(
     # bail out
     # model = model_fn()
     # return model
+    if job_config.experimental.autop_force_bf16:
+        logger.info("Forcing bf16 on model")
+        model = model.bfloat16()
 
     with AutoParallel(model, input_fn, world_mesh) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
