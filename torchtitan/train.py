@@ -255,7 +255,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         model_args.max_seq_len,
                         model_args.rope_theta,
                     ),
-                    device_mesh=model.buffers_.get_buffer("freqs_cis").device_mesh,
+                    device_mesh=model.get_buffer("freqs_cis").device_mesh,
                 )
             )
 
