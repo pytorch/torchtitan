@@ -42,11 +42,30 @@ To integrate `lm-eval` with TorchTitan and verify performance, we implemented th
 
 ## Comparison Between HF and Titan Evaluation Results
 
+### Pre-requisites to Reproduce Results
+
+Refer to the `README.md` file in the `scripts` folder to convert HF checkpoints to Titan DCP.
+Then, carefully update your settings accordingly:
+- Update `tokenizer_path` in the following configuration files:
+  - `llama3/train_configs/llama3.2_1b.toml`
+  - `llama3/train_configs/llama3.2_3b.toml`
+- Modify the following variables in `generator/utils.py`:
+  - `PROJECT_ROOT`
+  - `SAVE_ROOT`
+  - `job_config.training.dataset_path` (at line #L61)
+- In `scripts/sanity_check/compare_hf_titan_models.ipynb`, update:
+  - `PROJECT_ROOT` and `SAVE_ROOT` in Cell #1
+  - `job_config.training.dataset_path` in Cell #4
+
+
 ### Running Command
 
 For the HuggingFace Llama 3.2 1B model, you can obtain the results from `lm-eval` with the following command:
 ```bash
-lm_eval --model hf     --model_args pretrained=meta-llama/Llama-3.2-1B,dtype="bfloat16",add_bos_token=True     --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,openbookqa     --device cuda:0 --batch_size 8
+lm_eval --model hf --model_args pretrained=meta-llama/Llama-3.2-1B,dtype="bfloat16",add_bos_token=True
+        --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,openbookqa
+        --device cuda:0
+        --batch_size 8
 ```
 
 For the TorchTitan model, you can run the evaluation with the following command:
