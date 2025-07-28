@@ -400,18 +400,8 @@ class MetricsProcessor:
         }
 
         if self.lr_schedulers:
-            # Log learning rate for each scheduler
-            lr_metrics = {}
-            for i, scheduler in enumerate(self.lr_schedulers.schedulers):
-                for j, lr in enumerate(scheduler.get_last_lr()):
-                    lr_metrics[f"lr_scheduler/{i}/param_group_{j}/lr"] = lr
-
-            if len(lr_metrics) == 1:
-                # If there's only one learning rate, log it directly
-                metrics.update({"lr": list(lr_metrics.values())[0]})
-            else:
-                # Otherwise, log all learning rates under the lr_scheduler key
-                metrics.update(lr_metrics)
+            # Log the learning rate from the first scheduler
+            metrics.update({"lr": self.lr_schedulers.schedulers[0].get_last_lr()[0]})
 
         if extra_metrics:
             metrics.update(extra_metrics)
