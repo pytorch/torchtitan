@@ -361,13 +361,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         data_iterator = iter(data_iterable)
 
         while True:
+            data_load_start = time.perf_counter()
             try:
                 batch = next(data_iterator)
             except StopIteration as ex:
                 # If data runs out during gradient accumulation, that
                 # entire step will not be executed.
                 raise DataloaderStopIteration() from ex
-            data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
             self.metrics_processor.data_loading_times.append(
