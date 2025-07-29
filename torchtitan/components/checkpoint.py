@@ -354,13 +354,13 @@ class CheckpointManager:
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
+        fqn_to_index_mapping: dict[str, int] = {}
         if to_hf:
             assert (
                 self.sd_adapter is not None
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
-            fqn_to_index_mapping = {}
             num_fqns_per_file = 30
             # the use of 30 is just a heuristic for now.
             # Once these fqns map to HF ones, we can use the fqn mapping
@@ -370,11 +370,9 @@ class CheckpointManager:
                 fqn_to_index_mapping[key] = group_num
 
             storage_writer = HuggingFaceStorageWriter(
-                path=checkpoint_id,
+                path=os.path.join(checkpoint_id, "sharded"),
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
-                enable_consolidation=True,
-                thread_count_consolidation=5,
             )
 
         else:
@@ -402,6 +400,9 @@ class CheckpointManager:
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
             )
+        
+        if to_hf:
+            consolidate_safetensors_files_on_every_rank(input_path=os.path.join(checkpoint_id, "sharded"), output_path=checkpoint_id, fqn_to_index_mapping=fqn_to_index_mapping, num_threads=10) # noqa
 
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
