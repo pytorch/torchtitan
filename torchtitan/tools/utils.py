@@ -39,7 +39,7 @@ class GarbageCollection:
         self.gc_freq = gc_freq
         self.debug = debug
         gc.disable()
-        self.collect("Initial GC collection.")
+        self.collect("Initial GC collection")
         if debug:
             from torch.utils.viz._cycles import warn_tensor_cycles
 
@@ -49,18 +49,18 @@ class GarbageCollection:
     def run(self, step_count: int):
         if self.debug:
             self.collect(
-                "Force GC to perform collection to obtain debug information.",
+                "Force GC to perform collection to obtain debug information",
                 generation=2,
             )
             gc.collect()
         elif step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Peforming periodical GC collection.")
+            self.collect("Peforming periodical GC collection")
 
     @staticmethod
     def collect(reason: str, generation: int = 1):
         begin = time.monotonic()
         gc.collect(generation)
-        logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
+        logger.info("[GC] %s %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
