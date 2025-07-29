@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 
-from tests.integration_tests.integration_tests import OverrideDefinitions
+from tests.integration_tests.features import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,7 +34,6 @@ def build_test_list():
                 ],
                 "default",
                 "default",
-                supported_models=["flux"],
             ),
             # Checkpointing tests.
             OverrideDefinitions(
@@ -49,7 +48,6 @@ def build_test_list():
                 ],
                 "Checkpoint Integration Test - Save Load Full Checkpoint",
                 "full_checkpoint",
-                supported_models=["flux"],
             ),
             OverrideDefinitions(
                 [
@@ -60,7 +58,6 @@ def build_test_list():
                 ],
                 "Checkpoint Integration Test - Save Model Only fp32",
                 "last_save_model_only_fp32",
-                supported_models=["flux"],
             ),
             # Parallelism tests.
             OverrideDefinitions(
@@ -73,7 +70,6 @@ def build_test_list():
                 "FSDP",
                 "fsdp",
                 ngpu=4,
-                supported_models=["flux"],
             ),
             OverrideDefinitions(
                 [
@@ -85,7 +81,6 @@ def build_test_list():
                 "HSDP",
                 "hsdp",
                 ngpu=4,
-                supported_models=["flux"],
             ),
         ]
     )

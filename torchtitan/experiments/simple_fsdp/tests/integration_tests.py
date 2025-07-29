@@ -242,28 +242,26 @@ def run_tests(args):
     test_list = build_test_list()
 
     for test_flavor in test_list:
-        model_names = test_flavor.supported_models
-        for model_name in model_names:
-            # Filter by test_name if specified
-            if args.test_name != "all" and test_flavor.test_name != args.test_name:
-                continue
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
+            continue
 
-            # Check if config file exists
-            assert args.config_path.endswith(
-                ".toml"
-            ), "Base config path must end with .toml"
-            assert os.path.exists(
-                args.config_path
-            ), f"Base config path {args.config_path} does not exist"
+        # Check if config file exists
+        assert args.config_path.endswith(
+            ".toml"
+        ), "Base config path must end with .toml"
+        assert os.path.exists(
+            args.config_path
+        ), f"Base config path {args.config_path} does not exist"
 
-            # Check if we have enough GPUs
-            if args.ngpu < test_flavor.ngpu:
-                logger.info(
-                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                    f" because --ngpu arg is {args.ngpu}"
-                )
-            else:
-                run_single_test(test_flavor, args.config_path, args.output_dir)
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():

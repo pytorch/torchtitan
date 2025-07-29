@@ -27,9 +27,6 @@ class OverrideDefinitions:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
-    supported_models: List[str] = field(
-        default_factory=lambda: ["llama3"]
-    )  # Default to llama3
 
     def __repr__(self):
         return self.test_descr
@@ -46,17 +43,18 @@ def build_model_parallelism_tests() -> dict[str, list[OverrideDefinitions]]:
     """
     model_tests = defaultdict(list)
 
-    model_tests["deepseek_v3"].append(
+    model_tests["deepseek_v3"].extend(
         [
             OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree 4",
-                        "--parallelism.expert_parallel_shard_degree 2",
+                        "--parallelism.expert_parallel_degree 2",
                     ],
                 ],
                 "FSDP+DP2EP",
                 "fsdp_dp2ep",
+                ngpu=4,
             ),
             OverrideDefinitions(
                 [
