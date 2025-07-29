@@ -665,10 +665,10 @@ class Experimental:
     """
 
     # "none", "all", "only_fsdp"
-    bucket_all_gathers_fx: str | None = None
+    bucket_all_gathers_fx: str = "none"
 
     # "none", "all"
-    bucket_reduce_scatters_fx: str | None = None
+    bucket_reduce_scatters_fx: str = "none"
 
     reorder_for_compute_comm_overlap: bool = False
     """
