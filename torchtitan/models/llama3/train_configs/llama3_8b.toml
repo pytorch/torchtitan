@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "8B"
-tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
+tokenizer_path = "./assets/tokenizer/Llama-3.1-70B/original/tokenizer.model"
 # converters = ["float8"]
 
 [optimizer]
@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 6
 compile = false
 dataset = "c4"
 
@@ -44,13 +44,22 @@ tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
+
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+folder = "hf__checkpoint"
 interval = 500
-last_save_model_weights_only = false
+last_save_model_weights_only = true
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+last_save_in_safetensors_format = false
+initial_load_model_weights_only = true
+# initial_load_path = "outputs/Llama-3.1-8B/consolidated/"
+# initial_load_path = "/home/ankitageorge/tmp/mffuse/8b-safetensors/consolidated/"
+initial_load_path = "/home/ankitageorge/tmp/mffuse/8b-dcp/"
+# initial_load_path = "outputs/checkpoint/step-6"
+# initial_load_path = "outputs/hf_checkpoint/step-5"
+# initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-dcp"
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]

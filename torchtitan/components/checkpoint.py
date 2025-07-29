@@ -22,6 +22,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint import (
     HuggingFaceStorageReader,
     HuggingFaceStorageWriter,
+    DefaultLoadPlanner,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
@@ -407,7 +408,7 @@ class CheckpointManager:
 
         if checkpoint_type == CheckpointType.SAFETENSORS:
             storage_reader = HuggingFaceStorageReader(path=checkpoint_id)
-            dcp.load(state_dict, storage_reader=storage_reader)
+            dcp.load(state_dict, storage_reader=storage_reader, planner=DefaultLoadPlanner(allow_partial_load=True))
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 

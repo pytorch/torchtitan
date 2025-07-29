@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "70B"
-tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
+tokenizer_path = "./assets/tokenizer/Llama-3.1-70B/original/tokenizer.model"
 # converters = ["float8"]
 
 [optimizer]
@@ -45,12 +45,16 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+folder = "new_hf_checkpoint"
 interval = 500
-last_save_model_weights_only = false
+last_save_model_weights_only = true
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+last_save_in_safetensors_format = true
+initial_load_model_weights_only = true
+# initial_load_path = "outputs/Llama-3.1-70B/consolidated/"
+# initial_load_path = "/home/ankitageorge/tmp/mffuse/outputs/torchtitan-64-ankitageorge-tr43pl5b/hf_checkpoint/step-5/consolidated/"
 
 [activation_checkpoint]
 mode = "full"
