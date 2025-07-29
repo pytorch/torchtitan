@@ -371,7 +371,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 raise DataloaderStopIteration() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            ntokens_batch = labels.numel()
+            self.metrics_processor.ntokens_since_last_log += ntokens_batch
+            self.ntokens_seen += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
@@ -491,13 +493,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
 
-        self.ntokens_seen += self.metrics_processor.ntokens_since_last_log
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
             global_max_loss,
             grad_norm.item(),
-            self.ntokens_seen,
+            extra_metrics={"ntokens_seen": self.ntokens_seen},
         )
 
     @record

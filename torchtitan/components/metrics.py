@@ -359,7 +359,6 @@ class MetricsProcessor:
         global_avg_loss: float,
         global_max_loss: float,
         grad_norm: float,
-        ntokens_seen: int,
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
@@ -386,7 +385,6 @@ class MetricsProcessor:
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
             "grad_norm": grad_norm,
-            "ntokens_seen": ntokens_seen,
             "throughput(tps)": tps,
             "tflops": tflops,
             "mfu(%)": mfu,
