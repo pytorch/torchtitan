@@ -40,6 +40,10 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
@@ -47,4 +51,6 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m tests.integration_tests_h100 artifacts-to-be-uploaded --ngpu 8
+
+        # Enable CPP stacktraces for debugging symmetric memory initialization errors.
+        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests_h100 artifacts-to-be-uploaded --ngpu 8
