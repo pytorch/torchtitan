@@ -46,7 +46,7 @@ def build_test_list():
                 "float8",
             ),
             OverrideDefinitions(
-                [                
+                [
                     [
                         "--training.compile",
                         "--parallelism.data_parallel_shard_degree 2",
