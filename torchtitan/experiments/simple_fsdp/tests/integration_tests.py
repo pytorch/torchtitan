@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 
-from tests.integration_tests.integration_tests import TestCaseConfigs
+from tests.integration_tests.features import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,22 +17,21 @@ logger = logging.getLogger(__name__)
 
 def build_test_list():
     """
-    key is the config file name and value is a list of TestCaseConfigs
+    key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
     integration_tests_flavors = []
     integration_tests_flavors.extend(
         [
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [],
                 ],
                 "1D",
                 "1d",
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--activation_checkpoint.mode selective",
@@ -41,9 +40,8 @@ def build_test_list():
                 ],
                 "1D with selective op AC",
                 "1d_sac_op",
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--activation_checkpoint.mode full",
@@ -51,9 +49,8 @@ def build_test_list():
                 ],
                 "1D with full AC",
                 "1d_full_ac",
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.tensor_parallel_degree 2",
@@ -61,10 +58,9 @@ def build_test_list():
                 ],
                 "2D",
                 "2d",
-                supported_models=["llama3_simple_fsdp"],
             ),
             # TODO: re-enable this test once the async TP issue is fixed
-            # TestCaseConfigs(
+            # OverrideDefinitions(
             #     [
             #         [
             #             "--parallelism.tensor_parallel_degree 2",
@@ -75,7 +71,7 @@ def build_test_list():
             #     "2d_asynctp",
             #     supported_models=["llama3_simple_fsdp"],
             # ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--checkpoint.enable_checkpoint",
@@ -87,9 +83,8 @@ def build_test_list():
                 ],
                 "Checkpoint Integration Test - Save Load Full Checkpoint",
                 "full_checkpoint",
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--checkpoint.enable_checkpoint",
@@ -108,9 +103,8 @@ def build_test_list():
                 "PP+DP+TP 3D test with save/load resume ckpt",
                 "pp_dp_tp",
                 ngpu=8,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=1",
@@ -120,9 +114,8 @@ def build_test_list():
                 "DDP",
                 "ddp",
                 ngpu=4,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=2",
@@ -132,9 +125,8 @@ def build_test_list():
                 "HSDP",
                 "hsdp",
                 ngpu=4,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=2",
@@ -145,9 +137,8 @@ def build_test_list():
                 "HSDP+TP",
                 "hsdp+tp",
                 ngpu=8,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_replicate_degree=2",
@@ -157,9 +148,8 @@ def build_test_list():
                 "DDP+TP",
                 "ddp+tp",
                 ngpu=4,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=2",
@@ -170,9 +160,8 @@ def build_test_list():
                 "HSDP+CP (with dp_shard)",
                 "hsdp+cp_with_dp_shard",
                 ngpu=8,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=2",
@@ -183,9 +172,8 @@ def build_test_list():
                 "FSDP+TP+CP",
                 "fsdp+tp+cp",
                 ngpu=8,
-                supported_models=["llama3_simple_fsdp"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--checkpoint.enable_checkpoint",
@@ -210,7 +198,6 @@ def build_test_list():
                 "Optional checkpoint",
                 "optional_checkpoint",
                 ngpu=4,
-                supported_models=["llama3_simple_fsdp"],
             ),
         ]
     )
@@ -222,27 +209,22 @@ def _run_cmd(cmd):
 
 
 def run_single_test(
-    test_flavor: TestCaseConfigs, model_name: str, full_path: str, output_dir: str
+    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
 ):
-    assert (
-        model_name == "llama3_simple_fsdp"
-    ), "Only support llama3_simple_fsdp model for simpleFSDP integration tests"
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    model_name_arg = f"--model.name {model_name}"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = (
             f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh "
-            f"--training.compile "
+            f"--model.name llama3_simple_fsdp --training.compile "
         )
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
         cmd += " " + dump_folder_arg
-        cmd += " " + model_name_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
@@ -284,7 +266,7 @@ def run_tests(args):
                 )
             else:
                 run_single_test(
-                    test_flavor, model_name, args.config_path, args.output_dir
+                    test_flavor, args.config_path, args.output_dir
                 )
 
 

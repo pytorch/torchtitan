@@ -10,7 +10,7 @@ import os
 import subprocess
 from collections import defaultdict
 
-from .integration_tests import OverrideDefinitions
+from .features import run_single_test, OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 
 def build_test_list():
     """
-    key is the config file name and value is a list of TestCaseConfigs
+    key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
     integration_tests_flavors = []
     integration_tests_flavors.extend(
         [
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--training.compile",
@@ -36,9 +36,8 @@ def build_test_list():
                 ],
                 "2D async TP compile",
                 "2d_asynctp_compile",
-                supported_models=["llama3"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
@@ -46,9 +45,8 @@ def build_test_list():
                 ],
                 "Float8 test",
                 "float8",
-                supported_models=["llama3"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree=2",
@@ -90,30 +88,28 @@ def run_tests(args):
     test_list = build_h100_test_list()
 
     for test_flavor in test_list:
-        model_names = test_flavor.supported_models
-        for model_name in model_names:
-            # Filter by test_name if specified
-            if args.test_name != "all" and test_flavor.test_name != args.test_name:
-                continue
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
+            continue
 
-            # Check if config file exists
-            assert args.config_path.endswith(
-                ".toml"
-            ), "Base config path must end with .toml"
-            assert os.path.exists(
-                args.config_path
-            ), f"Base config path {args.config_path} does not exist"
+        # Check if config file exists
+        assert args.config_path.endswith(
+            ".toml"
+        ), "Base config path must end with .toml"
+        assert os.path.exists(
+            args.config_path
+        ), f"Base config path {args.config_path} does not exist"
 
-            # Check if we have enough GPUs
-            if args.ngpu < test_flavor.ngpu:
-                logger.info(
-                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                    f" because --ngpu arg is {args.ngpu}"
-                )
-            else:
-                run_single_test(
-                    test_flavor, model_name, args.config_path, args.output_dir
-                )
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(
+                test_flavor, args.config_path, args.output_dir
+            )
 
 
 def main():
@@ -129,12 +125,6 @@ def main():
         default="all",
         help="Specific test name to run (e.g., 'tp_only', 'full_checkpoint'). Use 'all' to run all tests (default: all)",
     )
-    parser.add_argument(
-        "--model",
-        default="all",
-        choices=["all", "llama3", "deepseek_v3"],
-        help="Specify the model to run tests on (default: llama3)",
-    )
     parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
 
@@ -142,7 +132,7 @@ def main():
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
-    run_h100_tests(args)
+    run_tests(args)
 
 
 if __name__ == "__main__":

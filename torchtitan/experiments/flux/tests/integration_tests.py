@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 
-from tests.integration_tests.integration_tests import TestCaseConfigs
+from tests.integration_tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def build_test_list():
     """
-    key is the config file name and value is a list of TestCaseConfigs
+    key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
@@ -25,7 +25,7 @@ def build_test_list():
     integration_tests_flavors.extend(
         [
             # basic tests
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--profiling.enable_profiling",
@@ -37,7 +37,7 @@ def build_test_list():
                 supported_models=["flux"],
             ),
             # Checkpointing tests.
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--checkpoint.enable_checkpoint",
@@ -51,7 +51,7 @@ def build_test_list():
                 "full_checkpoint",
                 supported_models=["flux"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--checkpoint.enable_checkpoint",
@@ -63,7 +63,7 @@ def build_test_list():
                 supported_models=["flux"],
             ),
             # Parallelism tests.
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=4",
@@ -75,7 +75,7 @@ def build_test_list():
                 ngpu=4,
                 supported_models=["flux"],
             ),
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     [
                         "--parallelism.data_parallel_shard_degree=2",
@@ -97,13 +97,11 @@ def _run_cmd(cmd):
 
 
 def run_single_test(
-    test_flavor: TestCaseConfigs, model_name: str, full_path: str, output_dir: str
+    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
 ):
-    assert model_name == "flux", "Only support flux model for FLUX integration tests"
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    model_name_arg = f"--model.name {model_name}"
 
     # Random init encoder for offline testing
     random_init_encoder_arg = "--training.test_mode"
@@ -119,7 +117,6 @@ def run_single_test(
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/experiments/flux/run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
-        cmd += " " + model_name_arg
         cmd += " " + dump_folder_arg
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
@@ -144,30 +141,28 @@ def run_tests(args):
     test_list = build_test_list()
 
     for test_flavor in test_list:
-        model_names = test_flavor.supported_models
-        for model_name in model_names:
-            # Filter by test_name if specified
-            if args.test_name != "all" and test_flavor.test_name != args.test_name:
-                continue
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
+            continue
 
-            # Check if config file exists
-            assert args.config_path.endswith(
-                ".toml"
-            ), "Base config path must end with .toml"
-            assert os.path.exists(
-                args.config_path
-            ), f"Base config path {args.config_path} does not exist"
+        # Check if config file exists
+        assert args.config_path.endswith(
+            ".toml"
+        ), "Base config path must end with .toml"
+        assert os.path.exists(
+            args.config_path
+        ), f"Base config path {args.config_path} does not exist"
 
-            # Check if we have enough GPUs
-            if args.ngpu < test_flavor.ngpu:
-                logger.info(
-                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                    f" because --ngpu arg is {args.ngpu}"
-                )
-            else:
-                run_single_test(
-                    test_flavor, model_name, args.config_path, args.output_dir
-                )
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(
+                test_flavor, args.config_path, args.output_dir
+            )
 
 
 def main():

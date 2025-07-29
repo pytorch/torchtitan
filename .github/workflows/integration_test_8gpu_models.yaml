@@ -50,4 +50,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m tests.integration_tests.integration_tests artifacts-to-be-uploaded --test_suite core --ngpu 8
+        python -m tests.integration_tests.models artifacts-to-be-uploaded --ngpu 8
