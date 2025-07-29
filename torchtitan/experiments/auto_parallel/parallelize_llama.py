@@ -89,6 +89,6 @@ def parallelize_llama(
 
     if job_config.training.compile:
         torch._inductor.config.reorder_for_peak_memory = False
-        parallel_mod = torch.compile(parallel_mod, fullgraph=True)
+        parallel_mod.compile(fullgraph=True)
 
     return parallel_mod
