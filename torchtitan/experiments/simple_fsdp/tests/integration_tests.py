@@ -208,9 +208,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(
-    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
-):
+def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -265,9 +263,7 @@ def run_tests(args):
                     f" because --ngpu arg is {args.ngpu}"
                 )
             else:
-                run_single_test(
-                    test_flavor, args.config_path, args.output_dir
-                )
+                run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():
