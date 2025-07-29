@@ -1,5 +1,3 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "model debug training for integration test"
