@@ -9,8 +9,8 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import List, Sequence
+from dataclasses import dataclass
+from typing import Sequence
 
 
 logging.basicConfig(level=logging.INFO)
