@@ -36,23 +36,27 @@ def build_test_list():
             ),
             OverrideDefinitions(
                 [
-                    "--model.converters float8",
-                    "--float8.enable_fsdp_float8_all_gather",
-                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    [
+                        "--model.converters float8",
+                        "--float8.enable_fsdp_float8_all_gather",
+                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    ],
                 ],
                 "Float8 test",
                 "float8",
             ),
             OverrideDefinitions(
-                [
-                    "--compile.enable",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.enable_async_tensor_parallel",
-                    "--model.converters float8",
-                    "--float8.enable_fsdp_float8_all_gather",
-                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                [                
+                    [
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.tensor_parallel_degree 2",
+                        "--parallelism.pipeline_parallel_degree 2",
+                        "--parallelism.enable_async_tensor_parallel",
+                        "--model.converters float8",
+                        "--float8.enable_fsdp_float8_all_gather",
+                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    ],
                 ],
                 "FSDP+async TP+PP+torch.compile+Float8",
                 "fsdp+tp+cp+compile+float8",
@@ -62,9 +66,9 @@ def build_test_list():
                 [
                     [
                         "--training.compile",
-                        "--parallelism.data_parallel_shard_degree=2",
-                        "--parallelism.data_parallel_replicate_degree=2",
-                        "--parallelism.context_parallel_degree=2",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.data_parallel_replicate_degree 2",
+                        "--parallelism.context_parallel_degree 2",
                         "--model.converters float8",
                         "--float8.enable_fsdp_float8_all_gather",
                         "--float8.precompute_float8_dynamic_scale_for_fsdp",
