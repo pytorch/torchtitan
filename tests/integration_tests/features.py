@@ -415,7 +415,7 @@ def build_test_list() -> List[OverrideDefinitions]:
             [
                 [
                     "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree2",
+                    "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
                 ]
             ],
