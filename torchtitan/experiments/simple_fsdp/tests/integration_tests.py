@@ -50,15 +50,16 @@ def build_test_list():
                 "1D with full AC",
                 "1d_full_ac",
             ),
-            OverrideDefinitions(
-                [
-                    [
-                        "--parallelism.tensor_parallel_degree 2",
-                    ],
-                ],
-                "2D",
-                "2d",
-            ),
+            # TODO: re-enable this test once the pytorch side issue is fixed
+            # OverrideDefinitions(
+            #     [
+            #         [
+            #             "--parallelism.tensor_parallel_degree 2",
+            #         ],
+            #     ],
+            #     "2D",
+            #     "2d",
+            # ),
             # TODO: re-enable this test once the async TP issue is fixed
             # OverrideDefinitions(
             #     [
@@ -69,7 +70,6 @@ def build_test_list():
             #     ],
             #     "2D async TP",
             #     "2d_asynctp",
-            #     supported_models=["llama3_simple_fsdp"],
             # ),
             OverrideDefinitions(
                 [
