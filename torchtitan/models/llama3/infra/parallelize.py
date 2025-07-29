@@ -385,41 +385,30 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
+    for layer_id, transformer_block in model.layers.items():
+        if reshard_after_forward_policy == "always":
             reshard_after_forward = True
-        case "never":
+        elif reshard_after_forward_policy == "never":
             reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
+        elif reshard_after_forward_policy == "default":
+            if pp_enabled:
+                # For PP, do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                reshard_after_forward = False
+            else:
+                # As an optimization, do not reshard after forward for the last
+                # transformer block since FSDP would prefetch it immediately
+                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+        else:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
-
-    if model.tok_embeddings is not None:
-        fully_shard(
-            model.tok_embeddings,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-    for layer_id, transformer_block in model.layers.items():
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
-        fully_shard(
-            [model.norm, model.output],
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
-        )
-    fully_shard(model, **fsdp_config)
+    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
 
 def apply_ddp(
