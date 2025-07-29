@@ -63,6 +63,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     # additional training states
     step: int
+    ntokens_seen: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -294,6 +295,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
+        self.ntokens_seen = 0
 
         self.checkpointer = CheckpointManager(
             dataloader=self.dataloader,
@@ -369,7 +371,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 raise DataloaderStopIteration() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            ntokens_batch = labels.numel()
+            self.ntokens_seen += ntokens_batch
+            self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
@@ -494,6 +498,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             global_avg_loss,
             global_max_loss,
             grad_norm.item(),
+            extra_metrics={"ntokens_seen": self.ntokens_seen},
         )
 
     @record
@@ -572,10 +577,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info("Training completed")
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step}
+        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
+        self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
         if self.checkpointer:
