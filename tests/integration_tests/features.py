@@ -456,6 +456,7 @@ def build_test_list() -> List[OverrideDefinitions]:
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
+        # TODO: re-enable this test once the issue is fixed
         # OverrideDefinitions(
         #     [
         #         [
