@@ -312,7 +312,6 @@ class MetricsProcessor:
     color: utils.NoColor | utils.Color
 
     gpu_peak_flops: int
-    ntokens_seen: int
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
@@ -341,7 +340,6 @@ class MetricsProcessor:
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
         )
-        self.ntokens_seen = 0
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
@@ -361,14 +359,12 @@ class MetricsProcessor:
         global_avg_loss: float,
         global_max_loss: float,
         grad_norm: float,
+        ntokens_seen: int,
         extra_metrics: dict[str, Any] | None = None,
     ):
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
-
-        # update the total number of tokens seen
-        self.ntokens_seen += self.ntokens_since_last_log
 
         # tokens per second per device, abbreviated as tps
         tps = self.ntokens_since_last_log / (
@@ -390,7 +386,7 @@ class MetricsProcessor:
             "loss_metrics/global_avg_loss": global_avg_loss,
             "loss_metrics/global_max_loss": global_max_loss,
             "grad_norm": grad_norm,
-            "ntokens_seen": self.ntokens_seen,
+            "ntokens_seen": ntokens_seen,
             "throughput(tps)": tps,
             "tflops": tflops,
             "mfu(%)": mfu,
