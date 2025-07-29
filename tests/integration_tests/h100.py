@@ -7,14 +7,11 @@
 import argparse
 import logging
 import os
-import subprocess
-from collections import defaultdict
 
-from .features import run_single_test, OverrideDefinitions
+from .features import OverrideDefinitions, run_single_test
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 
 def build_test_list():
@@ -56,36 +53,36 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                ]
-            ],
-            "FSDP+async TP+PP+torch.compile+Float8",
-            "fsdp+tp+cp+compile+float8",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
+                ],
+                "FSDP+async TP+PP+torch.compile+Float8",
+                "fsdp+tp+cp+compile+float8",
+                ngpu=8,
+            ),
+            OverrideDefinitions(
                 [
-                    "--compile.enable",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--model.converters float8",
-                    "--float8.enable_fsdp_float8_all_gather",
-                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                ]
-            ],
-            "HSDP+CP+torch.compile+Float8",
-            "hsdp+cp+compile+float8",
-            ngpu=8,
-        ),
-    ]
+                    [
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree=2",
+                        "--parallelism.data_parallel_replicate_degree=2",
+                        "--parallelism.context_parallel_degree=2",
+                        "--model.converters float8",
+                        "--float8.enable_fsdp_float8_all_gather",
+                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                    ]
+                ],
+                "HSDP+CP+torch.compile+Float8",
+                "hsdp+cp+compile+float8",
+                ngpu=8,
+            ),
+        ]
+    )
     return integration_tests_flavors
 
 
 def run_tests(args):
     """Run all H100 integration tests"""
     # build integration tests list
-    test_list = build_h100_test_list()
+    test_list = build_test_list()
 
     for test_flavor in test_list:
         # Filter by test_name if specified
@@ -107,9 +104,7 @@ def run_tests(args):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(
-                test_flavor, args.config_path, args.output_dir
-            )
+            run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():

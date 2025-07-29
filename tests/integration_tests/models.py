@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-from collections import defaultdict
 import logging
 import os
 import subprocess
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Sequence
 
@@ -76,7 +76,7 @@ def build_model_parallelism_tests() -> dict[str, list[OverrideDefinitions]]:
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
                         "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_schedule Interleaved1F1B"
+                        "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     ],
                 ],
                 "FSDP+TP+PP",
@@ -125,7 +125,7 @@ def run_single_test(
 def run_tests(args):
     """Run integration tests to test the supported model parallelsim of TorchTitan"""
     test_case_dict = build_model_parallelism_tests()
-    
+
     for model_name, test_list in test_case_dict.items():
         for test_flavor in test_list:
             # Filter by test_name if specified

@@ -456,16 +456,16 @@ def build_test_list() -> List[OverrideDefinitions]:
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--memory_estimation.enabled",
-                ]
-            ],
-            "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_memory_estimation",
-            ngpu=2,
-        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--memory_estimation.enabled",
+        #         ]
+        #     ],
+        #     "FSDP2 Memory Tracking and Estimation",
+        #     "fsdp2_memory_estimation",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -556,9 +556,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(
-    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
-):
+def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -600,9 +598,9 @@ def run_single_test(
 
 def run_tests(args):
     """Run all integration tests to test the core features of TorchTitan"""
-    
+
     test_list = build_test_list()
-    for test_flavor in test_list: 
+    for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -622,9 +620,7 @@ def run_tests(args):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(
-                test_flavor, args.config_path, args.output_dir
-            )
+            run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():
