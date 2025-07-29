@@ -23,6 +23,38 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
+class _A2A(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, out_splits, in_splits, group):
+        if isinstance(out_splits, torch.Tensor):
+            out_splits = out_splits.tolist()
+        if isinstance(in_splits, torch.Tensor):
+            in_splits = in_splits.tolist()
+        T_out = int(sum(out_splits))
+
+        y = x.new_empty((T_out,) + tuple(x.shape[1:]))  # allocate by output splits
+        dist.all_to_all_single(y, x.contiguous(), out_splits, in_splits, group=group)
+
+        ctx.in_splits = in_splits
+        ctx.out_splits = out_splits
+        ctx.group = group
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_y):
+        # grad wrt input has length sum(in_splits)
+        T_in = int(sum(ctx.in_splits))
+        grad_x = grad_y.new_empty((T_in,) + tuple(grad_y.shape[1:]))
+        dist.all_to_all_single(
+            grad_x, grad_y.contiguous(), ctx.in_splits, ctx.out_splits, group=ctx.group
+        )
+        return grad_x, None, None, None
+
+
+def a2a(x, out_splits, in_splits, group):
+    return _A2A.apply(x, out_splits, in_splits, group)
+
+
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
@@ -132,7 +164,7 @@ class ExpertParallel(ParallelStyle):
             )
 
         # perform all-to-all
-        routed_input = all_to_all_single_autograd(
+        routed_input = a2a(
             routed_input,
             self.output_splits,
             self.input_splits,
@@ -160,7 +192,7 @@ class ExpertParallel(ParallelStyle):
 
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = all_to_all_single_autograd(
+        routed_output = a2a(
             routed_output,
             self.input_splits,
             self.output_splits,
