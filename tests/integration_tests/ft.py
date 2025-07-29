@@ -10,7 +10,7 @@ import logging
 import os
 import subprocess
 
-from .integration_tests import TestCaseConfigs
+from .features import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 
 def build_test_list():
     """
-    key is the config file name and value is a list of TestCaseConfigs
+    key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
     integration_tests_flavors = []
     integration_tests_flavors.extend(
         [
-            TestCaseConfigs(
+            OverrideDefinitions(
                 [
                     ["--training.steps 10", "--checkpoint.enable_checkpoint"],
                 ],
@@ -43,12 +43,11 @@ def _run_cmd(cmd):
 
 
 def run_single_test(
-    test_flavor: TestCaseConfigs, model_name: str, full_path: str, output_dir: str
+    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    model_name_arg = f"--model.name {model_name}"
 
     # Use all 8 GPUs in a single replica
     # TODO: Use two replica groups
@@ -69,7 +68,6 @@ def run_single_test(
             )
 
             cmd += " " + dump_folder_arg
-            cmd += " " + model_name_arg
             if override_arg:
                 cmd += " " + " ".join(override_arg)
 
@@ -102,30 +100,28 @@ def run_tests(args):
         return
 
     for test_flavor in integration_tests_flavors:
-        model_names = test_flavor.supported_models
-        for model_name in model_names:
-            # Filter by test_name if specified
-            if args.test_name != "all" and test_flavor.test_name != args.test_name:
-                continue
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
+            continue
 
-            # Check if config file exists
-            assert args.config_path.endswith(
-                ".toml"
-            ), "Base config path must end with .toml"
-            assert os.path.exists(
-                args.config_path
-            ), f"Base config path {args.config_path} does not exist"
+        # Check if config file exists
+        assert args.config_path.endswith(
+            ".toml"
+        ), "Base config path must end with .toml"
+        assert os.path.exists(
+            args.config_path
+        ), f"Base config path {args.config_path} does not exist"
 
-            # Check if we have enough GPUs
-            if args.ngpu < test_flavor.ngpu:
-                logger.info(
-                    f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                    f" because --ngpu arg is {args.ngpu}"
-                )
-            else:
-                run_single_test(
-                    test_flavor, model_name, args.config_path, args.output_dir
-                )
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(
+                test_flavor, args.config_path, args.output_dir
+            )
 
 
 def main():
