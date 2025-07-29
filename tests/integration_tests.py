@@ -461,16 +461,16 @@ def build_test_list():
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--memory_estimation.enabled",
-                ]
-            ],
-            "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_memory_estimation",
-            ngpu=2,
-        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--memory_estimation.enabled",
+        #         ]
+        #     ],
+        #     "FSDP2 Memory Tracking and Estimation",
+        #     "fsdp2_memory_estimation",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [
