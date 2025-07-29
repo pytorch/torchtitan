@@ -434,7 +434,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, self.tokenizer.eos_id)
+                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
@@ -507,6 +507,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
+
+        self.checkpointer.save(1, last_step=True)
+        return
 
         leaf_folder = (
             ""
