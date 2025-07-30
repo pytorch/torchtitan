@@ -59,7 +59,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 128815
+    vocab_size: int = 129280
     dim: int = 2048
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
