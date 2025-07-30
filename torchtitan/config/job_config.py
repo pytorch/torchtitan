@@ -290,6 +290,7 @@ class Parallelism:
 
     pipeline_parallel_split_points: list[str] = field(default_factory=list)
     """
+    DEPRECATED: Use module_fqns_per_model_part instead.
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
     the first containing all the layers up to layers.0,
@@ -299,9 +300,31 @@ class Parallelism:
     but currently the split points must be specified manually.
     """
 
+    module_fqns_per_model_part: list[list[str]] | None = None
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk compared to split points.
+    """
+
+    pipeline_parallel_first_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the first stage of pipeline parallelism. This is because
+    the first stage has the extra overhead of the embedding layer, which is not present in the other stages.
+    """
+
+    pipeline_parallel_last_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the last stage of pipeline parallelism. This is because
+    the last stage has the extra overhead of the output layer, which is not present in the other stages.
+    """
+
     pipeline_parallel_layers_per_stage: int | None = None
     """
-    The number of layers per (virtual) pipeline stage. If specified, the split points will be
+    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
     calculated from the number of layers and pipeline_parallel_degree. If not specified, the
     layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
     """
