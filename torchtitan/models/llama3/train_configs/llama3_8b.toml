@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "8B"
-tokenizer_path = "./assets/tokenizer/original/tokenizer.model"
+tokenizer_path = "./assets/tokenizer/Llama-3.1-8B/"
 # converters = ["float8"]
 
 [optimizer]
@@ -59,7 +59,9 @@ initial_load_model_weights_only = true
 # initial_load_path = "/home/ankitageorge/tmp/mffuse/8b-dcp/"
 # initial_load_path = "outputs/checkpoint/step-6"
 # initial_load_path = "outputs/hf_checkpoint/step-5"
-initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-dcp"
+# initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-dcp"
+initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-safetensors/consolidated/"
+initial_load_in_hf = true
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
