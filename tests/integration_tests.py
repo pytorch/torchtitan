@@ -552,6 +552,18 @@ def build_test_list():
             "validation_fsdp_tp_cp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enabled",
+                    "--validation.dataset c4_test",
+                    "--parallelism.pipeline_parallel_degree=2",
+                ],
+            ],
+            "Validation test with pp",
+            "validation_pp",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 

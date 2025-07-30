@@ -327,9 +327,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Build validator if validation is configured
         if job_config.validation.enabled:
             assert self.train_spec.build_validator_fn is not None
-            assert (
-                not parallel_dims.pp_enabled
-            ), "pp is enabled but validation doesn't support pipeline parallelism yet"
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
@@ -341,6 +338,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
+                pp_schedule=self.pp_schedule if parallel_dims.pp_enabled else None,
+                pp_has_first_stage=(
+                    self.pp_has_first_stage if parallel_dims.pp_enabled else None
+                ),
+                pp_has_last_stage=(
+                    self.pp_has_last_stage if parallel_dims.pp_enabled else None
+                ),
             )
 
         logger.info(
@@ -430,7 +434,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, self.tokenizer.eos_id)
+                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
