@@ -11,7 +11,7 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
+log_freq = 1
 enable_tensorboard = true
 save_tb_folder = "tb"
 
@@ -33,24 +33,27 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 20
 compile = false
 dataset = "c4"
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 1
+tensor_parallel_degree = 2
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
-interval = 500
+enable_checkpoint = true
+folder = "checkpoint-llama3-8b"
+interval = 10
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+initial_load_path = "/data/users/jianiw/model/llama-3.1-8b/"
+initial_load_in_hf = true
+# load_step = 10
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
