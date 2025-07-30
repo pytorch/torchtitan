@@ -145,7 +145,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        model_args.update_from_config(job_config, self.tokenizer)
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
@@ -253,7 +253,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
+            model = self.train_spec.parallelize_fn(model, world_mesh, parallel_dims, job_config)
 
             model.to_empty(device=init_device)
             with torch.no_grad():

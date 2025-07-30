@@ -19,11 +19,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import (
-    HuggingFaceStorageReader,
-    HuggingFaceStorageWriter,
-)
-from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -349,7 +344,10 @@ class CheckpointManager:
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
         """
-
+        try:
+            from torch.distributed.checkpoint import HuggingFaceStorageWriter
+        except ImportError:
+            HuggingFaceStorageWriter = None
         ret: Future | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
@@ -423,6 +421,7 @@ class CheckpointManager:
         """
 
         if from_hf:
+            from torch.distributed.checkpoint import HuggingFaceStorageReader
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
@@ -480,6 +479,7 @@ class CheckpointManager:
 
             states = self._flattened_model_states_sd()
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+                from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))

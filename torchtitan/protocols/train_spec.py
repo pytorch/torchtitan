@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
+import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
@@ -23,6 +24,7 @@ from torchtitan.config import LRScheduler
 from .model import BaseModelArgs, ModelProtocol
 from .state_dict_adapter import StateDictAdapter
 
+DeviceType = int | str | torch.device
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 PipeliningFunction: TypeAlias = Callable[

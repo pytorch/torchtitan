@@ -41,12 +41,23 @@ class ParallelDims:
             self.ep,
         )
         for d in (dp_replicate, cp, tp, pp, ep):
-            assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
+            assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard and dp_replicate"
 
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must -1 or >=1."
+        assert dp_replicate == -1 or dp_replicate >= 1, " dp_replicate must -1 or >=1."
+
+        if dp_shard < 0:
+            assert dp_replicate >= 1, " dp_replicate must be >= 1 if dp_shard is -1."
+            self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
+        if dp_replicate < 0:
+            assert dp_shard >= 1, " dp_shard must be >= 1 if dp_replicate is -1."
+            self.dp_replicate = dp_replicate = self.world_size // (
+                dp_shard * cp * tp * pp
+            )
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
-        assert dp_shard >= 1
+        
+        assert dp_shard >= 1 and dp_replicate >= 1
 
         assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "

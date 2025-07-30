@@ -330,6 +330,19 @@ class Parallelism:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_reshard_after_backward: bool = False
+    """
+    Whether to reshard the parameters after the backward pass in pipeline parallelism at every microbatch.
+    If False, the parameters will be resharded only at the last microbatch.
+    """
+
+    pipeline_parallel_requires_gradient_sync: bool = False
+    """
+    Whether to require gradient synchronization in pipeline parallelism at every microbatch.
+    By gradient synchronization, gradient is resharded across FSDP ranks
+    If False, the gradients will be synchronized only at the last microbatch.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
