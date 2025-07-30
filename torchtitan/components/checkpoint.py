@@ -22,6 +22,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint import (
     HuggingFaceStorageReader,
     HuggingFaceStorageWriter,
+    DefaultLoadPlanner
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
@@ -423,25 +424,26 @@ class CheckpointManager:
         """
 
         if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            # assert (
+            #    self.sd_adapter is not None
+            # ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+            # hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
             dcp.load(
-                hf_state_dict,
+                state_dict,
+                planner=DefaultLoadPlanner(allow_partial_load=True),
                 storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
             )
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
+            # state_dict = self.sd_adapter.from_hf(state_dict)
+            # self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+            # if MODEL in self.states:
+            #    self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
