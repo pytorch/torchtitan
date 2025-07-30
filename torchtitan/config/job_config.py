@@ -155,11 +155,11 @@ class LRScheduler:
     - 'cosine': smoothly decays learning rate following a cosine curve
     """
 
-    lr_min: float = 0.0
+    min_lr_factor: float = 0.0
     """
     Min lr ratio for lr scheduler.
-    If provided, the range of decay factor is scaled from 1 to `lr_min`
-    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.lr_min`.
+    If provided, the range of decay factor is scaled from 1 to `min_lr_factor`
+    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
     """
 
 
