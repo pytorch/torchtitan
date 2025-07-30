@@ -399,11 +399,6 @@ class MetricsProcessor:
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
 
-        if self.lr_schedulers:
-            # Log the learning rate from the first scheduler
-            # Note: This logs the LR for step i+1 when logging is done at the end of step i
-            metrics.update({"lr": self.lr_schedulers.schedulers[0].get_last_lr()[0]})
-
         if extra_metrics:
             metrics.update(extra_metrics)
 
