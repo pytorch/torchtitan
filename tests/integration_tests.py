@@ -543,26 +543,15 @@ def build_test_list():
                 [
                     "--validation.enabled",
                     "--validation.dataset c4_test",
-                    "--parallelism.data_parallel_replicate_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
-                ],
-            ],
-            "Validation test with fsdp, tp, cp",
-            "validation_fsdp_tp_cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--validation.enabled",
-                    "--validation.dataset c4_test",
                     "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
-            "Validation test with pp",
-            "validation_pp",
-            ngpu=2,
+            "Validation test with tp, cp, pp",
+            "validation_tp_cp_pp",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors

@@ -328,6 +328,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.validation.enabled:
             assert self.train_spec.build_validator_fn is not None
 
+            pp_schedule, pp_has_first_stage, pp_has_last_stage = (
+                (
+                    self.pp_schedule,
+                    self.pp_has_first_stage,
+                    self.pp_has_last_stage,
+                )
+                if parallel_dims.pp_enabled
+                else (None, None, None)
+            )
+
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
                 dp_world_size=dp_degree,
@@ -338,13 +348,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
-                pp_schedule=self.pp_schedule if parallel_dims.pp_enabled else None,
-                pp_has_first_stage=(
-                    self.pp_has_first_stage if parallel_dims.pp_enabled else None
-                ),
-                pp_has_last_stage=(
-                    self.pp_has_last_stage if parallel_dims.pp_enabled else None
-                ),
+                pp_schedule=pp_schedule,
+                pp_has_first_stage=pp_has_first_stage,
+                pp_has_last_stage=pp_has_last_stage,
             )
 
         logger.info(
