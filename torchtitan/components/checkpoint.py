@@ -538,7 +538,7 @@ class CheckpointManager:
 
         model_only = False
         from_hf = False
-        if not os.path.exists(self.folder):
+        if not self._find_checkpoint_dirs(self.folder):
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
@@ -592,6 +592,31 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             self.staging_future.result()
+
+    def _find_checkpoint_dirs(self, folder: str = "") -> list[tuple[int, str]]:
+        """Find all checkpoint directories in the given folder.
+
+        Args:
+            folder (str, optional): The folder to find checkpoint directories in. If ``folder``
+            is "", then ``self.folder`` will be used.
+
+        Returns:
+            list[tuple[int, str]]: A list of tuples containing the step number and path for each
+            checkpoint directory.
+        """
+        folder = folder if folder else self.folder
+        checkpoint_dirs = []
+
+        if not os.path.isdir(folder):
+            return checkpoint_dirs
+
+        for filename in os.listdir(folder):
+            match = re.search(r"step-(\d+)", filename)
+            path = os.path.join(folder, filename)
+            if match and os.path.isdir(path):
+                checkpoint_dirs.append((int(match.group(1)), path))
+
+        return checkpoint_dirs
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
@@ -771,13 +796,7 @@ class CheckpointManager:
             and os.path.isdir(self.folder)
             and (not self.ft_manager or self.ft_manager.participating_rank() == 0)
         ):
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                if match:
-                    path = os.path.join(self.folder, filename)
-                    discovered_checkpoints.append((int(match.group(1)), path))
-
+            discovered_checkpoints = self._find_checkpoint_dirs(self.folder)
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
