@@ -41,6 +41,10 @@ jobs:
 
         pip config --user set global.progress_bar off
 
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded

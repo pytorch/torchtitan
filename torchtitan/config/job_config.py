@@ -78,7 +78,7 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
+    tokenizer_path: str = "./tests/assets/tokenizer"
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
