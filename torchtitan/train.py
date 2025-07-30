@@ -354,8 +354,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                # model.init_weights(buffer_device=buffer_device)
-                llama3_autoparallel_init_fn(model)
+                if job_config.model.name == "llama3_auto_parallel":
+                    llama3_autoparallel_init_fn(model)
+                else:
+                    model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
