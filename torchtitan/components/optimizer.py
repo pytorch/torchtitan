@@ -20,6 +20,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "OptimizersContainer",
@@ -111,6 +112,9 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
         list(map(func, self.model_parts, self.optimizers))
+        from torchtitan.components.checkpoint import compute_state_hash
+        res = compute_state_hash(self.state_dict())
+        logger.info(f"In optimizer load_state_dict, state hash: {res}")
 
     def _validate_length(self, expected_length: int) -> None:
         assert expected_length == len(self.optimizers), (

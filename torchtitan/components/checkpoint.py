@@ -60,6 +60,23 @@ class AsyncMode(str, enum.Enum):
 # Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
 excluded_parameters_for_model_only = {"freqs_cis"}
 
+def compute_state_hash(state: dict[str, Any]) -> float:
+    """Compute a hash for the given state dictionary."""
+    state_sum = 0
+    for key, value in state.items():
+        if isinstance(value, dict):
+            state_sum += compute_state_hash(value)
+        elif isinstance(value, torch.Tensor):
+            # Handle complex numbers by taking their absolute value
+            item_value = value.sum().item()
+            if isinstance(item_value, complex):
+                state_sum += float(abs(item_value))
+            else:
+                state_sum += float(item_value)
+        elif isinstance(value, (int, float)):
+            state_sum += float(value)
+    return state_sum
+
 
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
@@ -87,7 +104,12 @@ class ModelWrapper(Stateful):
         list(map(func, self.model))
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
+
         self.cache_state_dict = self._get_state_dict()
+
+        from torchtitan.components.checkpoint import compute_state_hash
+        res = compute_state_hash(self._get_state_dict())
+        logger.info(f"In load model state dict, model state hash: {res}")
 
 
 class Terminate:
@@ -442,6 +464,7 @@ class CheckpointManager:
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
+        
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -503,6 +526,12 @@ class CheckpointManager:
                     async_mode=AsyncMode.DISABLED,
                     enable_garbage_collection=True,
                 )
+
+            for k, v in self.states.items():
+                if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
+                    res = compute_state_hash(v.state_dict())
+                    logger.info(f"State hash before saving for {k}: {res}")
+            
             self._purge_stale_checkpoints()
 
             logger.info(
@@ -582,6 +611,12 @@ class CheckpointManager:
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
         )
+        
+        for k, v in self.states.items():
+            if k in {MODEL, OPTIMIZER, LR_SCHEDULER}:
+                res = compute_state_hash(v.state_dict())
+                logger.info(f"State hash before loading for {k}: {res}")
+        
         return True
 
     def maybe_wait_for_staging(self) -> None:

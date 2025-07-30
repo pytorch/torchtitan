@@ -22,7 +22,7 @@ enable_wandb = false
 
 [model]
 name = "llama3"
-flavor = "debugmodel"
+flavor = "debugmodel_test"
 # test folder with tokenizer.json, for debug purpose only
 tokenizer_path = "./tests/assets/tokenizer_test"
 # converters = ["float8"]
@@ -57,13 +57,12 @@ context_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = true
-folder = "checkpoint_2000"
+folder = "checkpoint_1999"
 interval = 10
 last_save_model_only = false
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 load_step = 10
-
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]

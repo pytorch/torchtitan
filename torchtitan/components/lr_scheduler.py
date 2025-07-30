@@ -77,8 +77,13 @@ class LRSchedulersContainer(Stateful):
         # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
         # in ``job_config`` remain unchanged when resuming from a checkpoint, this
         # approach is safe. We call ``copy()`` here to ensure extra safety.
+        
+        from torchtitan.components.checkpoint import compute_state_hash
         for scheduler in self.schedulers:
             scheduler.load_state_dict(copy.deepcopy(state_dict))
+       
+            res = compute_state_hash(scheduler.state_dict())
+            logger.info(f"In lr scheduler load_state_dict, state hash: {res}")
 
 
 def build_lr_schedulers(
