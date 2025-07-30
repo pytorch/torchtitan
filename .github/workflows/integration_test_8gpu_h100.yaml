@@ -51,4 +51,6 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m tests.integration_tests.h100 artifacts-to-be-uploaded --ngpu 8
+
+        # Enable CPP stacktraces for debugging symmetric memory initialization errors.
+        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.h100 artifacts-to-be-uploaded --ngpu 8
