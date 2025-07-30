@@ -58,7 +58,11 @@ class TestLRScheduler(unittest.TestCase):
         args += (
             ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
         )
-        args += ["--lr_scheduler.min_lr_factor", str(min_lr_factor)] if min_lr_factor is not None else []
+        args += (
+            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
+            if min_lr_factor is not None
+            else []
+        )
 
         config_manager = ConfigManager()
         # Create base config with parameters passed directly
