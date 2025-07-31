@@ -69,7 +69,7 @@ deepseekv3_configs = {
         attn_mask_type="block_causal",
     ),
     "16B": DeepSeekV3ModelArgs(
-        vocab_size=102400,
+        vocab_size=129280,
         dim=2048,
         inter_dim=10944,
         moe_inter_dim=1408,
