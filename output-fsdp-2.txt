@@ -1,0 +1,96 @@
++ NGPU=4
++ export LOG_RANK=0
++ LOG_RANK=0
++ CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_8b_debug.toml
++ overrides=
++ '[' 0 -ne 0 ']'
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=4 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b_debug.toml
+W0731 14:10:56.299000 1644403 site-packages/torch/distributed/run.py:803] 
+W0731 14:10:56.299000 1644403 site-packages/torch/distributed/run.py:803] *****************************************
+W0731 14:10:56.299000 1644403 site-packages/torch/distributed/run.py:803] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0731 14:10:56.299000 1644403 site-packages/torch/distributed/run.py:803] *****************************************
+[rank0]:2025-07-31 14:11:03.056220: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+[rank0]:2025-07-31 14:11:03.070090: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+[rank0]:WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+[rank0]:E0000 00:00:1753996263.083978 1655756 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+[rank0]:E0000 00:00:1753996263.087994 1655756 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+[rank0]:W0000 00:00:1753996263.102972 1655756 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+[rank0]:W0000 00:00:1753996263.102997 1655756 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+[rank0]:W0000 00:00:1753996263.102999 1655756 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+[rank0]:W0000 00:00:1753996263.103001 1655756 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+[rank0]:2025-07-31 14:11:03.106314: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+[rank0]:To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+[rank0]:[titan] 2025-07-31 14:11:06,064 - root - INFO - Starting job: Llama 3 8B training
+[rank0]:[titan] 2025-07-31 14:11:09,180 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2025-07-31 14:11:09,182 - root - INFO - Building 1-D device mesh with ['dp_shard'], [4]
+[rank0]:[titan] 2025-07-31 14:11:09,187 - root - INFO - [GC] Initial GC collection 0.00 seconds
+[rank0]:[titan] 2025-07-31 14:11:09,187 - root - INFO - Deterministic algorithm enabled (expect perf degradation).
+[rank0]:[titan] 2025-07-31 14:11:14,897 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2025-07-31 14:11:15,217 - root - INFO - Preparing c4 dataset from allenai/c4
+[rank0]:[titan] 2025-07-31 14:11:19,710 - root - INFO - Building llama3 8B with TransformerModelArgs(_enforced='This field is used to enforce all fields have defaults.', dim=4096, n_layers=32, n_heads=32, n_kv_heads=8, vocab_size=128256, multiple_of=1024, ffn_dim_multiplier=1.3, norm_eps=1e-05, rope_theta=500000, max_seq_len=8192, depth_init=True, use_flex_attn=False, attn_mask_type='causal', eos_id=0)
+[rank0]:[titan] 2025-07-31 14:11:19,855 - root - INFO - TensorBoard logging enabled. Logs will be saved at ./outputs/tb/20250731-1411
+[rank0]:[titan] 2025-07-31 14:11:19,856 - root - INFO - CUDA capacity: NVIDIA H100 with 94.99GiB memory
+[rank0]:[titan] 2025-07-31 14:11:19,873 - root - INFO - [34mModel llama3 8B [31msize: 8,030,261,248 total parameters[39m
+[rank0]:[titan] 2025-07-31 14:11:19,874 - root - INFO - Applied selective activation checkpointing to the model
+[rank0]:[titan] 2025-07-31 14:11:19,942 - root - INFO - Applied FSDP to the model
+[rank0]:[titan] 2025-07-31 14:11:20,281 - root - INFO - Peak FLOPS used for computing MFU: 9.890e+14
+[rank0]:[titan] 2025-07-31 14:11:20,281 - root - INFO - CUDA memory usage for model: 7.50GiB(7.90%)
+[rank0]:[titan] 2025-07-31 14:11:20,283 - root - WARNING - Warmup steps (200) exceed total training steps (1). Adjusting warmup steps to 1.
+[rank0]:[titan] 2025-07-31 14:11:20,312 - root - INFO - Checkpointing active. Checkpoints will be loaded from and saved to ./outputs/checkpoint-fsdp
+[rank0]:[titan] 2025-07-31 14:11:20,312 - root - INFO - Mixed precision training is handled by fully_shard
+[rank0]:[titan] 2025-07-31 14:11:20,312 - root - INFO - Trainer is initialized with local batch size 1, global batch size 4, gradient accumulation steps 1, sequence length 8192, total steps 1 (warmup 200)
+[rank0]:[titan] 2025-07-31 14:11:20,312 - root - INFO - Loading the checkpoint from /data/users/jianiw/model/llama-3.1-8b/.
+[rank0]:[titan] 2025-07-31 14:11:20,874 - root - INFO - [To hf] Before permute layers.0.attention.wq.weight, the dtensor full value is tensor([[ 0.0348,  0.0052,  0.0473,  ..., -0.0174,  0.0224,  0.0428],
+[rank0]:        [-0.0088,  0.0263, -0.0134,  ..., -0.0236, -0.0078,  0.0501],
+[rank0]:        [ 0.0067, -0.0055,  0.0181,  ..., -0.0301,  0.0081,  0.0134],
+[rank0]:        ...,
+[rank0]:        [ 0.0291, -0.0054,  0.0016,  ..., -0.0222, -0.0139,  0.0406],
+[rank0]:        [ 0.0096,  0.0297,  0.0015,  ..., -0.0046,  0.0012, -0.0138],
+[rank0]:        [-0.0258,  0.0244, -0.0111,  ...,  0.0158, -0.0095,  0.0142]],
+[rank0]:       device='cuda:0'), hash e866f74b99922b725cb12c6f8a40c489f2122e0d174d9c928fa1ce655bb26e56
+[rank0]:[titan] 2025-07-31 14:11:20,874 - root - INFO - [To hf] Before permute layers.0.attention.wq.weight, the dtensor shape is torch.Size([4096, 4096]), placement is (Shard(dim=0),), device_mesh is DeviceMesh((dp_shard_cp=4), device: 'cuda', stride: (1,))
+[rank0]:[titan] 2025-07-31 14:11:21,002 - root - INFO - [To hf] After permute layers.0.attention.wq.weight, the dtensor full value is tensor([[ 0.0348,  0.0052,  0.0473,  ..., -0.0174,  0.0224,  0.0428],
+[rank0]:        [ 0.0067, -0.0055,  0.0181,  ..., -0.0301,  0.0081,  0.0134],
+[rank0]:        [ 0.0163, -0.0160,  0.0068,  ...,  0.0025,  0.0311, -0.0176],
+[rank0]:        ...,
+[rank0]:        [ 0.0013,  0.0527,  0.0058,  ..., -0.0438,  0.0008, -0.0176],
+[rank0]:        [ 0.0291, -0.0054,  0.0016,  ..., -0.0222, -0.0139,  0.0406],
+[rank0]:        [-0.0258,  0.0244, -0.0111,  ...,  0.0158, -0.0095,  0.0142]],
+[rank0]:       device='cuda:0'), , hash 98ae72b87049e686bec5a69567061ee7912e9a4278ee93b800c219fa5b4a51c9
+[rank0]:[titan] 2025-07-31 14:11:21,002 - root - INFO - [To hf] After permute layers.0.attention.wq.weight, the dtensor shape is torch.Size([4096, 4096]), placement is (Shard(dim=0),), device_mesh is DeviceMesh((dp_shard_cp=4), device: 'cuda', stride: (1,))
+[rank0]:/home/jianiw/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torch/distributed/checkpoint/hf_storage.py:257: UserWarning: The given buffer is not writable, and PyTorch does not support non-writable tensors. This means you can write to the underlying (supposedly non-writable) buffer using the tensor. You may want to copy the buffer to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_new.cpp:1581.)
+[rank0]:  tensor = torch.frombuffer(
+[rank0]:[titan] 2025-07-31 14:11:41,865 - root - INFO - [From hf] Before _reverse_permute model.layers.0.self_attn.q_proj.weight, the dtensor full value is tensor([[ 0.0053, -0.0291, -0.0058,  ...,  0.0095, -0.0420, -0.0272],
+[rank0]:        [-0.0142, -0.0679, -0.0049,  ..., -0.0142, -0.0498,  0.0192],
+[rank0]:        [-0.0162, -0.0393, -0.0026,  ...,  0.0115, -0.0126,  0.0071],
+[rank0]:        ...,
+[rank0]:        [-0.0039, -0.0393,  0.0806,  ...,  0.0061, -0.0013,  0.0023],
+[rank0]:        [-0.0035, -0.0101,  0.0459,  ...,  0.0049, -0.0011,  0.0011],
+[rank0]:        [-0.0018, -0.0153,  0.0347,  ...,  0.0110,  0.0004,  0.0044]],
+[rank0]:       device='cuda:0'), hash 1cee64c5b1a1275592d7083229b9940d1d15d4c9ceef6c7a236bce958f603ca9
+[rank0]:[titan] 2025-07-31 14:11:41,865 - root - INFO - [From hf] Before _reverse_permute model.layers.{}.self_attn.q_proj.weight, the dtensor shape is torch.Size([4096, 4096]), placement is (Shard(dim=0),), device_mesh is DeviceMesh((dp_shard_cp=4), device: 'cuda', stride: (1,))
+[rank0]:[titan] 2025-07-31 14:11:42,039 - root - INFO - [From hf] After _reverse_permute model.layers.0.self_attn.q_proj.weight, the dtensor full value is tensor([[ 0.0053, -0.0291, -0.0058,  ...,  0.0095, -0.0420, -0.0272],
+[rank0]:        [ 0.0284,  0.0008, -0.0093,  ..., -0.0092, -0.0078,  0.0048],
+[rank0]:        [-0.0142, -0.0679, -0.0049,  ..., -0.0142, -0.0498,  0.0192],
+[rank0]:        ...,
+[rank0]:        [-0.0035, -0.0101,  0.0459,  ...,  0.0049, -0.0011,  0.0011],
+[rank0]:        [ 0.0006,  0.0309, -0.0698,  ..., -0.0028, -0.0002, -0.0019],
+[rank0]:        [-0.0018, -0.0153,  0.0347,  ...,  0.0110,  0.0004,  0.0044]],
+[rank0]:       device='cuda:0'), hash cb1cd23742390b3c5744ab01859603d22d34c6b2bef4a80d22317f9dc2d0587f
+[rank0]:[titan] 2025-07-31 14:11:42,040 - root - INFO - [From hf] After _reverse_permute model.layers.{}.self_attn.q_proj.weight, the dtensor shape is torch.Size([4096, 4096]), placement is (Shard(dim=0),), device_mesh is DeviceMesh((dp_shard_cp=4), device: 'cuda', stride: (1,))
+[rank0]:[titan] 2025-07-31 14:11:42,526 - root - INFO - [GC] GC collection for checkpoint loading. 0.01 seconds
+[rank0]:[titan] 2025-07-31 14:11:42,526 - root - INFO - Finished loading the checkpoint in 22.21 seconds.
+[rank0]:[titan] 2025-07-31 14:11:42,526 - root - INFO - Training starts at step 1
+[rank0]:[titan] 2025-07-31 14:11:42,527 - root - INFO - Saving the checkpoint (or staging if async is enabled).
+[rank0]:[titan] 2025-07-31 14:11:42,527 - root - INFO - Saving a model only checkpoint in torch.float32 at last step, step 1.
+[rank0]:[titan] 2025-07-31 14:12:42,368 - root - INFO - [GC] GC collection invoked by checkpointer. 0.00 seconds
+[rank0]:[titan] 2025-07-31 14:12:42,369 - root - INFO - Destroying the purge thread.
+[rank0]:[titan] 2025-07-31 14:12:42,826 - root - INFO - Process group destroyed
+[rank0]:NCCL version 2.27.5+cuda12.9
+[rank0]:
+[rank0]:[2025-07-31 14:11:12] devvm7508:1655756:1706127 [0] ras/client_support.cc:160 NCCL WARN Call to bind failed: Address already in use
+[rank0]:In load_state_dict(), before the weight layers.0.attention.wq.weight is cb1cd23742390b3c5744ab01859603d22d34c6b2bef4a80d22317f9dc2d0587f
+[rank0]:In load_state_dict(), After set the model weights, the weight is cb1cd23742390b3c5744ab01859603d22d34c6b2bef4a80d22317f9dc2d0587f
