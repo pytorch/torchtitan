@@ -24,6 +24,17 @@ from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
 
+TOKEN_GROUP_ALIGN_SIZE_M = 16
+
+
+def set_token_group_alignment_size_m(m: int) -> None:
+    """Set the alignment size for token groups in MoE."""
+    global TOKEN_GROUP_ALIGN_SIZE_M
+    assert m > 0, "Alignment size must be positive"
+    assert m % 16 == 0, "Alignment size must always be a multiple of 16 due to hardware constraints"
+    TOKEN_GROUP_ALIGN_SIZE_M = m
+
+
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
@@ -251,6 +262,7 @@ def expert_parallel(func: Callable) -> Callable:
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        global TOKEN_GROUP_ALIGN_SIZE_M
         if isinstance(w1, DTensor):
             w1 = w1.to_local()
             w2 = w2.to_local()
@@ -264,7 +276,6 @@ def expert_parallel(func: Callable) -> Callable:
             experts_per_ep_rank = w1.shape[0]
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
-            ALIGN_SIZE_M = 16
             with torch.no_grad():
                 (
                     permuted_indices,
@@ -274,8 +285,8 @@ def expert_parallel(func: Callable) -> Callable:
                     num_tokens_per_expert,
                     experts_per_ep_rank,
                     num_ep_ranks,
-                    x.shape[0] + experts_per_ep_rank * ALIGN_SIZE_M,
-                    ALIGN_SIZE_M,
+                    x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
+                    TOKEN_GROUP_ALIGN_SIZE_M,
                 )
 
             x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
