@@ -11,11 +11,11 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.experiments.llama4.optimizer import build_llama4_optimizers
+from torchtitan.models.llama3.infra.pipeline import pipeline_llama
 
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_deepseekv3
-from .infra.pipeline import pipeline_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
 from .model.model import DeepSeekV3Model
 
@@ -138,7 +138,7 @@ register_train_spec(
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_deepseekv3,
+        pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_llama4_optimizers,  # use optimizer hooks to update expert weights
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,

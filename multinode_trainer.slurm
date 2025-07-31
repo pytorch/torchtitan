@@ -34,7 +34,7 @@ export LOGLEVEL=INFO
 export FI_PROVIDER="efa"
 # Ensure that P2P is available
 # export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
+# export NCCL_IB_DISABLE=1
 
 # debugging flags (optional)
 export NCCL_DEBUG=WARN
@@ -59,5 +59,5 @@ CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/llama3_8b.t
 dcgmi profile --pause
 # adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
 # to your specific node count, and update target launch file.
-srun torchrun --nnodes 4 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./torchtitan/train.py --job.config_file ${CONFIG_FILE}
+srun torchrun --nnodes 4 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" ./torchtitan/train.py --job.config_file ${CONFIG_FILE} "$@"
 dcgmi profile --resume

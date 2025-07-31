@@ -41,7 +41,7 @@ jobs:
         conda activate "${CONDA_ENV}"
 
         # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
         echo "CUDA driver version: ${DRIVER_VERSION}"
 
         pip config --user set global.progress_bar off
