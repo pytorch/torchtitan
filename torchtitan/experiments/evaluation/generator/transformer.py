@@ -192,26 +192,27 @@ class PackedCausalTransformerGeneratorArgs:
 
 
 class PackedCausalTransformerGenerator:
+    """
+    This class wraps a causal transformer model with its corresponding tokenizer
+    and provides an efficient way to pack prompts together and do generation on
+    the packed sequence.
+
+    For example, if we had the prompts "Hello, I am a " and "Initiating calibration "
+    Then this class will concatenate those sequence (pack them together)
+    "Hello, I am a Initiating calibration"
+    And make the necessary attention masks such that a sequence only attends to itself
+    during prefilling and generation.
+
+    This class creates a fixed size cache of size max_tokens or sum of prompt sizes
+    + the max number of generated tokens per sequence.
+    """
+    
     def __init__(
         self,
         cfg: PackedCausalTransformerGeneratorArgs,
         model,
         tokenizer,
     ):
-        """
-        This class wraps a causal transformer model with its corresponding tokenizer
-        and provides an efficient way to pack prompts together and do generation on
-        the packed sequence.
-
-        For example, if we had the prompts "Hello, I am a " and "Initiating calibration "
-        Then this class will concatenate those sequence (pack them together)
-        "Hello, I am a Initiating calibration"
-        And make the necessary attention masks such that a sequence only attends to itself
-        during prefilling and generation.
-
-        This class creates a fixed size cache of size max_tokens or sum of prompt sizes
-        + the max number of generated tokens per sequence.
-        """
         self.model = model
         self.tokenizer = tokenizer
         self.temperature = cfg.temperature
