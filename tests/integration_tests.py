@@ -544,13 +544,14 @@ def build_test_list():
                 [
                     "--validation.enabled",
                     "--validation.dataset c4_test",
-                    "--parallelism.data_parallel_replicate_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
-            "Validation test with fsdp, tp, cp",
-            "validation_fsdp_tp_cp",
+            "Validation test with tp, cp, pp",
+            "validation_tp_cp_pp",
             ngpu=8,
         ),
     ]
