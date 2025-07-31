@@ -577,7 +577,7 @@ class MX:
     """
     Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --float8.moe_fqns_prototype="experts"
+    Example: --mx.moe_fqns_prototype="experts"
     """
 
 @dataclass
