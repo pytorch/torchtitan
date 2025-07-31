@@ -129,7 +129,7 @@ def maybe_semi_sync_training(
             for model in model_parts:
                 params = [p for p in model.parameters() if p.requires_grad]
                 outer_optimizer = torch.optim.SGD(
-                    params, lr=0.7, momentum=0.9, nesterov=True
+                    params, lr=0.7, momentum=0.9, nesterov=True, maximize=True
                 )
                 outer_optimizers.append(outer_optimizer)
 
