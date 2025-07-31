@@ -508,6 +508,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
+        self.checkpointer.save(1, last_step=True)
+        return
+        
         leaf_folder = (
             ""
             if not self.ft_manager.enabled

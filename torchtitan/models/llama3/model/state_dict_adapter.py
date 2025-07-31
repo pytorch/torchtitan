@@ -80,10 +80,16 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 # the native Llama and huggingface RoPE implementation.
                 if abstract_key == "layers.{}.attention.wq.weight":
                     # input_full_tensor = value.clone().full_tensor()
-                    # logger.info(f"[To hf] Before permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-                    # value = self._permute(value, n_heads)
+                    if layer_num == "0":
+                        full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
+                        logger.info(f"[To hf] Before permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[To hf] Before permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
+                    value = self._permute(value, n_heads)
                     # output_full_tensor = value.clone().full_tensor()
-                    # logger.info(f"[To hf] After permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
+                    if layer_num == "0":
+                        full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
+                        logger.info(f"[To hf] After permute {key}, the dtensor full value is {full_value}, , hash {hash(str(full_value))}")
+                        logger.info(f"[To hf] After permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     # # logger.info(f"[To hf] KL divergence between input and output tensors for {key}: {loss_fn(self._permute(input_full_tensor, n_heads), output_full_tensor).item()}")
                     # are_tensors_equal = torch.allclose(
                     #     self._permute(input_full_tensor, n_heads), 
@@ -92,26 +98,27 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     #     atol=1e-5
                     # )
                     # logger.info(f"[To hf] Are input and output tensors equivalent for {key}: {are_tensors_equal}")
-                    full_value = value.redistribute(placements=[Replicate(), Replicate()])
-                    value = self._permute(full_value, n_heads)
 
-                    
                 if abstract_key == "layers.{}.attention.wk.weight":
                     # input_full_tensor = value.clone().full_tensor()
-                    # key_value_dim = head_dim * n_kv_heads
+                    key_value_dim = head_dim * n_kv_heads
                     # logger.info(f"[To hf] Before permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-                    # value = self._permute(value, n_kv_heads, key_value_dim, dim)
+                    value = self._permute(value, n_kv_heads, key_value_dim, dim)
                     # output_full_tensor = value.clone().full_tensor()
                     # logger.info(f"[To hf] After permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     # logger.info(f"[To hf] KL divergence between input and output tensors for {key}: {loss_fn(self._permute(input_full_tensor, n_heads), output_full_tensor).item()}")
 
-                    key_value_dim = head_dim * n_kv_heads
-                    full_value = value.redistribute(placements=[Replicate(), Replicate()])
-                    logger.info(f"[to hf] Before _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
+                
+                # if abstract_key == "layers.{}.attention.wq.weight":
+                #     full_value = value.redistribute(placements=[Replicate(), Replicate()])
+                #     value = self._permute(full_value, n_heads)
 
-                    value = self._permute(full_value, n_kv_heads, key_value_dim, dim)
-                    logger.info(f"[to hf] After _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
-
+                # if abstract_key == "layers.{}.attention.wk.weight":
+                #     key_value_dim = head_dim * n_kv_heads
+                #     full_value = value.redistribute(placements=[Replicate(), Replicate()])
+                #     logger.info(f"[to hf] Before _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
+                #     value = self._permute(full_value, n_kv_heads, key_value_dim, dim)
+                #     logger.info(f"[to hf] After _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
 
                 if new_key is None:
                     continue
@@ -142,28 +149,31 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
                 # # the native Llama and huggingface RoPE implementation.
-                # if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
-                #     logger.info(f"[From hf] Before _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-                #     value = self._reverse_permute(value, n_heads)
-                #     logger.info(f"[From hf] After _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-
-                # if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
-                #     key_value_dim = head_dim * n_kv_heads
-                #     logger.info(f"[From hf] Before _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-                #     value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
-                #     logger.info(f"[From hf] After _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
-                
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
-                    full_value = value.redistribute(placements=[Replicate(), Replicate()])
-                    value = self._reverse_permute(full_value, n_heads)
-                
+                    if layer_num == "0": 
+                        full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
+                        logger.info(f"[From hf] Before _reverse_permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[From hf] Before _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
+                    value = self._reverse_permute(value, n_heads)
+                    if layer_num == "0":
+                        full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
+                        logger.info(f"[From hf] After _reverse_permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[From hf] After _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
+
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
                     key_value_dim = head_dim * n_kv_heads
-                    full_value = value.redistribute(placements=[Replicate(), Replicate()])
-                    logger.info(f"[From hf] Before _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
-
-                    value = self._reverse_permute(full_value, n_kv_heads, key_value_dim, dim)
-                    logger.info(f"[From hf] After _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
+                    value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
+                
+                # if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
+                #     full_value = value.redistribute(placements=[Replicate(), Replicate()])
+                #     value = self._reverse_permute(full_value, n_heads)
+                
+                # if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
+                #     key_value_dim = head_dim * n_kv_heads
+                #     full_value = value.redistribute(placements=[Replicate(), Replicate()])
+                #     logger.info(f"[From hf] Before _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
+                #     value = self._reverse_permute(full_value, n_kv_heads, key_value_dim, dim)
+                #     logger.info(f"[From hf] After _reverse_permute {key}, the dtensor shape is {full_value.shape}, placement is {full_value.placements}, device_mesh is {full_value.device_mesh}")
 
                 if new_key is None:
                     continue
