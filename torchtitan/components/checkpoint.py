@@ -6,6 +6,7 @@
 
 import enum
 import functools
+from logging import PlaceHolder
 import os
 import queue
 import re
@@ -79,12 +80,27 @@ class ModelWrapper(Stateful):
         return self.cache_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        from torchtitan.models.llama3.model.state_dict_adapter import calculate_hash
+        from torch.distributed.tensor.placement_types import Replicate
+
+        weight = state_dict["layers.0.attention.wq.weight"]
+        print(f"In load_state_dict(), before set the model weights, the weight info: {weight.placements} {weight.shape} {weight.device}")
+        full_weight = weight.redistribute(placements=[Replicate(), Replicate()]).to_local()
+        print(f"In load_state_dict(), before the weight layers.0.attention.wq.weight is {calculate_hash(full_weight.detach().cpu().numpy())}")
         func = functools.partial(
             set_model_state_dict,
             model_state_dict=state_dict,
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
+
+        #  print(f"In load_state_dict(), the model is {self.model[0]}, model's state dict is {self.state_dict()}")
+        weight = self._get_state_dict()["layers.0.attention.wq.weight"]
+        print(f"In load_state_dict(), After set the model weights, the weight info: {weight.placements} {weight.shape} {weight.device}")
+        full_weight = weight.redistribute(placements=[Replicate(), Replicate()]).to_local()
+        print(f"In load_state_dict(), After set the model weights, the weight is {calculate_hash(full_weight.detach().cpu().numpy())}")
+
+
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
         self.cache_state_dict = self._get_state_dict()

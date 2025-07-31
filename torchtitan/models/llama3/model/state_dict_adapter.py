@@ -14,6 +14,7 @@ from torchtitan.tools.logging import logger
 import torch.nn.functional as F
 from torch.distributed.tensor.placement_types import Replicate
 import hashlib
+import numpy as np
 
 
 def calculate_hash(tensor_data: np.ndarray) -> str:
@@ -94,7 +95,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     # output_full_tensor = value.clone().full_tensor()
                     if layer_num == "0":
                         full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
-                        logger.info(f"[To hf] After permute {key}, the dtensor full value is {full_value}, , hash {calculate_hash(full_value.detach().cpu().numpy()))}")
+                        logger.info(f"[To hf] After permute {key}, the dtensor full value is {full_value}, , hash {calculate_hash(full_value.detach().cpu().numpy())}")
                         logger.info(f"[To hf] After permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     # # logger.info(f"[To hf] KL divergence between input and output tensors for {key}: {loss_fn(self._permute(input_full_tensor, n_heads), output_full_tensor).item()}")
                     # are_tensors_equal = torch.allclose(
