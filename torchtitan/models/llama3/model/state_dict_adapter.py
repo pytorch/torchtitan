@@ -13,7 +13,13 @@ from .args import TransformerModelArgs
 from torchtitan.tools.logging import logger
 import torch.nn.functional as F
 from torch.distributed.tensor.placement_types import Replicate
+import hashlib
 
+
+def calculate_hash(tensor_data: np.ndarray) -> str:
+    """Calculate SHA-256 hash of a tensor."""
+    tensor_bytes = tensor_data.tobytes()
+    return hashlib.sha256(tensor_bytes).hexdigest()
 
 class Llama3StateDictAdapter(StateDictAdapter):
     def __init__(self, model_args: TransformerModelArgs):
@@ -82,13 +88,13 @@ class Llama3StateDictAdapter(StateDictAdapter):
                     # input_full_tensor = value.clone().full_tensor()
                     if layer_num == "0":
                         full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
-                        logger.info(f"[To hf] Before permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[To hf] Before permute {key}, the dtensor full value is {full_value}, hash {calculate_hash(full_value.detach().cpu().numpy())}")
                         logger.info(f"[To hf] Before permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     value = self._permute(value, n_heads)
                     # output_full_tensor = value.clone().full_tensor()
                     if layer_num == "0":
                         full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
-                        logger.info(f"[To hf] After permute {key}, the dtensor full value is {full_value}, , hash {hash(str(full_value))}")
+                        logger.info(f"[To hf] After permute {key}, the dtensor full value is {full_value}, , hash {calculate_hash(full_value.detach().cpu().numpy()))}")
                         logger.info(f"[To hf] After permute {key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     # # logger.info(f"[To hf] KL divergence between input and output tensors for {key}: {loss_fn(self._permute(input_full_tensor, n_heads), output_full_tensor).item()}")
                     # are_tensors_equal = torch.allclose(
@@ -152,12 +158,12 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
                     if layer_num == "0": 
                         full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
-                        logger.info(f"[From hf] Before _reverse_permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[From hf] Before _reverse_permute {key}, the dtensor full value is {full_value}, hash {calculate_hash(full_value.detach().cpu().numpy())}")
                         logger.info(f"[From hf] Before _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
                     value = self._reverse_permute(value, n_heads)
                     if layer_num == "0":
                         full_value = value.redistribute(placements=[Replicate(), Replicate()]).to_local()
-                        logger.info(f"[From hf] After _reverse_permute {key}, the dtensor full value is {full_value}, hash {hash(str(full_value))}")
+                        logger.info(f"[From hf] After _reverse_permute {key}, the dtensor full value is {full_value}, hash {calculate_hash(full_value.detach().cpu().numpy())}")
                         logger.info(f"[From hf] After _reverse_permute {abstract_key}, the dtensor shape is {value.shape}, placement is {value.placements}, device_mesh is {value.device_mesh}")
 
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
