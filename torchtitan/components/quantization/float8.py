@@ -10,7 +10,9 @@ import torch.nn as nn
 
 from torchtitan.config.job_config import Float8, JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.llama4.infra.expert_parallel import set_token_group_alignment_size_m
+from torchtitan.experiments.llama4.infra.expert_parallel import (
+    set_token_group_alignment_size_m,
+)
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,

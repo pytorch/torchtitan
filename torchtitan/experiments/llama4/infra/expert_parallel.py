@@ -30,16 +30,16 @@ TOKEN_GROUP_ALIGN_SIZE_M = 8
 def set_token_group_alignment_size_m(m: int) -> None:
     """
     Set the token group alignment size for token groups in MoE. This is implemented by
-    padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M. 
+    padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
     Different values are needed for different cases:
-    
+
     * For bf16, 8 is enough (16 byte alignment / 2 bytes per elem = 8 elements).
     * For fp8, 16 byte alignment / 1 byte per elem = 16 elements.
-    * For mxfp8, we need 32 (or block_size) because scaling block size is (1 x 32), 
+    * For mxfp8, we need 32 (or block_size) because scaling block size is (1 x 32),
       so when doing per-token-group quantization on each logically distinct subtensor,
-      we need to ensure the contracting dim is divisible by block_size. 
+      we need to ensure the contracting dim is divisible by block_size.
       In the backward pass, grad_weight = (grad_output_t @ input).t() has gemm dims
-      of (N, M) @ (M, K) so M is the contracting dim, and group offsets are along M, 
+      of (N, M) @ (M, K) so M is the contracting dim, and group offsets are along M,
       so we need 32 element alignment.
     """
     global TOKEN_GROUP_ALIGN_SIZE_M
