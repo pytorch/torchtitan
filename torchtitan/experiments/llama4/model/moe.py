@@ -69,9 +69,9 @@ class GroupedExperts(nn.Module):
             )
             out_experts_splits = []
             for expert_idx, x_expert in enumerate(x):
-                h = F.silu(torch.matmul(x_expert, w1[expert_idx]))
-                h = h * torch.matmul(x_expert, w3[expert_idx])
-                h = torch.matmul(h, w2[expert_idx])
+                h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
+                h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+                h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
                 # h shape (tokens_per_expert(varying), dim)
                 out_experts_splits.append(h)
             out = torch.cat(out_experts_splits, dim=0)
@@ -80,10 +80,10 @@ class GroupedExperts(nn.Module):
             out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
         else:
             # x shape (num_experts, tokens_per_expert, dim)
-            h = F.silu(torch.bmm(x, w1))
-            h = h * torch.bmm(x, w3)
+            h = F.silu(torch.bmm(x, w1.transpose(-2, -1)))
+            h = h * torch.bmm(x, w3.transpose(-2, -1))
             # out shape (num_experts, tokens_per_expert, dim)
-            out = torch.bmm(h, w2)
+            out = torch.bmm(h, w2.transpose(-2, -1))
 
         return out
 
