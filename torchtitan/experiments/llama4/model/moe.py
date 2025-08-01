@@ -23,9 +23,9 @@ class GroupedExperts(nn.Module):
     ):
         super().__init__()
         self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
+        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
+        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
 
     def forward(
@@ -105,9 +105,9 @@ class GroupedExperts(nn.Module):
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
-        h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16(), offs=offsets))
-        h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16(), offs=offsets)
-        out = torch._grouped_mm(h, w2.bfloat16(), offs=offsets).type_as(x)
+        h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
+        h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
+        out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 
         return out
 
