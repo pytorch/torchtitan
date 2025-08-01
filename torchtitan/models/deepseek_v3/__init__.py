@@ -21,8 +21,8 @@ from .model.model import DeepSeekV3Model
 
 __all__ = [
     "parallelize_deepseekv3",
-    "DeepseekV3ModelArgs",
-    "DeepseekV3Model",
+    "DeepSeekV3ModelArgs",
+    "DeepSeekV3Model",
     "deepseekv3_configs",
 ]
 
