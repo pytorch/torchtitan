@@ -233,7 +233,9 @@ class Attention(nn.Module):
         output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
-        output = output.transpose(1, 2)  # (bsz, seqlen, n_heads, v_head_dim)
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
