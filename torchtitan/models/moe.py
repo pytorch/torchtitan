@@ -31,6 +31,79 @@ class MoEArgs:
     load_balance_coeff: float | None = 1e-3
 
 
+# TODO: keeping this for-loop implementation for comparison
+#       and readability, may remove later
+@expert_parallel
+def _run_experts_for_loop(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if num_tokens_per_expert is not None:
+        # NOTE: this would incur a synchronization between device and host
+        num_tokens_per_expert = num_tokens_per_expert.tolist()
+
+        # side-effect code due to the usage of generate_permute_indices
+        num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+        # a tuple of tensors indexed by experts
+        # each with shape (tokens_per_expert(varying), dim)
+        x = torch.split(
+            x[: sum(num_tokens_per_expert)],
+            split_size_or_sections=num_tokens_per_expert,
+            dim=0,
+        )
+        out_experts_splits = []
+        for expert_idx, x_expert in enumerate(x):
+            h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
+            h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+            h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
+            # h shape (tokens_per_expert(varying), dim)
+            out_experts_splits.append(h)
+        out = torch.cat(out_experts_splits, dim=0)
+
+        # side-effect code due to the usage of generate_permute_indices
+        out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    else:
+        # x shape (num_experts, tokens_per_expert, dim)
+        h = F.silu(torch.bmm(x, w1.transpose(-2, -1)))
+        h = h * torch.bmm(x, w3.transpose(-2, -1))
+        # out shape (num_experts, tokens_per_expert, dim)
+        out = torch.bmm(h, w2.transpose(-2, -1))
+
+    return out
+
+
+@expert_parallel
+def _run_experts_grouped_mm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if num_tokens_per_expert is not None:
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+        # grouped mm between a 2D tensor and a 3D tensor
+        assert x.dim() == 2
+    else:
+        offsets = None
+        # fall back to regular bmm between 3D tensors
+        assert x.dim() == 3
+
+    h = F.silu(
+        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+    )
+    h = h * torch._grouped_mm(
+        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+    )
+    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+
+    return out
+
+
 class GroupedExperts(nn.Module):
     def __init__(
         self,
@@ -52,90 +125,13 @@ class GroupedExperts(nn.Module):
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_grouped_mm:
-            return GroupedExperts._run_experts_grouped_mm(
+            return _run_experts_grouped_mm(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
         else:
-            return GroupedExperts._run_experts_for_loop(
+            return _run_experts_for_loop(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
-
-    # TODO: keeping this for-loop implementation for comparison
-    #       and readability, may remove later
-    @expert_parallel
-    @staticmethod
-    def _run_experts_for_loop(
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w3: torch.Tensor,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if num_tokens_per_expert is not None:
-            # NOTE: this would incur a synchronization between device and host
-            num_tokens_per_expert = num_tokens_per_expert.tolist()
-
-            # side-effect code due to the usage of generate_permute_indices
-            num_padding = x.shape[0] - sum(num_tokens_per_expert)
-
-            # a tuple of tensors indexed by experts
-            # each with shape (tokens_per_expert(varying), dim)
-            x = torch.split(
-                x[: sum(num_tokens_per_expert)],
-                split_size_or_sections=num_tokens_per_expert,
-                dim=0,
-            )
-            out_experts_splits = []
-            for expert_idx, x_expert in enumerate(x):
-                h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
-                h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
-                h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
-                # h shape (tokens_per_expert(varying), dim)
-                out_experts_splits.append(h)
-            out = torch.cat(out_experts_splits, dim=0)
-
-            # side-effect code due to the usage of generate_permute_indices
-            out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-        else:
-            # x shape (num_experts, tokens_per_expert, dim)
-            h = F.silu(torch.bmm(x, w1.transpose(-2, -1)))
-            h = h * torch.bmm(x, w3.transpose(-2, -1))
-            # out shape (num_experts, tokens_per_expert, dim)
-            out = torch.bmm(h, w2.transpose(-2, -1))
-
-        return out
-
-    @expert_parallel
-    @staticmethod
-    def _run_experts_grouped_mm(
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w3: torch.Tensor,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if num_tokens_per_expert is not None:
-            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-            # grouped mm between a 2D tensor and a 3D tensor
-            assert x.dim() == 2
-        else:
-            offsets = None
-            # fall back to regular bmm between 3D tensors
-            assert x.dim() == 3
-
-        h = F.silu(
-            torch._grouped_mm(
-                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
-            )
-        )
-        h = h * torch._grouped_mm(
-            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-        )
-        out = torch._grouped_mm(
-            h, w2.bfloat16().transpose(-2, -1), offs=offsets
-        ).type_as(x)
-
-        return out
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
