@@ -22,9 +22,6 @@ from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
 
-# Maps titan recipe names to torchao mx recipe names
-NAME_MAP = {"mxfp8": "mxfp8_cublas"}
-
 
 class MXConverter(ModelConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
@@ -76,7 +73,7 @@ class MXConverter(ModelConverter):
         )
 
         mx_job_config: MX = job_config.mx
-        config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
+        config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         ]

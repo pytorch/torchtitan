@@ -562,8 +562,11 @@ class MX:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """Temp work around for inductor performance gap"""
 
-    recipe_name: Literal["mxfp8"] = "mxfp8"
-    """If specified, creates float8 config from recipe name"""
+    recipe_name: str = "mxfp8_cublas"
+    """
+    If specified, creates MX config from recipe name. See
+    https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
+    """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
     """
