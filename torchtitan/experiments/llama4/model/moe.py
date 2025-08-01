@@ -105,9 +105,17 @@ class GroupedExperts(nn.Module):
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
-        h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
-        h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
-        out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+            )
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
         return out
 
