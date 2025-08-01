@@ -6,7 +6,7 @@
 
 
 from functools import partial
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import torch.distributed as dist
@@ -22,6 +22,33 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
+
+
+TOKEN_GROUP_ALIGN_SIZE_M = 8
+ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
+
+
+def set_token_group_alignment_size_m(
+    alignment_size: ValidTokenGroupAlignmentSize,
+) -> None:
+    """
+    Set the token group alignment size for token groups in MoE. This is implemented by
+    padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+
+    Valid values are: 8, 16, or 32.
+    Different values are needed for different cases:
+
+    * For bf16, 8 is enough (16 byte alignment / 2 bytes per elem = 8 elements).
+    * For fp8, 16 byte alignment / 1 byte per elem = 16 elements.
+    * For mxfp8, we need 32 (or block_size) because scaling block size is (1 x 32),
+      so when doing per-token-group quantization on each logically distinct subtensor,
+      we need to ensure the contracting dim is divisible by block_size.
+      In the backward pass, grad_weight = (grad_output_t @ input).t() has gemm dims
+      of (N, M) @ (M, K) so M is the contracting dim, and group offsets are along M,
+      so we need 32 element alignment.
+    """
+    global TOKEN_GROUP_ALIGN_SIZE_M
+    TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
@@ -251,6 +278,7 @@ def expert_parallel(func: Callable) -> Callable:
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        global TOKEN_GROUP_ALIGN_SIZE_M
         if isinstance(w1, DTensor):
             w1 = w1.to_local()
             w2 = w2.to_local()
@@ -264,7 +292,6 @@ def expert_parallel(func: Callable) -> Callable:
             experts_per_ep_rank = w1.shape[0]
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
-            ALIGN_SIZE_M = 16
             with torch.no_grad():
                 (
                     permuted_indices,
@@ -274,8 +301,8 @@ def expert_parallel(func: Callable) -> Callable:
                     num_tokens_per_expert,
                     experts_per_ep_rank,
                     num_ep_ranks,
-                    x.shape[0] + experts_per_ep_rank * ALIGN_SIZE_M,
-                    ALIGN_SIZE_M,
+                    x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
+                    TOKEN_GROUP_ALIGN_SIZE_M,
                 )
 
             x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
