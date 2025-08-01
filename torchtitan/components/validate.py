@@ -73,7 +73,7 @@ class Validator(BaseValidator):
         self,
         model_parts: list[nn.Module],
         step: int,
-    ) -> dict[str, float]:
+    ) -> None:
         # Set model to eval mode
         # TODO: currently does not support pipeline parallelism
         model = model_parts[0]

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -103,6 +104,38 @@ def _cc12m_wds_data_processor(
         "image": img,
         "clip_tokens": clip_tokens,  # type: List[int]
         "t5_tokens": t5_tokens,  # type: List[int]
+        "prompt": sample["txt"],  # type: str
+    }
+
+
+def _coco_data_processor(
+    sample: dict[str, Any],
+    t5_tokenizer: FluxTokenizer,
+    clip_tokenizer: FluxTokenizer,
+    output_size: int = 256,
+) -> dict[str, Any]:
+    """
+    Preprocess COCO dataset sample image and text for Flux model.
+
+    Args:
+        sample: A sample from dataset
+        t5_encoder: T5 encoder
+        clip_encoder: CLIP encoder
+        output_size: The output image size
+
+    """
+    img = _process_cc12m_image(sample["image"], output_size=output_size)
+    prompt = sample["caption"]
+    if isinstance(prompt, list):
+        prompt = " ".join(prompt)
+    t5_tokens = t5_tokenizer.encode(prompt)
+    clip_tokens = clip_tokenizer.encode(prompt)
+
+    return {
+        "image": img,
+        "clip_tokens": clip_tokens,  # type: List[int]
+        "t5_tokens": t5_tokens,  # type: List[int]
+        "prompt": prompt,  # type: str
     }
 
 
@@ -125,6 +158,11 @@ DATASETS = {
             path, split="train", data_files={"train": "*.tar"}, streaming=True
         ),
         data_processor=_cc12m_wds_data_processor,
+    ),
+    "coco-validation": TextToImageDatasetConfig(
+        path="howard-hou/COCO-Text",
+        loader=lambda path: load_dataset(path, split="validation", streaming=True),
+        data_processor=_coco_data_processor,
     ),
 }
 
@@ -155,6 +193,7 @@ class FluxDataset(IterableDataset, Stateful):
     dp_rank (int): Data parallel rank.
     dp_world_size (int): Data parallel world size.
     infinite (bool): Whether to loop over the dataset infinitely.
+    generate_timesteps (booL): Generate stratified timesteps in round-robin style for validation
     """
 
     def __init__(
@@ -167,6 +206,7 @@ class FluxDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        generate_timesteps: bool = False,
     ) -> None:
 
         # Force lowercase for consistent comparison
@@ -192,6 +232,12 @@ class FluxDataset(IterableDataset, Stateful):
         # Variables for checkpointing
         self._sample_idx = 0
         self._all_samples: list[dict[str, Any]] = []
+
+        # Generate stratified timesteps used for SD3 validation method
+        self.generate_timesteps = generate_timesteps
+        if self.generate_timesteps:
+            val_timesteps = [1 / 8 * (i + 0.5) for i in range(8)]
+            self.timestep = itertools.cycle(val_timesteps)
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset):
@@ -242,8 +288,10 @@ class FluxDataset(IterableDataset, Stateful):
 
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
+                # sample_id = sample.get('sample_id')
+                sample = sample.get("__key__", "unknown")
                 logger.warning(
-                    f"Low quality image {sample['__key__']} is skipped in Flux Dataloader."
+                    f"Low quality image {sample} is skipped in Flux Dataloader."
                 )
                 continue
 
@@ -257,6 +305,9 @@ class FluxDataset(IterableDataset, Stateful):
                     sample_dict["clip_tokens"] = self._clip_empty_token
 
             self._sample_idx += 1
+
+            if self.generate_timesteps:
+                sample_dict["timestep"] = next(self.timestep)
 
             labels = sample_dict.pop("image")
 
@@ -300,6 +351,40 @@ def build_flux_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+    )
+
+
+def build_flux_validation_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    job_config: JobConfig,
+    # This parameter is not used, keep it for compatibility
+    tokenizer: FluxTokenizer | None,
+) -> ParallelAwareDataloader:
+    """Build a data loader for HuggingFace datasets."""
+    dataset_name = job_config.validation.dataset
+    dataset_path = job_config.validation.dataset_path
+    batch_size = job_config.validation.local_batch_size
+
+    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(job_config)
+
+    ds = FluxDataset(
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        t5_tokenizer=t5_tokenizer,
+        clip_tokenizer=clip_tokenizer,
+        job_config=job_config,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=False,
+        generate_timesteps=True,
     )
 
     return ParallelAwareDataloader(
