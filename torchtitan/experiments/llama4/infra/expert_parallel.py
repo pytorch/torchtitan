@@ -6,7 +6,7 @@
 
 
 from functools import partial
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import torch.distributed as dist
@@ -25,12 +25,17 @@ from torch.distributed.tensor.placement_types import Placement
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
+ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
 
 
-def set_token_group_alignment_size_m(m: int) -> None:
+def set_token_group_alignment_size_m(
+    alignment_size: ValidTokenGroupAlignmentSize,
+) -> None:
     """
     Set the token group alignment size for token groups in MoE. This is implemented by
     padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+
+    Valid values are: 8, 16, or 32.
     Different values are needed for different cases:
 
     * For bf16, 8 is enough (16 byte alignment / 2 bytes per elem = 8 elements).
@@ -43,8 +48,7 @@ def set_token_group_alignment_size_m(m: int) -> None:
       so we need 32 element alignment.
     """
     global TOKEN_GROUP_ALIGN_SIZE_M
-    assert m > 0, "Alignment size must be positive"
-    TOKEN_GROUP_ALIGN_SIZE_M = m
+    TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
