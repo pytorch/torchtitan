@@ -93,7 +93,9 @@ def generate_image(
     img_height = 16 * (job_config.training.img_size // 16)
     img_width = 16 * (job_config.training.img_size // 16)
 
-    enable_classifier_free_guidance = job_config.eval.enable_classifier_free_guidance
+    enable_classifier_free_guidance = (
+        job_config.validation.enable_classifier_free_guidance
+    )
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
     clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
@@ -132,7 +134,7 @@ def generate_image(
         model=model,
         img_width=img_width,
         img_height=img_height,
-        denoising_steps=job_config.eval.denoising_steps,
+        denoising_steps=job_config.validation.denoising_steps,
         clip_encodings=batch["clip_encodings"],
         t5_encodings=batch["t5_encodings"],
         enable_classifier_free_guidance=enable_classifier_free_guidance,
@@ -142,7 +144,7 @@ def generate_image(
         empty_clip_encodings=(
             empty_batch["clip_encodings"] if enable_classifier_free_guidance else None
         ),
-        classifier_free_guidance_scale=job_config.eval.classifier_free_guidance_scale,
+        classifier_free_guidance_scale=job_config.validation.classifier_free_guidance_scale,
     )
 
     img = autoencoder.decode(img)
