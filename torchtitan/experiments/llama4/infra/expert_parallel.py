@@ -54,17 +54,20 @@ def set_token_group_alignment_size_m(
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
+        # w1 shape = (experts, out_dim, in_dim)
         module.register_parameter(
-            "w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(2)]))
-        )  # Column-wise sharding
+            "w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(1)]))
+        )
+        # w2 shape = (experts, in_dim, out_dim)
         module.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(1)])),
-        )  # Row-wise sharding
+            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(2)])),
+        )
+        # w3 shape = (experts, out_dim, in_dim)
         module.register_parameter(
             "w3",
-            nn.Parameter(distribute_tensor(module.w3, device_mesh, [Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(module.w3, device_mesh, [Shard(1)])),
+        )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -223,18 +226,21 @@ class ExpertTensorParallel(ExpertParallel):
         return super()._token_dispatch(mod, inputs, self.ep_mesh)
 
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
+        # w1 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w1",
-            nn.Parameter(distribute_tensor(mod.w1, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(mod.w1, ep_tp_mesh, [Shard(0), Shard(1)])),
+        )
+        # w2 shape = (experts, in_dim, out_dim)
         mod.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(1)])),
-        )  # Row-wise sharding
+            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(2)])),
+        )
+        # w3 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w3",
-            nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(1)])),
+        )
 
     def _token_combine(self, mod, routed_output, device_mesh):
         # token combine happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
