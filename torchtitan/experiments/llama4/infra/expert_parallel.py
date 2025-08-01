@@ -272,24 +272,22 @@ def expert_parallel(func: Callable) -> Callable:
     """
 
     def wrapper(
-        w1: torch.Tensor,
+        w13: torch.Tensor,
         w2: torch.Tensor,
-        w3: torch.Tensor,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
         global TOKEN_GROUP_ALIGN_SIZE_M
-        if isinstance(w1, DTensor):
-            w1 = w1.to_local()
+        if isinstance(w13, DTensor):
+            w13 = w13.to_local()
             w2 = w2.to_local()
-            w3 = w3.to_local()
 
         if num_tokens_per_expert is not None:
             from torchtitan.experiments.kernels.moe.indices import (
                 generate_permute_indices,
             )
 
-            experts_per_ep_rank = w1.shape[0]
+            experts_per_ep_rank = w13.shape[0]
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
             with torch.no_grad():
@@ -309,7 +307,7 @@ def expert_parallel(func: Callable) -> Callable:
             input_shape = x.shape
             x = x[permuted_indices, :]
 
-        out = func(w1, w2, w3, x, num_tokens_per_expert)
+        out = func(w13, w2, x, num_tokens_per_expert)
 
         if num_tokens_per_expert is not None:
             out_unpermuted = out.new_empty(input_shape)
