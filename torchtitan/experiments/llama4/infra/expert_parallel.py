@@ -55,16 +55,12 @@ def set_token_group_alignment_size_m(
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
         module.register_parameter(
-            "w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(2)]))
+            "w13", nn.Parameter(distribute_tensor(module.w13, device_mesh, [Shard(2)]))
         )  # Column-wise sharding
         module.register_parameter(
             "w2",
             nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(1)])),
         )  # Row-wise sharding
-        module.register_parameter(
-            "w3",
-            nn.Parameter(distribute_tensor(module.w3, device_mesh, [Shard(2)])),
-        )  # Column-wise sharding
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -224,17 +220,13 @@ class ExpertTensorParallel(ExpertParallel):
 
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
         mod.register_parameter(
-            "w1",
-            nn.Parameter(distribute_tensor(mod.w1, ep_tp_mesh, [Shard(0), Shard(2)])),
+            "w13",
+            nn.Parameter(distribute_tensor(mod.w13, ep_tp_mesh, [Shard(0), Shard(2)])),
         )  # Column-wise sharding
         mod.register_parameter(
             "w2",
             nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(1)])),
         )  # Row-wise sharding
-        mod.register_parameter(
-            "w3",
-            nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
 
     def _token_combine(self, mod, routed_output, device_mesh):
         # token combine happens on the EP mesh, whereas device_mesh is [ep, tp] mesh

@@ -250,8 +250,9 @@ class MoE(nn.Module):
 
         # shared expert
         if self.shared_expert is not None:
-            out = self.shared_expert(x.reshape(1, bs * slen, dim))
-            out = out.reshape(bs * slen, dim)
+            out = self.shared_expert(x.reshape(1, bs * slen, dim)).reshape(
+                bs * slen, dim
+            )
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
