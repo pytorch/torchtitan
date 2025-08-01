@@ -25,7 +25,7 @@ class GroupedExperts(nn.Module):
         self.num_experts = num_experts
         # Combine w1 and w3 into a single tensor to perform so we can combine
         # `x @ w1` and `x @ w3` into a single grouped mm.
-        self.w13 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim * 2))
+        self.w13 = nn.Parameter(torch.empty(num_experts, hidden_dim * 2, dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.use_grouped_mm = use_grouped_mm
 
@@ -55,6 +55,7 @@ class GroupedExperts(nn.Module):
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
+        # Perform `x @ w1` and `x @ w3` in a single grouped mm.
         x1, x3 = torch._grouped_mm(x, w13.transpose(-2, -1), offs=offsets).chunk(
             2, dim=-1
         )
