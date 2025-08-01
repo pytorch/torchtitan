@@ -55,11 +55,11 @@ def set_token_group_alignment_size_m(
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
         module.register_parameter(
-            "w13", nn.Parameter(distribute_tensor(module.w13, device_mesh, [Shard(2)]))
+            "w13", nn.Parameter(distribute_tensor(module.w13, device_mesh, [Shard(1)]))
         )  # Column-wise sharding
         module.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(1)])),
+            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(2)])),
         )  # Row-wise sharding
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
@@ -221,11 +221,11 @@ class ExpertTensorParallel(ExpertParallel):
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
         mod.register_parameter(
             "w13",
-            nn.Parameter(distribute_tensor(mod.w13, ep_tp_mesh, [Shard(0), Shard(2)])),
+            nn.Parameter(distribute_tensor(mod.w13, ep_tp_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
         mod.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(2)])),
         )  # Row-wise sharding
 
     def _token_combine(self, mod, routed_output, device_mesh):
