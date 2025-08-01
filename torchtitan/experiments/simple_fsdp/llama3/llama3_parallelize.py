@@ -14,7 +14,7 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
-from .simple_fsdp import data_parallel, MixedPrecisionPolicy
+from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 
 # for selective op activation checkpointing
@@ -116,7 +116,9 @@ def parallelize_llama(
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
         )
-        logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
+        logger.info(
+            "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
+        )
 
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False

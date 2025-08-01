@@ -8,24 +8,25 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
+from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.models.llama3 import llama3_configs, pipeline_llama
+from torchtitan.models.deepseek_v3 import deepseekv3_configs
+from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import TrainSpec
 
-from .model import SimpleFSDPTransformer
-from .parallelize import parallelize_llama
+from .deepseek_v3_model import SimpleFSDPDeepSeekV3Model
+from .deepseek_v3_parallelize import parallelize_deepseekv3
 
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="simple_fsdp",
-        model_cls=SimpleFSDPTransformer,
-        model_args=llama3_configs,
-        parallelize_fn=parallelize_llama,
+        name="simple_fsdp.deepseek_v3",
+        model_cls=SimpleFSDPDeepSeekV3Model,
+        model_args=deepseekv3_configs,
+        parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llama,
-        build_optimizers_fn=build_optimizers,
+        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,

@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.models.llama3 import Transformer, TransformerModelArgs
-from .simple_fsdp import disable_data_parallel
+
+from ..simple_fsdp import enable_active_parametrization
 
 
 class SimpleFSDPTransformer(Transformer):
@@ -13,5 +14,5 @@ class SimpleFSDPTransformer(Transformer):
         super().__init__(model_args)
 
     def init_weights(self, *args, **kwargs):
-        with disable_data_parallel():
+        with enable_active_parametrization():
             super().init_weights(*args, **kwargs)
