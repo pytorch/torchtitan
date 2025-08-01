@@ -12,8 +12,8 @@ python scripts/download_tokenizer.py --repo_id deepseek-ai/DeepSeek-V3
 ```
 
 ```bash
-# For 16B model support:
-python scripts/download_tokenizer.py --repo_id deepseek-ai/deepseek-moe-16b-chat
+# DeepSeek 16B tokenizer:
+python scripts/download_tokenizer.py --repo_id deepseek-ai/deepseek-moe-16b-base
 ```
 
 ## Training

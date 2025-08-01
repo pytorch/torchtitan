@@ -22,7 +22,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "16B"
-tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-chat"
+tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-base"
 # converters = ["float8"]
 
 [optimizer]
