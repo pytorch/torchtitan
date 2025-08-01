@@ -10,6 +10,9 @@ import torch.nn as nn
 
 from torchtitan.config.job_config import Float8, JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.llama4.infra.expert_parallel import (
+    set_token_group_alignment_size_m,
+)
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,
@@ -65,6 +68,10 @@ class Float8Converter(ModelConverter):
             assert (
                 job_config.parallelism.context_parallel_degree == 1
             ), "Float8 MoE training prototype does not yet support context parallelism"
+
+            # For fp8 grouped GEMM, token group sizes must be multiples of 16
+            # (16 byte alignment / 1 byte per elem = 16 elements)
+            set_token_group_alignment_size_m(16)
 
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (

@@ -567,10 +567,17 @@ class MX:
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
     """
-    Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
+    Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
     Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    """
+
+    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+    """
+    Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
+    This is a prototype feature that requires the torchao nightly build.
+    Example: --mx.moe_fqns_prototype="experts"
     """
 
 
