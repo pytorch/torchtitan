@@ -498,15 +498,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
-            global_avg_loss, global_max_loss = (
+            global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        self.ntokens_seen, dtype=torch.int64, device=self.device
+                    ),
+                    parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                ),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
+            global_ntokens_seen = self.ntokens_seen
 
         extra_metrics = {
-            "n_tokens_seen": self.ntokens_seen,
+            "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
         self.metrics_processor.log(

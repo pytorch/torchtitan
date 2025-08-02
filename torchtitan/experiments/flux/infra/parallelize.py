@@ -143,7 +143,7 @@ def parallelize_encoders(
         fully_shard(t5_model.hf_module, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied FSDP to the T5 encoder model")
+            logger.info("Applied HSDP to the T5 encoder model")
         else:
             logger.info("Applied FSDP to the T5 encoder model")
 
