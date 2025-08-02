@@ -54,17 +54,16 @@ def set_token_group_alignment_size_m(
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
+        # w13 shape = (num_experts, hidden_dim, dim)
         module.register_parameter(
-            "w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(2)]))
-        )  # Column-wise sharding
+            "w13", nn.Parameter(distribute_tensor(module.w13, device_mesh, [Shard(1)]))
+        )
+
+        # w2 shape = (num_experts, dim, hidden_dim)
         module.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(1)])),
-        )  # Row-wise sharding
-        module.register_parameter(
-            "w3",
-            nn.Parameter(distribute_tensor(module.w3, device_mesh, [Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(module.w2, device_mesh, [Shard(2)])),
+        )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -223,18 +222,17 @@ class ExpertTensorParallel(ExpertParallel):
         return super()._token_dispatch(mod, inputs, self.ep_mesh)
 
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
+        # w13 shape = (num_experts, hidden_dim, dim)
         mod.register_parameter(
-            "w1",
-            nn.Parameter(distribute_tensor(mod.w1, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
+            "w13",
+            nn.Parameter(distribute_tensor(mod.w13, ep_tp_mesh, [Shard(0), Shard(1)])),
+        )
+
+        # w2 shape = (num_experts, dim, hidden_dim)
         mod.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(1)])),
-        )  # Row-wise sharding
-        mod.register_parameter(
-            "w3",
-            nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(2)])),
+        )
 
     def _token_combine(self, mod, routed_output, device_mesh):
         # token combine happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
@@ -272,24 +270,22 @@ def expert_parallel(func: Callable) -> Callable:
     """
 
     def wrapper(
-        w1: torch.Tensor,
+        w13: torch.Tensor,
         w2: torch.Tensor,
-        w3: torch.Tensor,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
         global TOKEN_GROUP_ALIGN_SIZE_M
-        if isinstance(w1, DTensor):
-            w1 = w1.to_local()
+        if isinstance(w13, DTensor):
+            w13 = w13.to_local()
             w2 = w2.to_local()
-            w3 = w3.to_local()
 
         if num_tokens_per_expert is not None:
             from torchtitan.experiments.kernels.moe.indices import (
                 generate_permute_indices,
             )
 
-            experts_per_ep_rank = w1.shape[0]
+            experts_per_ep_rank = w13.shape[0]
             num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
             with torch.no_grad():
@@ -309,7 +305,7 @@ def expert_parallel(func: Callable) -> Callable:
             input_shape = x.shape
             x = x[permuted_indices, :]
 
-        out = func(w1, w2, w3, x, num_tokens_per_expert)
+        out = func(w13, w2, x, num_tokens_per_expert)
 
         if num_tokens_per_expert is not None:
             out_unpermuted = out.new_empty(input_shape)
