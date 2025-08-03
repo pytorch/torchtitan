@@ -554,6 +554,27 @@ def build_test_list():
             "validation_tp_cp_pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--liger_kernel.enable_fused_linear_cross_entropy",
+                ],
+            ],
+            "Liger-Kernel fused linear cross entropy loss",
+            "liger_kernel_fused_loss",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--liger_kernel.enable_fused_linear_cross_entropy",
+                    "--training.compile",
+                ],
+            ],
+            "Liger-Kernel fused loss with torch.compile",
+            "liger_kernel_fused_loss_compile",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
