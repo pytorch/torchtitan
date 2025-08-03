@@ -7,8 +7,13 @@ DeepSeek-V3 is a Mixture-of-Experts (MoE) transformer model with Multi-head Late
 ### Download Tokenizer
 
 ```bash
-# DeepSeek tokenizer (automatically downloads tokenizer.json and tokenizer_config.json)
+# DeepSeek 671B tokenizer (automatically downloads tokenizer.json and tokenizer_config.json)
 python scripts/download_tokenizer.py --repo_id deepseek-ai/DeepSeek-V3
+```
+
+```bash
+# For 16B model support:
+python scripts/download_tokenizer.py --repo_id deepseek-ai/deepseek-moe-16b-chat
 ```
 
 ## Training

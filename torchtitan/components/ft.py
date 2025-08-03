@@ -123,8 +123,6 @@ def maybe_semi_sync_training(
         ), "FTManager must be enabled to use semi-sync training."
         if semi_sync_method.lower() == "diloco":
             # Create the outer optimizer based on the inner optimizer parameters.
-            params = [group["params"] for group in optimizer.param_groups]
-            params = [param for sublist in params for param in sublist]
             outer_optimizers = []
             for model in model_parts:
                 params = [p for p in model.parameters() if p.requires_grad]

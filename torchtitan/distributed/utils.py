@@ -62,6 +62,16 @@ def dist_max(
     )
 
 
+def dist_sum(
+    x: torch.Tensor,
+    mesh: DeviceMesh,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> float:
+    return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
+    )
+
+
 def dist_mean(
     x: torch.Tensor,
     mesh: DeviceMesh,

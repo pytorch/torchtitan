@@ -36,7 +36,7 @@ eps = 1e-8
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
-lr_min = 0.0
+min_lr_factor = 0.0
 
 [training]
 local_batch_size = 8

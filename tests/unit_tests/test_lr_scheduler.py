@@ -37,7 +37,7 @@ class TestLRScheduler(unittest.TestCase):
         warmup_steps=None,
         decay_ratio=None,
         decay_type=None,
-        lr_min=None,
+        min_lr_factor=None,
     ):
         # Create a job config with the specified parameters
         args = [
@@ -58,7 +58,11 @@ class TestLRScheduler(unittest.TestCase):
         args += (
             ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
         )
-        args += ["--lr_scheduler.lr_min", str(lr_min)] if lr_min is not None else []
+        args += (
+            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
+            if min_lr_factor is not None
+            else []
+        )
 
         config_manager = ConfigManager()
         # Create base config with parameters passed directly
@@ -74,7 +78,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=None,  # Use default decay: start decay immediately
             decay_type=None,
-            lr_min=None,
+            min_lr_factor=None,
         )
 
         # Build the lr scheduler
@@ -116,7 +120,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=0.5,  # 50% of steps for decay
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler
@@ -157,7 +161,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=None,
             decay_type="linear",
-            lr_min=0.2,  # 20% of base LR as minimum
+            min_lr_factor=0.2,  # 20% of base LR as minimum
         )
 
         # Build the lr scheduler
@@ -180,7 +184,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=10,  # More than training steps
             decay_ratio=None,
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler - should adjust warmup steps
@@ -216,7 +220,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=0.0,  # 0% of steps for decay (no decay)
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler
@@ -258,7 +262,7 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=5,
             decay_ratio=0.8,  # 80% of steps for decay (8 steps)
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler - should adjust warmup steps

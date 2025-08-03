@@ -161,7 +161,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
             raise FileNotFoundError(
                 f"No supported tokenizer files found in '{tokenizer_path}'. "
                 f"Available files: {available_files}. "
-                "Looking for: tokenizer.json, tokenizer.model, vocab.txt+merges.txt, or vocab.json+merges.txt"
+                "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
             )
 
     def _get_token_from_config(self, config: dict[str, Any], key: str) -> Optional[str]:

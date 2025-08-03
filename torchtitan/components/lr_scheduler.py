@@ -127,7 +127,7 @@ def build_lr_schedulers(
     # Add a vitual last step to prevent the learning rate from dropping to 0
     stable_steps = training_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = lr_scheduler_config.decay_type
-    lr_min = lr_scheduler_config.lr_min
+    min_lr_factor = lr_scheduler_config.min_lr_factor
 
     def linear_warmup_stable_decay(
         current_step: int,
@@ -135,7 +135,7 @@ def build_lr_schedulers(
         stable_steps: int,
         decay_steps: int,
         lr_decay_type: str,
-        lr_min: float,
+        min_lr_factor: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -150,7 +150,7 @@ def build_lr_schedulers(
         2. `sqrt`: decays as 1 minus the square root of the decay progress.
         3. `cosine`: follows a cosine curve, decaying according to the values of the half-period of the cosine function.
 
-        If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
+        If `min_lr_factor` is specified, the decay range is scaled from 1 to `min_lr_factor`
         to ensure the learning rate does not drop below this minimum value.
         """
         warmup_stable_steps = warmup_steps + stable_steps
@@ -176,7 +176,7 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
-            curr_adjustment = lr_min + (1 - lr_min) * curr_adjustment
+            curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
         return curr_adjustment
 
     lr_lambda = functools.partial(
@@ -185,6 +185,6 @@ def build_lr_schedulers(
         stable_steps=stable_steps,
         decay_steps=decay_steps,
         lr_decay_type=lr_decay_type,
-        lr_min=lr_min,
+        min_lr_factor=min_lr_factor,
     )
     return LRSchedulersContainer(optimizers, lr_lambda)
