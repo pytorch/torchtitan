@@ -698,6 +698,12 @@ class FaultTolerance:
 
 
 @dataclass
+class LigerKernel:
+    enable_fused_linear_cross_entropy: bool = False
+    """Enable Liger-Kernel's fused linear cross entropy loss for improved performance"""
+
+
+@dataclass
 class Experimental:
     custom_import: str = ""
     """
@@ -769,6 +775,7 @@ class JobConfig:
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
+    liger_kernel: LigerKernel = field(default_factory=LigerKernel)
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
 

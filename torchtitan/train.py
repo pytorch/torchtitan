@@ -17,7 +17,11 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderStopIteration
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import (
+    is_liger_kernel_enabled,
+    liger_fused_linear_cross_entropy_loss,
+    rescale_accumulated_loss,
+)
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -222,6 +226,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 raise RuntimeError(
                     f"Pipeline Parallel is enabled but {self.train_spec.name} "
                     f"does not support pipelining"
+                )
+            
+            # Validate that Liger-Kernel is not enabled with Pipeline Parallelism
+            if is_liger_kernel_enabled(job_config):
+                raise RuntimeError(
+                    "Liger-Kernel fused linear cross entropy loss is not compatible with "
+                    "Pipeline Parallelism. Please disable either Pipeline Parallelism "
+                    "(--parallelism.pipeline_parallel_degree 1) or Liger-Kernel "
+                    "(--liger_kernel.enable_fused_linear_cross_entropy False)"
                 )
 
             # apply both PT-D Pipeline Parallel and SPMD-style PT-D techniques
@@ -444,10 +457,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
-                    loss = self.loss_fn(pred, labels)
-                # need to free to before bwd to avoid peaking memory
-                del pred
+                    if is_liger_kernel_enabled(self.job_config):
+                        # Use Liger fused loss - get hidden states and compute fused loss
+                        h = model_parts[0](
+                            inputs, eos_id=self.tokenizer.eos_id, return_hidden_states=True
+                        )
+                        loss = liger_fused_linear_cross_entropy_loss(
+                            model_parts[0].output.weight, h, labels
+                        )
+                        # Clean up intermediate tensor
+                        del h
+                    else:
+                        # Standard approach - model returns logits, then compute loss
+                        pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
+                        loss = self.loss_fn(pred, labels)
+                        # need to free to before bwd to avoid peaking memory
+                        del pred
                 loss.backward()
 
         return loss

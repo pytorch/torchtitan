@@ -24,6 +24,9 @@ dependencies = [
     "fsspec",
     "tyro",
     "tensorboard",
+    
+    # Liger Kernel for fused operations
+    "liger-kernel",
 ]
 dynamic = ["version"]
 

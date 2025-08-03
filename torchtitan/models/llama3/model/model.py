@@ -402,6 +402,7 @@ class Transformer(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
+        return_hidden_states: bool = False,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -415,9 +416,12 @@ class Transformer(nn.Module, ModelProtocol):
                 This will always be the input batch regardless of the pipeline stage.
                 This field is required for non-first PP stages to perform document
                 masking attention (to analyze the boundary of the document).
+            return_hidden_states (bool): If True, return hidden states before the final
+                linear layer instead of logits. Used for Liger fused loss computation.
 
         Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
+            torch.Tensor: Output logits after applying the Transformer model, or hidden
+                states if return_hidden_states=True.
 
         """
         if self.model_args.use_flex_attn:
@@ -432,5 +436,10 @@ class Transformer(nn.Module, ModelProtocol):
             h = layer(h, self.freqs_cis)
 
         h = self.norm(h) if self.norm else h
+        
+        # Return hidden states before final linear layer if requested
+        if return_hidden_states:
+            return h
+            
         output = self.output(h) if self.output else h
         return output
