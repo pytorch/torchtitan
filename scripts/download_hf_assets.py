@@ -14,7 +14,7 @@ from tqdm import tqdm
 def download_hf_assets(
     repo_id: str,
     local_dir: str,
-    asset_types: list[str],
+    asset_types: str | list[str],
     hf_token: Optional[str] = None,
     additional_patterns: Optional[list] = None,
 ) -> None:
@@ -77,6 +77,9 @@ def download_hf_assets(
         "mapping": ["safetensors.index.json"],
         "config": ["config.json"],
     }
+
+    if isinstance(asset_types, str):
+        asset_types = [asset_types]
 
     total_patterns = []
     for asset_type in asset_types:
