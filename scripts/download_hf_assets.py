@@ -23,7 +23,6 @@ def download_hf_assets(
 
     This function recursively searches through the HuggingFace Hub repository
     and downloads all related files
-    loading with the build_hf_tokenizer() function.
 
     Asset types:
     - tokenizer:
@@ -74,7 +73,7 @@ def download_hf_assets(
             "special_tokens_map.json",
         ],
         "weights": ["*.safetensors"],
-        "mapping": ["safetensors.index.json"],
+        "mapping": ["model.safetensors.index.json"],
         "config": ["config.json"],
     }
 
@@ -100,11 +99,10 @@ def download_hf_assets(
         for pattern in patterns:
             pattern_lower = pattern.lower()
 
-            # Method 1: Exact match (fastest)
+            # Exact name match
             if basename == pattern_lower:
                 return True
-
-            # Method 2: Wildcard patterns (e.g., "*.safetensors")
+            # Do wildcard match if wildcards are in pattern
             if "*" in pattern_lower or "?" in pattern_lower:
                 if fnmatch(basename, pattern_lower):
                     return True
@@ -218,7 +216,6 @@ if __name__ == "__main__":
         nargs="+",
         required=True,
         help="Asset types to download: tokenizer, weights, config, mapping",
-        # action="append",
     )
     parser.add_argument(
         "--additional_patterns",
