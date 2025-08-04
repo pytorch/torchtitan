@@ -74,8 +74,6 @@ class FluxValidator(Validator):
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
 
-        self.save_img_count = self.job_config.validation.save_img_count
-
     def flux_init(
         self,
         device: torch.device,
@@ -101,6 +99,8 @@ class FluxValidator(Validator):
         model = model_parts[0]
         model.eval()
 
+        save_img_count = self.job_config.validation.save_img_count
+
         parallel_dims = self.parallel_dims
 
         accumulated_losses = []
@@ -118,7 +118,7 @@ class FluxValidator(Validator):
             if not isinstance(prompt, list):
                 prompt = [prompt]
             for p in prompt:
-                if self.save_img_count != -1 and self.save_img_count <= 0:
+                if save_img_count != -1 and save_img_count <= 0:
                     break
                 image = generate_image(
                     device=self.device,
@@ -143,7 +143,7 @@ class FluxValidator(Validator):
                     add_sampling_metadata=True,
                     prompt=p,
                 )
-                self.save_img_count -= 1
+                save_img_count -= 1
 
             # generate t5 and clip embeddings
             input_dict["image"] = labels
