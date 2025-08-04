@@ -187,11 +187,13 @@ class DionOptimizersContainer(OptimizersContainer):
 
     def step(self, *args, **kwargs) -> None:
         """Perform optimization step."""
+        # TODO - do we have to call parent to trigger AdamW and Lion steps?
         self.dion_optimizer.step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:
-        """Zero gradients."""
-        self.dion_optimizer.zero_grad(*args, **kwargs)
+        """Zero gradients for all optimizers."""
+        # Call parent class method to ensure all optimizers in self.optimizers are handled
+        super().zero_grad(*args, **kwargs)
 
     def state_dict(self) -> Dict[str, Any]:
         """Get state dict using distributed checkpoint utilities."""
