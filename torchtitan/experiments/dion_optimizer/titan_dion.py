@@ -147,23 +147,33 @@ class DionOptimizersContainer(OptimizersContainer):
         outer_shard_mesh = None
         inner_shard_mesh = None
 
-        # Setup replicate mesh for data parallelism
-        if parallel_dims.dp_enabled:
-            if hasattr(parallel_dims, "dp_mesh"):
-                replicate_mesh = parallel_dims.dp_mesh
-            elif hasattr(parallel_dims, "dp_pg"):
-                replicate_mesh = parallel_dims.dp_pg
+        # Get the world mesh from parallel_dims
+        world_mesh = parallel_dims.world_mesh
 
-        # Setup outer shard mesh (typically FSDP)
-        if parallel_dims.pp_enabled:
-            # For pipeline parallelism, we might want to use it as outer sharding
-            if hasattr(parallel_dims, "pp_mesh"):
-                outer_shard_mesh = parallel_dims.pp_mesh
+        # Setup replicate mesh for data parallelism (dp_replicate)
+        if parallel_dims.dp_replicate_enabled:
+            # Extract the dp_replicate submesh if it exists
+            if "dp_replicate" in world_mesh.mesh_dim_names:
+                replicate_mesh = world_mesh["dp_replicate"]
+            else:
+                # If no dp_replicate, use the full dp mesh
+                if "dp" in world_mesh.mesh_dim_names:
+                    replicate_mesh = world_mesh["dp"]
 
-        # Setup inner shard mesh (typically tensor parallelism)
+        # Setup outer shard mesh (FSDP - dp_shard)
+        if parallel_dims.dp_shard_enabled:
+            # Extract the dp_shard submesh
+            if "dp_shard" in world_mesh.mesh_dim_names:
+                outer_shard_mesh = world_mesh["dp_shard"]
+            elif "dp_shard_cp" in world_mesh.mesh_dim_names:
+                # If context parallel is enabled, use dp_shard_cp mesh
+                outer_shard_mesh = world_mesh["dp_shard_cp"]
+
+        # Setup inner shard mesh (tensor parallelism)
         if parallel_dims.tp_enabled:
-            if hasattr(parallel_dims, "tp_mesh"):
-                inner_shard_mesh = parallel_dims.tp_mesh
+            # Extract the tp submesh
+            if "tp" in world_mesh.mesh_dim_names:
+                inner_shard_mesh = world_mesh["tp"]
 
         return replicate_mesh, outer_shard_mesh, inner_shard_mesh
 
