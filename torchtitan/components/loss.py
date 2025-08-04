@@ -54,7 +54,8 @@ def liger_fused_linear_cross_entropy_loss(
     liger_loss_fn = LigerFusedLinearCrossEntropyLoss()
     
     # Compute fused linear + cross entropy loss
-    loss = liger_loss_fn(input_2d, weight, target_1d)
+    # Note: API is (lin_weight, _input, target, bias=None)
+    loss = liger_loss_fn(weight, input_2d, target_1d)
     
     return loss
 
