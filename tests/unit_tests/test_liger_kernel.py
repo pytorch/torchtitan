@@ -25,10 +25,13 @@ class TestLigerKernel(unittest.TestCase):
         self.hidden_dim = 8
         self.vocab_size = 16
         
-        # Create test tensors
-        self.hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
-        self.weight = torch.randn(self.vocab_size, self.hidden_dim)
-        self.target = torch.randint(0, self.vocab_size, (self.batch_size, self.seq_len))
+        # Check if CUDA is available for GPU tests
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Create test tensors (on GPU if available, CPU otherwise)
+        self.hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim, device=self.device)
+        self.weight = torch.randn(self.vocab_size, self.hidden_dim, device=self.device)
+        self.target = torch.randint(0, self.vocab_size, (self.batch_size, self.seq_len), device=self.device)
         
         # Create job config
         self.job_config = JobConfig()
@@ -43,6 +46,7 @@ class TestLigerKernel(unittest.TestCase):
         self.assertTrue(is_liger_kernel_enabled(self.job_config))
 
     @unittest.skipIf(not LIGER_KERNEL_AVAILABLE, "Liger-Kernel not available")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_liger_fused_loss_shapes(self):
         """Test that liger fused loss handles tensor shapes correctly."""
         loss = liger_fused_linear_cross_entropy_loss(
@@ -55,6 +59,7 @@ class TestLigerKernel(unittest.TestCase):
         self.assertFalse(torch.isnan(loss))
 
     @unittest.skipIf(not LIGER_KERNEL_AVAILABLE, "Liger-Kernel not available")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_liger_vs_standard_loss_equivalence(self):
         """Test that liger fused loss produces equivalent results to standard approach."""
         # Standard approach: linear + cross entropy
@@ -80,6 +85,8 @@ class TestLigerKernel(unittest.TestCase):
             self.assertIn("Liger-Kernel is not installed", str(context.exception))
             self.assertIn("pip install liger-kernel", str(context.exception))
 
+    @unittest.skipIf(not LIGER_KERNEL_AVAILABLE, "Liger-Kernel not available")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")  
     def test_tensor_reshaping(self):
         """Test that tensor reshaping works correctly."""
         # Test different batch sizes and sequence lengths
@@ -91,20 +98,18 @@ class TestLigerKernel(unittest.TestCase):
         
         for batch_size, seq_len, hidden_dim, vocab_size in test_cases:
             with self.subTest(batch_size=batch_size, seq_len=seq_len):
-                hidden_states = torch.randn(batch_size, seq_len, hidden_dim)
-                weight = torch.randn(vocab_size, hidden_dim)
-                target = torch.randint(0, vocab_size, (batch_size, seq_len))
+                hidden_states = torch.randn(batch_size, seq_len, hidden_dim, device=self.device)
+                weight = torch.randn(vocab_size, hidden_dim, device=self.device)
+                target = torch.randint(0, vocab_size, (batch_size, seq_len), device=self.device)
                 
-                if LIGER_KERNEL_AVAILABLE:
-                    loss = liger_fused_linear_cross_entropy_loss(weight, hidden_states, target)
-                    self.assertEqual(loss.shape, torch.Size([]))
-                    self.assertFalse(torch.isnan(loss))
+                loss = liger_fused_linear_cross_entropy_loss(weight, hidden_states, target)
+                self.assertEqual(loss.shape, torch.Size([]))
+                self.assertFalse(torch.isnan(loss))
 
+    @unittest.skipIf(not LIGER_KERNEL_AVAILABLE, "Liger-Kernel not available")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_gradient_flow(self):
         """Test that gradients flow correctly through liger fused loss."""
-        if not LIGER_KERNEL_AVAILABLE:
-            self.skipTest("Liger-Kernel not available")
-            
         # Enable gradients
         weight = self.weight.clone().requires_grad_(True)
         hidden_states = self.hidden_states.clone().requires_grad_(True)

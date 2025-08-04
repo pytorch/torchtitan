@@ -13,7 +13,7 @@ from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 try:
-    from liger_kernel.transformers.cross_entropy import LigerFusedLinearCrossEntropyLoss
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
     LIGER_KERNEL_AVAILABLE = True
 except ImportError:
     LIGER_KERNEL_AVAILABLE = False
