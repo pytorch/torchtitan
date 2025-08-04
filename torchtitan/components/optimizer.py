@@ -21,17 +21,28 @@ from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
-# Import Dion optimizer components
-try:
-    from torchtitan.experiments.dion_optimizer.dion import (
-        Dion,
-        DionMixedPrecisionConfig,
-    )
-    from torchtitan.experiments.dion_optimizer.titan_dion import DionOptimizersContainer
+# Dion optimizer availability will be checked lazily when needed
+DION_AVAILABLE = None
 
-    DION_AVAILABLE = True
-except ImportError:
-    DION_AVAILABLE = False
+
+def _check_dion_availability():
+    """Lazy check for Dion optimizer availability."""
+    global DION_AVAILABLE
+    if DION_AVAILABLE is None:
+        try:
+            from torchtitan.experiments.dion_optimizer.dion import (
+                Dion,
+                DionMixedPrecisionConfig,
+            )
+            from torchtitan.experiments.dion_optimizer.titan_dion import (
+                DionOptimizersContainer,
+            )
+
+            DION_AVAILABLE = True
+        except ImportError:
+            DION_AVAILABLE = False
+    return DION_AVAILABLE
+
 
 __all__ = [
     "OptimizersContainer",
@@ -280,7 +291,7 @@ def build_optimizers(
 
     # Handle Dion optimizer
     if name == "Dion":
-        if not DION_AVAILABLE:
+        if not _check_dion_availability():
             raise ImportError(
                 "Dion optimizer is not available. Please ensure the dion optimizer files are present in "
                 "torchtitan/experiments/dion_optimizer/"
@@ -296,8 +307,11 @@ def build_optimizers(
                 "TorchFT is not yet supported with Dion optimizer."
             )
 
-        # Import the DionOptimizerConfig from titan_dion
-        from torchtitan.experiments.dion_optimizer.titan_dion import DionOptimizerConfig
+        # Import the DionOptimizerConfig and DionOptimizersContainer from titan_dion
+        from torchtitan.experiments.dion_optimizer.titan_dion import (
+            DionOptimizerConfig,
+            DionOptimizersContainer,
+        )
 
         # Create DionOptimizerConfig from optimizer_config
         dion_config = DionOptimizerConfig(
