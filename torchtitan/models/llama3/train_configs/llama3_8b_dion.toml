@@ -1,0 +1,74 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Example configuration for training LLaMA 3 8B with Dion optimizer
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 8B training with Dion optimizer"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 10
+enable_tensorboard = false
+
+[model]
+name = "llama3"
+flavor = "8B"
+tokenizer_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "Dion"
+lr = 3e-4
+weight_decay = 0.1
+beta1 = 0.9
+beta2 = 0.95
+eps = 1e-8
+
+# Dion-specific parameters
+mu = 0.95
+rank_fraction = 0.5
+rank_multiple_of = 128
+algorithm = "dion"
+power_iters = 1
+qr_method = "rcqr"
+cqr_warmup_steps = 150
+rcqr_oversample = 1.25
+replicate_mesh_grad_sync = true
+
+# Mixed precision for Dion (optional)
+# momentum_dtype = "float32"
+# Q_dtype = "bfloat16"
+# variance_dtype = "float32"
+
+[lr_scheduler]
+warmup_steps = 200
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+dataset = "c4_test"
+local_batch_size = 8
+seq_len = 2048
+max_norm = 1.0
+steps = 1000
+mixed_precision_param = "bfloat16"
+compile = false
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = "2"

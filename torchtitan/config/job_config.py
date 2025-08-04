@@ -130,6 +130,44 @@ class Optimizer:
     register_post_accumulate_grad_hook after the optimizer is built.
     """
 
+    # Dion-specific parameters
+    mu: float = 0.95
+    """Momentum factor for Dion optimizer"""
+
+    rank_fraction: float = 1.0
+    """r/d fraction for low-rank approximation in Dion. Used to compute the low-rank dimension."""
+
+    rank_multiple_of: int = 1
+    """Round up the low-rank dimension to a multiple of this number in Dion."""
+
+    algorithm: str = "dion"
+    """Algorithm to use for Dion optimizer. Can be 'dion', 'adamw', or 'lion'."""
+
+    power_iters: int = 1
+    """Number of power iterations for low-rank approximation in Dion."""
+
+    qr_method: str = "rcqr"
+    """Method for computing QR decomposition in Dion."""
+
+    cqr_warmup_steps: int = 150
+    """Warmup steps for CQR method in Dion (currently ignored)."""
+
+    rcqr_oversample: float = 1.25
+    """Random sketch matrix oversampling for RCQR in Dion."""
+
+    replicate_mesh_grad_sync: bool = True
+    """Whether Dion optimizer handles data-parallel gradient sync."""
+
+    # Mixed precision options for Dion
+    momentum_dtype: str | None = None
+    """Dtype for momentum state in Dion. None means same as parameter dtype."""
+
+    Q_dtype: str | None = None
+    """Dtype for Q matrix in Dion. None means same as parameter dtype."""
+
+    variance_dtype: str | None = None
+    """Dtype for variance state in Dion (for AdamW algorithm). None means same as parameter dtype."""
+
 
 @dataclass
 class LRScheduler:
