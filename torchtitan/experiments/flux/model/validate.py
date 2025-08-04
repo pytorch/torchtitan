@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import time
 from typing import Generator
 
 import torch
@@ -62,16 +61,20 @@ class FluxValidator(Validator):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        self.all_timesteps = self.job_config.validation.all_timesteps
         self.validation_dataloader = build_flux_validation_dataloader(
             job_config=job_config,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
+            generate_timestamps=not self.all_timesteps,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
+
+        self.save_img_count = self.job_config.validation.save_img_count
 
     def flux_init(
         self,
@@ -80,14 +83,12 @@ class FluxValidator(Validator):
         autoencoder: AutoEncoder,
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
-        all_timesteps: bool = False,
     ):
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
-        self.all_timesteps = all_timesteps
 
     @torch.no_grad()
     def validate(
@@ -95,11 +96,8 @@ class FluxValidator(Validator):
         model_parts: list[nn.Module],
         step: int,
     ) -> None:
-        # Start timing validation
-        validation_start_time = time.time()
-
-        # # Set model to eval mode
-        # # TODO: currently does not support pipeline parallelism
+        # Set model to eval mode
+        # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
         model.eval()
 
@@ -117,23 +115,20 @@ class FluxValidator(Validator):
                 break
 
             prompt = input_dict.pop("prompt")
-
-            save_imgs = self.job_config.validation.save_imgs
-            if save_imgs == -1 or num_steps < save_imgs:
-                t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
-                # take only the first sample if prompt is a batch
-                if isinstance(prompt, list):
-                    prompt = prompt[0]
-
+            if not isinstance(prompt, list):
+                prompt = [prompt]
+            for p in prompt:
+                if self.save_img_count != -1 and self.save_img_count <= 0:
+                    break
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
                     job_config=self.job_config,
                     model=model,
-                    prompt=prompt,
+                    prompt=p,
                     autoencoder=self.autoencoder,
-                    t5_tokenizer=t5_tokenizer,
-                    clip_tokenizer=clip_tokenizer,
+                    t5_tokenizer=self.t5_tokenizer,
+                    clip_tokenizer=self.clip_tokenizer,
                     t5_encoder=self.t5_encoder,
                     clip_encoder=self.clip_encoder,
                 )
@@ -146,8 +141,9 @@ class FluxValidator(Validator):
                     ),
                     x=image,
                     add_sampling_metadata=True,
-                    prompt=prompt,
+                    prompt=p,
                 )
+                self.save_img_count -= 1
 
             # generate t5 and clip embeddings
             input_dict["image"] = labels
@@ -165,7 +161,7 @@ class FluxValidator(Validator):
 
             bsz = labels.shape[0]
 
-            # To evaluate all 8 timesteps per sample do
+            # If using all_timesteps we generate all 8 timesteps and expand our batch inputs here
             if self.all_timesteps:
                 stratified_timesteps = torch.tensor(
                     [1 / 8 * (i + 0.5) for i in range(8)],
@@ -175,14 +171,13 @@ class FluxValidator(Validator):
                 clip_encodings = clip_encodings.repeat_interleave(8, dim=0)
                 t5_encodings = t5_encodings.repeat_interleave(8, dim=0)
                 labels = labels.repeat_interleave(8, dim=0)
-                input_dict.pop("timestep")
             else:
                 stratified_timesteps = input_dict.pop("timestep")
 
             # Note the tps may be inaccurate due to the generating image step not being counted
             self.metrics_processor.ntokens_since_last_log += labels.numel()
 
-            # increase the batch size and input sizes to complete all batches in a single forward pass for efficiency
+            # Apply timesteps here and update our bsz to efficiently compute all timesteps and samples in a single forward pass
             with torch.no_grad(), torch.device(self.device):
                 noise = torch.randn_like(labels)
                 timesteps = stratified_timesteps.to(labels)
@@ -202,14 +197,15 @@ class FluxValidator(Validator):
                 # Patchify: Convert latent into a sequence of patches
                 latents = pack_latents(latents)
 
-                latent_noise_pred = model(
-                    img=latents,
-                    img_ids=latent_pos_enc,
-                    txt=t5_encodings,
-                    txt_ids=text_pos_enc,
-                    y=clip_encodings,
-                    timesteps=timesteps,
-                )
+                with self.maybe_enable_amp:
+                    latent_noise_pred = model(
+                        img=latents,
+                        img_ids=latent_pos_enc,
+                        txt=t5_encodings,
+                        txt_ids=text_pos_enc,
+                        y=clip_encodings,
+                        timesteps=timesteps,
+                    )
 
             # Convert sequence of patches to latent shape
             pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
@@ -233,15 +229,6 @@ class FluxValidator(Validator):
             global_avg_loss = loss.item()
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
-
-        # Calculate and log validation timing
-        validation_end_time = time.time()
-        validation_duration = validation_end_time - validation_start_time
-
-        # Log timing information
-        from torchtitan.tools.logging import logger
-
-        logger.info(f"Validation step {step} completed in {validation_duration:.3f}s ")
 
         # Reshard after run forward pass
         # This is to ensure the model weights are sharded the same way for checkpoint saving.

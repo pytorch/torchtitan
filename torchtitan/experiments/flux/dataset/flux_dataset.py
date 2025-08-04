@@ -193,7 +193,6 @@ class FluxDataset(IterableDataset, Stateful):
     dp_rank (int): Data parallel rank.
     dp_world_size (int): Data parallel world size.
     infinite (bool): Whether to loop over the dataset infinitely.
-    generate_timesteps (booL): Generate stratified timesteps in round-robin style for validation
     """
 
     def __init__(
@@ -206,7 +205,6 @@ class FluxDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
-        generate_timesteps: bool = False,
     ) -> None:
 
         # Force lowercase for consistent comparison
@@ -232,12 +230,6 @@ class FluxDataset(IterableDataset, Stateful):
         # Variables for checkpointing
         self._sample_idx = 0
         self._all_samples: list[dict[str, Any]] = []
-
-        # Generate stratified timesteps used for SD3 validation method
-        self.generate_timesteps = generate_timesteps
-        if self.generate_timesteps:
-            val_timesteps = [1 / 8 * (i + 0.5) for i in range(8)]
-            self.timestep = itertools.cycle(val_timesteps)
 
     def _get_data_iter(self):
         if isinstance(self._data, Dataset):
@@ -306,9 +298,6 @@ class FluxDataset(IterableDataset, Stateful):
 
             self._sample_idx += 1
 
-            if self.generate_timesteps:
-                sample_dict["timestep"] = next(self.timestep)
-
             labels = sample_dict.pop("image")
 
             yield sample_dict, labels
@@ -361,12 +350,63 @@ def build_flux_dataloader(
     )
 
 
+class FluxValidationDataset(FluxDataset):
+    """
+    Adds logic to generate timesteps for flux validation method described in SD3 paper
+
+    Args:
+    generate_timesteps (bool): Generate stratified timesteps in round-robin style for validation
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset_path: Optional[str],
+        t5_tokenizer: BaseTokenizer,
+        clip_tokenizer: BaseTokenizer,
+        job_config: Optional[JobConfig] = None,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        generate_timesteps: bool = True,
+    ) -> None:
+        # Call parent constructor correctly
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            t5_tokenizer=t5_tokenizer,
+            clip_tokenizer=clip_tokenizer,
+            job_config=job_config,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=False,
+        )
+
+        # Initialize timestep generation for validation
+        self.generate_timesteps = generate_timesteps
+        if self.generate_timesteps:
+            # Generate stratified timesteps as described in SD3 paper
+            val_timesteps = [1 / 8 * (i + 0.5) for i in range(8)]
+            self.timestep_cycle = itertools.cycle(val_timesteps)
+
+    def __iter__(self):
+        # Get parent iterator and add timesteps to each sample
+        parent_iterator = super().__iter__()
+
+        for sample_dict, labels in parent_iterator:
+            # Add timestep to the sample dict if timestep generation is enabled
+            if self.generate_timesteps:
+                sample_dict["timestep"] = next(self.timestep_cycle)
+
+            yield sample_dict, labels
+
+
 def build_flux_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     job_config: JobConfig,
     # This parameter is not used, keep it for compatibility
-    tokenizer: FluxTokenizer | None,
+    tokenizer: BaseTokenizer | None,
+    generate_timestamps: bool = True,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
@@ -375,7 +415,7 @@ def build_flux_validation_dataloader(
 
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(job_config)
 
-    ds = FluxDataset(
+    ds = FluxValidationDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         t5_tokenizer=t5_tokenizer,
@@ -383,8 +423,7 @@ def build_flux_validation_dataloader(
         job_config=job_config,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        infinite=False,
-        generate_timesteps=True,
+        generate_timesteps=generate_timestamps,
     )
 
     return ParallelAwareDataloader(

@@ -73,5 +73,6 @@ freq = 1000
 enable_classifier_free_guidance = true
 classifier_free_guidance_scale = 5.0
 denoising_steps = 50
-save_imgs = 1
+save_img_count = 50
 save_img_folder = "img"
+all_timesteps = false
