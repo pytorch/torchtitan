@@ -15,7 +15,7 @@ description = "Llama 3 8B training with advanced Dion optimizer configuration"
 enable_profiling = false
 
 [metrics]
-log_freq = 10
+log_freq = 1
 enable_tensorboard = false
 
 [model]
@@ -68,7 +68,7 @@ dataset = "c4_test"
 local_batch_size = 8
 seq_len = 2048
 max_norm = 1.0
-steps = 1000
+steps = 20
 mixed_precision_param = "bfloat16"
 compile = false
 
@@ -83,4 +83,4 @@ enable_checkpoint = false
 
 [activation_checkpoint]
 mode = "selective"
-selective_ac_option = "2"
+selective_ac_option = "op"
