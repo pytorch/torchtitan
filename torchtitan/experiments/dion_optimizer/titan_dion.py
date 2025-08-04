@@ -24,6 +24,7 @@ from torchtitan.distributed import ParallelDims
 
 # Import the Dion optimizer (assuming it's available)
 from .dion import Dion, DionMixedPrecisionConfig
+from .parameter_classification import create_parameter_groups
 
 __all__ = [
     "DionOptimizersContainer",
@@ -100,29 +101,8 @@ class DionOptimizersContainer(OptimizersContainer):
             variance_dtype=dion_config.variance_dtype,
         )
 
-        # Collect all parameters from model parts
-        all_params = []
-        param_groups = []
-
-        for model in model_parts:
-            model_params = [p for p in model.parameters() if p.requires_grad]
-            all_params.extend(model_params)
-
-            # Create parameter group for this model part
-            # You can customize this to assign different algorithms to different layers
-            param_group = {
-                "params": model_params,
-                "algorithm": dion_config.algorithm,
-                "rank_fraction": dion_config.rank_fraction,
-                "rank_multiple_of": dion_config.rank_multiple_of,
-                "lr": dion_config.lr,
-                "mu": dion_config.mu,
-                "beta1": dion_config.betas[0],
-                "beta2": dion_config.betas[1],
-                "weight_decay": dion_config.weight_decay,
-                "epsilon": dion_config.epsilon,
-            }
-            param_groups.append(param_group)
+        # Classify parameters and create appropriate parameter groups
+        param_groups = create_parameter_groups(model_parts, dion_config)
 
         # Create the Dion optimizer
         self.dion_optimizer = Dion(

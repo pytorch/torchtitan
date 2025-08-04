@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Example configuration for training LLaMA 3 8B with Dion optimizer
+# Advanced configuration for training LLaMA 3 8B with Dion optimizer
+# Includes parameter-specific optimizer selection and learning rate scaling
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 8B training with Dion optimizer"
+description = "Llama 3 8B training with advanced Dion optimizer configuration"
 
 [profiling]
 enable_profiling = false
@@ -40,6 +41,17 @@ qr_method = "rcqr"
 cqr_warmup_steps = 150
 rcqr_oversample = 1.25
 replicate_mesh_grad_sync = true
+
+# Parameter-specific optimizer selection
+scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
+embedding_optimizer = "adamw"     # For embedding layers
+head_optimizer = "adamw"          # For model head/output layers
+head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
+
+# Learning rate scaling factors
+scalar_lr_factor = 1.0            # LR multiplier for scalar parameters
+embedding_lr_factor = 0.5         # LR multiplier for embedding parameters
+head_lr_factor = 1.0              # LR multiplier for head parameters (after head_lr_scaling)
 
 # Mixed precision for Dion (optional)
 # momentum_dtype = "float32"

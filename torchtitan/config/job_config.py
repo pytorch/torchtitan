@@ -168,6 +168,29 @@ class Optimizer:
     variance_dtype: str | None = None
     """Dtype for variance state in Dion (for AdamW algorithm). None means same as parameter dtype."""
 
+    # Parameter-specific optimizer selection for Dion
+    scalar_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for 1D scalar parameters (biases, layer norms, etc.) when using Dion."""
+
+    embedding_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for embedding layers when using Dion."""
+
+    head_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model head/output layers when using Dion."""
+
+    head_lr_scaling: bool = True
+    """Whether to apply 1/sqrt(dim) learning rate scaling for head layers."""
+
+    # Learning rate scaling factors for different parameter types
+    scalar_lr_factor: float = 1.0
+    """Learning rate scaling factor for scalar parameters."""
+
+    embedding_lr_factor: float = 1.0
+    """Learning rate scaling factor for embedding parameters."""
+
+    head_lr_factor: float = 1.0
+    """Learning rate scaling factor for head parameters (applied after head_lr_scaling if enabled)."""
+
 
 @dataclass
 class LRScheduler:
