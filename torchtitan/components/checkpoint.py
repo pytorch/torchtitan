@@ -36,7 +36,11 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    Checkpoint as CheckpointConfig, 
+    FaultTolerance as FaultToleranceConfig, 
+    TORCH_DTYPE_MAP
+)
 from torchtitan.protocols import StateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -101,25 +105,31 @@ class SaveDone:
 def purge_thread(purge_queue: queue.Queue):
     """Thread to purge the old checkpoints.
 
-    This is only used when keep_latest_k > 0.
+    This is only used when keep_latest_k > 0 or when ft_keep_latest_k > 0.
 
     Args:
         purge_queue (queue.Queue): The queue to receive the path to purge and Terminate signal.
     """
+    ft_ckpt_dir_prefix = 'ft-replicat-'
     try:
         while True:
             path = purge_queue.get()
             if isinstance(path, Terminate):
                 return
             assert isinstance(path, str)
-            logger.info("Checkpointer is deleting %s.", path)
+
+            if not ft_ckpt_dir_prefix in path:
+                logger.info("Checkpointer is deleting %s.", path)
+                
             begin = time.monotonic()
             shutil.rmtree(path, ignore_errors=True)
-            logger.info(
-                "Checkpointer deleted %s in %.2f seconds.",
-                path,
-                time.monotonic() - begin,
-            )
+
+            if not ft_ckpt_dir_prefix in path:
+                logger.info(
+                    "Checkpointer deleted %s in %.2f seconds.",
+                    path,
+                    time.monotonic() - begin,
+                )
     finally:
         logger.info("Destroying the purge thread.")
 
@@ -191,6 +201,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
+        ft_config: FaultToleranceConfig,
         sd_adapter: StateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
@@ -277,8 +288,9 @@ class CheckpointManager:
         ):
             self.pg = dist.new_group(backend="gloo")
 
+        self.ft_keep_latest_k = ft_config.checkpoint_keep_latest_k
         self.keep_latest_k = checkpoint_config.keep_latest_k
-        if self.keep_latest_k > 0:
+        if self.keep_latest_k > 0 or self.ft_keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
                     "We need to maintain at least 2 checkpoint replicas, "
@@ -638,6 +650,7 @@ class CheckpointManager:
         self.save_future = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
+        self._purge_stale_ft_checkpoints()
         logger.info(f"Staging ft checkpoint took {time.monotonic() - begin} secs.")
 
     def _ft_load(self) -> None:
@@ -764,6 +777,22 @@ class CheckpointManager:
                 "and fault tolerance is not active."
             )
 
+    def _purge_checkpoints_in_folder(self, folder: str, keep_latest_k: int) -> None:
+        """Helper function to purge old checkpoints in a given folder."""
+        discovered_checkpoints = []
+        for filename in os.listdir(folder):
+            match = re.search(r"step-(\d+)", filename)
+            if match:  # Only process files that match the pattern
+                path = os.path.join(folder, filename)
+                discovered_checkpoints.append((int(match.group(1)), path))
+
+        discovered_checkpoints.sort()
+        to_delete = discovered_checkpoints[: -1 * keep_latest_k]
+
+        for _, path in to_delete:
+            assert self.purge_thread is not None
+            self.purge_queue.put(path)
+
     def _purge_stale_checkpoints(self):
         if (
             self.keep_latest_k > 0
@@ -771,16 +800,12 @@ class CheckpointManager:
             and os.path.isdir(self.folder)
             and (not self.ft_manager or self.ft_manager.participating_rank() == 0)
         ):
-            discovered_checkpoints = []
-            for filename in os.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                if match:
-                    path = os.path.join(self.folder, filename)
-                    discovered_checkpoints.append((int(match.group(1)), path))
-
-            discovered_checkpoints.sort()
-            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
-
-            for _, path in to_delete:
-                assert self.purge_thread is not None
-                self.purge_queue.put(path)
+            self._purge_checkpoints_in_folder(self.folder, self.keep_latest_k)
+                
+    def _purge_stale_ft_checkpoints(self):
+        if (
+            self.ft_keep_latest_k > 0
+            and self.ft_manager is not None
+            and os.path.isdir(self._ft_folder())
+        ):
+            self._purge_checkpoints_in_folder(self._ft_folder(), self.ft_keep_latest_k)

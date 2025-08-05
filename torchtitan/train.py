@@ -304,6 +304,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
+            ft_config=job_config.fault_tolerance,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(model_args)
                 if self.train_spec.state_dict_adapter
