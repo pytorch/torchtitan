@@ -36,7 +36,11 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    Checkpoint as CheckpointConfig, 
+    FaultTolerance as FaultToleranceConfig, 
+    TORCH_DTYPE_MAP
+)
 from torchtitan.protocols import StateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -106,6 +110,7 @@ def purge_thread(purge_queue: queue.Queue):
     Args:
         purge_queue (queue.Queue): The queue to receive the path to purge and Terminate signal.
     """
+    ft_ckpt_dir_prefix = 'ft-replicat-'
     try:
         while True:
             path = purge_queue.get()
@@ -113,13 +118,13 @@ def purge_thread(purge_queue: queue.Queue):
                 return
             assert isinstance(path, str)
 
-            if not 'ft-replica' in path:
+            if not ft_ckpt_dir_prefix in path:
                 logger.info("Checkpointer is deleting %s.", path)
                 
             begin = time.monotonic()
             shutil.rmtree(path, ignore_errors=True)
 
-            if not 'ft-replica' in path:
+            if not ft_ckpt_dir_prefix in path:
                 logger.info(
                     "Checkpointer deleted %s in %.2f seconds.",
                     path,
@@ -196,6 +201,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
+        ft_config: FaultToleranceConfig,
         sd_adapter: StateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
@@ -282,9 +288,8 @@ class CheckpointManager:
         ):
             self.pg = dist.new_group(backend="gloo")
 
-
-        self.ft_keep_latest_k = job_config.fault_tolerance.checkpoint_keep_latest_k
-        self.keep_latest_k = ckpt_config.keep_latest_k
+        self.ft_keep_latest_k = ft_config.checkpoint_keep_latest_k
+        self.keep_latest_k = checkpoint_config.keep_latest_k
         if self.keep_latest_k > 0 or self.ft_keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
