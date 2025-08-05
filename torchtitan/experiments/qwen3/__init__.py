@@ -32,6 +32,7 @@ qwen3_configs = {
     "0.6B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=1024,
         n_layers=28,
         n_heads=16,
@@ -43,6 +44,7 @@ qwen3_configs = {
     "1.7B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=2048,
         n_layers=28,
         n_heads=16,
@@ -54,6 +56,7 @@ qwen3_configs = {
     "4B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=2560,
         n_layers=36,
         n_heads=32,
@@ -65,6 +68,7 @@ qwen3_configs = {
     "8B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=4096,
         n_layers=36,
         n_heads=32,
@@ -76,6 +80,7 @@ qwen3_configs = {
     "14B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=5120,
         n_layers=40,
         n_heads=40,
@@ -87,6 +92,7 @@ qwen3_configs = {
     "32B": TransformerModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
+        head_dim = 128,
         dim=5120,
         n_layers=64,
         n_heads=64,
