@@ -55,6 +55,38 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    if (
+        job_config.parallelism.context_parallel_degree > 1
+        and model.model_args.use_flex_attn
+    ):
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+
+    if parallel_dims.tp_enabled:
+        if (
+            job_config.parallelism.enable_async_tensor_parallel
+            and not job_config.training.compile
+        ):
+            raise RuntimeError("Async TP requires --training.compile")
+
+        enable_float8_linear = "float8" in job_config.model.converters
+        float8_is_rowwise = job_config.float8.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
+        )
+
+        # For now, float8 all-gather with TP is only supported for tensorwise
+        # float8 scaling recipes. For rowwise recipes, we use regular TP and
+        # all-gather happens in high precision.
+        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+
+        apply_tp(
+            model,
+            world_mesh["tp"],
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+        )
+
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
@@ -101,86 +133,12 @@ def parallelize_qwen3(
 
     return model
 
-
-# for selective op activation checkpointing
-_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-}
-
-
-def _apply_ac_to_transformer_block(module: nn.Module, ac_config):
-    valid_ac_modes = ("full", "selective")
-    if ac_config.mode not in valid_ac_modes:
-        raise ValueError(
-            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
-        )
-
-    if ac_config.mode == "full":
-        return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
-
-    assert ac_config.mode == "selective", f"{ac_config.mode}"
-    use_op_sac = ac_config.selective_ac_option == "op"
-    use_layer_sac = ac_config.selective_ac_option.isdigit()
-    if not use_op_sac and not use_layer_sac:
-        raise ValueError(
-            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
-            f"Valid options: 'op' or a positive int representing layer frequency"
-        )
-    if use_op_sac:
-        from torch.utils.checkpoint import (
-            CheckpointPolicy,
-            create_selective_checkpoint_contexts,
-        )
-
-        def _get_custom_policy(meta):
-            def _custom_policy(ctx, func, *args, **kwargs):
-                mode = "recompute" if ctx.is_recompute else "forward"
-                mm_count_key = f"{mode}_mm_count"
-                if func == torch.ops.aten.mm.default:
-                    meta[mm_count_key] += 1
-                # Saves output of all compute ops, except every second mm
-                to_save = func in _save_list and not (
-                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
-                )
-                return (
-                    CheckpointPolicy.MUST_SAVE
-                    if to_save
-                    else CheckpointPolicy.PREFER_RECOMPUTE
-                )
-
-            return _custom_policy
-
-        def selective_checkpointing_context_fn():
-            meta = defaultdict(int)
-            return create_selective_checkpoint_contexts(_get_custom_policy(meta))
-
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=selective_checkpointing_context_fn,
-            preserve_rng_state=False,
-        )
-    elif use_layer_sac:
-        # Checkpoint every `ac_freq` of the modules passed to this function
-        ac_freq = int(ac_config.selective_ac_option)
-        ptd_checkpoint_wrapper.__dict__.setdefault("_count", 0)
-        ptd_checkpoint_wrapper._count += 1
-        if not ac_freq or ptd_checkpoint_wrapper._count % ac_freq == 0:
-            return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
-        else:
-            return module
-
-
-def apply_ac(model: nn.Module, ac_config):
+def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = _apply_ac_to_transformer_block(transformer_block, ac_config)
+        transformer_block = _apply_ac_to_transformer_block(
+            transformer_block, ac_config, base_fqn=f"layers.{layer_id}"
+        )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
@@ -196,7 +154,6 @@ def apply_compile(model: nn.Module):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
-
 
 def apply_fsdp(
     model: nn.Module,
@@ -229,31 +186,41 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    for layer_id, transformer_block in model.layers.items():
-        if reshard_after_forward_policy == "always":
+    match reshard_after_forward_policy:
+        case "always":
             reshard_after_forward = True
-        elif reshard_after_forward_policy == "never":
+        case "never":
             reshard_after_forward = False
-        elif reshard_after_forward_policy == "default":
-            if pp_enabled:
-                # For PP, do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                reshard_after_forward = False
-            else:
-                # As an optimization, do not reshard after forward for the last
-                # transformer block since FSDP would prefetch it immediately
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            reshard_after_forward = not pp_enabled
+        case _:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
+
+    if model.tok_embeddings is not None:
+        fully_shard(
+            model.tok_embeddings,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+    for layer_id, transformer_block in model.layers.items():
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
-
+    # As an optimization, do not reshard_after_forward the last layers by default
+    # since FSDP would prefetch them immediately after the forward pass
+    if model.norm is not None and model.output is not None:
+        fully_shard(
+            [model.norm, model.output],
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward_policy == "always",
+        )
+    fully_shard(model, **fsdp_config)
 
 def apply_ddp(
     model: nn.Module,
