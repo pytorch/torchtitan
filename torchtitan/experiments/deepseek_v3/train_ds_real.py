@@ -24,7 +24,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.optimizer import build_optimizers
 
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import ParallelDims
