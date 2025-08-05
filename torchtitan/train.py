@@ -48,6 +48,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     lr_schedulers: train_spec_module.LRSchedulersContainer
     validator: train_spec_module.BaseValidator
     metrics_processor: train_spec_module.MetricsProcessor
+    model_args: train_spec_module.BaseModelArgs
 
     # non-swappable training components
     checkpointer: CheckpointManager
@@ -146,6 +147,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
         model_args.update_from_config(job_config)
+        self.model_args = model_args
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
@@ -545,8 +547,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             maybe_semi_sync_training(
                 job_config.fault_tolerance,
                 ft_manager=self.ft_manager,
-                model_parts=self.model_parts,
+                model=self.model_parts[0],
+                n_layers=(
+                    self.model_args.n_layers
+                    if hasattr(self.model_args, "n_layers")
+                    else 0
+                ),
                 optimizer=self.optimizers,
+                fragment_fn=(
+                    self.train_spec.fragment_fn
+                    if hasattr(self.train_spec, "fragment_fn")
+                    else None
+                ),
             ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
