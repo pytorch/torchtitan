@@ -13,7 +13,7 @@ from re import S
 from torch import nn
 
 from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 
 
@@ -25,7 +25,7 @@ class TransformerModelArgs(BaseModelArgs):
     n_layers: int = 28  
     n_heads: int = 16 
     n_kv_heads: int = 8
-    vocab_size: int = -1  # defined later by tokenizer
+    vocab_size: int = 151936
 
     hidden_dim: int = 3072
 
@@ -37,26 +37,28 @@ class TransformerModelArgs(BaseModelArgs):
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
-    eos_id: int = 0
+    eos_id: int = 151645
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-
-        self.vocab_size = tokenizer.get_vocab_size()
-        self.max_seq_len = job_config.training.seq_len
-        self.eos_id = tokenizer.eos_id
-
-        if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with selective AC yet. "
-                "See https://github.com/pytorch/pytorch/issues/147879"
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
             )
+        self.max_seq_len = seq_len
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise ValueError(
-                "FlexAttention is not compatible with CP yet. "
-                "We are still working on this."
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
             )
 
+        if (
+            job_config.parallelism.pipeline_parallel_degree > 1
+            and self.use_flex_attn
+            and self.attn_mask_type == "block_causal"
+        ):
+            raise RuntimeError(
+                "PP + block causal FlexAttention support will be fixed soon."
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
