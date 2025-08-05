@@ -127,7 +127,7 @@ def _coco_data_processor(
     img = _process_cc12m_image(sample["image"], output_size=output_size)
     prompt = sample["caption"]
     if isinstance(prompt, list):
-        prompt = " ".join(prompt)
+        prompt = prompt[0]
     t5_tokens = t5_tokenizer.encode(prompt)
     clip_tokens = clip_tokenizer.encode(prompt)
 
@@ -280,7 +280,6 @@ class FluxDataset(IterableDataset, Stateful):
 
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
-                # sample_id = sample.get('sample_id')
                 sample = sample.get("__key__", "unknown")
                 logger.warning(
                     f"Low quality image {sample} is skipped in Flux Dataloader."

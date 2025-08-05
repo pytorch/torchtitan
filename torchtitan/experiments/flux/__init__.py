@@ -17,7 +17,7 @@ from .loss import build_mse_loss
 from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
-from .model.validate import build_flux_validator
+from .validate import build_flux_validator
 
 __all__ = [
     "FluxModelArgs",
