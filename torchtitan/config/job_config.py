@@ -696,6 +696,11 @@ class FaultTolerance:
     This is only used when "semi_sync_method" is set.
     """
 
+    checkpoint_keep_latest_k: int = 0
+    """
+    Keeps only the latest k FT checkpoints and purge older ones.
+    """
+
 
 @dataclass
 class Experimental:
