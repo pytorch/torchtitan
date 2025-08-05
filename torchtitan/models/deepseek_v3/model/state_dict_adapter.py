@@ -49,18 +49,39 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+
     
-    def _split_experts_weights(self, weight: torch.Tensor, n_experts: int) -> list[torch.Tensor]:
+    def _split_experts_weights(self, weight: torch.Tensor, expert_id: int, n_experts: int) -> list[torch.Tensor]:
         """
         Split the weights of the experts into a list of tensors.
         """
-        return torch.split(weight, weight.shape[0] // n_experts, dim=0)
+        return torch.split(weight, weight.shape[0] // n_experts, dim=0)[expert_id]
     
-    def _concate_experts_weights(self, weights: list[torch.Tensor]) -> torch.Tensor:
+    def _concatenate_expert_weights(self, expert_weights_by_layer: dict[str, Any], n_experts: int) -> torch.Tensor:
         """
         Concatenate the weights of seprate experts into GroupedExpert weights.
         """
-        pass
+        for layer, abstract_keys in list(expert_weights_by_layer.items()):
+            for abstract_key, experts in list(abstract_keys.items()):
+                # If we have all the experts for this abstract_key, concatenate them
+                if len(experts) == n_experts:
+                    sorted_expert_ids = sorted(experts.keys())
+                    sorted_experts = [experts[i] for i in sorted_expert_ids]
+
+                    stacked_tensor = torch.stack(sorted_experts, dim=0).transpose(
+                        1, 2
+                    )
+
+                    # Remove these experts from the tracking dict to free memory
+                    del expert_weights_by_layer[layer][abstract_key]
+                    if not expert_weights_by_layer[layer]:
+                        del expert_weights_by_layer[layer]
+                    
+                    return stacked_tensor
+        
+        return None
+
+
 
     def _quantization(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -86,7 +107,17 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "layers" in key:
+            if "mlp.experts" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
+                layer_num, expert_num = re.findall(r"\d+", key)
+                new_key = to_hf_map[abstract_key]
+                new_key = new_key.format(layer_num)
+            
+                # try to concat the expert's weight into GroupedExperts' weight.
+                # NOTE: This concating might bring memory overhead
+                self._split_experts_weights(value, expert_num, self.model_args.n_routed_experts)
+   
+            elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
@@ -96,8 +127,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = new_key.format(layer_num)
             else:
                 new_key = to_hf_map[key]
-
+            
             hf_state_dict[new_key] = value
+        
 
         return hf_state_dict
 
@@ -108,16 +140,36 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         3. Concate seprate expert's wegiht into GroupedExperts' weight.
         """
         state_dict = {}
+        
+        expert_weights_by_layer = {} # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
-            if "layers" in key:
+            if "mlp.experts" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
+                layer_num, expert_num = re.findall(r"\d+", key)
+                new_key = self.from_hf_map[abstract_key]
+                new_key = new_key.format(layer_num)
+                
+                # Store the expert's weight in expert_weights_by_layer for concating later.
+                if layer_num not in expert_weights_by_layer:
+                    expert_weights_by_layer[layer_num] = {}
+                    if abstract_key not in expert_weights_by_layer[layer_num]:
+                        expert_weights_by_layer[layer_num][abstract_key] = {}
+                expert_weights_by_layer[layer_num][abstract_key][expert_num] = value
+
+                # try to concat the expert's weight into GroupedExperts' weight.
+                stacked_value = self._concatenate_expert_weights(expert_weights_by_layer, self.model_args.n_routed_experts)
+                if stacked_value is not None:
+                    state_dict[new_key] = value
+
+            elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
-
                 new_key = new_key.format(layer_num)
+                state_dict[new_key] = value
             else:
                 new_key = self.from_hf_map[key]
+                state_dict[new_key] = value
 
-            state_dict[new_key] = value
         return state_dict
