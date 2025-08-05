@@ -4,30 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
-import os
-import sys
-
-from dataclasses import asdict, dataclass, field, fields, is_dataclass, make_dataclass
-from typing import Any, Literal, Type
-
-import torch
-import tyro
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
-from torchtitan.tools.logging import logger
-
-TORCH_DTYPE_MAP = {
-    "float16": torch.float16,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
-
-custom_registry = tyro.constructors.ConstructorRegistry()
+from dataclasses import asdict, dataclass, field
+from typing import Any, Literal
 
 
 @dataclass
@@ -100,7 +78,7 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
+    tokenizer_path: str = "./tests/assets/tokenizer"
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
@@ -177,11 +155,11 @@ class LRScheduler:
     - 'cosine': smoothly decays learning rate following a cosine curve
     """
 
-    lr_min: float = 0.0
+    min_lr_factor: float = 0.0
     """
     Min lr ratio for lr scheduler.
-    If provided, the range of decay factor is scaled from 1 to `lr_min`
-    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.lr_min`.
+    If provided, the range of decay factor is scaled from 1 to `min_lr_factor`
+    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
     """
 
 
@@ -312,6 +290,7 @@ class Parallelism:
 
     pipeline_parallel_split_points: list[str] = field(default_factory=list)
     """
+    DEPRECATED: Use module_fqns_per_model_part instead.
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
     the first containing all the layers up to layers.0,
@@ -321,9 +300,31 @@ class Parallelism:
     but currently the split points must be specified manually.
     """
 
+    module_fqns_per_model_part: list[list[str]] | None = None
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk compared to split points.
+    """
+
+    pipeline_parallel_first_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the first stage of pipeline parallelism. This is because
+    the first stage has the extra overhead of the embedding layer, which is not present in the other stages.
+    """
+
+    pipeline_parallel_last_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the last stage of pipeline parallelism. This is because
+    the last stage has the extra overhead of the output layer, which is not present in the other stages.
+    """
+
     pipeline_parallel_layers_per_stage: int | None = None
     """
-    The number of layers per (virtual) pipeline stage. If specified, the split points will be
+    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
     calculated from the number of layers and pipeline_parallel_degree. If not specified, the
     layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
     """
@@ -383,6 +384,9 @@ class Checkpoint:
     When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
+    interval: int = 500
+    """Checkpointing interval in steps."""
+
     initial_load_path: str | None = None
     """
     This option specifies the path to the initial checkpoint to load, which is
@@ -404,13 +408,20 @@ class Checkpoint:
     This option specifies if only the model should be loaded during the initial
     checkpoint load. The option is only used when `initial_load_path` is specified.
     If False, the checkpoint at `initial_load_path` is treated as a standard training
-    checkpoint, including optimizer and training states.
+    checkpoint, including optimizer, lr scheduler, training states, etc.
     The default setting for this option is True. Note that you will have to use
     `--checkpoint.no_initial_load_model_only` to override the default setting.
     """
 
-    interval: int = 500
-    """Checkpointing interval in steps."""
+    initial_load_in_hf: bool = False
+    """
+    Enable the use of HuggingFace's safetensors format for checkpointing. The option
+    is only used when `initial_load_path` is specified. This will load checkpoints
+    in HF's model definition and safetensors format instead of the default torchtitan
+    model definition and DCP format, after necessary model state dict transformation.
+    `initial_load_model_only` must be true because safetensors doesn't support saving
+    non-tensors. The default value is False.
+    """
 
     last_save_model_only: bool = True
     """
@@ -421,16 +432,20 @@ class Checkpoint:
     The default value is True.
     """
 
+    last_save_in_hf: bool = False
+    """
+    Enable the use of Hugging Face's safetensors format for checkpointing. This will save the
+    final checkpoints in safetensors format instead of the default DCP format, after necessary
+    model state dict transformation. There will be a performance cost in using this as we need
+    to consolidate the sharded tensors to full tensors as a separate step.
+    last_save_model_only must be true because safetensors doesn't support saving
+    non-tensors. On load, this argument isn't needed as we will detect whether the loaded
+    checkpoint is in safetensors format or not. The default value is False.
+    """
+
     export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
     """
     Converts to the specified precision when training completes and last_save_model_only=true.
-    """
-
-    create_seed_checkpoint: bool = False
-    """
-    Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
-    Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
-    Could be implemented as a separate script, but this way shares more code.
     """
 
     async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
@@ -475,15 +490,11 @@ class Checkpoint:
     for many steps or checkpointing too frequently. The default value is False.
     """
 
-    last_save_in_hf: bool = False
+    create_seed_checkpoint: bool = False
     """
-    Enable the use of Hugging Face's safetensors format for checkpointing. This will save the
-    final checkpoints in safetensors format instead of the default DCP format, after necessary
-    model state dict transformation. There will be a performance cost in using this as we need
-    to consolidate the sharded tensors to full tensors as a separate step.
-    last_save_model_only must be true because safetensors doesn't support saving
-    non-tensors. On load, this argument isn't needed as we will detect whether the loaded
-    checkpoint is in safetensors format or not. The default value is False.
+    Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
+    Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
+    Could be implemented as a separate script, but this way shares more code.
     """
 
 
@@ -521,14 +532,6 @@ class Float8:
     precompute_float8_dynamic_scale_for_fsdp: bool = False
     """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
 
-    force_recompute_fp8_weight_in_bwd: bool = False
-    """
-    Whether to force the recomputation of FP8 weights during backward pass.
-    When using FSDP with tensorwise scaling, it is recommended to enable
-    `force_recompute_fp8_weight_in_bwd` to prevent saving unsharded FP8 weights
-    for backward computation.
-    """
-
     recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
     """If specified, creates float8 config from recipe name"""
 
@@ -556,18 +559,28 @@ class Float8:
 
 @dataclass
 class MX:
-    use_fp8_dim1_cast_triton_kernel: bool = True
+    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """Temp work around for inductor performance gap"""
 
-    recipe_name: Literal["mxfp8"] = "mxfp8"
-    """If specified, creates float8 config from recipe name"""
+    recipe_name: str = "mxfp8_cublas"
+    """
+    If specified, creates MX config from recipe name. See
+    https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
+    """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
     """
-    Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
+    Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
     Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    """
+
+    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+    """
+    Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
+    This is a prototype feature that requires the torchao nightly build.
+    Example: --mx.moe_fqns_prototype="experts"
     """
 
 
@@ -584,6 +597,9 @@ class Comm:
 
     trace_buf_size: int = 20000
     """Flight recorder ring buffer size, >0 means recording by default, 0 means disabled"""
+
+    save_traces_folder: str = "comm_traces"
+    """Flight recorder trace files location"""
 
 
 @dataclass
@@ -758,212 +774,3 @@ class JobConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-class ConfigManager:
-    """
-    Parses, merges, and validates a JobConfig from TOML and CLI sources.
-
-    Configuration precedence:
-        CLI args > TOML file > JobConfig defaults
-
-    CLI arguments use the format <section>.<key> to map to TOML entries.
-    Example:
-        model.name →
-
-        [model]
-        name
-    """
-
-    def __init__(self, config_cls: Type[JobConfig] = JobConfig):
-        self.config_cls = config_cls
-        self.config: JobConfig = config_cls()
-        self.register_tyro_rules(custom_registry)
-
-    def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
-        toml_values = self._maybe_load_toml(args)
-        config_cls = self._maybe_add_custom_args(args, toml_values)
-
-        base_config = (
-            self._dict_to_dataclass(config_cls, toml_values)
-            if toml_values
-            else config_cls()
-        )
-
-        self.config = tyro.cli(
-            config_cls, args=args, default=base_config, registry=custom_registry
-        )
-
-        self._validate_config()
-
-        return self.config
-
-    def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
-        # 1. Check CLI
-        valid_keys = {"--job.config-file", "--job.config_file"}
-        for i, arg in enumerate(args):
-            if "=" in arg:
-                key, value = arg.split("=", 1)
-                if key in valid_keys:
-                    file_path = value
-                    break
-            elif i < len(args) - 1 and arg in valid_keys:
-                file_path = args[i + 1]
-                break
-        else:
-            return None
-
-        try:
-            with open(file_path, "rb") as f:
-                return tomllib.load(f)
-        except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
-            logger.exception(f"Error while loading config file: {file_path}")
-            raise e
-
-    def _maybe_add_custom_args(
-        self, args: list[str], toml_values: dict[str, Any] | None
-    ) -> Type[JobConfig]:  # noqa: B006
-        """Find and merge custom arguments module with current JobConfig class"""
-        module_path = None
-
-        # 1. Check CLI
-        valid_keys = {
-            "--experimental.custom_args_module",
-            "--experimental.custom-args-module",
-        }
-        for i, arg in enumerate(args):
-            key = arg.split("=")[0]
-            if key in valid_keys:
-                module_path = arg.split("=", 1)[1] if "=" in arg else args[i + 1]
-                break
-
-        # 2. If not found in CLI, check TOML
-        if not module_path and toml_values:
-            experimental = toml_values.get("experimental", {})
-            if isinstance(experimental, dict):
-                module_path = experimental.get("custom_args_module")
-
-        if not module_path:
-            return self.config_cls
-
-        JobConfigExtended = importlib.import_module(module_path).JobConfig
-        return self._merge_configs(self.config_cls, JobConfigExtended)
-
-    @staticmethod
-    def _merge_configs(base, custom) -> Type:
-        """
-        Merges a base JobConfig class with user-defined extensions.
-
-        This method creates a new dataclass type that combines fields from both `base` and `custom`,
-        allowing users to extend or override JobConfig configuration structure.
-
-        Merge behavior:
-        - If a field exists in both `base` and `custom`:
-            - If both field types are dataclasses, they are merged recursively.
-            - Otherwise, the field from `custom` overrides the one in `base` (type, default, etc.).
-        - Fields only present in `base` or `custom` are preserved as-is.
-        """
-        result = []
-        b_map = {f.name: f for f in fields(base)}
-        c_map = {f.name: f for f in fields(custom)}
-
-        for name, f in b_map.items():
-            if (
-                name in c_map
-                and is_dataclass(f.type)
-                and is_dataclass(c_map[name].type)
-            ):
-                m_type = ConfigManager._merge_configs(f.type, c_map[name].type)
-                result.append((name, m_type, field(default_factory=m_type)))
-
-            # Custom field overrides base type
-            elif name in c_map:
-                result.append((name, c_map[name].type, c_map[name]))
-
-            # Only in Base
-            else:
-                result.append((name, f.type, f))
-
-        # Only in Custom
-        for name, f in c_map.items():
-            if name not in b_map:
-                result.append((name, f.type, f))
-
-        return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))
-
-    def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
-        """Convert dictionary to dataclass, handling nested structures."""
-        if not is_dataclass(cls):
-            return data
-
-        result = {}
-        for f in fields(cls):
-            if f.name in data:
-                value = data[f.name]
-                if is_dataclass(f.type) and isinstance(value, dict):
-                    result[f.name] = self._dict_to_dataclass(f.type, value)
-                else:
-                    result[f.name] = value
-        return cls(**result)
-
-    def _validate_config(self) -> None:
-        # TODO: temporary mitigation of BC breaking change in
-        #       tokenizer default path, need to remove later
-        if not os.path.exists(self.config.model.tokenizer_path):
-            logger.warning(
-                f"Tokenizer path {self.config.model.tokenizer_path} does not exist!"
-            )
-            old_tokenizer_path = (
-                "torchtitan/datasets/tokenizer/original/tokenizer.model"
-            )
-            if os.path.exists(old_tokenizer_path):
-                self.config.model.tokenizer_path = old_tokenizer_path
-                logger.warning(
-                    f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please download the new tokenizer model (python scripts/download_tokenizer.py) and update your config."
-                )
-        else:
-            # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            if self.config.model.tokenizer_path.endswith("tokenizer.model"):
-                raise Exception(
-                    "You are using the old tokenizer.model, please redownload the tokenizer ",
-                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B) ",
-                    " and update your config to the directory of the downloaded tokenizer.",
-                )
-
-    @staticmethod
-    def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
-        @registry.primitive_rule
-        def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
-            """Support for comma seperated string parsing"""
-            if type_info.type != list[str]:
-                return None
-            return tyro.constructors.PrimitiveConstructorSpec(
-                nargs=1,
-                metavar="A,B,C,...",
-                instance_from_str=lambda args: args[0].split(","),
-                is_instance=lambda instance: all(isinstance(i, str) for i in instance),
-                str_from_instance=lambda instance: [",".join(instance)],
-            )
-
-
-if __name__ == "__main__":
-    # -----------------------------------------------------------------------------
-    # Run this module directly to debug or inspect configuration parsing.
-    #
-    # Examples:
-    #   Show help message:
-    #     > python -m torchtitan.config_manager --help
-    #
-    #   Parse and print a config with CLI arguments:
-    #     > python -m torchtitan.config_manager --profiling.enable_memory_snapshot
-    #
-    # -----------------------------------------------------------------------------
-
-    from rich import print as rprint
-    from rich.pretty import Pretty
-
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
-
-    rprint(Pretty(config))

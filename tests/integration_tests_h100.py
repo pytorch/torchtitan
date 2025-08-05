@@ -9,8 +9,8 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Sequence
+
+from .integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,21 +19,6 @@ try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
-
-
-@dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
-
-    override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = "default"
-    test_name: str = "default"
-    ngpu: int = 4
-
-    def __repr__(self):
-        return self.test_descr
 
 
 def build_test_list():
@@ -61,7 +46,6 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--float8.force_recompute_fp8_weight_in_bwd",
                 ],
             ],
             "Float8 test",
@@ -78,7 +62,6 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--float8.force_recompute_fp8_weight_in_bwd",
                 ]
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
@@ -95,7 +78,6 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--float8.force_recompute_fp8_weight_in_bwd",
                 ]
             ],
             "HSDP+CP+torch.compile+Float8",

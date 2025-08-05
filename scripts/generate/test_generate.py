@@ -26,7 +26,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.components.checkpoint import excluded_parameters_for_model_only
 from torchtitan.components.metrics import build_device_memory_monitor
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
@@ -107,7 +107,7 @@ def test_generate(
     tokenizer = train_spec.build_tokenizer_fn(config)
 
     model_args = train_spec.model_args[config.model.flavor]
-    model_args.update_from_config(config, tokenizer)
+    model_args.update_from_config(config)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
@@ -117,7 +117,7 @@ def test_generate(
     world_mesh = None
     # Init distributed env
     if world_size > 1:
-        dist_utils.init_distributed(config)
+        dist_utils.init_distributed(config.comm)
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,

@@ -14,7 +14,7 @@ from torchtitan.tools.logging import init_logger, logger
 
 
 @torch.inference_mode()
-def convert_llama_weights(input_dir, output_dir, max_seq_len: int):
+def convert_from_llama(input_dir, output_dir, max_seq_len: int):
     with open(input_dir / "params.json", "r") as f:
         params = json.load(f)
     n_layers = params["n_layers"]
@@ -143,4 +143,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    convert_llama_weights(args.input_dir, args.output_dir, max_seq_len=args.max_seq_len)
+    convert_from_llama(args.input_dir, args.output_dir, max_seq_len=args.max_seq_len)

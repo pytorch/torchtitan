@@ -10,7 +10,7 @@ from typing import Iterable, Optional
 import torch
 from torch.distributed.fsdp import FSDPModule
 
-from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
@@ -126,19 +126,20 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        latent_noise_pred = model(
-            img=latents,
-            img_ids=latent_pos_enc,
-            txt=t5_encodings,
-            txt_ids=text_pos_enc,
-            y=clip_encodings,
-            timesteps=timesteps,
-        )
+        with self.maybe_enable_amp:
+            latent_noise_pred = model(
+                img=latents,
+                img_ids=latent_pos_enc,
+                txt=t5_encodings,
+                txt_ids=text_pos_enc,
+                y=clip_encodings,
+                timesteps=timesteps,
+            )
 
-        # Convert sequence of patches to latent shape
-        pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-        target = noise - labels
-        loss = self.loss_fn(pred, target)
+            # Convert sequence of patches to latent shape
+            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+            target = noise - labels
+            loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
         # need to free to before bwd to avoid peaking memory
         del (pred, noise, target)

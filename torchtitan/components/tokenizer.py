@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
 from tokenizers import AddedToken, Tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 from typing_extensions import override
 
@@ -161,7 +161,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
             raise FileNotFoundError(
                 f"No supported tokenizer files found in '{tokenizer_path}'. "
                 f"Available files: {available_files}. "
-                "Looking for: tokenizer.json, tokenizer.model, vocab.txt+merges.txt, or vocab.json+merges.txt"
+                "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
             )
 
     def _get_token_from_config(self, config: dict[str, Any], key: str) -> Optional[str]:

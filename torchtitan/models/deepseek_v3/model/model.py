@@ -233,7 +233,9 @@ class Attention(nn.Module):
         output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
-        output = output.transpose(1, 2)  # (bsz, seqlen, n_heads, v_head_dim)
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
@@ -330,7 +332,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             bias=False,
         )
         self.model_args = model_args
-        self.eos_id = model_args.eos_id
         self.init_weights()
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
@@ -355,7 +356,12 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
-    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        eos_id: int | None = None,
+        input_batch: torch.Tensor | None = None,
+    ):
         """
         Forward pass for the Transformer model.
 
@@ -374,7 +380,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         """
         if self.model_args.use_flex_attn:
             init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
+                input_batch if input_batch is not None else tokens, eos_id=eos_id
             )
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens

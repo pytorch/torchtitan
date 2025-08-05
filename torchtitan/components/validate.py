@@ -9,11 +9,12 @@ from typing import Generator
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
+from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
@@ -27,7 +28,7 @@ class BaseValidator:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
-        return step % self.job_config.validation.freq == 0
+        return step == 1 or step % self.job_config.validation.freq == 0
 
 
 class Validator(BaseValidator):
@@ -54,6 +55,9 @@ class Validator(BaseValidator):
         validation_context: Generator[None, None, None],
         maybe_enable_amp: Generator[None, None, None],
         metrics_processor: MetricsProcessor,
+        pp_schedule: _PipelineSchedule | None = None,
+        pp_has_first_stage: bool | None = None,
+        pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
@@ -67,6 +71,9 @@ class Validator(BaseValidator):
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
+        self.pp_schedule = pp_schedule
+        self.pp_has_first_stage = pp_has_first_stage
+        self.pp_has_last_stage = pp_has_last_stage
 
     @torch.no_grad()
     def validate(
@@ -75,7 +82,6 @@ class Validator(BaseValidator):
         step: int,
     ) -> dict[str, float]:
         # Set model to eval mode
-        # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
         model.eval()
 
@@ -110,11 +116,40 @@ class Validator(BaseValidator):
                 else None
             )
 
-            with self.validation_context(optional_context_parallel_ctx):
-                assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    predictions = model(inputs)
-                    loss = self.loss_fn(predictions, labels)
+            if parallel_dims.pp_enabled:
+                assert self.pp_schedule is not None
+                assert self.pp_has_first_stage is not None
+                assert self.pp_has_last_stage is not None
+                # Pipeline Parallel forward inside eval() call
+                with self.validation_context(optional_context_parallel_ctx):
+                    targets, losses = (
+                        (labels, []) if self.pp_has_last_stage else (None, None)
+                    )
+                    if self.pp_has_first_stage:
+                        self.pp_schedule.eval(
+                            inputs,
+                            target=targets,
+                            losses=losses,
+                            input_batch=inputs,
+                        )
+                    else:
+                        self.pp_schedule.eval(
+                            target=targets, losses=losses, input_batch=inputs
+                        )
+
+                # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+                loss = (
+                    torch.mean(torch.stack(losses)).to(device_type)
+                    if self.pp_has_last_stage
+                    else torch.tensor([-1.0], device=device_type)
+                )
+            else:
+                with self.validation_context(optional_context_parallel_ctx):
+                    assert len(model_parts) == 1
+                    with self.maybe_enable_amp:
+                        predictions = model(inputs)
+                        loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
 
@@ -152,6 +187,9 @@ def build_validator(
     validation_context: Generator[None, None, None],
     maybe_enable_amp: Generator[None, None, None],
     metrics_processor: MetricsProcessor | None = None,
+    pp_schedule: _PipelineSchedule | None = None,
+    pp_has_first_stage: bool | None = None,
+    pp_has_last_stage: bool | None = None,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
     return Validator(
@@ -164,4 +202,7 @@ def build_validator(
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
         metrics_processor=metrics_processor,
+        pp_schedule=pp_schedule,
+        pp_has_first_stage=pp_has_first_stage,
+        pp_has_last_stage=pp_has_last_stage,
     )

@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
-from torchtitan.config_manager import FaultTolerance as FTConfig
+from torchtitan.config.job_config import FaultTolerance as FTConfig
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
@@ -123,8 +123,6 @@ def maybe_semi_sync_training(
         ), "FTManager must be enabled to use semi-sync training."
         if semi_sync_method.lower() == "diloco":
             # Create the outer optimizer based on the inner optimizer parameters.
-            params = [group["params"] for group in optimizer.param_groups]
-            params = [param for sublist in params for param in sublist]
             outer_optimizers = []
             for model in model_parts:
                 params = [p for p in model.parameters() if p.requires_grad]

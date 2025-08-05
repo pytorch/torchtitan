@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torchtitan.components.checkpoint import MODEL
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
@@ -62,7 +62,7 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
         return [f"layers.{layer}.moe.shared_expert.w3"]
     elif "feed_forward.shared_expert.up_proj.weight" in fqn:
         return [f"layers.{layer}.moe.shared_expert.w1"]
-    elif "input_layernorm.weight" in fqn:
+    elif "post_attention_layernorm.weight" in fqn:
         return [f"layers.{layer}.ffn_norm.weight"]
     elif "self_attn.k_proj" in fqn:
         return [f"layers.{layer}.attention.wk.weight"]
@@ -72,7 +72,7 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
         return [f"layers.{layer}.attention.wq.weight"]
     elif "self_attn.v_proj" in fqn:
         return [f"layers.{layer}.attention.wv.weight"]
-    elif "post_attention_layernorm.weight" in fqn:
+    elif "input_layernorm.weight" in fqn:
         return [f"layers.{layer}.attention_norm.weight"]
     else:
         raise ValueError(f"Unknown fqn {fqn}")

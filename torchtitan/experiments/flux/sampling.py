@@ -15,7 +15,7 @@ from PIL import ExifTags, Image
 from torch import Tensor
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 from .model.autoencoder import AutoEncoder
@@ -172,7 +172,7 @@ def denoise(
     _, latent_channels, latent_height, latent_width = latents.shape
 
     # create denoising schedule
-    timesteps = get_schedule(denoising_steps, latent_channels, shift=True)
+    timesteps = get_schedule(denoising_steps, latent_height * latent_width, shift=True)
 
     # create positional encodings
     POSITION_DIM = 3

@@ -7,7 +7,7 @@ from typing import Dict, List, Protocol, Union
 
 import torch.nn as nn
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 

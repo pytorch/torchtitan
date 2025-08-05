@@ -17,7 +17,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
@@ -76,9 +76,6 @@ def estimate_memory(job_config: JobConfig):
 
     train_spec = get_train_spec(job_config.model.name)
 
-    # build tokenizer
-    tokenizer = train_spec.build_tokenizer_fn(job_config)
-
     loss_parallel_enabled = (
         parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
     )
@@ -89,7 +86,7 @@ def estimate_memory(job_config: JobConfig):
 
     # build model (using meta init)
     model_args = train_spec.model_args[job_config.model.flavor]
-    model_args.update_from_config(job_config, tokenizer)
+    model_args.update_from_config(job_config)
 
     with (
         FakeTensorMode()
@@ -115,8 +112,10 @@ def estimate_memory(job_config: JobConfig):
         model.train()
 
         # build optimizer after applying parallelisms to the model
-        optimizers = build_optimizers([model], job_config, parallel_dims)
-        lr_schedulers = build_lr_schedulers(optimizers.optimizers, job_config)
+        optimizers = build_optimizers([model], job_config.optimizer, parallel_dims)
+        lr_schedulers = build_lr_schedulers(
+            optimizers.optimizers, job_config.lr_scheduler, job_config.training.steps
+        )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
         # where it issues a single all-reduce for all parameters at once for better performance

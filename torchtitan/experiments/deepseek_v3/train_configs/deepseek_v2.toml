@@ -35,7 +35,7 @@ implementation = "foreach"
 warmup_steps = 100  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
-lr_min = 0.1
+min_lr_factor = 0.1
 
 [training]
 local_batch_size = 2 # 8

@@ -322,7 +322,7 @@ class Transformer(nn.Module, ModelProtocol):
         tok_embeddings (ParallelEmbedding): Token embeddings.
         layers (torch.nn.ModuleList): List of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
-        output (ColumnParallelLinear): Linear layer for final output.
+        output (Linear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
 
     """
@@ -332,7 +332,6 @@ class Transformer(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -398,7 +397,12 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        eos_id: int | None = None,
+        input_batch: torch.Tensor | None = None,
+    ):
         """
         Perform a forward pass through the Transformer model.
 
@@ -418,7 +422,7 @@ class Transformer(nn.Module, ModelProtocol):
         """
         if self.model_args.use_flex_attn:
             init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
+                input_batch if input_batch is not None else tokens, eos_id=eos_id
             )
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
