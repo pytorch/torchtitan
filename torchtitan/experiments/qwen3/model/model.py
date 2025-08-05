@@ -135,7 +135,7 @@ class Attention(nn.Module):
             else model_args.n_kv_heads
         )
         self.n_rep = self.n_heads // self.n_kv_heads
-        self.head_dim = model_args.dim // model_args.n_heads
+        self.head_dim = model_args.head_dim
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -188,17 +188,17 @@ class Attention(nn.Module):
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-
+        
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
         if self.q_norm:
             xq = self.q_norm(xq)
         if self.k_norm:
             xk = self.k_norm(xk)
+
+        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
             
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
         
@@ -274,23 +274,13 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
 
-        # assert self.dim % self.n_heads== 0, "`d_in` must be divisible by `num_heads` if `head_dim` is not set"
-        # head_dim = self.dim // self.n_heads
 
         self.attention = Attention(model_args)
         self.feed_forward = FeedForward(
             dim=model_args.dim, hidden_dim=model_args.hidden_dim
-        )  # why 4 *?
-        # multiple_of=model_args.multiple_of,
-        # ffn_dim_multiplier=model_args.ffn_dim_multiplier,
-        # )
+        ) 
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        # Added here
-        # if model_args.qk_norm:
-        #     self.q_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        #     self.k_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        # Here we need to add RMSNorm to the key/query on top of the input
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -406,7 +396,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
+            self.head_dim,
             # Need to compute until at least the max token limit for generation
             # TODO: explain in docs/composability.md why we removed the 2x
             # relaxing in our CP enablement PR
