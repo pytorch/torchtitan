@@ -57,12 +57,12 @@ class TestGenerateImage:
                 "--training.img_size",
                 str(img_width),
                 # eval params
-                "--eval.denoising_steps",
+                "--validation.denoising_steps",
                 str(num_steps),
-                "--eval.enable_classifier_free_guidance",
-                "--eval.classifier_free_guidance_scale",
+                "--validation.enable_classifier_free_guidance",
+                "--validation.classifier_free_guidance_scale",
                 str(classifier_free_guidance_scale),
-                "--eval.save_img_folder",
+                "--validation.save_img_folder",
                 "img",
             ]
         )
@@ -120,7 +120,7 @@ class TestGenerateImage:
         save_image(
             name=f"img_unit_test_{config.training.seed}.jpg",
             output_dir=os.path.join(
-                config.job.dump_folder, config.eval.save_img_folder
+                config.job.dump_folder, config.validation.save_img_folder
             ),
             x=image,
             add_sampling_metadata=True,

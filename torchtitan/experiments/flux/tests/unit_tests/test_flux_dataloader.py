@@ -79,7 +79,9 @@ class TestFluxDataLoader(unittest.TestCase):
                 for i in range(0, num_steps):
                     input_data, labels = next(it)
 
-                    assert len(input_data) == 2  # (clip_encodings, t5_encodings)
+                    assert (
+                        len(input_data) == 3
+                    )  # (clip_encodings, t5_encodings, prompt)
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip_tokens"].shape == (
                         batch_size,
