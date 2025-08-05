@@ -10,6 +10,7 @@ from typing import Generator
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
+from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
@@ -57,6 +58,9 @@ class FluxValidator(Validator):
         validation_context: Generator[None, None, None],
         maybe_enable_amp: Generator[None, None, None],
         metrics_processor: MetricsProcessor | None = None,
+        pp_schedule: _PipelineSchedule | None = None,
+        pp_has_first_stage: bool | None = None,
+        pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
@@ -250,6 +254,9 @@ def build_flux_validator(
     validation_context: Generator[None, None, None],
     maybe_enable_amp: Generator[None, None, None],
     metrics_processor: MetricsProcessor | None = None,
+    pp_schedule: _PipelineSchedule | None = None,
+    pp_has_first_stage: bool | None = None,
+    pp_has_last_stage: bool | None = None,
 ) -> FluxValidator:
     """Build a simple validator focused on correctness."""
     return FluxValidator(
@@ -262,4 +269,7 @@ def build_flux_validator(
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
         metrics_processor=metrics_processor,
+        pp_schedule=pp_schedule,
+        pp_has_first_stage=pp_has_first_stage,
+        pp_has_last_stage=pp_has_last_stage,
     )
