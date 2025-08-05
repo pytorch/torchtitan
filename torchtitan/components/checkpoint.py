@@ -285,7 +285,7 @@ class CheckpointManager:
 
         self.ft_keep_latest_k = job_config.fault_tolerance.checkpoint_keep_latest_k
         self.keep_latest_k = ckpt_config.keep_latest_k
-        if self.keep_latest_k > 0:
+        if self.keep_latest_k > 0 or self.ft_keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
                     "We need to maintain at least 2 checkpoint replicas, "
