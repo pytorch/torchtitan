@@ -46,12 +46,6 @@ clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
-[eval]
-enable_classifier_free_guidance = true
-classifier_free_guidance_scale = 5.0
-denoising_steps = 50
-save_img_folder = "img"
-eval_freq = 1000
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -70,3 +64,15 @@ interval = 1_000
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[validation]
+enabled = false
+dataset = "coco-validation"
+local_batch_size=64
+freq = 1000
+enable_classifier_free_guidance = true
+classifier_free_guidance_scale = 5.0
+denoising_steps = 50
+save_img_count = 50
+save_img_folder = "img"
+all_timesteps = false
