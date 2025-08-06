@@ -25,11 +25,16 @@ __all__ = [
 
 llama4_configs = {
     "debugmodel": TransformerModelArgs(
-        dim=256,
-        n_layers=6,
-        n_heads=16,
-        vocab_size=2000,
+        dim=5120,
+        n_layers=2,
+        n_heads=40,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.2,
+        multiple_of=2048,
         rope_theta=500000,
+        max_seq_len=10485760,
+        num_experts=8,
+        interleave_moe_layer_step=1,
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
