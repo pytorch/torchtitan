@@ -357,6 +357,8 @@ class Transformer(nn.Module, ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
+        # Implement weight tying between input embeddings and output projection
+        self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
