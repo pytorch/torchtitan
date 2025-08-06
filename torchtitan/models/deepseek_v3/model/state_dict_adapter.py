@@ -11,6 +11,7 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 import torch
+from torchtitan.tools.logging import logger
 
 
 class DeepSeekV3StateDictAdapter(StateDictAdapter):
@@ -83,17 +84,100 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         
         return None
 
-    def _quantization(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _quantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Quantize the weights from float32 to float8. Export to HF f
         """
         pass
 
-    def _dequantization(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         Dequantize the weights from float8 to float32.
         """
-        pass
+        
+        scale_inv_keys = []
+        for key, weight in state_dict.items():
+            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
+                scale_inv = state_dict[key + "_scale_inv"]
+                
+                # Convert to float32 for computation
+                float_weight = weight.to(torch.float32)
+                # Get original dimensions
+                orig_shape = weight.shape
+                # Fixed block size of 128x128 as specified in the algorithm
+                BLOCK_SIZE = 128
+
+                # Calculate number of blocks needed
+                block_rows = (orig_shape[0] + BLOCK_SIZE - 1) // BLOCK_SIZE
+                block_cols = (orig_shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+                # Verify scale_inv shape matches expected block dimensions
+                expected_scale_shape = (block_rows, block_cols)
+                if scale_inv.shape != expected_scale_shape:
+                    logger.warning(
+                        f"scale_inv shape {scale_inv.shape} doesn't match expected shape {expected_scale_shape}"
+                    )
+
+                # NOTE: This might cause OOM if the model is too large
+                # Copy the weight tensor to make it also a DTensor
+                dequantized = float_weight.clone()
+
+                # Apply scaling factors to each block
+                for i in range(block_rows):
+                    row_start = i * BLOCK_SIZE
+                    row_end = min(row_start + BLOCK_SIZE, orig_shape[0])
+
+                    for j in range(block_cols):
+                        col_start = j * BLOCK_SIZE
+                        col_end = min(col_start + BLOCK_SIZE, orig_shape[1])
+
+                        # Get the block
+                        block = float_weight[row_start:row_end, col_start:col_end]
+
+                        scale = scale_inv[i, j]
+                        block = block * scale
+
+                        # Explicitly convert block to dtype
+                        block_converted = block.to(dtype=torch.float32)
+                        # Store the dequantized block
+                        dequantized[row_start:row_end, col_start:col_end] = block_converted
+
+                # update the weight and remove the scale_inv tensor
+                state_dict[key] = dequantized
+                scale_inv_keys.append(key + "_scale_inv")
+
+        for key in scale_inv_keys:
+            state_dict.pop(key)
+
+        return state_dict
+
+    def _add_quantization_scale_inv_tensors(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Add quantization scale tensors the state_dict.
+        """
+        non_quantized_keys = ["input_layernorm.weight", "post_attention_layernorm.weight", "norm.weight", "lm_head.weight", "embed_tokens.weight", "mlp.gate.weight"]
+
+        weight_scale_inv_state_dict = {}
+        for key, value in state_dict.items():
+            if key.endswith(".weight") and not any(non_quantized_key in key for non_quantized_key in non_quantized_keys):
+                # Calculate the scale tensor shape
+                orig_shape = value.shape
+
+                # Fixed block size of 128x128 as specified in the algorithm
+                BLOCK_SIZE = 128
+
+                # Calculate number of blocks needed
+                block_rows = (orig_shape[0] + BLOCK_SIZE - 1) // BLOCK_SIZE
+                block_cols = (orig_shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+                # Verify scale_inv shape matches expected block dimensions
+                expected_scale_shape = (block_rows, block_cols)
+                
+                # add weight_scale_inv to the state_dict
+                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.zeros(expected_scale_shape, dtype=torch.float32)
+
+        state_dict.update(weight_scale_inv_state_dict)
+        return state_dict
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -111,7 +195,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 continue
             
             if "moe.experts" in key:
-                print("In to_hf, the key is: ", key, " value is: ", value.shape, "\n")
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
@@ -120,7 +203,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 split_values = self._split_experts_weights(value, self.model_args.n_routed_experts)
                 for expert_num in range(0, self.model_args.n_routed_experts):                
                     new_key = new_key.format(layer_num, expert_num)
-                    hf_state_dict[new_key] = split_values[expert_num].transpose(0, 1)
+                    hf_state_dict[new_key] = split_values[expert_num].squeeze().transpose(0, 1)
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -132,15 +215,15 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 # torchtitan shape: (1, s[1], s[2]) -> HF shape: (s[2], s[1])
                 if "shared_expert" in key:
                     value = value.squeeze(0).transpose(0, 1)
-                    print("shared_expert value ", value.shape)
                     
                 hf_state_dict[new_key] = value
             
             else:
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
-            
-        return hf_state_dict
+        
+        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(hf_state_dict)    
+        return hf_state_dict_with_scale_inv
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -148,8 +231,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate seprate expert's wegiht into GroupedExperts' weight.
         """
-
-        print("In from_hf, the state_dict key is: ", hf_state_dict.keys(), "\n")
+        
+        # dequantize the tensor in state_dict and remove the scale_inv tensor
+        hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
         
         expert_weights_by_layer = {} # {layer: {abstract_key: {expert_id: tensor}}}
@@ -164,14 +248,14 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 # Store the expert's weight in expert_weights_by_layer for concating later.
                 if layer_num not in expert_weights_by_layer:
                     expert_weights_by_layer[layer_num] = {}
-                    if abstract_key not in expert_weights_by_layer[layer_num]:
-                        expert_weights_by_layer[layer_num][abstract_key] = {}
+                if abstract_key not in expert_weights_by_layer[layer_num]:
+                    expert_weights_by_layer[layer_num][abstract_key] = {}
                 expert_weights_by_layer[layer_num][abstract_key][expert_num] = value
 
                 # try to concat the expert's weight into GroupedExperts' weight.
                 stacked_value = self._concatenate_expert_weights(expert_weights_by_layer, self.model_args.n_routed_experts)
                 if stacked_value is not None:
-                    state_dict[new_key] = value
+                    state_dict[new_key] = stacked_value
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
