@@ -51,13 +51,11 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         }
 
     
-    def _split_experts_weights(self, weight: torch.Tensor, expert_id: int, n_experts: int) -> torch.Tensor:
+    def _split_experts_weights(self, weight: torch.Tensor, n_experts: int) -> list[torch.Tensor]:
         """
         Split the weights of the experts into a list of tensors.
         """
-        print("before split, the weight is ", weight.shape)
-        split_weight = torch.split(weight.squeeze(0), weight.shape[0] // n_experts, dim=0)[expert_id]
-        print("split weight: ", split_weight.shape)
+        split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
         return split_weight
     
     def _concatenate_expert_weights(self, expert_weights_by_layer: dict[str, Any], n_experts: int) -> torch.Tensor:
@@ -113,15 +111,16 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 continue
             
             if "moe.experts" in key:
+                print("In to_hf, the key is: ", key, " value is: ", value.shape, "\n")
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
                 
                 # Split expert weights into seperate expert weights
+                split_values = self._split_experts_weights(value, self.model_args.n_routed_experts)
                 for expert_num in range(0, self.model_args.n_routed_experts):                
                     new_key = new_key.format(layer_num, expert_num)
-                    value = self._split_experts_weights(value, expert_num, self.model_args.n_routed_experts)
-                    hf_state_dict[new_key] = value
+                    hf_state_dict[new_key] = split_values[expert_num].transpose(0, 1)
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
