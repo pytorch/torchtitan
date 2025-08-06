@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchtitan.config.job_config import JobConfig, MX
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,
@@ -58,12 +59,8 @@ class MXConverter(ModelConverter):
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
         if job_config.mx.moe_fqns_prototype:
-            from torchtitan.experiments.llama4.infra.expert_parallel import (
-                set_token_group_alignment_size,
-            )
-
             mxfp8_block_size = 32
-            set_token_group_alignment_size(mxfp8_block_size)
+            set_token_group_alignment_size_m(mxfp8_block_size)
             logger.info(f"Setting token group alignment size to {mxfp8_block_size}")
 
         # Configure MXFP8

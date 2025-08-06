@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Mapping, TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
@@ -43,7 +43,7 @@ ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]
 class TrainSpec:
     name: str
     model_cls: type[ModelProtocol]
-    model_args: dict[str, BaseModelArgs]
+    model_args: Mapping[str, BaseModelArgs]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
     build_optimizers_fn: OptimizersBuilder

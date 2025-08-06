@@ -1,4 +1,4 @@
-# DeepSeek-V3 in TorchTitan
+# DeepSeek-V3 in `torchtitan`
 
 DeepSeek-V3 is a Mixture-of-Experts (MoE) transformer model with Multi-head Latent Attention (MLA) architecture.
 
@@ -15,6 +15,9 @@ python scripts/download_tokenizer.py --repo_id deepseek-ai/DeepSeek-V3
 # DeepSeek 16B tokenizer:
 python scripts/download_tokenizer.py --repo_id deepseek-ai/deepseek-moe-16b-base
 ```
+
+> **Note:** We are reusing the tokenizer from deepseek-ai/deepseek-moe-16b-base to help users test and run the 16B model. This is not the official tokenizer for the DeepSeek-V3-16B model. The DeepSeek-V3 model has a different architecture from the deepseek-moe models (different attention implementation, MoE router implementation, etc.), making it not feasible to load deepseek-moe-16b model weights into DeepSeek-V3-16B.
+
 
 ## Training
 
@@ -47,11 +50,8 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
 
 
 ## To be added
-- Modeling
-    - Merge DeepSeek-V3 and Llama4 MoE common components
-    - Attention Layer: need to pass softmax_scale to sdpa() to support scaling
 - Parallelism
-    - Context Parallel support for DeepSeek-V3
+    - Context Parallel support for DeepSeek V3
 - torch.compile
 - Quantization
 - Testing

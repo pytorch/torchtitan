@@ -232,8 +232,3 @@ class ParallelDims:
         # when load balancing is enabled (by default).
         # https://github.com/pytorch/pytorch/blob/4f62dcc/torch/distributed/tensor/experimental/_attention.py#L1246
         return self.tp * (self.cp * 2)
-
-    @cached_property
-    def dense_params_mesh_ndim(self):
-        # Note: In dp2ep EP, EP params mesh ndim is 1 more due to the 'ep' mesh
-        return self.dp_replicate_enabled + self.fsdp_enabled + self.tp_enabled
