@@ -18,8 +18,31 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
-from torchtitan.config import Optimizer as OptimizerConfig
+from torchtitan.config import Optimizer as OptimizerConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+
+# Dion optimizer availability will be checked lazily when needed
+DION_AVAILABLE = None
+
+
+def _check_dion_availability():
+    """Lazy check for Dion optimizer availability."""
+    global DION_AVAILABLE
+    if DION_AVAILABLE is None:
+        try:
+            from torchtitan.experiments.dion_optimizer.dion import (
+                Dion,
+                DionMixedPrecisionConfig,
+            )
+            from torchtitan.experiments.dion_optimizer.titan_dion import (
+                DionOptimizersContainer,
+            )
+
+            DION_AVAILABLE = True
+        except ImportError:
+            DION_AVAILABLE = False
+    return DION_AVAILABLE
+
 
 __all__ = [
     "OptimizersContainer",
@@ -250,8 +273,8 @@ def build_optimizers(
 
     This function creates a ``OptimizersContainer`` for the given model parts.
     ``optimizer_config`` should define the correct optimizer name and parameters.
-    This function currently supports creating ``OptimizersContainer`` and
-    ``OptimizersInBackwardContainer``.
+    This function currently supports creating ``OptimizersContainer``,
+    ``OptimizersInBackwardContainer``, and ``DionOptimizersContainer``.
 
     **Note**
     Users who want to customize the optimizer behavior can create their own
@@ -265,6 +288,69 @@ def build_optimizers(
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
     optim_in_bwd = optimizer_config.early_step_in_backward
+    name = optimizer_config.name
+
+    # Handle Dion optimizer
+    if name == "Dion":
+        if not _check_dion_availability():
+            raise ImportError(
+                "Dion optimizer is not available. Please ensure the dion optimizer files are present in "
+                "torchtitan/experiments/dion_optimizer/"
+            )
+
+        if optim_in_bwd:
+            raise NotImplementedError(
+                "Dion optimizer does not support early step in backward."
+            )
+
+        if ft_manager and ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not yet supported with Dion optimizer."
+            )
+
+        # Import the DionOptimizerConfig and DionOptimizersContainer from titan_dion
+        from torchtitan.experiments.dion_optimizer.titan_dion import (
+            DionOptimizerConfig,
+            DionOptimizersContainer,
+        )
+
+        # Create DionOptimizerConfig from optimizer_config
+        dion_config = DionOptimizerConfig(
+            name="dion",
+            lr=optimizer_config.lr,
+            weight_decay=optimizer_config.weight_decay,
+            mu=optimizer_config.mu,
+            betas=(optimizer_config.beta1, optimizer_config.beta2),
+            epsilon=optimizer_config.eps,
+            rank_fraction=optimizer_config.rank_fraction,
+            rank_multiple_of=optimizer_config.rank_multiple_of,
+            power_iters=optimizer_config.power_iters,
+            qr_method=optimizer_config.qr_method,
+            cqr_warmup_steps=optimizer_config.cqr_warmup_steps,
+            rcqr_oversample=optimizer_config.rcqr_oversample,
+            algorithm=optimizer_config.algorithm,
+            replicate_mesh_grad_sync=optimizer_config.replicate_mesh_grad_sync,
+        )
+
+        # Set mixed precision dtypes if specified
+        if optimizer_config.momentum_dtype:
+            dion_config.momentum_dtype = TORCH_DTYPE_MAP[
+                optimizer_config.momentum_dtype
+            ]
+        if optimizer_config.Q_dtype:
+            dion_config.Q_dtype = TORCH_DTYPE_MAP[optimizer_config.Q_dtype]
+        if optimizer_config.variance_dtype:
+            dion_config.variance_dtype = TORCH_DTYPE_MAP[
+                optimizer_config.variance_dtype
+            ]
+
+        return DionOptimizersContainer(
+            model_parts=model_parts,
+            dion_config=dion_config,
+            parallel_dims=parallel_dims,
+        )
+
+    # Handle standard optimizers (Adam, AdamW)
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
             raise NotImplementedError(
@@ -279,7 +365,6 @@ def build_optimizers(
                 "TorchFT is not supported with optimizers in backward."
             )
 
-    name = optimizer_config.name
     lr = optimizer_config.lr
     beta1 = optimizer_config.beta1
     beta2 = optimizer_config.beta2

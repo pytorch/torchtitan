@@ -1,0 +1,93 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Advanced configuration for training LLaMA 3 8B with Dion optimizer
+# Includes parameter-specific optimizer selection and learning rate scaling
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 8B training with advanced Dion optimizer configuration"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+enable_wandb = true
+# Note: WandB configuration is done via environment variables:
+# - WANDB_PROJECT: Set the project name (e.g., "torchtitan-dion-experiments")
+# - WANDB_ENTITY: Set the entity/team name
+# - WANDB_NAME: Set the run name (e.g., "llama3-8b-dion-training")
+# - WANDB_TAGS: Set tags (e.g., "llama3,8b,dion,optimizer,torchtitan")
+# - WANDB_NOTES: Set notes about the run
+
+[model]
+name = "llama3"
+flavor = "8B"
+tokenizer_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "Dion"
+lr = 3e-4
+weight_decay = 0.1
+beta1 = 0.9
+beta2 = 0.95
+eps = 1e-8
+
+# Dion-specific parameters
+mu = 0.95
+rank_fraction = 0.75
+rank_multiple_of = 128
+algorithm = "dion"
+power_iters = 1
+qr_method = "rcqr"
+cqr_warmup_steps = 150
+rcqr_oversample = 1.25
+replicate_mesh_grad_sync = true
+
+# Parameter-specific optimizer selection
+scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
+embedding_optimizer = "adamw"     # For embedding layers
+head_optimizer = "adamw"          # For model head/output layers
+head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
+
+# Learning rate scaling factors
+scalar_lr_factor = 1.0            # LR multiplier for scalar parameters
+embedding_lr_factor = 0.5         # LR multiplier for embedding parameters
+head_lr_factor = 1.0              # LR multiplier for head parameters (after head_lr_scaling)
+
+# Mixed precision for Dion (optional)
+# momentum_dtype = "float32"
+# Q_dtype = "bfloat16"
+# variance_dtype = "float32"
+
+[lr_scheduler]
+warmup_steps = 500
+decay_type = "linear"
+min_lr_factor = 0.1
+
+[training]
+dataset = "c4"
+local_batch_size = 8
+seq_len = 2048
+max_norm = 1.0
+steps = 1000
+mixed_precision_param = "bfloat16"
+compile = true
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = "op"

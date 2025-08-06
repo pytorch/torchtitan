@@ -1,0 +1,109 @@
+# torchtitan Config.toml - Debug model with Dion optimizer
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 debug training with Dion optimizer"
+print_args = false
+use_for_integration_test = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "llama3"
+flavor = "debugmodel"
+# test folder with tokenizer.json, for debug purpose only
+tokenizer_path = "./tests/assets/tokenizer"
+# converters = ["float8"]
+
+[optimizer]
+name = "Dion"
+lr = 8e-4
+weight_decay = 0.1
+beta1 = 0.9
+beta2 = 0.95
+eps = 1e-8
+
+# Dion-specific parameters
+mu = 0.95
+rank_fraction = 0.75                # Higher rank fraction for debug model (smaller)
+rank_multiple_of = 64               # Smaller alignment for debug model
+algorithm = "dion"
+power_iters = 1
+qr_method = "rcqr"
+cqr_warmup_steps = 150
+rcqr_oversample = 1.25
+replicate_mesh_grad_sync = true
+
+# Parameter-specific optimizer selection
+scalar_optimizer = "adamw"          # For 1D parameters (biases, layer norms)
+embedding_optimizer = "adamw"       # For embedding layers
+head_optimizer = "lion"             # For model head/output layers
+head_lr_scaling = true              # Apply 1/sqrt(dim) scaling to head layers
+
+# Learning rate scaling factors
+scalar_lr_factor = 1.0              # LR multiplier for scalar parameters
+embedding_lr_factor = 0.8           # Slightly reduced LR for embeddings
+head_lr_factor = 1.5                # Slightly increased LR for head (before scaling)
+
+# Mixed precision for Dion (optional - commented out for debug)
+# momentum_dtype = "float32"
+# Q_dtype = "bfloat16"
+# variance_dtype = "float32"
+
+[lr_scheduler]
+warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+local_batch_size = 8
+seq_len = 2048
+max_norm = 1.0  # grad norm clipping
+steps = 10
+compile = false
+dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval = 10
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[validation]
+enabled = false
+dataset = "c4_validation"
+freq = 5
+steps = 10
