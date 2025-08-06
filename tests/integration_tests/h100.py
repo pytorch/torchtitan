@@ -20,66 +20,63 @@ def build_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = []
-    integration_tests_flavors.extend(
-        [
-            OverrideDefinitions(
+    integration_tests_flavors = [
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--training.compile",
-                        "--parallelism.tensor_parallel_degree 2",
-                        "--parallelism.enable_async_tensor_parallel",
-                    ],
+                    "--training.compile",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.enable_async_tensor_parallel",
                 ],
-                "2D async TP compile",
-                "2d_asynctp_compile",
-            ),
-            OverrideDefinitions(
+            ],
+            "2D async TP compile",
+            "2d_asynctp_compile",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.converters float8",
-                        "--float8.enable_fsdp_float8_all_gather",
-                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    ],
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
-                "Float8 test",
-                "float8",
-            ),
-            OverrideDefinitions(
+            ],
+            "Float8 test",
+            "float8",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--training.compile",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.enable_async_tensor_parallel",
-                        "--model.converters float8",
-                        "--float8.enable_fsdp_float8_all_gather",
-                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    ],
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.enable_async_tensor_parallel",
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
-                "FSDP+async TP+PP+torch.compile+Float8",
-                "fsdp+tp+cp+compile+float8",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+            ],
+            "FSDP+async TP+PP+torch.compile+Float8",
+            "fsdp+tp+cp+compile+float8",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--training.compile",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                        "--parallelism.context_parallel_degree 2",
-                        "--model.converters float8",
-                        "--float8.enable_fsdp_float8_all_gather",
-                        "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    ]
-                ],
-                "HSDP+CP+torch.compile+Float8",
-                "hsdp+cp+compile+float8",
-                ngpu=8,
-            ),
-        ]
-    )
+                    "--training.compile",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--model.converters float8",
+                    "--float8.enable_fsdp_float8_all_gather",
+                    "--float8.precompute_float8_dynamic_scale_for_fsdp",
+                ]
+            ],
+            "HSDP+CP+torch.compile+Float8",
+            "hsdp+cp+compile+float8",
+            ngpu=8,
+        ),
+    ]
     return integration_tests_flavors
 
 

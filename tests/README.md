@@ -1,19 +1,19 @@
 # Tests
 
-This directory contains tests for the TorchTitan project, including unit tests and integration tests.
+This directory contains tests for the torchtitan project, including unit tests and integration tests.
 
 ## Test Structure
 
 - `unit_tests/`: Contains unit tests for individual components
 - `integration_tests/`: Contains integration tests that test multiple components together
   - `base_config.toml`: Base configuration file for integration tests
-  - `features.py`: Tests for specific TorchTitan features
-  - `ft.py`: Fine-tuning integration tests
-  - `h100.py`: Tests specifically designed for H100 GPUs, utilizing symmetric memory and float8
+  - `features.py`: Tests for torchtitan features and composability
+  - `ft.py`: Fault-tolerance integration tests
+  - `h100.py`: Tests cases for H100 GPUs
   - `models.py`: Tests for specific model architectures and configurations
 - `assets/`: Contains test assets and fixtures used by the tests
   - `tokenizer/`: Tokenizer configuration and vocabulary files for testing
-  - `custom_schedule.csv`: Custom learning rate schedule for testing
+  - `custom_schedule.csv`: Custom PP schedule for testing
 
 ## Running Tests
 
@@ -22,7 +22,7 @@ This directory contains tests for the TorchTitan project, including unit tests a
 Ensure you have all development dependencies installed:
 
 ```bash
-pip install -r dev-requirements.txt
+pip install -r requirements-dev.txt
 pip install -r requirements.txt
 ```
 
@@ -33,12 +33,6 @@ To run the integration tests:
 ```bash
 python -m tests.integration_tests.<test_module> <output_dir> [--config_path CONFIG_PATH] [--test_name TEST_NAME] [--ngpu NGPU]
 ```
-
-Where `<test_module>` can be one of:
-- `features`: For feature-specific tests
-- `ft`: For fine-tuning tests
-- `h100`: For H100 GPU-specific tests
-- `models`: For model-specific tests
 
 Arguments:
 - `output_dir`: (Required) Directory where test outputs will be stored
@@ -84,17 +78,3 @@ To run a specific test function:
 ```bash
 pytest -s tests/unit_tests/test_job_config.py::TestJobConfig::test_command_line_args
 ```
-
-## Test Categories
-
-### Feature Tests (`features.py`)
-Tests specific TorchTitan features like attention mechanisms, optimizers, and other components.
-
-### Fine-tuning Tests (`ft.py`)
-Tests for fine-tuning capabilities including LoRA, QLoRA, and other parameter-efficient fine-tuning methods.
-
-### H100 Tests (`h100.py`)
-Tests specifically designed for H100 GPUs, focusing on features like symmetric memory and float8 precision.
-
-### Model Tests (`models.py`)
-Tests for specific model architectures and configurations, ensuring they train and generate correctly.

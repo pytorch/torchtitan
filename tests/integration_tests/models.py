@@ -9,30 +9,15 @@ import logging
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Sequence
+from .features import OverrideDefinitions, run_single_test
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
 
-    override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = "default"
-    test_name: str = "default"
-    ngpu: int = 4
-
-    def __repr__(self):
-        return self.test_descr
-
-
-def build_model_parallelism_tests() -> dict[str, list[OverrideDefinitions]]:
+def build_model_tests() -> list[OverrideDefinitions]:
     """
     Build a dictionary of model parallelism test configurations.
     This test suite is aimed at testing the model parallelism of torchtitan, and will broadly cover
@@ -41,48 +26,49 @@ def build_model_parallelism_tests() -> dict[str, list[OverrideDefinitions]]:
     Returns:
         A dictionary where each key is a model name and value is a list of OverrideDefinitions
     """
-    model_tests = defaultdict(list)
-
-    model_tests["deepseek_v3"].extend(
-        [
-            OverrideDefinitions(
+    model_tests = [
+        # Test cases for DeepSeek-V3 models
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.data_parallel_shard_degree 4",
-                        "--parallelism.expert_parallel_degree 2",
-                    ],
+                    "--model.name deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    
                 ],
-                "FSDP+DP2EP",
-                "fsdp_dp2ep",
-                ngpu=4,
-            ),
-            OverrideDefinitions(
+            ],
+            "FSDP+DP2EP",
+            "fsdp_dp2ep",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ],
+                    "--model.name deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                 ],
-                "HSDP+TP",
-                "hsdp+tp",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    ],
+                    "--model.name deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
-                "FSDP+TP+PP",
-                "fsdp+tp+pp",
-                ngpu=8,
-            ),
-        ]
-    )
+            ],
+            "FSDP+TP+PP",
+            "fsdp+tp+pp",
+            ngpu=8,
+        ),
+    ]
     return model_tests
 
 
