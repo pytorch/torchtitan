@@ -127,8 +127,9 @@ def build_test_list():
                     "--checkpoint.last_save_in_hf",
                 ],
                 [
+                    "--model.hf_assets_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
                     "--checkpoint.enable_checkpoint",
-                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+                    "--checkpoint.folder hf_checkpoint-load"
                     "--checkpoint.initial_load_model_only",
                     "--checkpoint.initial_load_in_hf",
                 ],
@@ -592,6 +593,9 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
                 "PROMPT='What is the meaning of life?' "
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             )
+        if test_name == "model_only_hf_checkpoint" and idx == 1:
+            copy_tokenizer = f"cp -r ./tests/assets/tokenizer/* {output_dir}/{test_name}/hf_checkpoint/step-10 "
+            _run_cmd(copy_tokenizer)
 
         result = _run_cmd(cmd)
         logger.info(result.stdout)

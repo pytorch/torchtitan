@@ -33,10 +33,11 @@ def download_hf_assets(
         - vocab.json - JSON vocabulary files
         - merges.txt - BPE merge rules (GPT-2, RoBERTa style)
         - special_tokens_map.json - Special token mappings
-    - weights
+    - safetensors
         - *.safetensors - Modern Huggingface model weights format for fast loading
-    - mapping
-        - safetensors.index.json - Contains mapping from hf fqn to file name
+        - model.safetensors.index.json - Contains mapping from hf fqn to file name
+    - safetensors.index
+        - model.safetensors.index.json - Contains mapping from hf fqn to file name
     - config
         - config.json - Defines the model architecture
 
@@ -72,8 +73,8 @@ def download_hf_assets(
             "merges.txt",
             "special_tokens_map.json",
         ],
-        "weights": ["*.safetensors"],
-        "mapping": ["model.safetensors.index.json"],
+        "safetensors": ["*.safetensors", "model.safetensors.index.json"],
+        "safetensors.index": ["model.safetensors.index.json"],
         "config": ["config.json"],
     }
 
@@ -189,8 +190,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description="Download files from HuggingFace Hub. "
-        "Automatically detects and downloads common tokenizer files (tokenizer.json, "
-        "tokenizer_config.json, tokenizer.model, ...) that work with Tokenizer."
+        "Automatically detects and downloads files that match the specified file-types to download. "
     )
     parser.add_argument(
         "--repo_id",
@@ -215,7 +215,7 @@ if __name__ == "__main__":
         type=str,
         nargs="+",
         required=True,
-        help="Asset types to download: tokenizer, weights, config, mapping",
+        help="Asset types to download: tokenizer, safetensors, safetensors.index, config",
     )
     parser.add_argument(
         "--additional_patterns",

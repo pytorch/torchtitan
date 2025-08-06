@@ -78,7 +78,14 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./tests/assets/tokenizer"
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    """
+    Path to hf_assets folder. This folder can be used to contain safetensor weights, safetensor.index.json mapping,
+    config.json, and tokenizer info
+    """
+
+    tokenizer_path: str | None = None
+    """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
