@@ -37,19 +37,19 @@ You can override it at runtime via CLI with:
 To inspect how configuration values are interpreted—including those from `.toml` files and CLI overrides—run the config manager directly:
 
 ```bash
-python -m torchtitan.config_manager [your cli args...]
+python -m torchtitan.config.manager [your cli args...]
 ```
 
 For example,
 
 ```bash
-python -m torchtitan.config_manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
+python -m torchtitan.config.manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
 ```
 
 To list all available CLI flags and usage:
 
 ```bash
-python -m torchtitan.config_manager --help
+python -m torchtitan.config.manager --help
 ```
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.

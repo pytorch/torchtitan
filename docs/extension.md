@@ -36,7 +36,7 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 ### Extending `JobConfig`
 
-[`JobConfig`](../torchtitan/config_manager.py) supports custom extension through the `--experimental.custom_args_module` flag.
+[`JobConfig`](../torchtitan/config/job_config.py) supports custom extension through the `--experimental.custom_args_module` flag.
 This lets you define a custom module that extends `JobConfig` with additional fields.
 
 When specified, your custom `JobConfig` is merged with the default:
