@@ -16,11 +16,9 @@ import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.nn.attention import SDPBackend
 
 from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -202,6 +200,10 @@ def get_train_context(
                 )
 
             if cp_context is not None:
+                from torch.nn.attention import SDPBackend
+
+                from torchtitan.models.attention import ScaledDotProductAttention
+
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
                 assert (
@@ -319,7 +321,7 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
-    ep_dense_params_mesh_ndim: int | None = None,
+    ep_enabled: bool = False,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -349,7 +351,7 @@ def clip_grad_norm_(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    if ep_dense_params_mesh_ndim is not None:
+    if ep_enabled:
         return _clip_grad_norm_with_ep(
             parameters,
             max_norm,
@@ -357,7 +359,6 @@ def clip_grad_norm_(
             error_if_nonfinite,
             foreach,
             pp_mesh,
-            ep_dense_params_mesh_ndim,
         )
 
     if isinstance(parameters, torch.Tensor):
@@ -401,7 +402,6 @@ def _clip_grad_norm_with_ep(
     error_if_nonfinite: bool,
     foreach: bool | None,
     pp_mesh: DeviceMesh | None,
-    dense_params_mesh_ndim: int,
 ) -> torch.Tensor:
     ep_params = []
     non_ep_params = []
@@ -412,12 +412,12 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        if p.device_mesh.ndim == dense_params_mesh_ndim:
-            non_ep_params.append(p)
-            non_ep_grads.append(p.grad)
-        else:
+        if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
+        else:
+            non_ep_params.append(p)
+            non_ep_grads.append(p.grad)
     ep_grads_total_norm = torch.nn.utils.get_total_norm(
         ep_grads, norm_type, error_if_nonfinite, foreach
     ).full_tensor()

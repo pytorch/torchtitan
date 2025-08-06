@@ -5,11 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torch import nn
 
 from torchtitan.config import JobConfig
+
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -34,7 +36,6 @@ class TransformerModelArgs(BaseModelArgs):
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
-    eos_id: int = 0
     # iRoPE settings
     # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
     # used every n layers. Other layers uses RoPE (rotary positional embedding) and
@@ -45,17 +46,11 @@ class TransformerModelArgs(BaseModelArgs):
     every_n_layers_nope: int | None = None
     fixed_attn_block_size: int = 8192
 
-    # MoE args
-    moe_enabled: bool = True
-    num_experts: int = 8
-    use_shared_expert: bool = True
+    # MoE
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
     auto_scale_hidden_dim: bool = True
     # frequency of using MoE layer instead of feedforward layer in a transformer block
     interleave_moe_layer_step: int = 2
-    # token-choice
-    top_k: int = 1
-    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
-    load_balance_coeff: float | None = 1e-3
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -65,11 +60,11 @@ class TransformerModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",
             )
-            self.use_grouped_mm = False
+            self.moe_args.use_grouped_mm = False
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
@@ -112,7 +107,7 @@ class TransformerModelArgs(BaseModelArgs):
         nparams_sparse_active = (
             nparams_moe_router
             + nparams_shared_expert
-            + nparams_experts * self.top_k // self.num_experts
+            + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
         logger.info(

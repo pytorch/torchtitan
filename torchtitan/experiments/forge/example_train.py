@@ -231,11 +231,7 @@ class Trainer(ForgeEngine):
             pp_mesh=(
                 parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
             ),
-            ep_dense_params_mesh_ndim=(
-                parallel_dims.dense_params_mesh_ndim
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()

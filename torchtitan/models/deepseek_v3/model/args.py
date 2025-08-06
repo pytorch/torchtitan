@@ -7,12 +7,13 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from torch import nn
 
 from torchtitan.config import JobConfig
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -67,16 +68,13 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     n_dense_layers: int = 1
     n_heads: int = 16
     norm_eps: float = 1e-5  # eps used for RMSNorm
+
     # MoE
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+    # TODO: node-limited routing is not supported yet
     n_expert_groups: int = 1
     n_limited_groups: int = 1
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
-    route_scale: float = 1.0
-    use_grouped_mm: bool = True
-    load_balance_coeff: float = 1e-3
+
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
@@ -85,6 +83,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     v_head_dim: int = 128
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 10000.0
@@ -101,11 +100,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        if self.use_grouped_mm and not has_cuda_capability(9, 0):
+        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",
             )
-            self.use_grouped_mm = False
+            self.moe_args.use_grouped_mm = False
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(
@@ -149,7 +148,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         nparams_sparse_active = (
             nparams_moe_router
             + nparams_shared_expert
-            + nparams_experts * self.n_activated_experts // self.n_routed_experts
+            + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
         logger.info(
