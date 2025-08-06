@@ -420,7 +420,11 @@ def _clip_grad_norm_with_ep(
             non_ep_grads.append(p.grad)
     ep_grads_total_norm = torch.nn.utils.get_total_norm(
         ep_grads, norm_type, error_if_nonfinite, foreach
-    ).full_tensor()
+    )
+    # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
+    if isinstance(ep_grads_total_norm, DTensor):
+        ep_grads_total_norm = ep_grads_total_norm.full_tensor()
+
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     ).full_tensor()
