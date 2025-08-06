@@ -40,6 +40,7 @@ def download_hf_assets(
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
     - config
         - config.json - Defines the model architecture
+        - generation_config.json - Defines the model architecture params needed for generation
 
     Args:
         repo_id (str): HuggingFace repository ID (e.g., meta-llama/Llama-3.1-8B")
@@ -75,7 +76,7 @@ def download_hf_assets(
         ],
         "safetensors": ["*.safetensors", "model.safetensors.index.json"],
         "safetensors.index": ["model.safetensors.index.json"],
-        "config": ["config.json"],
+        "config": ["config.json", "generation_config.json"],
     }
 
     if isinstance(asset_types, str):
