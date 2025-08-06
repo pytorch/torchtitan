@@ -7,6 +7,7 @@
 import torch.nn as nn
 from torchtitan.components.ft.config import FaultTolerance as FTConfig
 from torchtitan.distributed.pipeline_parallel import generate_llm_fqn_per_model_part
+from torchtitan.tools.logging import logger
 
 
 def module_split(
@@ -98,7 +99,9 @@ def module_split(
             fragment_idx,
             module_names,
         )
-        print(f"building fragment_idx {fragment_idx} " f"with modules {module_names}")
+        logger.info(
+            f"building fragment_idx {fragment_idx} " f"with modules {module_names}"
+        )
         model_fragments.append(model_fragment)
 
     return model_fragments
@@ -118,6 +121,7 @@ def fragment_llm(
 
     if module_fqns_per_model_fragment == []:
         if ft_config.num_fragments == 1:
+            logger.info("Created 1 model fragments")
             return [model]
 
         module_fqns_per_model_fragment = generate_llm_fqn_per_model_part(
@@ -125,6 +129,6 @@ def fragment_llm(
         )
 
     model_fragments = module_split(model, module_fqns_per_model_fragment)
-    print(f"Created {len(model_fragments)} model fragments")
+    logger.info(f"Created {len(model_fragments)} model fragments")
 
     return model_fragments

@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
 from torchtitan.components.ft.config import FaultTolerance as FTConfig
+from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
@@ -125,6 +126,9 @@ def maybe_semi_sync_training(
         assert (
             ft_manager._manager is not None
         ), "FTManager must be enabled to use semi-sync training."
+        logger.info(
+            f"using fragment function to split model: {fragment_fn is not None}"
+        )
         if semi_sync_method.lower() == "diloco":
             if fragment_fn:
                 model_parts = fragment_fn(model, ft_config, n_layers)
