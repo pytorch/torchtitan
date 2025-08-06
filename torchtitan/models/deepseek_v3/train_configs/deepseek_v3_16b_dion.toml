@@ -1,34 +1,30 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-# Advanced configuration for training LLaMA 3 8B with Dion optimizer
-# Includes parameter-specific optimizer selection and learning rate scaling
+# torchtitan Config.toml
 
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 8B training with advanced Dion optimizer configuration"
+description = "DeepSeek-V3 16B model training"
+print_args = false
 
 [profiling]
 enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
 log_freq = 1
+disable_color_printing = false
 enable_tensorboard = false
-enable_wandb = true
-# Note: WandB configuration is done via environment variables:
-# - WANDB_PROJECT: Set the project name (e.g., "torchtitan-dion-experiments")
-# - WANDB_ENTITY: Set the entity/team name
-# - WANDB_NAME: Set the run name (e.g., "llama3-8b-dion-training")
-# - WANDB_TAGS: Set tags (e.g., "llama3,8b,dion,optimizer,torchtitan")
-# - WANDB_NOTES: Set notes about the run
+save_tb_folder = "tb"
+enable_wandb = false
 
 [model]
-name = "llama3"
-flavor = "8B"
-tokenizer_path = "./tests/assets/tokenizer"
+name = "deepseek_v3"
+flavor = "16B"
+tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-chat"
+# converters = ["float8"]
+
 
 [optimizer]
 name = "Dion"
@@ -66,28 +62,42 @@ head_lr_factor = 1.0              # LR multiplier for head parameters (after hea
 # variance_dtype = "float32"
 
 [lr_scheduler]
-warmup_steps = 500
-decay_type = "linear"
+warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "cosine"
 min_lr_factor = 0.1
 
 [training]
-dataset = "c4"
 local_batch_size = 8
-seq_len = 2048
-max_norm = 1.0
+seq_len = 4096
+max_norm = 1.0  # grad norm clipping
 steps = 1000
-mixed_precision_param = "bfloat16"
-compile = true
+compile = false
+dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_parallel_degree = 1
 pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
 
 [checkpoint]
 enable_checkpoint = false
+folder = "checkpoint"
+interval = 10
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]
-mode = "selective"
-selective_ac_option = "op"
+mode = "full"  # ["none", "selective", "full"]
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output", "router.gate"]
+moe_fqns = ["experts"]

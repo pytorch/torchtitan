@@ -143,23 +143,104 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
-        self.wandb.init(
-            project=os.getenv("WANDB_PROJECT", "torchtitan"),
-            dir=log_dir,
-            config=job_config.to_dict(),
-        )
-        logger.info("WandB logging enabled")
+        # Prepare wandb initialization parameters
+        wandb_config = {
+            "project": os.getenv("WANDB_PROJECT", "torchtitan"),
+            "dir": log_dir,
+            "config": job_config.to_dict(),
+        }
+
+        # Add optional parameters if environment variables are set
+        if os.getenv("WANDB_ENTITY"):
+            wandb_config["entity"] = os.getenv("WANDB_ENTITY")
+
+        if os.getenv("WANDB_NAME"):
+            wandb_config["name"] = os.getenv("WANDB_NAME")
+
+        if os.getenv("WANDB_TAGS"):
+            # Split comma-separated tags
+            tags = [tag.strip() for tag in os.getenv("WANDB_TAGS").split(",")]
+            wandb_config["tags"] = tags
+
+        if os.getenv("WANDB_NOTES"):
+            wandb_config["notes"] = os.getenv("WANDB_NOTES")
+
+        # Log the configuration being used
+        logger.info(f"Initializing WandB with config: {wandb_config}")
+
+        # Check if wandb is properly authenticated
+        try:
+            api_key = self.wandb.api.api_key
+            if api_key:
+                logger.info("WandB API key found - authentication OK")
+            else:
+                logger.warning(
+                    "No WandB API key found - you may need to run 'wandb login'"
+                )
+        except Exception as e:
+            logger.warning(f"Could not check WandB authentication: {e}")
+
+        # Initialize wandb with enhanced configuration
+        try:
+            run = self.wandb.init(**wandb_config)
+
+            if run is not None:
+                logger.info(f"WandB logging enabled successfully!")
+                logger.info(f"Run URL: {run.url}")
+                logger.info(f"Project: {run.project}")
+                logger.info(f"Entity: {run.entity}")
+                logger.info(f"Run name: {run.name}")
+                logger.info(f"Run ID: {run.id}")
+                if hasattr(run, "tags") and run.tags:
+                    logger.info(f"Tags: {run.tags}")
+            else:
+                logger.warning(
+                    "WandB initialization returned None - logging may not work properly"
+                )
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to initialize WandB: {error_msg}")
+
+            # Provide specific guidance for common authentication errors
+            if "401" in error_msg or "user is not logged in" in error_msg:
+                logger.error("Authentication error detected. This usually means:")
+                logger.error("1. Your WandB login session has expired")
+                logger.error("2. You need to re-authenticate with WandB")
+                logger.error("Please run: wandb login --relogin")
+                logger.error(
+                    "Or set WANDB_MODE=offline to run without uploading to WandB"
+                )
+            elif "403" in error_msg or "permission" in error_msg.lower():
+                logger.error("Permission error detected. Please check:")
+                logger.error("1. Your WandB entity/team name is correct")
+                logger.error("2. You have access to the specified project")
+                logger.error("3. Your API key has the necessary permissions")
+            elif "network" in error_msg.lower() or "connection" in error_msg.lower():
+                logger.error("Network error detected. You can:")
+                logger.error("1. Check your internet connection")
+                logger.error("2. Set WANDB_MODE=offline to run without uploading")
+
+            logger.error("WandB logging will be disabled for this run")
+            # Fall back to a no-op logger
+            self.wandb = None
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        wandb_metrics = {
-            (k if self.tag is None else f"{self.tag}/{k}"): v
-            for k, v in metrics.items()
-        }
-        self.wandb.log(wandb_metrics, step=step)
+        if self.wandb is not None:
+            wandb_metrics = {
+                (k if self.tag is None else f"{self.tag}/{k}"): v
+                for k, v in metrics.items()
+            }
+            self.wandb.log(wandb_metrics, step=step)
 
     def close(self) -> None:
-        if self.wandb.run is not None:
+        if (
+            self.wandb is not None
+            and hasattr(self.wandb, "run")
+            and self.wandb.run is not None
+        ):
+            logger.info("Finishing WandB run...")
             self.wandb.finish()
+            logger.info("WandB run finished successfully")
 
 
 def ensure_pp_loss_visible(
