@@ -6,7 +6,7 @@
 
 import torch.nn as nn
 from torchtitan.components.ft.config import FaultTolerance as FTConfig
-from torchtitan.distributed.pipeline import generate_llm_fqn_per_model_part
+from torchtitan.distributed.pipeline_parallel import generate_llm_fqn_per_model_part
 
 
 def module_split(
