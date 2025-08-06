@@ -238,78 +238,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.loss_fn, self.gradient_accumulation_steps
         )
 
-        def llama3_autoparallel_init_fn(model):
-            # WHC - horrible hack to make auto-parallel work. basically, create a bespoke init_fn for llama3 by copying
-            # code from the llama3 init_weights functions throughout the model components, and adjusting them to use
-            # the new FQN structures in autoparallel.
-            # TODO: make it possible to more easily reuse the existing 'init_weights' functions on the auto_p module
-            def param(name):
-                return model.get_parameter(f"{name.replace('/', '.')}")
-
-            from torchtitan.models.llama3.model.model import precompute_freqs_cis
-
-            model.get_buffer("freqs_cis").copy_(
-                DTensor.from_local(
-                    precompute_freqs_cis(
-                        model_args.dim // model_args.n_heads,
-                        model_args.max_seq_len,
-                        model_args.rope_theta,
-                    ),
-                    device_mesh=model.get_buffer("freqs_cis").device_mesh,
-                )
-            )
-
-            torch.nn.init.normal_(param("tok_embeddings/weight"))
-
-            def init_layer(i):
-                for norm in ("attention_norm", "ffn_norm"):
-                    torch.nn.init.ones_(param(f"layers/{i}/{norm}/weight"))
-
-                if model_args.depth_init:
-                    weight_init_std = 0.02 / (2 * (i + 1)) ** 0.5
-                else:
-                    weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
-
-                for linear in ("wq", "wk", "wv"):
-                    torch.nn.init.trunc_normal_(
-                        param(f"layers/{i}/attention/{linear}/weight"),
-                        mean=0.0,
-                        std=0.02,
-                    )
-                torch.nn.init.trunc_normal_(
-                    param(f"layers/{i}/attention/wo/weight"),
-                    mean=0.0,
-                    std=weight_init_std,
-                )
-
-                torch.nn.init.trunc_normal_(
-                    param(f"layers/{i}/feed_forward/w1/weight"), mean=0.0, std=0.02
-                )
-                for linear in ("w2", "w3"):
-                    torch.nn.init.trunc_normal_(
-                        param(f"layers/{i}/feed_forward/{linear}/weight"),
-                        mean=0.0,
-                        std=weight_init_std,
-                    )
-
-            for i in range(model_args.n_layers):
-                init_layer(i)
-
-            if param("norm/weight") is not None:
-                torch.nn.init.ones_(param("norm/weight"))
-
-            final_out_std = model_args.dim**-0.5
-            cutoff_factor = 3
-
-            if param("output/weight") is not None:
-                torch.nn.init.trunc_normal_(
-                    param("output/weight"),
-                    mean=0.0,
-                    std=final_out_std,
-                    a=-cutoff_factor * final_out_std,
-                    b=cutoff_factor * final_out_std,
-                )
-
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -354,10 +282,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                if job_config.model.name == "llama3_auto_parallel":
-                    llama3_autoparallel_init_fn(model)
-                else:
-                    model.init_weights(buffer_device=buffer_device)
+                model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
