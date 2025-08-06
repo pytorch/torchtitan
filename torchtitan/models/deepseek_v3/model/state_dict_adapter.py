@@ -28,7 +28,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
             "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
-            "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.kv_norm.weight",
+            "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
             "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             # MLP Module
@@ -51,11 +51,14 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         }
 
     
-    def _split_experts_weights(self, weight: torch.Tensor, expert_id: int, n_experts: int) -> list[torch.Tensor]:
+    def _split_experts_weights(self, weight: torch.Tensor, expert_id: int, n_experts: int) -> torch.Tensor:
         """
         Split the weights of the experts into a list of tensors.
         """
-        return torch.split(weight, weight.shape[0] // n_experts, dim=0)[expert_id]
+        print("before split, the weight is ", weight.shape)
+        split_weight = torch.split(weight.squeeze(0), weight.shape[0] // n_experts, dim=0)[expert_id]
+        print("split weight: ", split_weight.shape)
+        return split_weight
     
     def _concatenate_expert_weights(self, expert_weights_by_layer: dict[str, Any], n_experts: int) -> torch.Tensor:
         """
@@ -68,6 +71,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     sorted_expert_ids = sorted(experts.keys())
                     sorted_experts = [experts[i] for i in sorted_expert_ids]
 
+                    # Here we need transpose because the torchtitan used nn.Linear() while HF used nn.Parameter
                     stacked_tensor = torch.stack(sorted_experts, dim=0).transpose(
                         1, 2
                     )
@@ -81,11 +85,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         
         return None
 
-
-
     def _quantization(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        Quantize the weights from float32 to float8.
+        Quantize the weights from float32 to float8. Export to HF f
         """
         pass
 
@@ -107,30 +109,38 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "mlp.experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
-                layer_num, expert_num = re.findall(r"\d+", key)
-                new_key = to_hf_map[abstract_key]
-                new_key = new_key.format(layer_num)
+            if "moe.expert_bias" in key or "moe.tokens_per_expert" in key:
+                continue
             
-                # try to concat the expert's weight into GroupedExperts' weight.
-                # NOTE: This concating might bring memory overhead
-                self._split_experts_weights(value, expert_num, self.model_args.n_routed_experts)
-   
-            elif "layers" in key:
+            if "moe.experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
                 
-                if new_key is None:
-                    continue
+                # Split expert weights into seperate expert weights
+                for expert_num in range(0, self.model_args.n_routed_experts):                
+                    new_key = new_key.format(layer_num, expert_num)
+                    value = self._split_experts_weights(value, expert_num, self.model_args.n_routed_experts)
+                    hf_state_dict[new_key] = value
+
+            elif "layers" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                layer_num = re.search(r"\d+", key).group(0)
+                new_key = to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
+                
+                # Special case for `shared_expert`: torchtitan uses nn.Linear, and HF uses nn.Parameter
+                # torchtitan shape: (1, s[1], s[2]) -> HF shape: (s[2], s[1])
+                if "shared_expert" in key:
+                    value = value.squeeze(0).transpose(0, 1)
+                    print("shared_expert value ", value.shape)
+                    
+                hf_state_dict[new_key] = value
+            
             else:
                 new_key = to_hf_map[key]
+                hf_state_dict[new_key] = value
             
-            hf_state_dict[new_key] = value
-        
-
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +149,8 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate seprate expert's wegiht into GroupedExperts' weight.
         """
+
+        print("In from_hf, the state_dict key is: ", hf_state_dict.keys(), "\n")
         state_dict = {}
         
         expert_weights_by_layer = {} # {layer: {abstract_key: {expert_id: tensor}}}
@@ -167,6 +179,12 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
+                
+                # Special case for `shared_expert`: torchtitan uses nn.Linear, and HF uses nn.Parameter
+                # HF shape: (s[1], s[2]) -> torchtitan shape: (1, s[2], s[1])
+                if "shared_experts" in key:
+                    value = value.transpose(0, 1).unsqueeze(0)
+                    
                 state_dict[new_key] = value
             else:
                 new_key = self.from_hf_map[key]
