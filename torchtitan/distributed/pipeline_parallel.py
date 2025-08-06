@@ -27,7 +27,6 @@ from torchtitan.tools.logging import logger
 
 __all__ = [
     "build_pipeline_schedule",
-    "stage_ids_this_rank",
     "generate_llm_fqn_per_model_part",
     "pipeline_module_split",
 ]
@@ -103,7 +102,7 @@ def build_pipeline_schedule(
 
 
 # TODO(whc) should this be a utility inside torch.pipelining?
-def stage_ids_this_rank(
+def _stage_ids_this_rank(
     pp_rank: int, pp_size: int, num_stages: int, style: str = "loop"
 ) -> tuple[int]:
     """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
@@ -337,7 +336,7 @@ def pipeline_module_split(
     schedule_class = get_schedule_class(pp_schedule)
     style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
 
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
+    for stage_idx in _stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
         module_names = module_names_per_stage[stage_idx]
         stage, model_chunk = _build_stage_from_modules(
             stage_idx,
