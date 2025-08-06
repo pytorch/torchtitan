@@ -1,4 +1,4 @@
-# DeepSeek-V3 in TorchTitan
+# DeepSeek-V3 in `torchtitan`
 
 DeepSeek-V3 is a Mixture-of-Experts (MoE) transformer model with Multi-head Latent Attention (MLA) architecture.
 
@@ -50,11 +50,8 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
 
 
 ## To be added
-- Modeling
-    - Merge DeepSeek-V3 and Llama4 MoE common components
-    - Attention Layer: need to pass softmax_scale to sdpa() to support scaling
 - Parallelism
-    - Context Parallel support for DeepSeek-V3
+    - Context Parallel support for DeepSeek V3
 - torch.compile
 - Quantization
 - Testing
