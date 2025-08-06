@@ -696,6 +696,22 @@ class FaultTolerance:
     This is only used when "semi_sync_method" is set.
     """
 
+    module_fqns_per_model_fragment: list[list[str]] = field(default_factory=list)
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model fragment.
+    Each inner list represents one model fragment and contains the module names that belong to that fragment.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    """
+
+    num_fragments: int = 1
+    """
+    Number of fragments to split the model into. This is only used when "semi_sync_method" is "diloco".
+    This is used to automatically split the model into fragments provided that the model
+    implements FaultTolerantTrainSpec
+    """
+
 
 @dataclass
 class Experimental:
