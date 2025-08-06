@@ -1,3 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
 """
 Parameter classification utilities for Dion optimizer integration.
 """
@@ -7,11 +14,13 @@ from typing import Any, Dict, List
 import torch
 import torch.nn as nn
 
+from torchtitan.tools.logging import logger
+
 
 def create_parameter_groups(
     model_parts: List[nn.Module], dion_config
 ) -> List[Dict[str, Any]]:
-    """Create parameter groups with sophisticated parameter classification.
+    """Create parameter groups with parameter classification.
 
     Classification rules:
     1. 1D scalar parameters (biases, layer norms) → Use scalar_optimizer (adamw/lion)
@@ -34,8 +43,10 @@ def create_parameter_groups(
 
             # Classify parameter based on shape and module type
             if is_embedding_param(name, param, model):
+                logger.info(f"Dion optimizer found embedding parameter: {name}")
                 embedding_params.append(param)
             elif is_head_param(name, param, model):
+                logger.info(f"Dion optimizer found LM head parameter: {name}")
                 head_params.append(param)
             elif param.ndim == 1:  # 1D scalar parameters (biases, layer norms)
                 scalar_params.append(param)
@@ -166,12 +177,13 @@ def create_head_param_group(params: List[torch.Tensor], dion_config) -> Dict[str
     head_lr_factor = getattr(dion_config, "head_lr_factor", 1.0)
     head_lr_scaling = getattr(dion_config, "head_lr_scaling", True)
 
-    # Calculate learning rate with optional 1/sqrt(dim) scaling
+    # Calculate learning rate with 1/sqrt(dim) scaling
+    # TODO - double check this
     lr = dion_config.lr * head_lr_factor
 
     if head_lr_scaling and params:
         # Use the first parameter to determine the dimension for scaling
-        # Typically this would be the input dimension of the head layer
+
         first_param = params[0]
         if first_param.ndim >= 2:
             dim = first_param.shape[-1]  # Input dimension
