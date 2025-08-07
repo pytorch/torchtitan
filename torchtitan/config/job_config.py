@@ -80,8 +80,9 @@ class Model:
 
     hf_assets_path: str = "./tests/assets/tokenizer"
     """
-    Path to hf_assets folder. This folder can be used to contain safetensor weights, safetensor.index.json mapping,
-    config.json, and tokenizer info
+    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+    including model weights in .safetensors format, the model.safetensor.index.json file
+    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
     """
 
     tokenizer_path: str | None = None

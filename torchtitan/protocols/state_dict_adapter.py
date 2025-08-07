@@ -21,7 +21,7 @@ class StateDictAdapter(ABC):
     """
 
     @abstractmethod
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str):
+    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
         pass
 
     @abstractmethod

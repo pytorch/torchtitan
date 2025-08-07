@@ -15,6 +15,7 @@ def download_hf_assets(
     repo_id: str,
     local_dir: str,
     asset_types: str | list[str],
+    download_all: bool,
     hf_token: Optional[str] = None,
     additional_patterns: Optional[list] = None,
 ) -> None:
@@ -36,7 +37,7 @@ def download_hf_assets(
     - safetensors
         - *.safetensors - Modern Huggingface model weights format for fast loading
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
-    - safetensors.index
+    - index
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
     - config
         - config.json - Defines the model architecture
@@ -51,6 +52,7 @@ def download_hf_assets(
                                  Required for gated models like Llama.
         additional_patterns (Optional[list]): Additional file patterns to search for and download
                                           from the HuggingFace Hub repository.
+        download_all (bool): If True, download all files from the repository
     """
     import os
 
@@ -75,115 +77,125 @@ def download_hf_assets(
             "special_tokens_map.json",
         ],
         "safetensors": ["*.safetensors", "model.safetensors.index.json"],
-        "safetensors.index": ["model.safetensors.index.json"],
+        "index": ["model.safetensors.index.json"],
         "config": ["config.json", "generation_config.json"],
     }
 
     if isinstance(asset_types, str):
         asset_types = [asset_types]
 
-    total_patterns = []
-    for asset_type in asset_types:
-        if asset_type in ASSET_PATTERNS:
-            total_patterns.extend(ASSET_PATTERNS[asset_type])
-        else:
-            raise ValueError(
-                f"Unknown asset type '{asset_type}'. Available types: {list(ASSET_PATTERNS.keys())}"
-            )
-
-    # Add additional patterns if provided
-    if additional_patterns:
-        total_patterns.extend(additional_patterns)
-
-    def should_download(patterns: list[str], filename: str) -> bool:
-        """Check if a file matches a pattern to be downloaded."""
-        basename = os.path.basename(filename)
-        for pattern in patterns:
-            pattern_lower = pattern.lower()
-
-            # Exact name match
-            if basename == pattern_lower:
-                return True
-            # Do wildcard match if wildcards are in pattern
-            if "*" in pattern_lower or "?" in pattern_lower:
-                if fnmatch(basename, pattern_lower):
-                    return True
-        return False
-
-    try:
-        # Get list of available files in the repo
-        print(f"Scanning repository {repo_id} for tokenizer files...")
-        available_files = list_repo_files(repo_id=repo_id, token=hf_token)
-
-        # Filter for requested asset files
-        files_found = [f for f in available_files if should_download(total_patterns, f)]
-
-        # Check each asset type individually to see if files were not found
+    if download_all:
+        print("Downloading all files from repository...")
+        files_found = list_repo_files(repo_id=repo_id, token=hf_token)
+    else:
+        total_patterns = []
         for asset_type in asset_types:
             if asset_type in ASSET_PATTERNS:
-                asset_patterns = ASSET_PATTERNS[asset_type]
-                matches_found = False
-                for f in available_files:
-                    if should_download(asset_patterns, f):
-                        matches_found = True
-                        break
+                total_patterns.extend(ASSET_PATTERNS[asset_type])
+            else:
+                raise ValueError(
+                    "Unknown asset type {}. Available uses: --asset {} \n".format(
+                        asset_type, " ".join(ASSET_PATTERNS.keys())
+                    ),
+                    "Or specify exact patterns to download. Example: --additional_patterns '*.safetensors' README.md '*.json' \n",
+                    "Or use --all to download all files",
+                )
 
-                if not matches_found:
-                    print(
-                        f"Warning: No matching files found for asset_type '{asset_type}' in {repo_id}"
-                    )
+        # Add additional patterns if provided
+        if additional_patterns:
+            total_patterns.extend(additional_patterns)
+            asset_types.append("additional_patterns")
+            ASSET_PATTERNS["additional_patterns"] = additional_patterns
 
-        if not files_found:
-            print(f"Warning: No matching files found in {repo_id}")
-            print(f"Available files: {available_files[:10]}...")
-            return
+        def should_download(patterns: list[str], filename: str) -> bool:
+            """Check if a file matches a pattern to be downloaded."""
+            basename = os.path.basename(filename)
+            for pattern in patterns:
+                pattern_lower = pattern.lower()
 
-        print(f"Found {len(files_found)} files:")
-        for f in files_found:
-            print(f"  - {f}")
+                # Exact name match
+                if basename == pattern_lower:
+                    return True
+                # Do wildcard match if wildcards are in pattern
+                if "*" in pattern_lower or "?" in pattern_lower:
+                    if fnmatch(basename, pattern_lower):
+                        return True
+            return False
 
-        downloaded_files = []
-        missed_files = []
+        try:
+            # Get list of available files in the repo
+            print(f"Scanning repository {repo_id} for files...")
+            available_files = list_repo_files(repo_id=repo_id, token=hf_token)
 
-        # Download files with progress bar
-        with tqdm(
-            total=len(files_found), desc="Downloading files", unit="file"
-        ) as pbar:
-            for filename in files_found:
-                try:
-                    pbar.set_description(f"Downloading {os.path.basename(filename)}")
+            # Filter for requested asset files
+            files_found = [
+                f for f in available_files if should_download(total_patterns, f)
+            ]
 
-                    hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=model_dir,
-                        token=hf_token,
-                    )
-                    downloaded_files.append(filename)
+            # Check each asset type individually to see if files were not found
+            for asset_type in asset_types:
+                if asset_type in ASSET_PATTERNS:
+                    asset_patterns = ASSET_PATTERNS[asset_type]
+                    matches_found = False
+                    for f in available_files:
+                        if should_download(asset_patterns, f):
+                            matches_found = True
+                            break
+
+                    if not matches_found:
+                        print(
+                            f"Warning: No matching files found for asset_type '{asset_type}' in {repo_id}"
+                        )
+
+            if not files_found:
+                print(f"Warning: No matching files found in {repo_id}")
+                print(f"Available files: {available_files[:10]}...")
+                return
+
+        except HTTPError as e:
+            if e.response and e.response.status_code == 401:
+                print(
+                    "You need to pass a valid `--hf_token=...` to download private checkpoints."
+                )
+            raise e
+
+    print(f"Found {len(files_found)} files:")
+    for f in files_found:
+        print(f"  - {f}")
+
+    downloaded_files = []
+    missed_files = []
+
+    # Download files with progress bar
+    with tqdm(total=len(files_found), desc="Downloading files", unit="file") as pbar:
+        for filename in files_found:
+            try:
+                pbar.set_description(f"Downloading {os.path.basename(filename)}")
+
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=model_dir,
+                    token=hf_token,
+                )
+                downloaded_files.append(filename)
+                pbar.update(1)
+
+            except HTTPError as e:
+                if e.response and e.response.status_code == 404:
+                    print(f"File {filename} not found, skipping...")
+                    missed_files.append(filename)
                     pbar.update(1)
+                    continue
+                else:
+                    raise e
 
-                except HTTPError as e:
-                    if e.response and e.response.status_code == 404:
-                        print(f"File {filename} not found, skipping...")
-                        missed_files.append(filename)
-                        pbar.update(1)
-                        continue
-                    else:
-                        raise e
-
-        if downloaded_files:
-            print(
-                f"\nSuccessfully downloaded {len(downloaded_files)} files to: {model_dir}"
-            )
-        if missed_files:
-            print(f"Warning: Some files could not be downloaded: \n{missed_files}")
-
-    except HTTPError as e:
-        if e.response and e.response.status_code == 401:
-            print(
-                "You need to pass a valid `--hf_token=...` to download private checkpoints."
-            )
-        raise e
+    if downloaded_files:
+        print(
+            f"\nSuccessfully downloaded {len(downloaded_files)} files to: {model_dir}"
+        )
+    if missed_files:
+        print(f"Warning: Some files could not be downloaded: \n{missed_files}")
 
 
 if __name__ == "__main__":
@@ -215,22 +227,32 @@ if __name__ == "__main__":
         "--assets",
         type=str,
         nargs="+",
-        required=True,
-        help="Asset types to download: tokenizer, safetensors, safetensors.index, config",
+        default=[],
+        help="Asset types to download: tokenizer, safetensors, index, config",
     )
     parser.add_argument(
         "--additional_patterns",
         type=str,
-        nargs="*",
-        default=None,
+        nargs="+",
+        default=[],
         help="Additional file patterns to search for and download from the HuggingFace Hub repository",
     )
 
+    parser.add_argument(
+        "--all", action="store_true", default=False, help="Download all files in repo"
+    )
+
     args = parser.parse_args()
+    if not args.all and not args.assets and not args.additional_patterns:
+        parser.error(
+            "At least one of --all, --assets or --additional_patterns must be specified."
+        )
+
     download_hf_assets(
         args.repo_id,
         args.local_dir,
         args.assets,
+        args.all,
         args.hf_token,
         args.additional_patterns,
     )

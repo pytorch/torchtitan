@@ -534,6 +534,10 @@ class CheckpointManager:
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
+            if from_hf:
+                assert (
+                    model_only
+                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
@@ -541,20 +545,19 @@ class CheckpointManager:
                         "checkpoint.initial_load_path is specified but the path is not valid."
                     )
                 if from_hf:
-                    raise ValueError(
-                        "checkpoint.initial_load_path is not supported with checkpoint.initial_load_in_hf.\
-                        To load from HF checkpoint, specify model.hf_assets_path instead."
+                    logger.warning(
+                        f"loading from hf from initial_load_path: {self.initial_load_path}"
                     )
             elif from_hf:
-                assert (
-                    model_only
-                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
                 checkpoint_id = self.sd_adapter.hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
+                logger.warning(
+                    f"loading from hf from hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                )
             else:
                 return False
         else:
