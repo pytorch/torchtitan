@@ -15,7 +15,7 @@ def download_hf_assets(
     repo_id: str,
     local_dir: str,
     asset_types: str | list[str],
-    download_all: bool,
+    download_all: bool = False,
     hf_token: Optional[str] = None,
     additional_patterns: Optional[list] = None,
 ) -> None:

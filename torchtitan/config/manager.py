@@ -196,7 +196,7 @@ class ConfigManager:
             if self.config.model.hf_assets_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
-                    "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B) ",
+                    "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
                     " and update your config to the directory of the downloaded tokenizer.",
                 )
 
