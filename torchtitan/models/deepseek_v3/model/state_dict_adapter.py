@@ -11,7 +11,7 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 import torch
-from torchtitan.tools.logging import logger
+from .quantization import dequantize_fp8, calculate_scale_shape
 
 
 class DeepSeekV3StateDictAdapter(StateDictAdapter):
@@ -99,51 +99,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         for key, weight in state_dict.items():
             if key.endswith(".weight") and key + "_scale_inv" in state_dict:
                 scale_inv = state_dict[key + "_scale_inv"]
-                
-                # Convert to float32 for computation
-                float_weight = weight.to(torch.float32)
-                # Get original dimensions
-                orig_shape = weight.shape
-                # Fixed block size of 128x128 as specified in the algorithm
-                BLOCK_SIZE = 128
-
-                # Calculate number of blocks needed
-                block_rows = (orig_shape[0] + BLOCK_SIZE - 1) // BLOCK_SIZE
-                block_cols = (orig_shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
-
-                # Verify scale_inv shape matches expected block dimensions
-                expected_scale_shape = (block_rows, block_cols)
-                if scale_inv.shape != expected_scale_shape:
-                    logger.warning(
-                        f"scale_inv shape {scale_inv.shape} doesn't match expected shape {expected_scale_shape}"
-                    )
-
-                # NOTE: This might cause OOM if the model is too large
-                # Copy the weight tensor to make it also a DTensor
-                dequantized = float_weight.clone()
-
-                # Apply scaling factors to each block
-                for i in range(block_rows):
-                    row_start = i * BLOCK_SIZE
-                    row_end = min(row_start + BLOCK_SIZE, orig_shape[0])
-
-                    for j in range(block_cols):
-                        col_start = j * BLOCK_SIZE
-                        col_end = min(col_start + BLOCK_SIZE, orig_shape[1])
-
-                        # Get the block
-                        block = float_weight[row_start:row_end, col_start:col_end]
-
-                        scale = scale_inv[i, j]
-                        block = block * scale
-
-                        # Explicitly convert block to dtype
-                        block_converted = block.to(dtype=torch.float32)
-                        # Store the dequantized block
-                        dequantized[row_start:row_end, col_start:col_end] = block_converted
-
+                dequantized_weight = dequantize_fp8(weight, scale_inv, dtype=torch.float32)
                 # update the weight and remove the scale_inv tensor
-                state_dict[key] = dequantized
+                state_dict[key] = dequantized_weight
                 scale_inv_keys.append(key + "_scale_inv")
 
         for key in scale_inv_keys:
@@ -160,19 +118,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         weight_scale_inv_state_dict = {}
         for key, value in state_dict.items():
             if key.endswith(".weight") and not any(non_quantized_key in key for non_quantized_key in non_quantized_keys):
-                # Calculate the scale tensor shape
-                orig_shape = value.shape
-
-                # Fixed block size of 128x128 as specified in the algorithm
-                BLOCK_SIZE = 128
-
-                # Calculate number of blocks needed
-                block_rows = (orig_shape[0] + BLOCK_SIZE - 1) // BLOCK_SIZE
-                block_cols = (orig_shape[1] + BLOCK_SIZE - 1) // BLOCK_SIZE
-
-                # Verify scale_inv shape matches expected block dimensions
-                expected_scale_shape = (block_rows, block_cols)
-                
+                expected_scale_shape = calculate_scale_shape(value)
                 # add weight_scale_inv to the state_dict
                 weight_scale_inv_state_dict[key + "_scale_inv"] = torch.zeros(expected_scale_shape, dtype=torch.float32)
 
@@ -203,6 +149,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 split_values = self._split_experts_weights(value, self.model_args.n_routed_experts)
                 for expert_num in range(0, self.model_args.n_routed_experts):                
                     new_key = new_key.format(layer_num, expert_num)
+                    # We need to transpose the weight because the torchtitan used nn.Linear() while HF used nn.Parameter()
                     hf_state_dict[new_key] = split_values[expert_num].squeeze().transpose(0, 1)
 
             elif "layers" in key:
