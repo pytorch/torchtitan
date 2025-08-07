@@ -93,6 +93,13 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+
+        # Handle the case where all parallelism dimensions are 1
+        # We still need to create a mesh with named dimensions for submesh access
+        if not dims:
+            dims = [1]
+            names = ["world"]
+
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
@@ -123,6 +130,11 @@ class ParallelDims:
             dp_cp_mesh_dim_names.append("cp")
             ep_mesh_dim_names.append("cp")
 
+        # Ensure dp_cp submesh exists even when all parallelism dimensions are 1
+        # This is required for fault tolerance functionality
+        if not dp_cp_mesh_dim_names and "world" in names:
+            dp_cp_mesh_dim_names = ["world"]
+
         mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
         mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_shard_cp")
         mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
@@ -142,6 +154,13 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+
+        # Handle the case where all parallelism dimensions are 1
+        # We still need to create a mesh with named dimensions for submesh access
+        if not dims:
+            dims = [1]
+            names = ["world"]
+
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
@@ -163,6 +182,12 @@ class ParallelDims:
         if self.cp_enabled:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
+
+        # Ensure dp_cp submesh exists even when all parallelism dimensions are 1
+        # This is required for fault tolerance functionality
+        if not dp_cp_mesh_dim_names and "world" in names:
+            dp_cp_mesh_dim_names = ["world"]
+
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
