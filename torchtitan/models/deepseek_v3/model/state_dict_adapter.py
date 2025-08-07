@@ -241,6 +241,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     value = value.transpose(0, 1).unsqueeze(0)
 
                 state_dict[new_key] = value
+            
             else:
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value

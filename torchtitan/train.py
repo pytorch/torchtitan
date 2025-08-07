@@ -449,7 +449,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, eos_id=self.tokenizer.eos_id)
-                    loss = self.loss_fn(pred, labels)
+                    
+                    # loss = self.loss_fn(pred, labels)
+                    print("\nForward Pass Results:")
+                    print(f"- Output logits shape: {pred.shape}")
+                    print(f"- Sequence length: {pred.shape[1]}")
+                    print(f"- Vocabulary size: {pred.shape[2]}")
+                    
+                    # Get the predictions for the next token (highest probability)
+                    next_token_logits = pred[:, -1, :]
+                    print(f"\nNext token logits : {next_token_logits}")
+                    next_token_probs = torch.softmax(next_token_logits, dim=-1)
+                    print(f"\nNext token probabilities: {next_token_probs}")
+                    top_k_values, top_k_indices = torch.topk(next_token_probs, 5, dim=-1)
+
+                    print("Top K values: ", top_k_values)
+                    print("Top K indices: ", top_k_indices)
+                    
+                    print("\nTop 5 predicted next tokens (showing IDs only since we're not using tokenizer):")
+                    for i, (value, index) in enumerate(zip(top_k_values[0], top_k_indices[0])):
+                        print(f"  {i+1}. Token ID: {index} - Probability: {value.item():.4f}")
+                    
                 # need to free to before bwd to avoid peaking memory
                 del pred
                 loss.backward()
@@ -472,6 +492,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
+
+            # Set seed for reproducibility
+            torch.manual_seed(42)
+            
+            # Define sequence length for fake input
+            seq_length = self.job_config.training.seq_len
+            
+            with torch.no_grad():
+            # Create fake input_ids directly on the device - using random integers between 0 and 50000 (typical vocab size)
+                input_ids = torch.randint(0, 50000, (1, seq_length), dtype=torch.long, device=self.device)
+                
+                # Create fake attention_mask directly on the device - all 1s for full attention
+                attention_mask = torch.ones((1, seq_length), dtype=torch.long, device=self.device)
+                
+                # Create inputs dictionary similar to what tokenizer would produce
+                input_dict = {
+                    "input": input_ids,
+                }
+                
+                # Create fake labels (same as attention_mask for simplicity)
+                labels = attention_mask.clone()
+
+            # Print input information
+            print(f"Fake input token IDs: {input_ids[0][:10].cpu().numpy()}...")
+            print(f"Fake input shape: {input_ids.shape}")
+            print(f"Input tensors device: {input_ids.device}")
+            
+            print("\nRunning single forward pass...")
+
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
