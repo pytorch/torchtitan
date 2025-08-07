@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import torch
 from torchtitan.tools.logging import logger
 
@@ -21,7 +27,12 @@ def calculate_scale_shape(
     return expected_scale_shape
 
 
-def dequantize_fp8(weight: torch.Tensor, scale_inv: torch.Tensor, dtype=torch.bfloat16, BLOCK_SIZE: int = BLOCK_SIZE) -> torch.Tensor:
+def dequantize_fp8(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    dtype=torch.bfloat16,
+    BLOCK_SIZE: int = BLOCK_SIZE,
+) -> torch.Tensor:
     # Convert to float32 for computation
     float_weight = weight.to(torch.float32)
     # Get original dimensions
