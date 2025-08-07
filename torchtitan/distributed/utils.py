@@ -422,6 +422,7 @@ def _clip_grad_norm_with_ep(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
     # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
+    # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
