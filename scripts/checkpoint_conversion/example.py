@@ -4,14 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 from typing import Optional
 
 import torch
 
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
-from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpoint import excluded_parameters_for_model_only
 from torchtitan.config import ConfigManager
 from torchtitan.protocols.train_spec import get_train_spec
@@ -88,17 +86,7 @@ def forward_tt(config_path, checkpoint_path, test_set):
 
     # Checkpoint Loading
     logger.info(f"Loading chkpt at: {checkpoint_path}")
-    load_from_hf = False
-    for filename in os.listdir(checkpoint_path):
-        if filename == "model.safetensors.index.json":
-            load_from_hf = True
-    if load_from_hf:
-        sd_adapter = train_spec.state_dict_adapter
-        hf_state_dict = sd_adapter.to_hf(state_dict)
-        dcp.load(hf_state_dict, HuggingFaceStorageReader(path=checkpoint_path))
-        state_dict = sd_adapter.from_hf(hf_state_dict)
-    else:
-        dcp.load(state_dict, checkpoint_id=checkpoint_path)
+    dcp.load(state_dict, checkpoint_id=checkpoint_path)
 
     output_list = []
     for prompt in test_set:
