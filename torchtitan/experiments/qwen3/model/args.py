@@ -83,6 +83,6 @@ class TransformerModelArgs(BaseModelArgs):
         # Question: is Nu_flops_per_token being used anywhere?
         num_flops_per_token = (
             6 * (nparams - nparams_embedding) + 12 * l * h * q * t
-        )  # Going over the math of this formula for Qwen3
+        )
 
         return nparams, num_flops_per_token
