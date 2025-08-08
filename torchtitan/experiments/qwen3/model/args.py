@@ -26,7 +26,7 @@ class TransformerModelArgs(BaseModelArgs):
     n_heads: int = 16 
     n_kv_heads: int = 8
     vocab_size: int = 151936
-
+    head_dim = 128
     hidden_dim: int = 3072
 
     norm_eps: float = 1e-6
