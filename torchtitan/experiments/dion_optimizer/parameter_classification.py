@@ -26,7 +26,8 @@ def create_parameter_groups(
     1. 1D scalar parameters (biases, layer norms) → Use scalar_optimizer (adamw/lion)
     2. Embedding layers → Use embedding_optimizer (adamw/lion)
     3. Model head/output layers → Use head_optimizer (adamw/lion) with optional 1/sqrt(dim) scaling
-    4. 2D matrix parameters (not head/embedding) → Use Dion algorithm
+    4. Routing layers (DeepSeek MoE) → Use routing_optimizer (adamw/lion)
+    5. 2D matrix parameters (not head/embedding/routing) → Use Dion algorithm
     """
     param_groups = []
 
@@ -36,13 +37,17 @@ def create_parameter_groups(
         scalar_params = []
         embedding_params = []
         head_params = []
+        routing_params = []
 
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
 
             # Classify parameter based on shape and module type
-            if is_embedding_param(name, param, model):
+            if is_routing_param(name, param, model):
+                logger.info(f"Dion optimizer found routing layer parameter: {name}")
+                routing_params.append(param)
+            elif is_embedding_param(name, param, model):
                 logger.info(f"Dion optimizer found embedding parameter: {name}")
                 embedding_params.append(param)
             elif is_head_param(name, param, model):
@@ -71,6 +76,20 @@ def create_parameter_groups(
         if head_params:
             param_groups.append(create_head_param_group(head_params, dion_config))
 
+        if routing_params:
+            param_groups.append(create_routing_param_group(routing_params, dion_config))
+
+    # Log summary of parameter classification
+    total_routing_params = sum(
+        len(group["params"])
+        for group in param_groups
+        if group.get("algorithm") == getattr(dion_config, "routing_optimizer", "adamw")
+    )
+    if total_routing_params > 0:
+        logger.info(
+            f"Dion optimizer: Found {total_routing_params} routing layer parameters that will use AdamW instead of Dion"
+        )
+
     return param_groups
 
 
@@ -88,6 +107,26 @@ def is_embedding_param(name: str, param: torch.Tensor, model: nn.Module) -> bool
 
     name_lower = name.lower()
     for pattern in embedding_patterns:
+        if pattern in name_lower:
+            return True
+
+    return False
+
+
+def is_routing_param(name: str, param: torch.Tensor, model: nn.Module) -> bool:
+    """Check if parameter belongs to a routing layer (for DeepSeek MoE models)."""
+    # Check for routing layer patterns specific to DeepSeek v3
+    routing_patterns = [
+        "router.gate",  # DeepSeek v3 routing layer (exact match)
+        "gate.weight",  # Alternative routing layer pattern
+        "router_gate",  # Alternative pattern
+        "routing_gate",  # Alternative pattern
+        ".router.",  # Any parameter containing .router.
+        "moe.router",  # MoE router pattern
+    ]
+
+    name_lower = name.lower()
+    for pattern in routing_patterns:
         if pattern in name_lower:
             return True
 
@@ -193,6 +232,25 @@ def create_head_param_group(params: List[torch.Tensor], dion_config) -> Dict[str
         "params": params,
         "algorithm": head_optimizer,
         "lr": lr,
+        "beta1": dion_config.betas[0],
+        "beta2": dion_config.betas[1],
+        "weight_decay": dion_config.weight_decay,
+        "epsilon": dion_config.epsilon,
+    }
+
+
+def create_routing_param_group(
+    params: List[torch.Tensor], dion_config
+) -> Dict[str, Any]:
+    """Create parameter group for routing parameters (DeepSeek MoE routing layers)."""
+    # Get routing optimizer from config if available, otherwise use adamw
+    routing_optimizer = getattr(dion_config, "routing_optimizer", "adamw")
+    routing_lr_factor = getattr(dion_config, "routing_lr_factor", 1.0)
+
+    return {
+        "params": params,
+        "algorithm": routing_optimizer,
+        "lr": dion_config.lr * routing_lr_factor,
         "beta1": dion_config.betas[0],
         "beta2": dion_config.betas[1],
         "weight_decay": dion_config.weight_decay,

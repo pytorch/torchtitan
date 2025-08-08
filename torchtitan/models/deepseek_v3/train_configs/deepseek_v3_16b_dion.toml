@@ -49,12 +49,14 @@ replicate_mesh_grad_sync = true
 scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
 embedding_optimizer = "adamw"     # For embedding layers
 head_optimizer = "adamw"          # For model head/output layers
+routing_optimizer = "adamw"       # For routing layers (DeepSeek MoE)
 head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
 
 # Learning rate scaling factors
 scalar_lr_factor = 1.0            # LR multiplier for scalar parameters
 embedding_lr_factor = 1.0         # LR multiplier for embedding parameters
 head_lr_factor = 1.0              # LR multiplier for head parameters (after head_lr_scaling)
+routing_lr_factor = 1.0           # LR multiplier for routing parameters
 
 # Mixed precision for Dion (optional)
 # momentum_dtype = "float32"
