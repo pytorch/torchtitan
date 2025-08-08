@@ -11,7 +11,7 @@ import unittest
 
 from requests.exceptions import HTTPError
 
-from scripts.download_tokenizer import download_hf_tokenizer_files
+from scripts.download_hf_assets import download_hf_assets
 
 from tokenizers import Tokenizer
 from torch.testing._internal.common_utils import (
@@ -23,7 +23,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 class TestTokenizerIntegration(unittest.TestCase):
-    """Test integration between download_tokenizer and load_tokenizer functions."""
+    """Test integration between download_hf_assets and load_tokenizer functions."""
 
     def setUp(self):
         """Create a temporary directory for test files."""
@@ -262,9 +262,10 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         """
         # Step 1: Download tokenizer files
         try:
-            download_hf_tokenizer_files(
+            download_hf_assets(
                 repo_id=test_repo_id,
                 local_dir=self.temp_dir,
+                asset_types="tokenizer",
             )
         except HTTPError as e:
             if test_repo_id == "meta-llama/Llama-3.1-8B":

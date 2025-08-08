@@ -15,7 +15,7 @@ from torchtitan.components.checkpoint import ModelWrapper
 
 
 @torch.inference_mode()
-def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
+def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path):
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
@@ -24,7 +24,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
-    sd_adapter = train_spec.state_dict_adapter(model_args)
+    sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
@@ -39,17 +39,10 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor):
     # convert state dict tt->hf
     hf_state_dict = sd_adapter.to_hf(state_dict)
 
-    fqn_to_index_mapping = {}
-    num_fqns_per_file = 30
-
-    for i, key in enumerate(hf_state_dict.keys()):
-        group_num = (i // num_fqns_per_file) + 1
-        fqn_to_index_mapping[key] = group_num
-
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=fqn_to_index_mapping,
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
@@ -68,6 +61,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "output_dir", type=Path, help="Output directory for HF checkpoint."
     )
+    parser.add_argument(
+        "--hf_assets_path",
+        type=Path,
+        help="Path to HF assets directory. This is used to get the model.safetensors.index.json mapping",
+        default="./assets/hf/Llama3.1-8B",
+    )
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
     args = parser.parse_args()
@@ -77,4 +76,5 @@ if __name__ == "__main__":
         args.output_dir,
         args.model_name,
         args.model_flavor,
+        args.hf_assets_path,
     )

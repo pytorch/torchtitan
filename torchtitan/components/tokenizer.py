@@ -417,5 +417,5 @@ def build_hf_tokenizer(
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
-    tokenizer = HuggingFaceTokenizer(job_config.model.tokenizer_path)
+    tokenizer = HuggingFaceTokenizer(job_config.model.hf_assets_path)
     return tokenizer

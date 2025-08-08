@@ -15,10 +15,8 @@ wandb
 
 torchtitan/datasets/**/*.model
 
-# tokenizer models
-assets/**/*.model
-assets/**/*.json
-assets/**/*.txt
+# hf assets
+assets/hf/*
 torchtitan/experiments/flux/assets/*
 
 # temp files

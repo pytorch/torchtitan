@@ -78,7 +78,15 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./tests/assets/tokenizer"
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    """
+    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+    including model weights in .safetensors format, the model.safetensor.index.json file
+    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
+    """
+
+    tokenizer_path: str | None = None
+    """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
