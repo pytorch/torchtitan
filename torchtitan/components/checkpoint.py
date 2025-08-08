@@ -430,7 +430,7 @@ class CheckpointManager:
             start_time = time.monotonic()
             dcp.load(
                 hf_state_dict,
-                storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
+                storage_reader=HuggingFaceStorageReader(path=checkpoint_id, thread_count=10),
             )
             print("Time for dcp load: ", time.monotonic() - start_time)
 

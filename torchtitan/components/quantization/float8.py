@@ -26,7 +26,7 @@ AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 class Float8Converter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
-
+        '''
         float8_config: Float8 = job_config.float8
         if has_cuda_capability(8, 9) or (
             float8_config.emulate and not job_config.training.compile
@@ -105,6 +105,7 @@ class Float8Converter(ModelConverter):
                 and float8_config.precompute_float8_dynamic_scale_for_fsdp
             )
             logger.info("Float8 tensorwise scaled training active")
+        '''
 
     def _init_filter_fn(self, float8_config: Float8):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
