@@ -41,18 +41,27 @@ def parallelize_llama(
             # step.
             dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
             global_batch_size = job_config.training.local_batch_size * dp_degree
-        return torch.randint(
-            0,
-            # job_config.training.vocab_size,
-            model.vocab_size,
-            (global_batch_size, job_config.training.seq_len),
-            device=torch.device("cuda"),
-        ),
+        return (
+            torch.randint(
+                0,
+                # job_config.training.vocab_size,
+                model.vocab_size,
+                (global_batch_size, job_config.training.seq_len),
+                device=torch.device("cuda"),
+            ),
+        )
 
     # TODO make autop work correctly with different combinations of DP, DP+TP, TP, and support DDP / HSDP
     assert parallel_dims.dp_replicate_enabled is False, "DDP not supported yet"
     assert parallel_dims.cp_enabled is False, "CP not supported yet"
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
+
+    torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
+        lambda bucket_idx: 500
+    )
+    torch._inductor.config.bucket_reduce_scatters_fx_bucket_size_determinator = (
+        lambda bucket_idx: 1000
+    )
 
     # bail out
     # model = model_fn()
@@ -64,7 +73,13 @@ def parallelize_llama(
     param_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
     reduce_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce]
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    with AutoParallel(model, input_fn, world_mesh, mp_policy=mp_policy, compile=job_config.training.compile) as autop:
+    with AutoParallel(
+        model,
+        input_fn,
+        world_mesh,
+        mp_policy=mp_policy,
+        compile=job_config.training.compile,
+    ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
         possible_input_shardings = {
