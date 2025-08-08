@@ -258,10 +258,10 @@ def parallelize_llama(
 
     torch._inductor.config.bucket_all_gathers_fx = "fsdp"
     torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
-        lambda bucket_idx: 500
+        lambda bucket_idx: 55
     )
     torch._inductor.config.bucket_reduce_scatters_fx_bucket_size_determinator = (
-        lambda bucket_idx: 1000
+        lambda bucket_idx: 110
     )
 
     torch._inductor.config.post_grad_custom_post_pass = post_grad_custom_post_pass
@@ -292,7 +292,9 @@ def parallelize_llama(
             possible_input_shardings[name] for name in world_mesh.mesh_dim_names
         )
         autop.add_input_constraints([x_sharding])
-        autop.add_output_constraints([x_sharding])
+
+        out_sharding = (Shard(0), Shard(2))
+        autop.add_output_constraints([out_sharding])
         t0 = time.time()
         sharding_placement = autop.optimize_placement()
         t1 = time.time()
@@ -302,5 +304,14 @@ def parallelize_llama(
     # if job_config.training.compile:
     #    torch._inductor.config.reorder_for_peak_memory = False
     #    parallel_mod.compile(fullgraph=True)
+
+    if True:
+
+        def _return_dtensor_hack(module, args, output):
+            return torch.distributed.tensor.DTensor.from_local(
+                output, world_mesh["tp"], (Shard(2),)
+            )
+
+        hook = parallel_mod.register_forward_hook(_return_dtensor_hack)
 
     return parallel_mod
