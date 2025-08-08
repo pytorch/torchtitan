@@ -575,16 +575,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
+                self.checkpointer.save(
+                    self.step, last_step=(self.step == job_config.training.steps)
+                )
+
                 # Run validation if validator is available
                 if (
                     self.job_config.validation.enabled
                     and self.validator.should_validate(self.step)
                 ):
                     self.validator.validate(self.model_parts, self.step)
-
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
-                )
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
