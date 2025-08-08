@@ -64,7 +64,7 @@ def parallelize_llama(
     param_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
     reduce_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce]
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    with AutoParallel(model, input_fn, world_mesh, mp_policy=mp_policy) as autop:
+    with AutoParallel(model, input_fn, world_mesh, mp_policy=mp_policy, compile=job_config.training.compile) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
         possible_input_shardings = {
@@ -86,9 +86,5 @@ def parallelize_llama(
         t1 = time.time()
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
-
-    if job_config.training.compile:
-        torch._inductor.config.reorder_for_peak_memory = False
-        parallel_mod.compile(fullgraph=True)
 
     return parallel_mod
