@@ -57,10 +57,10 @@ def parallelize_llama(
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
     torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
-        lambda bucket_idx: 500
+        lambda bucket_idx: 500 / parallel_dims.tp
     )
     torch._inductor.config.bucket_reduce_scatters_fx_bucket_size_determinator = (
-        lambda bucket_idx: 1000
+        lambda bucket_idx: 1000 / parallel_dims.tp
     )
 
     # bail out
