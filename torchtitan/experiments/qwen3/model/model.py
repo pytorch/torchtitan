@@ -87,11 +87,23 @@ def apply_rotary_emb(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    xk_complex = torch.view_as_complex(
+        xk.view(*xk.shape[:-1], 2, xk.shape[-1] // 2)
+        .transpose(-2, -1)
+        .contiguous()
+        .float()
+    )
+    xq_complex = torch.view_as_complex(
+        xq.view(*xq.shape[:-1], 2, xq.shape[-1] // 2)
+        .transpose(-2, -1)
+        .contiguous()
+        .float()
+    )
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_complex)
+
+    xq_out = torch.view_as_real(xq_complex * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_complex * freqs_cis).flatten(3)
+
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -140,8 +152,8 @@ class Attention(nn.Module):
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
         if model_args.qk_norm:
-            self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
-            self.k_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
+            self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps, elementwise_affine=True)
+            self.k_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps, elementwise_affine=True)
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -185,9 +197,6 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
@@ -195,7 +204,13 @@ class Attention(nn.Module):
             xq = self.q_norm(xq)
         if self.k_norm:
             xk = self.k_norm(xk)
-
+            
+        # repeat k/v heads if n_kv_heads < n_heads
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        
+        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
@@ -207,6 +222,7 @@ class Attention(nn.Module):
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
