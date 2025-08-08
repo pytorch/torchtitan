@@ -71,7 +71,7 @@ min_lr_factor = 0.0
 
 [training]
 local_batch_size = 18
-global_batch_size = 288  # This will result in gradient_accumulation_steps = 2 with dp_degree = 8 (288 / (18 * 8) = 2)
+global_batch_size = 576  # gradient_accumulation_steps = 4 with dp_degree = 8 (576 / (18 * 8) = 4)
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 1000
