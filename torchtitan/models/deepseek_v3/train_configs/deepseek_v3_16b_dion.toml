@@ -17,7 +17,7 @@ log_freq = 1
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = false
+enable_wandb = true
 
 [model]
 name = "deepseek_v3"
@@ -28,7 +28,7 @@ tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-chat"
 
 [optimizer]
 name = "Dion"
-lr = 3e-4
+lr = 2e-2
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
@@ -53,7 +53,7 @@ head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
 
 # Learning rate scaling factors
 scalar_lr_factor = 1.0            # LR multiplier for scalar parameters
-embedding_lr_factor = 0.5         # LR multiplier for embedding parameters
+embedding_lr_factor = 1.0         # LR multiplier for embedding parameters
 head_lr_factor = 1.0              # LR multiplier for head parameters (after head_lr_scaling)
 
 # Mixed precision for Dion (optional)
@@ -62,13 +62,13 @@ head_lr_factor = 1.0              # LR multiplier for head parameters (after hea
 # variance_dtype = "float32"
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
-decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
-decay_type = "cosine"
-min_lr_factor = 0.1
+warmup_steps = 0  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.45  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "linear"
+min_lr_factor = 0.0
 
 [training]
-local_batch_size = 8
+local_batch_size = 7
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 1000
@@ -94,7 +94,7 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 
 [float8]
 enable_fsdp_float8_all_gather = false
