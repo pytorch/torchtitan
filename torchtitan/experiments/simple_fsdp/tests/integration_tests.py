@@ -9,13 +9,14 @@ import logging
 import os
 import subprocess
 
-from tests.integration_tests.features import OverrideDefinitions
+from tests.integration_tests.run_tests import OverrideDefinitions, run_tests
+from torchtitan.tools.logging import logger
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def build_test_list():
+def build_simple_fsdp_test_list():
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
@@ -26,7 +27,10 @@ def build_test_list():
         [
             OverrideDefinitions(
                 [
-                    [],
+                    [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                    ],
                 ],
                 "1D",
                 "1d",
@@ -34,6 +38,8 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--activation_checkpoint.mode selective",
                         "--activation_checkpoint.selective_ac_option op",
                     ],
@@ -44,6 +50,8 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--activation_checkpoint.mode full",
                     ],
                 ],
@@ -54,6 +62,8 @@ def build_test_list():
             # OverrideDefinitions(
             #     [
             #         [
+            #             "--model.name llama3_simple_fsdp",
+            #             "--training.compile",
             #             "--parallelism.tensor_parallel_degree 2",
             #         ],
             #     ],
@@ -64,6 +74,8 @@ def build_test_list():
             # OverrideDefinitions(
             #     [
             #         [
+            #             "--model.name llama3_simple_fsdp",
+            #             "--training.compile",
             #             "--parallelism.tensor_parallel_degree 2",
             #             "--parallelism.enable_async_tensor_parallel",
             #         ],
@@ -74,9 +86,13 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                     ],
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                         "--training.steps 20",
                     ],
@@ -87,12 +103,16 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                         "--parallelism.pipeline_parallel_degree 2",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
                     ],
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--training.steps 20",
                         "--checkpoint.enable_checkpoint",
                         "--parallelism.pipeline_parallel_degree 2",
@@ -107,8 +127,10 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_shard_degree=1",
-                        "--parallelism.data_parallel_replicate_degree=4",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 1",
+                        "--parallelism.data_parallel_replicate_degree 4",
                     ]
                 ],
                 "DDP",
@@ -118,8 +140,10 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_shard_degree=2",
-                        "--parallelism.data_parallel_replicate_degree=2",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.data_parallel_replicate_degree 2",
                     ]
                 ],
                 "HSDP",
@@ -129,9 +153,11 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_shard_degree=2",
-                        "--parallelism.data_parallel_replicate_degree=2",
-                        "--parallelism.tensor_parallel_degree=2",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.data_parallel_replicate_degree 2",
+                        "--parallelism.tensor_parallel_degree 2",
                     ]
                 ],
                 "HSDP+TP",
@@ -141,8 +167,10 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_replicate_degree=2",
-                        "--parallelism.tensor_parallel_degree=2",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_replicate_degree 2",
+                        "--parallelism.tensor_parallel_degree 2",
                     ]
                 ],
                 "DDP+TP",
@@ -152,9 +180,11 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_shard_degree=2",
-                        "--parallelism.data_parallel_replicate_degree=2",
-                        "--parallelism.context_parallel_degree=2",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.data_parallel_replicate_degree 2",
+                        "--parallelism.context_parallel_degree 2",
                     ]
                 ],
                 "HSDP+CP (with dp_shard)",
@@ -164,9 +194,11 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
-                        "--parallelism.data_parallel_shard_degree=2",
-                        "--parallelism.tensor_parallel_degree=2",
-                        "--parallelism.context_parallel_degree=2",
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
+                        "--parallelism.data_parallel_shard_degree 2",
+                        "--parallelism.tensor_parallel_degree 2",
+                        "--parallelism.context_parallel_degree 2",
                     ]
                 ],
                 "FSDP+TP+CP",
@@ -176,12 +208,16 @@ def build_test_list():
             OverrideDefinitions(
                 [
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                         "--training.steps 10",
                     ],
                     # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                     # excluded during loading to avoid errors caused by mismatched dp_degree.
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                         "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                         "--parallelism.tensor_parallel_degree 2",
@@ -189,6 +225,8 @@ def build_test_list():
                     ],
                     # load at [tp:4].
                     [
+                        "--model.name llama3_simple_fsdp",
+                        "--training.compile",
                         "--checkpoint.enable_checkpoint",
                         "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                         "--parallelism.tensor_parallel_degree 4",
@@ -204,64 +242,9 @@ def build_test_list():
     return integration_tests_flavors
 
 
-def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True)
-
-
-def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
-    # run_test supports sequence of tests.
-    test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-
-    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
-
-    for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = (
-            f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh "
-            f"--model.name llama3_simple_fsdp --training.compile "
-        )
-        # dump compile trace for debugging purpose
-        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
-        cmd += " " + dump_folder_arg
-        if override_arg:
-            cmd += " " + " ".join(override_arg)
-        logger.info(
-            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-        )
-
-        result = _run_cmd(cmd)
-        logger.info(result.stdout)
-        if result.returncode != 0:
-            raise Exception(
-                f"Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
-            )
-
-
-def run_tests(args):
-    # build integration tests list
-    test_list = build_test_list()
-
-    for test_flavor in test_list:
-        # Filter by test_name if specified
-        if args.test_name != "all" and test_flavor.test_name != args.test_name:
-            continue
-
-        # Check if config file exists
-        assert args.config_path.endswith(
-            ".toml"
-        ), "Base config path must end with .toml"
-        assert os.path.exists(
-            args.config_path
-        ), f"Base config path {args.config_path} does not exist"
-
-        # Check if we have enough GPUs
-        if args.ngpu < test_flavor.ngpu:
-            logger.info(
-                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                f" because --ngpu arg is {args.ngpu}"
-            )
-        else:
-            run_single_test(test_flavor, args.config_path, args.output_dir)
+_TEST_SUITES_FUNCTION = {
+    "simple_fsdp": build_simple_fsdp_test_list,
+}
 
 
 def main():
@@ -284,7 +267,9 @@ def main():
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
-    run_tests(args)
+
+    test_list = _TEST_SUITES_FUNCTION["simple_fsdp"]()
+    run_tests(args, test_list)
 
 
 if __name__ == "__main__":
