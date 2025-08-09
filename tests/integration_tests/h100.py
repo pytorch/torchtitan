@@ -8,13 +8,13 @@ import argparse
 import logging
 import os
 
-from .features import OverrideDefinitions, run_single_test
+from .features import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def build_test_list():
+def build_h100_tests_list():
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
