@@ -55,6 +55,20 @@ class Validation:
 
 
 @dataclass
+class Inference:
+    """Inference configuration"""
+
+    save_img_folder: str = "inference_results"
+    """Path to save the inference results"""
+    prompts_path: str = "./torchtitan/experiments/flux/inference/prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
+    batch_size: int = 16
+    """Batch size for inference"""
+    img_size: int = 256
+    """Image size for inference"""
+
+
+@dataclass
 class JobConfig:
     """
     Extend the tyro parser with custom config classe for Flux model.
@@ -63,3 +77,4 @@ class JobConfig:
     training: Training = field(default_factory=Training)
     encoder: Encoder = field(default_factory=Encoder)
     validation: Validation = field(default_factory=Validation)
+    inference: Inference = field(default_factory=Inference)

@@ -76,7 +76,7 @@ def generate_image(
     dtype: torch.dtype,
     job_config: JobConfig,
     model: FluxModel,
-    prompt: str,
+    prompt: str | list[str],
     autoencoder: AutoEncoder,
     t5_tokenizer: BaseTokenizer,
     clip_tokenizer: BaseTokenizer,
@@ -89,6 +89,9 @@ def generate_image(
     Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
     """
 
+    if isinstance(prompt, str):
+        prompt = [prompt]
+
     # allow for packing and conversion to latent space. Use the same resolution as training time.
     img_height = 16 * (job_config.training.img_size // 16)
     img_width = 16 * (job_config.training.img_size // 16)
@@ -98,8 +101,11 @@ def generate_image(
     )
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
-    clip_tokens = clip_tokenizer.encode(prompt).unsqueeze(0)
-    t5_tokens = t5_tokenizer.encode(prompt).unsqueeze(0)
+    clip_tokens = clip_tokenizer.encode(prompt)
+    t5_tokens = t5_tokenizer.encode(prompt)
+    if len(prompt) == 1:
+        clip_tokens = clip_tokens.unsqueeze(0)
+        t5_tokens = t5_tokens.unsqueeze(0)
 
     batch = preprocess_data(
         device=device,
@@ -114,11 +120,16 @@ def generate_image(
     )
 
     if enable_classifier_free_guidance:
-        empty_clip_tokens = clip_tokenizer.encode("").unsqueeze(0)
-        empty_t5_tokens = t5_tokenizer.encode("").unsqueeze(0)
+        num_images = len(prompt)
+
+        empty_clip_tokens = clip_tokenizer.encode("")
+        empty_t5_tokens = t5_tokenizer.encode("")
+        empty_clip_tokens = empty_clip_tokens.repeat(num_images, 1)
+        empty_t5_tokens = empty_t5_tokens.repeat(num_images, 1)
+
         empty_batch = preprocess_data(
             device=device,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             autoencoder=None,
             clip_encoder=clip_encoder,
             t5_encoder=t5_encoder,
@@ -176,17 +187,19 @@ def denoise(
     # create denoising schedule
     timesteps = get_schedule(denoising_steps, latent_height * latent_width, shift=True)
 
+    if enable_classifier_free_guidance:
+        # Double batch size for CFG: [unconditional, conditional]
+        latents = torch.cat([latents, latents], dim=0)
+        t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
+        clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
+        bsz *= 2
+
     # create positional encodings
     POSITION_DIM = 3
     latent_pos_enc = create_position_encoding_for_latents(
         bsz, latent_height, latent_width, POSITION_DIM
     ).to(latents)
     text_pos_enc = torch.zeros(bsz, t5_encodings.shape[1], POSITION_DIM).to(latents)
-
-    if enable_classifier_free_guidance:
-        latents = torch.cat([latents, latents], dim=0)
-        t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
-        clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
 
     # convert img-like latents into sequences of patches
     latents = pack_latents(latents)
@@ -206,7 +219,14 @@ def denoise(
             pred_u, pred_c = pred.chunk(2)
             pred = pred_u + classifier_free_guidance_scale * (pred_c - pred_u)
 
+            # repeat along batch dimension to update both unconditional and conditional latents
+            pred = pred.repeat(2, 1, 1)
+
         latents = latents + (t_prev - t_curr) * pred
+
+    # take the conditional latents for the final result
+    if enable_classifier_free_guidance:
+        latents = latents.chunk(2)[1]
 
     # convert sequences of patches into img-like latents
     latents = unpack_latents(latents, latent_height, latent_width)
