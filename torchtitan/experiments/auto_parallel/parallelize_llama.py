@@ -91,7 +91,6 @@ def parallelize_llama(
         # only used if loss parallel is enabled
         possible_output_shardings = {
             # maps relative to mesh dim names used in torchtitan
-            "dp_replicate": Shard(0),
             "dp_shard": Shard(0),
             "tp": Shard(2),
         }
