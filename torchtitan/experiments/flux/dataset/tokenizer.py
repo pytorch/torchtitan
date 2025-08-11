@@ -108,7 +108,7 @@ class FluxTokenizer(BaseTokenizer):
 
     def encode(
         self,
-        s: str,
+        s: str | list[str],
     ) -> torch.Tensor:
         """
         Encode the prompt text into tokens.

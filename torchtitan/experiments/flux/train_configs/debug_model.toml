@@ -82,4 +82,4 @@ all_timesteps = false
 [inference]
 save_img_folder = "inference_results"
 prompts_path = "./torchtitan/experiments/flux/inference/prompts.txt"
-batch_size = 8
+local_batch_size = 2

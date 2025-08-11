@@ -1,4 +1,3 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -11,45 +10,13 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.experiments.flux.dataset.tokenizer import (
-    build_flux_tokenizer,
-    FluxTokenizer,
-)
+from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
 from torchtitan.experiments.flux.sampling import generate_image, save_image
 from torchtitan.experiments.flux.train import FluxTrainer
 from torchtitan.tools.logging import init_logger, logger
 
 
-def inference_call(
-    prompts: list[str],
-    trainer: FluxTrainer,
-    t5_tokenizer: FluxTokenizer,
-    clip_tokenizer: FluxTokenizer,
-    bs: int = 1,
-):
-    """
-    Run inference on the Flux model.
-    """
-    results = []
-    with torch.no_grad():
-        for i in range(0, len(prompts), bs):
-            images = generate_image(
-                device=trainer.device,
-                dtype=trainer._dtype,
-                job_config=trainer.job_config,
-                model=trainer.model_parts[0],
-                prompt=prompts[i : i + bs],
-                autoencoder=trainer.autoencoder,
-                t5_tokenizer=t5_tokenizer,
-                clip_tokenizer=clip_tokenizer,
-                t5_encoder=trainer.t5_encoder,
-                clip_encoder=trainer.clip_encoder,
-            )
-            results.append(images.detach())
-    results = torch.cat(results, dim=0)
-    return results
-
-
+@torch.no_grad()
 @record
 def inference(config: JobConfig):
     # Reuse trainer to perform forward passes
@@ -72,32 +39,40 @@ def inference(config: JobConfig):
 
     if prompts:
         # Generate images for this process's assigned prompts
-        images = inference_call(
-            prompts,
-            trainer,
-            t5_tokenizer,
-            clip_tokenizer,
-            bs=config.inference.batch_size,
+        bs = config.inference.local_batch_size
+
+        output_dir = os.path.join(
+            config.job.dump_folder,
+            config.inference.save_img_folder,
         )
 
-        if config.inference.save_img_folder:
-            # Create mapping from local indices to global prompt indices
-            global_ids = list(range(global_rank, total_prompts, world_size))
+        # Create mapping from local indices to global prompt indices
+        global_ids = list(range(global_rank, total_prompts, world_size))
 
-            for i in range(images.shape[0]):
+        for i in range(0, len(prompts), bs):
+            images = generate_image(
+                device=trainer.device,
+                dtype=trainer._dtype,
+                job_config=trainer.job_config,
+                model=trainer.model_parts[0],
+                prompt=prompts[i : i + bs],
+                autoencoder=trainer.autoencoder,
+                t5_tokenizer=t5_tokenizer,
+                clip_tokenizer=clip_tokenizer,
+                t5_encoder=trainer.t5_encoder,
+                clip_encoder=trainer.clip_encoder,
+            )
+            for j in range(images.shape[0]):
                 # Extract single image while preserving batch dimension [1, C, H, W]
-                img = images[i : i + 1]
-                global_id = global_ids[i]
+                img = images[j : j + 1]
+                global_id = global_ids[i + j]
 
                 save_image(
                     name=f"image_prompt{global_id}_rank{str(torch.distributed.get_rank())}.png",
-                    output_dir=os.path.join(
-                        config.job.dump_folder,
-                        config.inference.save_img_folder,
-                    ),
+                    output_dir=output_dir,
                     x=img,
                     add_sampling_metadata=True,
-                    prompt=prompts[i],
+                    prompt=prompts[i + j],
                 )
 
     torch.distributed.destroy_process_group()
