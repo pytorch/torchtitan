@@ -85,7 +85,7 @@ def forward_tt(config_path, checkpoint_path, test_set):
         state_dict.pop(k, None)
 
     # Checkpoint Loading
-    logger.info(f"Loading chkpt at: {checkpoint_path}")
+    logger.info(f"Loading checkpoint at: {checkpoint_path}")
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
 
     output_list = []
@@ -108,14 +108,18 @@ def forward_tt(config_path, checkpoint_path, test_set):
 if __name__ == "__main__":
     # hf params
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
-    hf_model_path = "outputs/checkpoint/step-0-tohf"
-    hf_model_path_no_perm = "outputs/checkpoint/step-0-tohfnoperm"
+    hf_model_path = "outputs/test_checkpoint/step-0-tohf"  # safetensors checkpoint from convert_from_hf.py
+    # safetensors checkpoint from convert_from_hf.py but without using sd_adapter's permute
+    hf_model_path_no_perm = "outputs/test_checkpoint/step-0-tohfnoperm"
 
     # tt params
     config_path = "torchtitan/models/llama3/train_configs/llama3_8b.toml"
-    baseline_checkpoint_path = "outputs/checkpoint/step-0-fromllama"
-    checkpoint_path = "outputs/checkpoint/step-0-fromhf"
-    checkpoint_path_no_perm = "outputs/checkpoint/step-0-fromhfnoperm"
+    baseline_checkpoint_path = "outputs/test_checkpoint/step-0-fromllama"  # dcp checkpoint from convert_from_llama.py
+    checkpoint_path = (
+        "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_to_hf.py
+    )
+    # dcp checkpoint from convert_to_hf.py without using sd_adapter's permute
+    checkpoint_path_no_perm = "outputs/test_checkpoint/step-0-fromhfnoperm"
 
     # test params
     prompt_len = 8
