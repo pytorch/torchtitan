@@ -136,7 +136,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        1. Quantize the weights from float32 to float8.
+        1. When saving HF checkpoints, quantize the weights from float32 to float8.
         2. Convert between the HF shape and the torchtitan shape.
         3. Split the GroupedExperts' weight into seprate expert's wegiht.
         """
@@ -149,7 +149,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 continue
 
             if "moe.experts" in key:
-                # model.layers.3.mlp.experts.0.down_proj.weight
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
@@ -188,7 +187,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        1. Dequantize the weights from float8 to float32.
+        1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate seprate expert's wegiht into GroupedExperts' weight.
         """
