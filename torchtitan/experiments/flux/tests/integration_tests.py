@@ -5,14 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import logging
 import os
-import subprocess
 
 from tests.integration_tests.features import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
-
-from torchtitan.tools.logging import logger
 
 
 def build_flux_test_list():

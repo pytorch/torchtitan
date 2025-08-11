@@ -4,18 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
-import logging
-import os
-import subprocess
-from collections import defaultdict
-from .features import OverrideDefinitions, run_single_test
 
 from .features import OverrideDefinitions
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 def build_model_tests_list() -> list[OverrideDefinitions]:
