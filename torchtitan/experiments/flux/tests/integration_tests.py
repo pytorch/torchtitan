@@ -86,8 +86,8 @@ def build_flux_test_list():
                     "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
                     "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
                     "--model.tokenizer_path tests/assets/tokenizer",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--parallelism.data_parallel_replicate_degree=1",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_replicate_degree 1",
                 ]
             ],
             "FSDP",
@@ -102,13 +102,27 @@ def build_flux_test_list():
                     "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
                     "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
                     "--model.tokenizer_path tests/assets/tokenizer",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
                 ]
             ],
             "HSDP",
             "hsdp",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name flux",
+                    "--training.test_mode",
+                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
+                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
+                    "--model.tokenizer_path tests/assets/tokenizer",
+                    "--validation.enabled",
+                ]
+            ],
+            "Flux Validation Test",
+            "validation",
         ),
     ]
     return integration_tests_flavors
