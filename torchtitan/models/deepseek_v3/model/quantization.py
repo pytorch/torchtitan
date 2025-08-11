@@ -46,14 +46,9 @@ def dequantize_from_fp8(
             f"scale_inv shape {scale_inv.shape} doesn't match expected shape {expected_scale_shape}"
         )
 
-    # NOTE: This might cause OOM if the model is too large
-    # Copy the weight tensor to make it also a DTensor
-    print("weight type is: ", type(weight), weight.shape)
-    # dequantized = torch.zeros_like(float_weight, dtype=dtype, device="cpu")
-    
-    # clone give dequantized : 
+    # NOTE: This might cause OOM because DTensor might incurr underlaying communication
+    # if the model is too large when converting on-the-fly.
     dequantized = float_weight.detach().clone().to(dtype=dtype)
-    print(f"float_weight type is: {type(float_weight)}, {float_weight.shape} , dequantized type is: {type(dequantized)} ,  block_rows is: {block_rows}, block_cols is: {block_cols}, expected_scale_shape is: {expected_scale_shape}")
 
     # Apply scaling factors to each block
     for i in range(block_rows):
