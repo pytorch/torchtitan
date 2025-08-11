@@ -6,7 +6,7 @@ dump_folder = "./outputs"
 description = "Qwen 3 0.6B training"
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
