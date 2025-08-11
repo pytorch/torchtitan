@@ -9,6 +9,7 @@ import concurrent.futures
 import logging
 import os
 import subprocess
+from typing import List
 
 from .features import OverrideDefinitions
 
@@ -90,14 +91,12 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             )
 
 
-def run_tests(args):
-    integration_tests_flavors = build_test_list()
-
+def run_tests(args, test_list: List[OverrideDefinitions]):
     if args.ngpu < 8:
         logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return
 
-    for test_flavor in integration_tests_flavors:
+    for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -138,7 +137,11 @@ def main():
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    run_tests(args)
+    if os.listdir(args.output_dir):
+        raise RuntimeError("Please provide an empty output directory.")
+
+    test_list = build_ft_test_list()
+    run_tests(args, test_list)
 
 
 if __name__ == "__main__":

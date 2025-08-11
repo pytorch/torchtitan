@@ -16,7 +16,6 @@ from .features import OverrideDefinitions
 
 _TEST_SUITES_FUNCTION = {
     "features": build_features_test_list,
-    "ft": build_ft_test_list,
     "models": build_model_tests_list,
     "h100": build_h100_tests_list,
 }
@@ -99,7 +98,7 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="",
-        choices=["features", "ft", "models", "h100"],
+        choices=["features", "models", "h100"],
         help="Which test suite to run. If not specified, torchtitan composibility tests will be run",
     )
     parser.add_argument(

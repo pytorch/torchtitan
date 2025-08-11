@@ -80,10 +80,11 @@ def build_h100_tests_list():
     return integration_tests_flavors
 
 
-def run_tests(args):
+def run_tests(args, test_list=None):
     """Run all H100 integration tests"""
     # build integration tests list
-    test_list = build_test_list()
+    if test_list is None:
+        test_list = build_h100_tests_list()
 
     for test_flavor in test_list:
         # Filter by test_name if specified
@@ -105,6 +106,8 @@ def run_tests(args):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
+            # Import run_single_test from run_tests.py
+            from tests.integration_tests.run_tests import run_single_test
             run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
@@ -128,7 +131,9 @@ def main():
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
-    run_tests(args)
+    
+    test_list = build_h100_tests_list()
+    run_tests(args, test_list)
 
 
 if __name__ == "__main__":
