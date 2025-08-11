@@ -129,7 +129,6 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
-                    "--checkpoint.folder hf_checkpoint"
                     "--checkpoint.initial_load_model_only",
                     "--checkpoint.initial_load_in_hf",
                 ],

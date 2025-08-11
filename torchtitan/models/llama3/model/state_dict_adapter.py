@@ -45,7 +45,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
             except FileNotFoundError:
                 logger.warning(
                     "model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
-                    Defaulting to mapping dcp weights to a single safetensors file",
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
                 )
                 hf_safetensors_indx = None
 

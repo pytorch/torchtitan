@@ -189,7 +189,7 @@ class ConfigManager:
                 self.config.model.hf_assets_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please download the new tokenizer model (python scripts/download_hf_assets.py) and update your config."
+                    "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer

@@ -545,8 +545,8 @@ class CheckpointManager:
                         "checkpoint.initial_load_path is specified but the path is not valid."
                     )
                 if from_hf:
-                    logger.warning(
-                        f"loading from hf from initial_load_path: {self.initial_load_path}"
+                    logger.info(
+                        f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
                     )
             elif from_hf:
                 checkpoint_id = self.sd_adapter.hf_assets_path
@@ -555,8 +555,8 @@ class CheckpointManager:
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
-                logger.warning(
-                    f"loading from hf from hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                logger.info(
+                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
                 )
             else:
                 return False
@@ -569,7 +569,7 @@ class CheckpointManager:
             if self.initial_load_in_hf:
                 logger.warning(
                     "checkpoint.initial_load_in_hf is True but the checkpoint.folder exists. "
-                    "Checkpointer will not load from hf safetensors"
+                    "Checkpointer will not load from HF safetensors"
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:
