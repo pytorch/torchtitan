@@ -19,7 +19,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline import (
+from torchtitan.distributed.pipeline_parallel import (
     build_pipeline_schedule,
     generate_llm_fqn_per_model_part,
     pipeline_module_split,

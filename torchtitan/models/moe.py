@@ -4,48 +4,31 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
 
-from .args import DeepSeekV3ModelArgs
+from torchtitan.distributed.expert_parallel import expert_parallel
 
 
-class FeedForward(nn.Module):
-    """
-    FeedForward module
+@dataclass
+class MoEArgs:
+    num_experts: int = 8
+    num_shared_experts: int = 1
 
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+    # router
+    score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+    route_norm: bool = False
+    route_scale: float = 1.0
+    score_before_experts: bool = True
 
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+    # token-choice
+    top_k: int = 1
+    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
+    load_balance_coeff: float | None = 1e-3
 
 
 class GroupedExperts(nn.Module):
@@ -58,9 +41,9 @@ class GroupedExperts(nn.Module):
     ):
         super().__init__()
         self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
+        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
+        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
 
     def forward(
@@ -104,9 +87,9 @@ class GroupedExperts(nn.Module):
             )
             out_experts_splits = []
             for expert_idx, x_expert in enumerate(x):
-                h = F.silu(torch.matmul(x_expert, w1[expert_idx]))
-                h = h * torch.matmul(x_expert, w3[expert_idx])
-                h = torch.matmul(h, w2[expert_idx])
+                h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
+                h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+                h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
                 # h shape (tokens_per_expert(varying), dim)
                 out_experts_splits.append(h)
             out = torch.cat(out_experts_splits, dim=0)
@@ -115,10 +98,10 @@ class GroupedExperts(nn.Module):
             out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
         else:
             # x shape (num_experts, tokens_per_expert, dim)
-            h = F.silu(torch.bmm(x, w1))
-            h = h * torch.bmm(x, w3)
+            h = F.silu(torch.bmm(x, w1.transpose(-2, -1)))
+            h = h * torch.bmm(x, w3.transpose(-2, -1))
             # out shape (num_experts, tokens_per_expert, dim)
-            out = torch.bmm(h, w2)
+            out = torch.bmm(h, w2.transpose(-2, -1))
 
         return out
 
@@ -140,9 +123,17 @@ class GroupedExperts(nn.Module):
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
-        h = F.silu(torch._grouped_mm(x.bfloat16(), w1.bfloat16(), offs=offsets))
-        h = h * torch._grouped_mm(x.bfloat16(), w3.bfloat16(), offs=offsets)
-        out = torch._grouped_mm(h, w2.bfloat16(), offs=offsets).type_as(x)
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+            )
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
         return out
 
@@ -158,6 +149,7 @@ class TokenChoiceTopKRouter(nn.Module):
 
     Args:
         gate (nn.Module): Gate module to calculate the scores, typically nn.Linear(dim, num_experts).
+        dim (int): Dimension of input tokens.
         num_experts (int): Number of experts in each moe layer.
         top_k (int): Number of experts each token will be routed to in token-choice routing.
         use_sigmoid (bool): Whether to use sigmoid or softmax for router scores. Default is False.
@@ -168,25 +160,22 @@ class TokenChoiceTopKRouter(nn.Module):
         dim: int,
         num_experts: int,
         top_k: int,
-        use_sigmoid: bool = False,
-        route_sclaing_factor: float = 1.0,
+        score_func: Literal["softmax", "sigmoid"],
+        route_norm: bool,
+        route_scale: float,
     ):
         super().__init__()
-
-        self.dim = dim
+        self.gate = nn.Linear(dim, num_experts, bias=False)
         self.num_experts = num_experts
         self.top_k = top_k
-        self.use_sigmoid = use_sigmoid
-        self.route_sclaing_factor = route_sclaing_factor
-        self.gate = nn.Linear(self.dim, self.num_experts, bias=False)
+        self.score_func = score_func
+        self.route_norm = route_norm
+        self.route_scale = route_scale
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        TODO: We haven't implement the group-based routing (node limit routing),
-        and currently EP is not supporting node limit routing yet.
-
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
 
@@ -202,10 +191,12 @@ class TokenChoiceTopKRouter(nn.Module):
         scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
-        if self.use_sigmoid:
+        if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores.to(torch.float32))
-        else:
+        elif self.score_func == "softmax":
             scores = F.softmax(scores.to(torch.float32), dim=1)
+        else:
+            raise NotImplementedError(f"Unknown score function {self.score_function}")
 
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
@@ -220,9 +211,10 @@ class TokenChoiceTopKRouter(nn.Module):
                 scores, k=self.top_k, dim=1
             )
 
-        if self.use_sigmoid:
+        if self.score_func == "sigmoid" and self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
+        top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
@@ -238,13 +230,9 @@ class TokenChoiceTopKRouter(nn.Module):
             selected_experts_indices.view(-1), stable=True
         )
 
-        # reorder the scores to match the order of the token indices
         top_scores = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
-        top_scores = (
-            top_scores * self.route_sclaing_factor
-        )  # must multiply the scaling factor
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
@@ -252,43 +240,43 @@ class TokenChoiceTopKRouter(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
-
+    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
         super().__init__()
-        dim = model_args.dim
 
-        num_experts = model_args.n_routed_experts
-        hidden_dim = model_args.moe_inter_dim
-        top_k = model_args.n_activated_experts
-        route_scaling_factor = model_args.route_scale
-
+        num_experts = moe_args.num_experts
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            use_grouped_mm=model_args.use_grouped_mm,
+            use_grouped_mm=moe_args.use_grouped_mm,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
-            top_k=top_k,
-            use_sigmoid=model_args.score_func == "sigmoid",
-            route_sclaing_factor=route_scaling_factor,
+            top_k=moe_args.top_k,
+            score_func=moe_args.score_func,
+            route_norm=moe_args.route_norm,
+            route_scale=moe_args.route_scale,
         )
         self.shared_expert = (
-            # Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/modeling_deepseek.py#L517
             GroupedExperts(
                 dim=dim,
-                hidden_dim=hidden_dim * model_args.n_shared_experts,
-                num_experts=1,  # Here needs to be 1 to make it equivalent to the MLP
-                use_grouped_mm=model_args.use_grouped_mm,
+                # TODO: if it doesn't use GroupedExperts.num_experts
+                #       we can just use normal FeedForward
+                hidden_dim=hidden_dim * moe_args.num_shared_experts,
+                num_experts=1,
+                use_grouped_mm=moe_args.use_grouped_mm,
             )
-            if model_args.n_shared_experts > 0
+            if moe_args.num_shared_experts > 0
             else None
         )
+        self.score_before_experts = moe_args.score_before_experts
 
-        # auxiliary-loss-free load balancing
-        self.load_balance_coeff = model_args.load_balance_coeff
+        # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
+        # NOTE: tokens_per_expert is accumulated in the model forward pass.
+        #       expert_bias is updated outside the model in an optimzer step pre hook
+        #       to work with gradient accumulation.
+        self.load_balance_coeff = moe_args.load_balance_coeff
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
@@ -321,10 +309,13 @@ class MoE(nn.Module):
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
-        # Prevent extra local tokens accumulation on evaluation or activation recomputation.
-        if self.load_balance_coeff is not None and torch.is_grad_enabled():
+        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+        #       first in the forward pass, and then in the backward pass. However, this has no
+        #       effect on the expert bias update thanks to the torch.sign() operator.
+        if self.load_balance_coeff is not None:
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
+
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
 
@@ -335,12 +326,18 @@ class MoE(nn.Module):
             index=token_indices,
         )
 
+        if self.score_before_experts:
+            routed_input = (
+                routed_input.to(torch.float32) * top_scores.reshape(-1, 1)
+            ).to(x.dtype)
+
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
-        routed_output = (routed_output.to(torch.float32) * top_scores.unsqueeze(-1)).to(
-            x.dtype
-        )
+        if not self.score_before_experts:
+            routed_output = (
+                routed_output.to(torch.float32) * top_scores.reshape(-1, 1)
+            ).to(x.dtype)
 
         # shared expert
         if self.shared_expert is not None:
@@ -350,7 +347,6 @@ class MoE(nn.Module):
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
-        # Accumulate multiple expert results becase each token can be routed to multiple experts
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out

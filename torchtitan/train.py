@@ -48,6 +48,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     lr_schedulers: train_spec_module.LRSchedulersContainer
     validator: train_spec_module.BaseValidator
     metrics_processor: train_spec_module.MetricsProcessor
+    model_args: train_spec_module.BaseModelArgs
 
     # non-swappable training components
     checkpointer: CheckpointManager
@@ -146,6 +147,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
         model_args.update_from_config(job_config)
+        self.model_args = model_args
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
@@ -478,11 +480,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh=(
                 parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
             ),
-            ep_dense_params_mesh_ndim=(
-                parallel_dims.dense_params_mesh_ndim
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
@@ -553,8 +551,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             maybe_semi_sync_training(
                 job_config.fault_tolerance,
                 ft_manager=self.ft_manager,
-                model_parts=self.model_parts,
+                model=self.model_parts[0],
+                n_layers=(
+                    self.model_args.n_layers
+                    if hasattr(self.model_args, "n_layers")
+                    else 0
+                ),
                 optimizer=self.optimizers,
+                fragment_fn=(
+                    self.train_spec.fragment_fn
+                    if hasattr(self.train_spec, "fragment_fn")
+                    else None
+                ),
             ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
@@ -567,16 +575,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
+                self.checkpointer.save(
+                    self.step, last_step=(self.step == job_config.training.steps)
+                )
+
                 # Run validation if validator is available
                 if (
                     self.job_config.validation.enabled
                     and self.validator.should_validate(self.step)
                 ):
                     self.validator.validate(self.model_parts, self.step)
-
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
-                )
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
