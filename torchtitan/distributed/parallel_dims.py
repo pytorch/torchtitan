@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from functools import cached_property
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -219,11 +218,18 @@ class ParallelDims:
     def ep_enabled(self):
         return self.ep > 1
 
-    @cached_property
+    @property
+    def fsdp_gradient_divide_factor(self) -> int:
+        # This is needed for FSDP-sharded experts when Expert Parallel is enabled.
+        # Although the FSDP sharding of experts is done on a mesh of a different size than
+        # other parameters, the gradient division factor should be consistent with data.
+        return self.dp_replicate * self.dp_shard * self.cp
+
+    @property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
 
-    @cached_property
+    @property
     def seq_len_divisor(self):
         # Sequence Parallel requires that seq_len be divisible by TP degree.
         # https://github.com/pytorch/torchtitan/pull/640#discussion_r1849481001

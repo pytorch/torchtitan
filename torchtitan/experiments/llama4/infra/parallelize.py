@@ -139,6 +139,7 @@ def parallelize_llama(
                 if dp_mod_ep_mesh_dim_names
                 else None
             ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -270,6 +271,7 @@ def apply_fsdp(
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
     dp_mod_ep_mesh: DeviceMesh | None = None,
+    gradient_divide_factor: int | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -321,6 +323,12 @@ def apply_fsdp(
                 transformer_block.moe.experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
+            )
+            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
+            #       a different size than other parameters, the gradient division
+            #       factor should be consistent with data.
+            transformer_block.moe.experts.set_gradient_divide_factor(
+                gradient_divide_factor,
             )
 
         fully_shard(
