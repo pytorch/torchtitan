@@ -7,8 +7,11 @@
 import argparse
 import os
 
+from typing import List
+
 from tests.integration_tests.features import OverrideDefinitions
-from tests.integration_tests.run_tests import run_tests
+from tests.integration_tests.run_tests import _run_cmd
+from torchtitan.tools.logging import logger
 
 
 def build_flux_test_list():
@@ -22,11 +25,6 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--profiling.enable_profiling",
                     "--metrics.enable_tensorboard",
                 ],
@@ -38,19 +36,9 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--checkpoint.enable_checkpoint",
                 ],
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--checkpoint.enable_checkpoint",
                     "--training.steps 20",
                 ],
@@ -61,11 +49,6 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.last_save_model_only",
                 ],
@@ -77,11 +60,6 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.data_parallel_replicate_degree 1",
                 ]
@@ -93,11 +71,6 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                 ]
@@ -109,11 +82,6 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--model.name flux",
-                    "--training.test_mode",
-                    "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/",
-                    "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/",
-                    "--model.tokenizer_path tests/assets/tokenizer",
                     "--validation.enabled",
                 ]
             ],
@@ -127,6 +95,72 @@ def build_flux_test_list():
 _TEST_SUITES_FUNCTION = {
     "flux": build_flux_test_list,
 }
+
+
+def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+    # run_test supports sequence of tests.
+    test_name = test_flavor.test_name
+    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+
+    # Random init encoder for offline testing
+    model_arg = "--model.name flux"
+    random_init_encoder_arg = "--training.test_mode"
+    clip_encoder_version_arg = "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/"
+    t5_encoder_version_arg = (
+        "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
+    )
+    tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
+
+    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+
+    for idx, override_arg in enumerate(test_flavor.override_args):
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/experiments/flux/run_train.sh"
+        # dump compile trace for debugging purpose
+        cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
+        cmd += " " + model_arg
+        cmd += " " + dump_folder_arg
+        cmd += " " + random_init_encoder_arg
+        cmd += " " + clip_encoder_version_arg
+        cmd += " " + t5_encoder_version_arg
+        cmd += " " + tokenzier_path_arg
+        if override_arg:
+            cmd += " " + " ".join(override_arg)
+        logger.info(
+            f"=====Flux Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
+        )
+
+        result = _run_cmd(cmd)
+        logger.info(result.stdout)
+        if result.returncode != 0:
+            raise Exception(
+                f"Flux Integration test failed, flavor : {test_flavor.test_descr}, command : {cmd}"
+            )
+
+
+def run_tests(args, test_list: List[OverrideDefinitions]):
+    """Run all integration tests to test the core features of TorchTitan
+    Override the run_tests function in run_tests.py because FLUX model
+    uses different train.py in command to run the model"""
+
+    # Check if config file exists
+    assert args.config_path.endswith(".toml"), "Base config path must end with .toml"
+    assert os.path.exists(
+        args.config_path
+    ), f"Base config path {args.config_path} does not exist"
+
+    for test_flavor in test_list:
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
+            continue
+
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():
