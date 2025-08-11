@@ -4,11 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-<<<<<<< HEAD
-=======
 import math
-from collections.abc import Callable
->>>>>>> 69104707 ([PoC] Enable flexible different layout for same mesh via a util function)
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -30,13 +26,9 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-<<<<<<< HEAD
 
     _world_mesh: DeviceMesh = None
-=======
-    enable_loss_parallel: bool
     intermediate_num: int = 0
->>>>>>> 69104707 ([PoC] Enable flexible different layout for same mesh via a util function)
 
     def __post_init__(self):
         self._validate()
@@ -150,7 +142,7 @@ class ParallelDims:
             if d > 1:
                 dims.append(d)
                 names.append(name)
-        
+
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
@@ -282,7 +274,6 @@ class ParallelDims:
         device_type: str,
         mesh_configurations: list[dict[str, int]],
         flatten_names_map: list[dict[str, list[str]]],
-        init_device_mesh_fn: Callable,
     ) -> DeviceMesh:
         """
         Build a mesh with multiple mesh configurations and flatten names map.
@@ -366,7 +357,7 @@ class ParallelDims:
         logger.info(
             f"Building intermediate {len(final_mesh_shape)}-D device mesh with {final_mesh_dim_names}, {final_mesh_shape}"
         )
-        mesh = init_device_mesh_fn(
+        mesh = init_device_mesh(
             device_type, final_mesh_shape, mesh_dim_names=final_mesh_dim_names
         )
         inter_flatten_names_map_list.reverse()
