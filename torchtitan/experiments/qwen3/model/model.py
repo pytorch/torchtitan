@@ -152,8 +152,12 @@ class Attention(nn.Module):
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
         if model_args.qk_norm:
-            self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps, elementwise_affine=True)
-            self.k_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps, elementwise_affine=True)
+            self.q_norm = nn.RMSNorm(
+                self.head_dim, eps=model_args.norm_eps, elementwise_affine=True
+            )
+            self.k_norm = nn.RMSNorm(
+                self.head_dim, eps=model_args.norm_eps, elementwise_affine=True
+            )
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -197,32 +201,29 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
         if self.q_norm:
             xq = self.q_norm(xq)
         if self.k_norm:
             xk = self.k_norm(xk)
-            
+
         # repeat k/v heads if n_kv_heads < n_heads
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-        
+
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        
+
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-            
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-        
+
         output = self.sdpa(xq, xk, xv)
 
         output = output.transpose(
             1, 2
         ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
-        
+
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
@@ -290,11 +291,10 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
 
-
         self.attention = Attention(model_args)
         self.feed_forward = FeedForward(
             dim=model_args.dim, hidden_dim=model_args.hidden_dim
-        ) 
+        )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
