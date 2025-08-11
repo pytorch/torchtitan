@@ -5,15 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import logging
 import os
-import subprocess
 
 from tests.integration_tests.run_tests import OverrideDefinitions, run_tests
-from torchtitan.tools.logging import logger
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 def build_simple_fsdp_test_list():

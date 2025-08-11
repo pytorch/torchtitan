@@ -108,6 +108,7 @@ def run_tests(args, test_list=None):
         else:
             # Import run_single_test from run_tests.py
             from tests.integration_tests.run_tests import run_single_test
+
             run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
@@ -131,7 +132,7 @@ def main():
         os.makedirs(args.output_dir)
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
-    
+
     test_list = build_h100_tests_list()
     run_tests(args, test_list)
 
