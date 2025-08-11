@@ -53,4 +53,4 @@ jobs:
         mkdir artifacts-to-be-uploaded
 
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.h100 artifacts-to-be-uploaded --ngpu 8
+        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
