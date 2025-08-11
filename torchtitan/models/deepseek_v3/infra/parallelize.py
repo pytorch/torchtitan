@@ -122,6 +122,7 @@ def parallelize_deepseekv3(
                 if dp_mod_ep_mesh_dim_names
                 else None
             ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
