@@ -201,15 +201,15 @@ class TokenChoiceTopKRouter(nn.Module):
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        if expert_bias is not None:
-            _, selected_experts_indices = torch.topk(
-                scores + expert_bias, k=self.top_k, dim=1
-            )
-            top_scores = scores.gather(dim=1, index=selected_experts_indices)
-        else:
-            top_scores, selected_experts_indices = torch.topk(
-                scores, k=self.top_k, dim=1
-            )
+        # if expert_bias is not None:
+        #     _, selected_experts_indices = torch.topk(
+        #         scores + expert_bias, k=self.top_k, dim=1
+        #     )
+        #     top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        # else:
+        #     top_scores, selected_experts_indices = torch.topk(scores, k=self.top_k, dim=1)
+        _, selected_experts_indices = torch.topk(scores, k=self.top_k, dim=1)
+        top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         if self.score_func == "sigmoid" and self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
@@ -282,10 +282,12 @@ class MoE(nn.Module):
             self.register_buffer(
                 "expert_bias",
                 torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
             )
             self.register_buffer(
                 "tokens_per_expert",
                 torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
             )
         else:
             self.expert_bias = None

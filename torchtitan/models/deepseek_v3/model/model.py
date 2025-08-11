@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from re import S
 from typing import Tuple
 
 import torch
@@ -52,6 +53,16 @@ class FeedForward(nn.Module):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+
+
+def print_tensor_stats(name, tensor):
+    mean = tensor.mean().item()
+    std = tensor.std().item()
+    min_val = tensor.min().item()
+    max_val = tensor.max().item()
+    print(
+        f"{name} - Shape: {tensor.shape} Mean: {mean:.6f}, Min: {min_val:.6f}, Max: {max_val:.6f}, Std: {std:.6f}, First 10 values: {tensor.flatten()[:10].tolist()}"
+    )
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -167,6 +178,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    # [rank0]:before freqs_cis view:  x: torch.Size([1, 2048, 128, 32]) torch.Size([4096, 32])
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     return y.to(dtype)
@@ -229,14 +241,21 @@ class Attention(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
+
         bsz, seqlen, _ = x.size()
+
+        print_tensor_stats("input: ", x)
 
         # Query projection
         if self.q_lora_rank == 0:
             q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
         else:
             q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            print_tensor_stats("After wq_a: ", q)
+            q = self.q_norm(q)
+            print_tensor_stats("After q_norm: ", q)
+            q = self.wq_b(q)
+        print_tensor_stats("After wq_b: ", q)
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of q and kv as TP may have sharded them after
         # the above linear ops.
@@ -244,38 +263,59 @@ class Attention(nn.Module):
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
-        q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
+        print_tensor_stats("After wkv_a: ", kv)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
+        # TODO(jiani): switch to HF rotary embedding implementation
+        q_pe = apply_rotary_emb(q_pe, freqs_cis)
         k_pe = apply_rotary_emb(
             k_pe.unsqueeze(2), freqs_cis
         )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
-        kv = self.wkv_b(
-            self.kv_norm(kv)
-        )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+        kv = self.kv_norm(kv)
+        print_tensor_stats("After kv_norm: ", kv)
+        kv = self.wkv_b(kv)  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+        print_tensor_stats("After wkv_b: ", kv)
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+
+        print_tensor_stats("After k_pe apply_rotary_emb: ", k_pe)
+        print_tensor_stats("After q_pe apply_rotary_emb: ", q_pe)
+        
         k = torch.cat(
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
+        q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
+
+        print_tensor_stats("k: ", k)
+        print_tensor_stats("v: ", v)
+        print_tensor_stats("q: ", q)
+        qk = torch.matmul(q.transpose(1, 2), k.permute(0, 2, 3, 1))
+        print_tensor_stats("After titan's rotary_emb, qk: ", qk)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
+        
 
+        # TODO: Need to pass softmax_scale to sdpa() interface.
+        # For mask, DeepseekV3 uses causal mask, so we can use the default mask in sdpa
+        # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py#L17
         output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(
             1, 2
         ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
-        output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
-        return self.wo(output)  # (bsz, seqlen, dim)
+        print_tensor_stats("After attention: ", output)
+        output = output.reshape(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
+        output = self.wo(output)  # (bsz, seqlen, dim)
+        print_tensor_stats("output after wo: ", output)
+        return output
 
     def init_weights(self, init_std: float):
         linear_list = [
@@ -332,12 +372,25 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+
+        # print_tensor_stats("hidden_states after mlp", hidden_states)
+        ## Our implementation of DeepSeek-V3
+        print_tensor_stats("input: ", x)
+        attn_norm_out = self.attention_norm(x)
+        print_tensor_stats("After attention_norm", attn_norm_out)
+
+        h = x + self.attention(attn_norm_out, freqs_cis)
+
+        print_tensor_stats("after x+attention", h)
+        ffn_output = self.ffn_norm(h)
+        print_tensor_stats("After ffn norm", ffn_output)
+
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            out = h + self.moe(ffn_output)
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+            out = h + self.feed_forward(ffn_output)
+        print_tensor_stats("After x+feed_forward", out)
+        return out
 
     def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -398,37 +451,54 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        eos_id: int | None = None,
-        input_batch: torch.Tensor | None = None,
-    ):
+    def forward(self, tokens: torch.Tensor, eos_id: int = 0, input_batch: torch.Tensor | None = None,):
         """
         Forward pass for the Transformer model.
 
         Args:
-            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
-                If pipeline parallelism is enabled, this will be the input token indices
-                for the ranks on the first pipeline stage. This will be the activation of the
-                previous pipeline stage if the current rank is not on the first stage.
-            input_batch (torch.Tensor): The input batch read from the dataloader.
-                This will always be the input batch regardless of the pipeline stage.
-                This field is required for non-first PP stages to perform document
-                masking attention (to analyze the boundary of the document).
+            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=eos_id
-            )
+        # Reset hidden states collection
+        self._hidden_states = []
 
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        # Get embeddings
+        input_embeds = self.tok_embeddings(tokens)
+        # Store and print statistics for input embeddings
+        self._hidden_states.append(input_embeds.detach())
 
-        for layer in self.layers.values():
+        print_tensor_stats("input_embeds: ", input_embeds)
+        h = input_embeds
+
+        # Process through layers
+        for i, layer in enumerate(self.layers.values()):
+            # NOTE(jianiw): Reset the hidden states to be input embeddings for the each layer to avoid numerical difference accumualation
+            # h = input_embeds
             h = layer(h, self.freqs_cis)
-        h = self.norm(h) if self.norm is not None else h
-        output = self.output(h) if self.output is not None else h
+
+            print_tensor_stats(f"layer {i} output: ", h)
+            # Store and print statistics for this layer
+            self._hidden_states.append(h.detach())
+
+        # Apply final normalization
+        h = self.norm(h)
+
+        print_tensor_stats("After norm: ", h)
+        # Generate output logits
+        output = self.output(h)
+        print_tensor_stats("output: ", output)
+
         return output
+
+    def get_hidden_states(self):
+        """
+        Returns the hidden states collected during the forward pass.
+
+        Returns:
+            list[torch.Tensor]: List of hidden states, where:
+                - hidden_states[0] is the input embeddings
+                - hidden_states[i] for i>0 is the output of the i-th layer
+        """
+        return self._hidden_states
