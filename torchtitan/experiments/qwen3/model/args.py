@@ -8,7 +8,6 @@
 
 
 from dataclasses import dataclass
-from re import S
 
 from torch import nn
 
@@ -16,17 +15,18 @@ from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 
+from torchtitan.tools.logging import logger
+
 
 @dataclass
 class TransformerModelArgs(BaseModelArgs):
 
-
-    dim: int = 1024  
-    n_layers: int = 28  
-    n_heads: int = 16 
+    dim: int = 1024
+    n_layers: int = 28
+    n_heads: int = 16
     n_kv_heads: int = 8
     vocab_size: int = 151936
-    head_dim = 128
+    head_dim: int = 128
     hidden_dim: int = 3072
 
     norm_eps: float = 1e-6
@@ -73,8 +73,6 @@ class TransformerModelArgs(BaseModelArgs):
         # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
         # 4. we follow the convention and do not account for sparsity in causal attention
         # Question: is Nu_flops_per_token being used anywhere?
-        num_flops_per_token = (
-            6 * (nparams - nparams_embedding) + 12 * l * h * q * t
-        )
+        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
         return nparams, num_flops_per_token

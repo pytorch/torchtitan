@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 from collections import defaultdict
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -45,9 +47,7 @@ def parallelize_qwen3(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.world_mesh
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
+
     assert (
         job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -60,32 +60,6 @@ def parallelize_qwen3(
         and model.model_args.use_flex_attn
     ):
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
-
-    if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
-        ):
-            raise RuntimeError("Async TP requires --training.compile")
-
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
-        apply_tp(
-            model,
-            world_mesh["tp"],
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-        )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -133,6 +107,107 @@ def parallelize_qwen3(
 
     return model
 
+
+_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+}
+
+
+def _apply_ac_to_transformer_block(
+    module: nn.Module, ac_config: ACConfig, *, base_fqn: Optional[str] = None
+):
+    valid_ac_modes = ("full", "selective")
+    if ac_config.mode not in valid_ac_modes:
+        raise ValueError(
+            f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
+        )
+
+    if ac_config.mode == "full":
+        return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+
+    assert ac_config.mode == "selective", f"{ac_config.mode}"
+    use_op_sac = ac_config.selective_ac_option == "op"
+    use_layer_sac = ac_config.selective_ac_option.isdigit()
+    if not use_op_sac and not use_layer_sac:
+        raise ValueError(
+            f"Invalid selective AC option: {ac_config.selective_ac_option}. "
+            f"Valid options: 'op' or a positive int representing layer frequency"
+        )
+    if use_op_sac:
+        from torch.utils.checkpoint import (
+            CheckpointPolicy,
+            create_selective_checkpoint_contexts,
+        )
+
+        mm_recompute_shapes = set()
+        if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
+            for module_fqn, submod in module.named_modules():
+                fqn = module_fqn
+                if base_fqn is not None:
+                    fqn = f"{base_fqn}.{module_fqn}"
+                if not any(
+                    filter_fqn in fqn
+                    for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+                ):
+                    continue
+                if not isinstance(submod, nn.Linear):
+                    raise ValueError(
+                        "per_op_sac_force_recompute_mm_shapes_by_fqns expected to match "
+                        f"a nn.Linear, but got: {submod}"
+                    )
+                out_f, in_f = submod.weight.shape
+                mm_recompute_shapes.add((in_f, out_f))
+            logger.debug(
+                f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
+            )
+
+        def _get_custom_policy(meta):
+            def _custom_policy(ctx, func, *args, **kwargs):
+                mode = "recompute" if ctx.is_recompute else "forward"
+                mm_count_key = f"{mode}_mm_count"
+                if func == torch.ops.aten.mm.default:
+                    if args[1].shape in mm_recompute_shapes:
+                        return CheckpointPolicy.PREFER_RECOMPUTE
+                    meta[mm_count_key] += 1
+                # Saves output of all compute ops, except every second mm
+                to_save = func in _save_list and not (
+                    func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
+                )
+                return (
+                    CheckpointPolicy.MUST_SAVE
+                    if to_save
+                    else CheckpointPolicy.PREFER_RECOMPUTE
+                )
+
+            return _custom_policy
+
+        def selective_checkpointing_context_fn():
+            meta = defaultdict(int)
+            return create_selective_checkpoint_contexts(_get_custom_policy(meta))
+
+        return ptd_checkpoint_wrapper(
+            module,
+            context_fn=selective_checkpointing_context_fn,
+            preserve_rng_state=False,
+        )
+    elif use_layer_sac:
+        # Checkpoint every `ac_freq` of the modules passed to this function
+        ac_freq = int(ac_config.selective_ac_option)
+        ptd_checkpoint_wrapper.__dict__.setdefault("_count", 0)
+        ptd_checkpoint_wrapper._count += 1
+        if not ac_freq or ptd_checkpoint_wrapper._count % ac_freq == 0:
+            return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+        else:
+            return module
+
+
 def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
     for layer_id, transformer_block in model.layers.named_children():
@@ -154,6 +229,7 @@ def apply_compile(model: nn.Module):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
 
 def apply_fsdp(
     model: nn.Module,
@@ -221,6 +297,7 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
     fully_shard(model, **fsdp_config)
+
 
 def apply_ddp(
     model: nn.Module,
