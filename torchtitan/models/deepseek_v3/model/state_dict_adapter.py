@@ -127,7 +127,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             ):
                 expected_scale_shape = calculate_scale_shape(value)
                 # add weight_scale_inv to the state_dict
-                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.zeros(
+                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
                     expected_scale_shape, dtype=torch.float32
                 )
 
