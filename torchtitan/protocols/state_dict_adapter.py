@@ -56,6 +56,8 @@ class BaseStateDictAdapter(ABC):
 
 
 class StateDictAdapter(BaseStateDictAdapter):
+    """State dict adapter base class which provides convenient default behavior to build fqn_to_index_mapping"""
+
     def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
