@@ -71,9 +71,15 @@ dataset = "coco-validation"
 freq = 5
 local_batch_size = 8
 steps = 1
+# args for sampling images
 enable_classifier_free_guidance = true
 classifier_free_guidance_scale = 5.0
 denoising_steps = 4
 save_img_count = 1
 save_img_folder = "img"
 all_timesteps = false
+
+[inference]
+save_img_folder = "inference_results"
+prompts_path = "./torchtitan/experiments/flux/inference/prompts.txt"
+local_batch_size = 2
