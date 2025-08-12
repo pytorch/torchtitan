@@ -20,7 +20,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
     StateDictAdapter for DeepSeekV3 model.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs, hf_assets_path: str | None):
         self.model_args = model_args
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
@@ -160,9 +160,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
                 for expert_num in range(0, self.model_args.moe_args.num_experts):
                     new_key = new_abstract_key.format(layer_num, expert_num)
-                    hf_state_dict[new_key] = (
-                        split_values[expert_num].squeeze()
-                    )
+                    hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)

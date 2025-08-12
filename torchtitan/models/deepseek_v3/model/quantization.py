@@ -46,8 +46,8 @@ def dequantize_from_fp8(
             f"scale_inv shape {scale_inv.shape} doesn't match expected shape {expected_scale_shape}"
         )
 
-    # NOTE: This might cause OOM because DTensor might incurr underlaying communication
-    # if the model is too large when converting on-the-fly.
+    # NOTE: When processing large models on-the-fly, misalignment between block boundaries
+    # and DTensor local shape partitioning can lead to silent numerical inaccuracies.
     dequantized = float_weight.detach().clone().to(dtype=dtype)
 
     # Apply scaling factors to each block
