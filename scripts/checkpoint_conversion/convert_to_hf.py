@@ -65,7 +65,7 @@ if __name__ == "__main__":
         "--hf_assets_path",
         type=Path,
         help="Path to HF assets directory. This is used to get the model.safetensors.index.json mapping",
-        default="./assets/hf/Llama3.1-8B",
+        default="./assets/hf/Llama-3.1-8B",
     )
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
