@@ -14,7 +14,7 @@ from torch import nn
 from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import TransformerModelArgs
+from .args import Qwen3ModelArgs
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -138,7 +138,7 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: Qwen3ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -286,7 +286,7 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: TransformerModelArgs):
+    def __init__(self, layer_id: int, model_args: Qwen3ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -349,7 +349,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: Qwen3ModelArgs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -374,8 +374,6 @@ class Transformer(nn.Module, ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
-        # Implement weight tying between input embeddings and output projection
-        self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,

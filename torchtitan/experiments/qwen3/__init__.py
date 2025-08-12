@@ -14,13 +14,13 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize import parallelize_qwen3
-from .model.args import TransformerModelArgs
+from .infra.parallelize import qwen3model
+from .model.args import Qwen3ModelArgs
 from .model.model import Transformer
 
 __all__ = [
-    "parallelize_qwen3",
-    "TransformerModelArgs",
+    "qwen3model",
+    "Qwen3ModelArgs",
     "Transformer",
     "qwen3_configs",
 ]
@@ -29,7 +29,7 @@ __all__ = [
 # Adding different variants of the model
 
 qwen3_configs = {
-    "0.6B": TransformerModelArgs(
+    "0.6B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -41,7 +41,7 @@ qwen3_configs = {
         hidden_dim=3072,
         rope_theta=1000000,
     ),
-    "1.7B": TransformerModelArgs(
+    "1.7B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -53,7 +53,7 @@ qwen3_configs = {
         hidden_dim=6144,
         rope_theta=1000000,
     ),
-    "4B": TransformerModelArgs(
+    "4B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -65,7 +65,7 @@ qwen3_configs = {
         hidden_dim=9728,
         rope_theta=1000000,
     ),
-    "8B": TransformerModelArgs(
+    "8B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -77,7 +77,7 @@ qwen3_configs = {
         hidden_dim=12288,
         rope_theta=1000000,
     ),
-    "14B": TransformerModelArgs(
+    "14B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -89,7 +89,7 @@ qwen3_configs = {
         hidden_dim=17408,
         rope_theta=1000000,
     ),
-    "32B": TransformerModelArgs(
+    "32B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
@@ -109,7 +109,7 @@ register_train_spec(
         name="qwen3",
         model_cls=Transformer,
         model_args=qwen3_configs,  # Change from dict to Mapping
-        parallelize_fn=parallelize_qwen3,
+        parallelize_fn=qwen3model,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
