@@ -23,6 +23,7 @@ from torchtitan.distributed import ParallelDims
 
 # Dion optimizer availability will be checked lazily when needed
 DION_AVAILABLE = None
+MUON_AVAILABLE = None
 
 
 def _check_dion_availability():
@@ -42,6 +43,22 @@ def _check_dion_availability():
         except ImportError:
             DION_AVAILABLE = False
     return DION_AVAILABLE
+
+
+def _check_muon_availability():
+    """Lazy check for Muon optimizer availability."""
+    global MUON_AVAILABLE
+    if MUON_AVAILABLE is None:
+        try:
+            from torchtitan.experiments.dion_optimizer.muon import Muon
+            from torchtitan.experiments.dion_optimizer.titan_muon import (
+                MuonOptimizersContainer,
+            )
+
+            MUON_AVAILABLE = True
+        except ImportError:
+            MUON_AVAILABLE = False
+    return MUON_AVAILABLE
 
 
 __all__ = [
@@ -329,6 +346,22 @@ def build_optimizers(
             rcqr_oversample=optimizer_config.rcqr_oversample,
             algorithm=optimizer_config.algorithm,
             replicate_mesh_grad_sync=optimizer_config.replicate_mesh_grad_sync,
+            # Parameter-specific optimizer selection
+            scalar_optimizer=getattr(optimizer_config, "scalar_optimizer", "adamw"),
+            embedding_optimizer=getattr(
+                optimizer_config, "embedding_optimizer", "adamw"
+            ),
+            head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
+            # Additional optimizer options
+            head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),
+            # Learning rate scaling factors
+            scalar_lr_factor=getattr(optimizer_config, "scalar_lr_factor", 1.0),
+            embedding_lr_factor=getattr(optimizer_config, "embedding_lr_factor", 1.0),
+            head_lr_factor=getattr(optimizer_config, "head_lr_factor", 1.0),
+            routing_lr_factor=getattr(optimizer_config, "routing_lr_factor", 1.0),
+            expert_lr_factor=getattr(optimizer_config, "expert_lr_factor", 1.0),
         )
 
         # Set mixed precision dtypes if specified
@@ -346,6 +379,67 @@ def build_optimizers(
         return DionOptimizersContainer(
             model_parts=model_parts,
             dion_config=dion_config,
+            parallel_dims=parallel_dims,
+        )
+
+    # Handle Muon optimizer
+    if name == "Muon":
+        if not _check_muon_availability():
+            raise ImportError(
+                "Muon optimizer is not available. Please ensure the muon optimizer files are present in "
+                "torchtitan/experiments/dion_optimizer/"
+            )
+
+        if optim_in_bwd:
+            raise NotImplementedError(
+                "Muon optimizer does not support early step in backward."
+            )
+
+        if ft_manager and ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not yet supported with Muon optimizer."
+            )
+
+        # Import the MuonOptimizerConfig and MuonOptimizersContainer from titan_muon
+        from torchtitan.experiments.dion_optimizer.titan_muon import (
+            MuonOptimizerConfig,
+            MuonOptimizersContainer,
+        )
+
+        # Create MuonOptimizerConfig from optimizer_config
+        muon_config = MuonOptimizerConfig(
+            name="muon",
+            lr=optimizer_config.lr,
+            weight_decay=optimizer_config.weight_decay,
+            mu=optimizer_config.mu,
+            betas=(optimizer_config.beta1, optimizer_config.beta2),
+            epsilon=optimizer_config.eps,
+            nesterov=getattr(optimizer_config, "nesterov", False),
+            adjust_lr=getattr(optimizer_config, "adjust_lr", "spectral_norm"),
+            flatten=getattr(optimizer_config, "flatten", False),
+            use_triton=getattr(optimizer_config, "use_triton", False),
+            algorithm=optimizer_config.algorithm,
+            # Parameter-specific optimizer selection
+            scalar_optimizer=getattr(optimizer_config, "scalar_optimizer", "adamw"),
+            embedding_optimizer=getattr(
+                optimizer_config, "embedding_optimizer", "adamw"
+            ),
+            head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
+            # Additional optimizer options
+            head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),
+            # Learning rate scaling factors
+            scalar_lr_factor=getattr(optimizer_config, "scalar_lr_factor", 1.0),
+            embedding_lr_factor=getattr(optimizer_config, "embedding_lr_factor", 1.0),
+            head_lr_factor=getattr(optimizer_config, "head_lr_factor", 1.0),
+            routing_lr_factor=getattr(optimizer_config, "routing_lr_factor", 1.0),
+            expert_lr_factor=getattr(optimizer_config, "expert_lr_factor", 1.0),
+        )
+
+        return MuonOptimizersContainer(
+            model_parts=model_parts,
+            muon_config=muon_config,
             parallel_dims=parallel_dims,
         )
 

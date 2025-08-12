@@ -191,6 +191,19 @@ class Optimizer:
     head_lr_factor: float = 1.0
     """Learning rate scaling factor for head parameters (applied after head_lr_scaling if enabled)."""
 
+    # Muon-specific parameters
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Muon optimizer."""
+
+    adjust_lr: str | None = "spectral_norm"
+    """How to adjust the learning rate for Muon updates. Options: 'spectral_norm', 'rms_norm', or None."""
+
+    flatten: bool = False
+    """Whether to flatten 3D+ tensors to 2D for Muon updates."""
+
+    use_triton: bool = False
+    """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
+
 
 @dataclass
 class LRScheduler:

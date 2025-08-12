@@ -2,7 +2,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "DeepSeek-V3 16B model training"
+description = "DeepSeek-V3 16B model training with Muon optimizer"
 print_args = false
 
 [profiling]
@@ -17,7 +17,7 @@ log_freq = 1
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = true
+enable_wandb = false
 
 [model]
 name = "deepseek_v3"
@@ -27,23 +27,20 @@ tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-chat"
 
 
 [optimizer]
-name = "Dion"
+name = "Muon"
 lr = 2e-2
 weight_decay = 0.1
 beta1 = 0.9
 beta2 = 0.95
 eps = 1e-8
 
-# Dion-specific parameters
-mu = 0.95
-rank_fraction = 1.0
-rank_multiple_of = 128
-algorithm = "dion"
-power_iters = 1
-qr_method = "rcqr"
-cqr_warmup_steps = 150
-rcqr_oversample = 1.25
-replicate_mesh_grad_sync = true
+# Muon-specific parameters
+mu = 0.95                     # Momentum factor for Muon
+algorithm = "muon"           # Main algorithm to use for 2D matrices
+nesterov = false             # Whether to use Nesterov momentum
+adjust_lr = "spectral_norm"  # How to adjust LR: "spectral_norm", "rms_norm", or null
+flatten = true              # Whether to flatten 3D+ tensors to 2D
+use_triton = true           # Whether to use Triton kernel for Newton-Schulz
 
 # Parameter-specific optimizer selection
 scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
@@ -51,18 +48,13 @@ embedding_optimizer = "adamw"     # For embedding layers
 head_optimizer = "adamw"          # For model head/output layers
 routing_optimizer = "adamw"       # For routing layers (DeepSeek MoE)
 head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
-expert_optimizer = "adamw"  # All expert weights will use Lion
+expert_optimizer = "adamw"        # All expert weights will use AdamW
 
 # Learning rate scaling factors
 scalar_lr_factor = 1.0            # LR multiplier for scalar parameters
 embedding_lr_factor = 1.0         # LR multiplier for embedding parameters
 head_lr_factor = 1.0              # LR multiplier for head parameters (after head_lr_scaling)
 routing_lr_factor = 1.0           # LR multiplier for routing parameters
-
-# Mixed precision for Dion (optional)
-# momentum_dtype = "float32"
-# Q_dtype = "bfloat16"
-# variance_dtype = "float32"
 
 [lr_scheduler]
 warmup_steps = 0  # lr scheduler warm up, normally 20% of the train steps

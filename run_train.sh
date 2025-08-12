@@ -13,7 +13,7 @@ set -ex
 export WANDB_PROJECT=${WANDB_PROJECT:-"titan-dion-8b"}
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b_dion.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/deepseek_v3/train_configs/debug_model_muon.toml"}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 

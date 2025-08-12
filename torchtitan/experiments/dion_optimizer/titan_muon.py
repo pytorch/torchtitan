@@ -22,40 +22,38 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
-# Import the Dion optimizer (assuming it's available)
-from .dion import Dion, DionMixedPrecisionConfig
+# Import the Muon optimizer (assuming it's available)
+from .muon import Muon
 from .parameter_classification import create_parameter_groups
 
 __all__ = [
-    "DionOptimizersContainer",
-    "build_dion_optimizers",
-    "DionOptimizerConfig",
+    "MuonOptimizersContainer",
+    "build_muon_optimizers",
+    "MuonOptimizerConfig",
 ]
 
 
 @dataclass
-class DionOptimizerConfig:
-    """Extended optimizer config for Dion-specific parameters."""
+class MuonOptimizerConfig:
+    """Extended optimizer config for Muon-specific parameters."""
 
     # Standard optimizer parameters
-    name: str = "dion"
+    name: str = "muon"
     lr: float = 0.01
     weight_decay: float = 0.01
 
-    # Dion-specific parameters
-    mu: float = 0.95  # Momentum for Dion
+    # Muon-specific parameters
+    mu: float = 0.95  # Momentum for Muon
     betas: tuple[float, float] = (0.9, 0.95)  # Betas for AdamW and Lion
     epsilon: float = 1e-8
-    rank_fraction: float = 1.0
-    rank_multiple_of: int = 1
-    power_iters: int = 1
-    qr_method: str = "rcqr"
-    cqr_warmup_steps: int = 150
-    rcqr_oversample: float = 1.25
+    nesterov: bool = False  # Whether to use Nesterov momentum
+    adjust_lr: Optional[str] = "spectral_norm"  # "spectral_norm", "rms_norm", or None
+    flatten: bool = False  # Whether to flatten 3D+ tensors to 2D
+    use_triton: bool = False  # Whether to use Triton kernel for Newton-Schulz
 
     # Algorithm selection per parameter group
-    # Can be "dion", "adamw", or "lion"
-    algorithm: str = "dion"
+    # Can be "muon", "adamw", or "lion"
+    algorithm: str = "muon"
 
     # Parameter-specific optimizer selection
     scalar_optimizer: str = "adamw"  # For 1D parameters (biases, layer norms)
@@ -76,125 +74,93 @@ class DionOptimizerConfig:
     routing_lr_factor: float = 1.0  # LR multiplier for routing parameters
     expert_lr_factor: float = 1.0  # LR multiplier for expert parameters
 
-    # Mixed precision config
-    momentum_dtype: Optional[torch.dtype] = None
-    Q_dtype: Optional[torch.dtype] = None
-    variance_dtype: Optional[torch.dtype] = None
-
     # Gradient synchronization
     replicate_mesh_grad_sync: bool = True
 
 
-class DionOptimizersContainer(OptimizersContainer):
-    """A container for Dion optimizers compatible with TorchTitan interface.
+class MuonOptimizersContainer(OptimizersContainer):
+    """A container for Muon optimizers compatible with TorchTitan interface.
 
-    This class wraps the Dion optimizer to make it compatible with the
-    TorchTitan OptimizersContainer interface while preserving Dion's
+    This class wraps the Muon optimizer to make it compatible with the
+    TorchTitan OptimizersContainer interface while preserving Muon's
     distributed training capabilities.
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        dion_config (DionOptimizerConfig): Configuration for Dion optimizer.
+        muon_config (MuonOptimizerConfig): Configuration for Muon optimizer.
         parallel_dims (ParallelDims): Parallel dimensions configuration.
     """
 
     def __init__(
         self,
         model_parts: List[nn.Module],
-        dion_config: DionOptimizerConfig,
+        muon_config: MuonOptimizerConfig,
         parallel_dims: ParallelDims,
     ) -> None:
         self.model_parts = model_parts
-        self.dion_config = dion_config
+        self.muon_config = muon_config
         self.parallel_dims = parallel_dims
 
         # Setup device meshes from parallel dimensions
-        replicate_mesh, outer_shard_mesh, inner_shard_mesh = self._setup_device_meshes(
-            parallel_dims
-        )
-
-        # Create mixed precision config
-        mixed_precision_config = DionMixedPrecisionConfig(
-            momentum_dtype=dion_config.momentum_dtype,
-            Q_dtype=dion_config.Q_dtype,
-            variance_dtype=dion_config.variance_dtype,
-        )
+        distributed_mesh = self._setup_device_mesh(parallel_dims)
 
         # Classify parameters and create appropriate parameter groups
-        param_groups = create_parameter_groups(model_parts, dion_config)
+        param_groups = create_parameter_groups(model_parts, muon_config)
 
-        # Create the Dion optimizer
-        self.dion_optimizer = Dion(
+        # Create the Muon optimizer
+        self.muon_optimizer = Muon(
             param_groups,
-            replicate_mesh=replicate_mesh,
-            outer_shard_mesh=outer_shard_mesh,
-            inner_shard_mesh=inner_shard_mesh,
-            replicate_mesh_grad_sync=dion_config.replicate_mesh_grad_sync,
-            rank_fraction=dion_config.rank_fraction,
-            rank_multiple_of=dion_config.rank_multiple_of,
-            lr=dion_config.lr,
-            mu=dion_config.mu,
-            betas=dion_config.betas,
-            weight_decay=dion_config.weight_decay,
-            epsilon=dion_config.epsilon,
-            power_iters=dion_config.power_iters,
-            qr_method=dion_config.qr_method,
-            cqr_warmup_steps=dion_config.cqr_warmup_steps,
-            rcqr_oversample=dion_config.rcqr_oversample,
-            mixed_precision_config=mixed_precision_config,
+            distributed_mesh=distributed_mesh,
+            lr=muon_config.lr,
+            mu=muon_config.mu,
+            betas=muon_config.betas,
+            weight_decay=muon_config.weight_decay,
+            epsilon=muon_config.epsilon,
+            nesterov=muon_config.nesterov,
+            adjust_lr=muon_config.adjust_lr,
+            flatten=muon_config.flatten,
+            use_triton=muon_config.use_triton,
         )
 
         # For compatibility with OptimizersContainer interface
-        self.optimizers = [self.dion_optimizer]
+        self.optimizers = [self.muon_optimizer]
 
         # Initialize parent class with dummy optimizer kwargs
         # This ensures hooks and other functionality work
         super().__init__(
             model_parts=model_parts,
             optimizer_cls=torch.optim.SGD,  # Dummy, not used
-            optimizer_kwargs={"lr": dion_config.lr},  # Dummy, not used
+            optimizer_kwargs={"lr": muon_config.lr},  # Dummy, not used
         )
 
-    def _setup_device_meshes(self, parallel_dims: ParallelDims) -> tuple[
-        Optional[Union[DeviceMesh, ProcessGroup]],
-        Optional[DeviceMesh],
-        Optional[DeviceMesh],
-    ]:
-        """Setup device meshes based on parallel dimensions."""
+    def _setup_device_mesh(
+        self, parallel_dims: ParallelDims
+    ) -> Optional[Union[DeviceMesh, ProcessGroup]]:
+        """Setup device mesh based on parallel dimensions.
 
-        replicate_mesh = None
-        outer_shard_mesh = None
-        inner_shard_mesh = None
+        For Muon, we use the dp_shard mesh for distributed communication.
+        """
+        distributed_mesh = None
 
         # Get the world mesh from parallel_dims
         world_mesh = parallel_dims.world_mesh
 
-        # Setup replicate mesh for data parallelism (dp_replicate)
-        if parallel_dims.dp_replicate_enabled:
-            # Extract the dp_replicate submesh if it exists
-            if "dp_replicate" in world_mesh.mesh_dim_names:
-                replicate_mesh = world_mesh["dp_replicate"]
-            else:
-                # If no dp_replicate, use the full dp mesh
-                if "dp" in world_mesh.mesh_dim_names:
-                    replicate_mesh = world_mesh["dp"]
-
-        # Setup outer shard mesh (FSDP - dp_shard)
+        # For Muon, we primarily use the dp_shard mesh for distributed operations
         if parallel_dims.dp_shard_enabled:
             # Extract the dp_shard submesh
             if "dp_shard" in world_mesh.mesh_dim_names:
-                outer_shard_mesh = world_mesh["dp_shard"]
+                distributed_mesh = world_mesh["dp_shard"]
             elif "dp_shard_cp" in world_mesh.mesh_dim_names:
                 # If context parallel is enabled, use dp_shard_cp mesh
-                outer_shard_mesh = world_mesh["dp_shard_cp"]
+                distributed_mesh = world_mesh["dp_shard_cp"]
+        elif parallel_dims.dp_replicate_enabled:
+            # If no dp_shard but dp_replicate is enabled, use that
+            if "dp_replicate" in world_mesh.mesh_dim_names:
+                distributed_mesh = world_mesh["dp_replicate"]
+            elif "dp" in world_mesh.mesh_dim_names:
+                distributed_mesh = world_mesh["dp"]
 
-        # Setup inner shard mesh (tensor parallelism)
-        if parallel_dims.tp_enabled:
-            # Extract the tp submesh
-            if "tp" in world_mesh.mesh_dim_names:
-                inner_shard_mesh = world_mesh["tp"]
-
-        return replicate_mesh, outer_shard_mesh, inner_shard_mesh
+        return distributed_mesh
 
     def __iter__(self):
         """Iterate over optimizers for compatibility."""
@@ -206,8 +172,7 @@ class DionOptimizersContainer(OptimizersContainer):
 
     def step(self, *args, **kwargs) -> None:
         """Perform optimization step."""
-        # TODO - do we have to call parent to trigger AdamW and Lion steps?
-        self.dion_optimizer.step(*args, **kwargs)
+        self.muon_optimizer.step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:
         """Zero gradients for all optimizers."""
@@ -223,7 +188,7 @@ class DionOptimizersContainer(OptimizersContainer):
         return {
             k: v
             for sd in map(
-                func, self.model_parts, [self.dion_optimizer] * len(self.model_parts)
+                func, self.model_parts, [self.muon_optimizer] * len(self.model_parts)
             )
             for k, v in sd.items()
         }
@@ -235,60 +200,55 @@ class DionOptimizersContainer(OptimizersContainer):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(func, self.model_parts, [self.dion_optimizer] * len(self.model_parts)))
-
-    def synchronize_for_checkpoint(self) -> None:
-        """Synchronize optimizer states for checkpointing."""
-        if hasattr(self.dion_optimizer, "synchronize_for_checkpoint"):
-            self.dion_optimizer.synchronize_for_checkpoint()
+        list(map(func, self.model_parts, [self.muon_optimizer] * len(self.model_parts)))
 
 
-def build_dion_optimizers(
+def build_muon_optimizers(
     model_parts: List[nn.Module],
-    dion_config: DionOptimizerConfig,
+    muon_config: MuonOptimizerConfig,
     parallel_dims: ParallelDims,
-) -> DionOptimizersContainer:
-    """Create a DionOptimizersContainer for the given model parts and config.
+) -> MuonOptimizersContainer:
+    """Create a MuonOptimizersContainer for the given model parts and config.
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        dion_config (DionOptimizerConfig): Dion optimizer configuration.
+        muon_config (MuonOptimizerConfig): Muon optimizer configuration.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
 
     Returns:
-        DionOptimizersContainer: Container with Dion optimizer.
+        MuonOptimizersContainer: Container with Muon optimizer.
     """
-    return DionOptimizersContainer(
+    return MuonOptimizersContainer(
         model_parts=model_parts,
-        dion_config=dion_config,
+        muon_config=muon_config,
         parallel_dims=parallel_dims,
     )
 
 
-def build_optimizers_with_dion_support(
+def build_optimizers_with_muon_support(
     model_parts: List[nn.Module],
     optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
-    dion_config: Optional[DionOptimizerConfig] = None,
+    muon_config: Optional[MuonOptimizerConfig] = None,
 ) -> OptimizersContainer:
-    """Extended build_optimizers function with Dion support.
+    """Extended build_optimizers function with Muon support.
 
     This is a drop-in replacement for the original build_optimizers function
-    that adds support for the Dion optimizer.
+    that adds support for the Muon optimizer.
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
         optimizer_config (OptimizerConfig): Standard optimizer config.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
-        dion_config (Optional[DionOptimizerConfig]): Dion-specific config.
-            If provided, will use Dion optimizer instead of standard optimizers.
+        muon_config (Optional[MuonOptimizerConfig]): Muon-specific config.
+            If provided, will use Muon optimizer instead of standard optimizers.
 
     Returns:
         OptimizersContainer: Container with appropriate optimizer(s).
     """
-    # If Dion config is provided, use Dion optimizer
-    if dion_config is not None:
-        return build_dion_optimizers(model_parts, dion_config, parallel_dims)
+    # If Muon config is provided, use Muon optimizer
+    if muon_config is not None:
+        return build_muon_optimizers(model_parts, muon_config, parallel_dims)
 
     # Otherwise, fall back to original build_optimizers logic
     from torchtitan.components.optimizer import build_optimizers
@@ -297,28 +257,28 @@ def build_optimizers_with_dion_support(
 
 
 # Example usage and parameter group configuration utilities
-class DionParameterGroupManager:
+class MuonParameterGroupManager:
     """Utility class to manage different algorithms for different parameter groups."""
 
     @staticmethod
     def create_mixed_param_groups(
         model_parts: List[nn.Module],
-        dion_config: DionOptimizerConfig,
+        muon_config: MuonOptimizerConfig,
         layer_algorithm_map: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """Create parameter groups with different algorithms for different layers.
 
         Args:
             model_parts: List of model parts
-            dion_config: Base configuration
+            muon_config: Base configuration
             layer_algorithm_map: Mapping from layer name patterns to algorithms
-                                Example: {"attention": "dion", "mlp": "adamw", "embed": "lion"}
+                                Example: {"attention": "muon", "mlp": "adamw", "embed": "lion"}
 
         Returns:
             List of parameter group dictionaries
         """
         if layer_algorithm_map is None:
-            layer_algorithm_map = {"": "dion"}  # Default to dion for all
+            layer_algorithm_map = {"": "muon"}  # Default to muon for all
 
         param_groups = []
 
@@ -328,7 +288,7 @@ class DionParameterGroupManager:
                     continue
 
                 # Determine algorithm based on layer name
-                algorithm = "dion"  # default
+                algorithm = "muon"  # default
                 for pattern, algo in layer_algorithm_map.items():
                     if pattern in name:
                         algorithm = algo
@@ -338,14 +298,15 @@ class DionParameterGroupManager:
                 param_group = {
                     "params": [param],
                     "algorithm": algorithm,
-                    "rank_fraction": dion_config.rank_fraction,
-                    "rank_multiple_of": dion_config.rank_multiple_of,
-                    "lr": dion_config.lr,
-                    "mu": dion_config.mu,
-                    "beta1": dion_config.betas[0],
-                    "beta2": dion_config.betas[1],
-                    "weight_decay": dion_config.weight_decay,
-                    "epsilon": dion_config.epsilon,
+                    "lr": muon_config.lr,
+                    "mu": muon_config.mu,
+                    "beta1": muon_config.betas[0],
+                    "beta2": muon_config.betas[1],
+                    "weight_decay": muon_config.weight_decay,
+                    "epsilon": muon_config.epsilon,
+                    "nesterov": muon_config.nesterov,
+                    "adjust_lr": muon_config.adjust_lr,
+                    "flatten": muon_config.flatten,
                 }
                 param_groups.append(param_group)
 
@@ -353,36 +314,34 @@ class DionParameterGroupManager:
 
 
 # Example configuration for different model architectures
-def get_llama_dion_config() -> DionOptimizerConfig:
-    """Example Dion configuration optimized for LLaMA-style models."""
-    return DionOptimizerConfig(
-        name="dion",
+def get_llama_muon_config() -> MuonOptimizerConfig:
+    """Example Muon configuration optimized for LLaMA-style models."""
+    return MuonOptimizerConfig(
+        name="muon",
         lr=3e-4,
         weight_decay=0.1,
         mu=0.95,
         betas=(0.9, 0.95),
         epsilon=1e-8,
-        rank_fraction=0.5,  # Use 50% rank for memory efficiency
-        rank_multiple_of=128,  # Align with tensor cores
-        algorithm="dion",
-        momentum_dtype=torch.float32,  # Higher precision for momentum
-        Q_dtype=torch.bfloat16,  # Lower precision for Q matrix
-        variance_dtype=torch.float32,  # Higher precision for variance (AdamW)
+        nesterov=False,
+        adjust_lr="spectral_norm",  # For learning rate transfer across model scale
+        flatten=False,  # Keep False for transformer attention layers
+        use_triton=False,  # Conservative default
+        algorithm="muon",
     )
 
 
-def get_mixed_algorithm_config() -> tuple[DionOptimizerConfig, Dict[str, str]]:
+def get_mixed_algorithm_config() -> tuple[MuonOptimizerConfig, Dict[str, str]]:
     """Example configuration using different algorithms for different layers."""
-    config = DionOptimizerConfig(
+    config = MuonOptimizerConfig(
         name="mixed",
         lr=3e-4,
         weight_decay=0.1,
-        rank_fraction=0.75,
     )
 
-    # Use Dion for attention layers, AdamW for embeddings, Lion for MLP
+    # Use Muon for attention layers, AdamW for embeddings, Lion for MLP
     algorithm_map = {
-        "attention": "dion",
+        "attention": "muon",
         "embed": "adamw",
         "mlp": "lion",
     }
