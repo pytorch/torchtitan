@@ -124,7 +124,7 @@ def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseToke
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
     if job_config.training.test_mode:
         tokenizer_class = FluxTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = job_config.model.tokenizer_path
+        t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path
     else:
         tokenizer_class = FluxTokenizer
 
