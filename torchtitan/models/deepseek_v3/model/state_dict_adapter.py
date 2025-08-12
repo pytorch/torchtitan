@@ -136,18 +136,14 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        1. When saving HF checkpoints, quantize the weights from float32 to float8.
-        2. Convert between the HF shape and the torchtitan shape.
-        3. Split the GroupedExperts' weight into seprate expert's wegiht.
+        1. Convert between the HF shape and the torchtitan shape.
+        2. Split the GroupedExperts' weight into seprate expert's wegiht.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "moe.tokens_per_expert" in key:
-                continue
-
             if "moe.experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
