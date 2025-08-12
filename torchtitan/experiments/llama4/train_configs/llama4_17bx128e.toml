@@ -46,6 +46,8 @@ pipeline_parallel_degree = 4
 # pipeline_parallel_schedule = "interleaved1f1b"
 # pipeline_parallel_microbatches = 2
 context_parallel_degree = 1
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 8
 
 [checkpoint]
 enable_checkpoint = false

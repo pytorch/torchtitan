@@ -44,6 +44,8 @@ tensor_parallel_degree = 8
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 8
 
 [checkpoint]
 enable_checkpoint = false
