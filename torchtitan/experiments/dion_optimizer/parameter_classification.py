@@ -79,10 +79,28 @@ def create_parameter_groups(
                     # Dion only supports 2D, but Muon supports 3D+ (with flattening)
                     algorithm_name = dion_config.algorithm.upper()
 
-                    if algorithm_name == "MUON" or param.ndim == 2:
-                        # Use Muon for any dimension >= 2, or Dion for 2D only
+                    # Check if flatten is enabled (for Muon 3D+ tensor support)
+                    flatten_enabled = getattr(dion_config, "flatten", False)
+
+                    # Handle case-insensitive algorithm matching
+                    is_muon = (
+                        algorithm_name in ["MUON", "muon"]
+                        or dion_config.algorithm.lower() == "muon"
+                    )
+
+                    # Debug logging for the condition
+                    logger.info(f"DEBUG: parameter {name} classification:")
+                    logger.info(f"  - algorithm_name: {algorithm_name}")
+                    logger.info(f"  - dion_config.algorithm: {dion_config.algorithm}")
+                    logger.info(f"  - is_muon: {is_muon}")
+                    logger.info(f"  - param.ndim: {param.ndim}")
+                    logger.info(f"  - flatten_enabled: {flatten_enabled}")
+
+                    # Simplified condition: Use matrix algorithm for any 2D+ tensors when algorithm is muon
+                    if is_muon and param.ndim >= 2:
+                        # Use Muon for 2D+ tensors when algorithm is MUON, or always for 2D tensors
                         dion_params.append(param)
-                        if param.ndim > 2 and algorithm_name == "MUON":
+                        if param.ndim > 2:
                             logger.info(
                                 f"  → Expert weight {name} will use {algorithm_name} optimizer ({param.ndim}D tensor - will be handled via flattening)"
                             )
@@ -97,7 +115,7 @@ def create_parameter_groups(
                             dion_config, "scalar_optimizer", "adamw"
                         )
                         logger.info(
-                            f"  → Expert weight {name} will use {scalar_optimizer.upper()} optimizer ({param.ndim}D parameter - {algorithm_name} doesn't support >2D)"
+                            f"  → Expert weight {name} will use {scalar_optimizer.upper()} optimizer ({param.ndim}D parameter - {algorithm_name} doesn't support >2D, flatten={flatten_enabled})"
                         )
                 else:
                     # Fall back to scalar optimizer for 1D expert parameters
@@ -224,8 +242,15 @@ def create_parameter_groups(
                 "Expert optimizer not configured - using default classification:"
             )
             for name, shape, expert_type in param_stats["expert"]:
-                if len(shape) == 2:
-                    algorithm_name = dion_config.algorithm.upper()
+                # Check if this expert parameter actually uses the matrix algorithm
+                algorithm_name = dion_config.algorithm.upper()
+                is_muon = (
+                    algorithm_name in ["MUON", "muon"]
+                    or dion_config.algorithm.lower() == "muon"
+                )
+                flatten_enabled = getattr(dion_config, "flatten", False)
+
+                if (len(shape) == 2) or (is_muon and len(shape) >= 2):
                     logger.info(
                         f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
                     )

@@ -63,6 +63,7 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
+seed = 2025
 local_batch_size = 18
 global_batch_size = 576  # gradient_accumulation_steps = 4 with dp_degree = 8 (576 / (18 * 8) = 4)
 seq_len = 4096
