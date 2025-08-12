@@ -12,6 +12,11 @@ from scripts.download_hf_assets import download_hf_assets
 
 
 class TestDownloadHfAssets(unittest.TestCase):
+    """Tests for the download_hf_assets script
+
+    We mock `huggingface_hub.list_repo_files` and `huggingface_hub.hf_hub_download` to simulate the meta-llama/Llama-3.1-8B repo
+    """
+
     # Complete file list from the actual meta-llama/Llama-3.1-8B repository
     COMPLETE_REPO_FILES = [
         "config.json",
@@ -32,6 +37,7 @@ class TestDownloadHfAssets(unittest.TestCase):
         "USE_POLICY.md",
     ]
 
+    # Expected files for each asset type
     EXPECTED_FILES = {
         "tokenizer": [
             "tokenizer.json",
@@ -139,7 +145,7 @@ class TestDownloadHfAssets(unittest.TestCase):
     @patch("huggingface_hub.list_repo_files")
     @patch("huggingface_hub.hf_hub_download")
     def test_nested_directory_handling(self, mock_download, mock_list_files):
-        """Test that nested directory files are handled correctly"""
+        """Tests that files in nested directory files are detected and downloaded correctly"""
         test_files = [
             "tokenizer.json",
             "original/tokenizer.model",
