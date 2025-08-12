@@ -139,6 +139,7 @@ class TokenDispatcher(torch.nn.Module):
         `num_ranks`: number of ranks in the group.
         `num_local_experts`: number of local experts.
         `dtype`: data type of the input/output.
+        `device`: device to use for communication.
     """
 
     def __init__(
@@ -151,15 +152,20 @@ class TokenDispatcher(torch.nn.Module):
         num_ranks,
         num_local_experts,
         dtype,
+        device: torch.device,
     ) -> None:
         super().__init__()
         self.group_name = group_name
         self.align = align
-        self.grad_out_buf = symm_mem.empty(out_len, *token_shape, dtype=dtype)
-        self.grad_in_buf = symm_mem.empty(in_len, *token_shape, dtype=dtype)
+        self.grad_out_buf = symm_mem.empty(
+            out_len, *token_shape, dtype=dtype, device=device
+        )
+        self.grad_in_buf = symm_mem.empty(
+            in_len, *token_shape, dtype=dtype, device=device
+        )
         self.nsplits = num_ranks * num_local_experts
         self.grad_in_splits_offsets = symm_mem.empty(
-            (2, self.nsplits), dtype=torch.int64
+            (2, self.nsplits), dtype=torch.int64, device=device
         )
 
     def forward(
@@ -251,17 +257,17 @@ def test_token_dispatch() -> None:
     # 2 rows: output splits, output offsets
     out_splits_offsets = symm_mem.empty((2, nsplits), dtype=torch.int64, device=device)
 
-    with device:
-        dispatcher = TokenDispatcher(
-            group_name,
-            align,
-            max_inp_len,
-            max_out_len,
-            inp.shape[1:],
-            world_size,
-            ne,
-            dtype,
-        )
+    dispatcher = TokenDispatcher(
+        group_name,
+        align,
+        max_inp_len,
+        max_out_len,
+        inp.shape[1:],
+        world_size,
+        ne,
+        dtype,
+        device,
+    )
 
     compiled_dispatcher = torch.compile(
         dispatcher,
