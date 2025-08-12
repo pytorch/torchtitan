@@ -49,6 +49,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
 
+<<<<<<< HEAD
     def forward(
         self,
         q: torch.Tensor,
@@ -65,6 +66,141 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
         return FlexAttentionWrapper._compiled_flex_attn(
             q, k, v, block_mask=block_mask, scale=scale
+=======
+    def forward(self, q, k, v, sink_weights=None, sliding_window=0, enable_gqa=False):
+        """
+        q : (B, H_q, S_q, D)
+        k : (B, H_kv, S_kv, D)   -- without sink
+        v : (B, H_kv, S_kv, D)
+        sink_weights : (H_q,) or (H, M)   -- broadcast to all queries
+        sliding_window : int
+        enable_gqa : bool
+        """
+        if sink_weights is None:
+            block_mask = FlexAttention.block_masks[self.mask_key]
+            return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
+
+        B, H_q, S_q, D = q.shape
+        _, H_kv, S_kv, _ = k.shape
+        sink_idx = S_kv # sink occupies final key slot
+
+        sink_k = k.new_zeros(B, H_kv, 1, D) # this needn't be 0's since it's overwritten
+        sink_v = v.new_zeros(B, H_kv, 1, D) # 0 value nullifies sink weight in output
+
+        k_ext = torch.cat([k, sink_k], dim=2)
+        v_ext = torch.cat([v, sink_v], dim=2)
+
+        # masks ensure sinks are included in softmax
+        if sliding_window is not None and sliding_window > 0:
+            mask_mod = FlexAttention._get_sliding_window_with_sink_mask_mod(sliding_window, sink_idx)
+        else:
+            mask_mod = FlexAttention._get_causal_with_sink_mask_mod(sink_idx)
+
+        block_mask = FlexAttention.compiled_create_block_mask(
+            mask_mod, B, H_q, S_q, S_kv+1
+        )
+
+        # overwrite the dummy sink scores with actual sink weights
+        def score_mod(score, b, h_q, q_idx, kv_idx):
+            return torch.where(
+                kv_idx == sink_idx,
+                sink_weights[h_q].to(score.dtype) + 0.0,  # cast + keep grad
+                score
+            )
+
+        return FlexAttention.flex_attn(
+            q, k_ext, v_ext,
+            block_mask=block_mask,
+            score_mod=score_mod,
+            enable_gqa=enable_gqa
+        )
+
+    @staticmethod
+    def _get_causal_with_sink_mask_mod(sink_idx):
+        """
+        Returns a mask_mod function that
+        - only allows kv_idx ≤ q_idx (causal)
+        - or if kv_idx == sink_idx (always allow the sink)
+        """
+        orig = FlexAttention._get_causal_mask_mod()
+        def causal_with_sink(b, h, q_idx, kv_idx):
+            return orig(b, h, q_idx, kv_idx) | (kv_idx == sink_idx)
+        return causal_with_sink
+
+    @staticmethod
+    def _get_sliding_window_with_sink_mask_mod(window: int, sink_idx: int):
+        """
+        Returns a mask_mod function that
+        - only allows kv_idx ≤ q_idx (causal)
+        - and only if (q_idx - kv_idx) ≤ window
+        - or if kv_idx == sink_idx (always allow the sink)
+        """
+        def sliding_mod(b, h, q_idx, kv_idx):
+            # causal within window
+            keep = (kv_idx <= q_idx) & (q_idx - kv_idx <= window)
+            # always allow the sink slot
+            return keep | (kv_idx == sink_idx)
+        return sliding_mod
+
+    @staticmethod
+    def _get_causal_mask_mod() -> _mask_mod_signature:
+        def causal_mask(
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+        ):
+            return q_idx >= kv_idx
+
+        return causal_mask
+
+    @staticmethod
+    def _get_block_causal_mask_mod(
+        batch: torch.Tensor, eos_id: int
+    ) -> _mask_mod_signature:
+        # batch is [b, s, h, d] shape
+        mask = batch == eos_id
+        mask[:, -1] = True
+        acc_mask = torch.cumsum(torch.where(mask, 1, 0), dim=1)
+        seq_idx = torch.zeros_like(acc_mask, dtype=torch.int32)
+        seq_idx[:, 1:] = acc_mask[:, :-1]
+
+        def block_causal_mask(
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+        ):
+            return (seq_idx[b, q_idx] == seq_idx[b, kv_idx]) & (q_idx >= kv_idx)
+
+        return block_causal_mask
+
+    @staticmethod
+    def _fixed_block_mask_mod(
+        mask_mod: _mask_mod_signature, fixed_block_size: int
+    ) -> _mask_mod_signature:
+        """
+        Given an arbitrary mask_mod, divide the input sequence to blocks
+        and only allow attention within the same block.
+
+        Args:
+            mask_mod: The mask mod to apply to the documents
+            fixed_block_size: The number of tokens in each block.
+        """
+
+        # Credit to @drisspg.
+        def blocked_mask_mod(
+            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+        ):
+            # Get the block index of the query and key
+            q_block = q_idx // fixed_block_size
+            kv_block = kv_idx // fixed_block_size
+            # Only allow attention within the same block
+            same_block = q_block == kv_block
+            # Apply the original mask mod
+            inner_mask = mask_mod(
+                b, h, q_idx % fixed_block_size, kv_idx % fixed_block_size
+            )
+
+            return same_block & inner_mask
+
+        blocked_mask_mod.__name__ = (
+            f"blocked_mask_mod_{mask_mod.__name__}_fixed_block_size_{fixed_block_size}"
+>>>>>>> 0313a6fb (gptoss experimental support)
         )
 
 
