@@ -4,13 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+import logging
+import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any
+
+logger = logging.getLogger()
 
 from .model import BaseModelArgs
 
 
-class StateDictAdapter(ABC):
+class BaseStateDictAdapter(ABC):
     """Abstract base class for state dict transformations.
 
     This class defines the interface for converting between native model
@@ -47,3 +53,26 @@ class StateDictAdapter(ABC):
             The converted native model state dict
         """
         pass
+
+
+class StateDictAdapter(BaseStateDictAdapter):
+    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+        if hf_assets_path:
+            mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+            try:
+                with open(mapping_path, "r") as f:
+                    hf_safetensors_indx = json.load(f)
+            except FileNotFoundError:
+                logger.warning(
+                    "model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
+                )
+                hf_safetensors_indx = None
+
+            if hf_safetensors_indx:
+                self.fqn_to_index_mapping = {}
+                for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    indx = re.search(r"\d+", raw_indx).group(0)
+                    self.fqn_to_index_mapping[hf_key] = indx
+            else:
+                self.fqn_to_index_mapping = None
