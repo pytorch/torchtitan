@@ -86,7 +86,6 @@ class TestDownloadHfAssets(unittest.TestCase):
         defaults = {
             "repo_id": self.repo_id,
             "local_dir": self.temp_dir,
-            "hf_token": "fake_token",
         }
         defaults.update(kwargs)
         return download_hf_assets(**defaults)
@@ -140,6 +139,30 @@ class TestDownloadHfAssets(unittest.TestCase):
 
         # Only tokenizer.json and custom_file.txt should be downloaded
         expected_files = ["tokenizer.json", "custom_file.txt"]
+        self._assert_files_downloaded(mock_download, expected_files)
+
+    @patch("huggingface_hub.hf_hub_download")
+    def test_list_files(self, mock_download):
+        """Tests that list files returns correct list of files by using real huggingface_hub.list_files"""
+        """This test uses larger deepseek-ai/DeepSeek-V3 repo for more thorough test"""
+
+        # Setup mock download
+        mock_download.return_value = None
+
+        # Test downloading safetensors asset type
+        self._call_download_hf_assets(
+            repo_id="deepseek-ai/DeepSeek-V3",
+            asset_types=["safetensors"],
+        )
+
+        # Verify all 163 safetensors files plus index file are downloaded
+        expected_safetensors_files = [
+            f"model-{i:05d}-of-000163.safetensors" for i in range(1, 164)
+        ]
+        expected_files = expected_safetensors_files + [
+            "model.safetensors.index.json",
+        ]
+
         self._assert_files_downloaded(mock_download, expected_files)
 
     @patch("huggingface_hub.list_repo_files")
