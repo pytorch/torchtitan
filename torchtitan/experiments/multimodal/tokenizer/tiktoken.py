@@ -232,4 +232,4 @@ class TikTokenizer(BaseTokenizer):
 
 
 def build_tiktoken_tokenizer(job_config: JobConfig) -> TikTokenizer:
-    return TikTokenizer(job_config.model.tokenizer_path)
+    return TikTokenizer(job_config.model.hf_assets_path)

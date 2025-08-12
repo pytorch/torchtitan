@@ -39,7 +39,7 @@ def main(
             str(batch_size),
             "--training.seq_len",
             str(seq_len),
-            "--model.tokenizer_path",
+            "--model.hf_assets_path",
             tokenizer_path,
         ]
     )
