@@ -4,8 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+import logging
+import os
 import re
 from typing import Any
+
+logger = logging.getLogger()
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -13,8 +18,9 @@ from .args import TransformerModelArgs
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None):
         self.model_args = model_args
+        self.hf_assets_path = hf_assets_path
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
@@ -30,6 +36,26 @@ class Llama3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+
+        if hf_assets_path:
+            mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+            try:
+                with open(mapping_path, "r") as f:
+                    hf_safetensors_indx = json.load(f)
+            except FileNotFoundError:
+                logger.warning(
+                    "model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
+                )
+                hf_safetensors_indx = None
+
+            if hf_safetensors_indx:
+                self.fqn_to_index_mapping = {}
+                for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    indx = re.search(r"\d+", raw_indx).group(0)
+                    self.fqn_to_index_mapping[hf_key] = indx
+            else:
+                self.fqn_to_index_mapping = None
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):

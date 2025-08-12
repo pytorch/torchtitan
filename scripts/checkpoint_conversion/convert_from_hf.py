@@ -24,7 +24,7 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
-    sd_adapter = train_spec.state_dict_adapter(model_args)
+    sd_adapter = train_spec.state_dict_adapter(model_args, None)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from HF to DCP safetensors format, but sd_adapter is not provided."

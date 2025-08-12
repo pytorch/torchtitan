@@ -109,7 +109,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     t5_encoder_version_arg = (
         "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
     )
-    tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
+    hf_assets_path_arg = "--model.hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -121,7 +121,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
-        cmd += " " + tokenzier_path_arg
+        cmd += " " + hf_assets_path_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
