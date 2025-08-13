@@ -22,6 +22,7 @@ def build_parallel_dims(job_config, world_size):
         tp=parallelism_config.tensor_parallel_degree,
         pp=parallelism_config.pipeline_parallel_degree,
         ep=parallelism_config.expert_parallel_degree,
+        etp=parallelism_config.expert_tensor_parallel_degree,
         world_size=world_size,
     )
     return parallel_dims

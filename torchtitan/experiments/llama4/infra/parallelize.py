@@ -25,6 +25,7 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
     NoParallel,
+    ReordererSequenceParallel,
     TensorParallel,
 )
 
@@ -87,7 +88,6 @@ def parallelize_llama(
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
-    # TODO: shall we support tensorwise float8 comms for MoE TP
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -95,9 +95,12 @@ def parallelize_llama(
             ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
                 world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled and parallel_dims.ep_enabled
+                if parallel_dims.tp_enabled
+                and parallel_dims.ep_enabled
+                and parallel_dims.etp_enabled
                 else None
             ),
+            etp_enabled=parallel_dims.etp_enabled,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -344,6 +347,7 @@ def apply_moe_ep_tp(
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
+    etp_enabled: bool,
 ):
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
@@ -365,13 +369,17 @@ def apply_moe_ep_tp(
                 # input Replicate, output Partial
                 "moe.shared_expert": TensorParallel(),
             }
+            if not etp_enabled:
+                # If TP is borrowed for EP, then split the tokens across TP ranks so that
+                # the reorderer, the all-to-all comms, and routed experts computation
+                # are effectively running Sequence Parallel (split along the folded bs*slen dim)
+                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             parallelize_module(
                 module=transformer_block,
                 device_mesh=tp_mesh,
                 parallelize_plan=moe_layer_plan,
             )
 
-        # if ep_mesh is not None:
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             experts_mesh = tp_mesh
@@ -381,9 +389,13 @@ def apply_moe_ep_tp(
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-        else:
+        elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+        else:
+            experts_mesh = ep_mesh
+            experts_plan = ExpertParallel()
+
         parallelize_module(
             module=transformer_block.moe.experts,
             device_mesh=experts_mesh,

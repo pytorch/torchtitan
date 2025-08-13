@@ -148,11 +148,12 @@ class TokenChoiceTopKRouter(nn.Module):
         routed to top K experts based on the router scores.
 
     Args:
-        gate (nn.Module): Gate module to calculate the scores, typically nn.Linear(dim, num_experts).
         dim (int): Dimension of input tokens.
         num_experts (int): Number of experts in each moe layer.
         top_k (int): Number of experts each token will be routed to in token-choice routing.
-        use_sigmoid (bool): Whether to use sigmoid or softmax for router scores. Default is False.
+        score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
+        route_norm (bool): Whether to normalize the routing scores when using sigmoid.
+        route_scale (float): Scaling factor applied to the routing scores.
     """
 
     def __init__(
@@ -178,14 +179,17 @@ class TokenChoiceTopKRouter(nn.Module):
         """
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
+            expert_bias (torch.Tensor | None, optional): Optional bias tensor for experts with shape ``(num_experts,)``.
+                Used for load balancing. Defaults to None.
 
         Returns:
-            routed_input (torch.Tensor):
-                Tokens grouped together by experts indices with shape ``(bs*slen*top_k,)``.
-            token_indices (torch.Tensor):
-                Token indices for routed_input with shape ``(bs*slen*top_k,)``.
-            num_tokens_per_expert (torch.Tensor):
-                Number of tokens assigned to each expert with shape ``(num_experts,)``.
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                - top_scores (torch.Tensor):
+                    Routing scores for selected experts with shape ``(bs*slen, top_k)``.
+                - selected_experts_indices (torch.Tensor):
+                    Expert indices selected for each token with shape ``(bs*slen, top_k)``.
+                - num_tokens_per_expert (torch.Tensor):
+                    Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
@@ -224,19 +228,71 @@ class TokenChoiceTopKRouter(nn.Module):
             max=self.num_experts,
         )
 
+        return top_scores, selected_experts_indices, num_tokens_per_expert
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+
+
+# NOTE: the reason we make this a stateless module is to support
+#       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
+class TokenReorderer(nn.Module):
+    """
+    This module reorders token indices to match the order of experts, enabling
+    efficient parallel processing of tokens by experts.
+
+    Args:
+        num_experts (int): Number of experts in the MoE layer.
+        top_k (int): Number of experts each token will be routed to.
+    """
+
+    def __init__(self, num_experts: int, top_k: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+    def forward(
+        self,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Reorders token indices to match the order of experts for MoE routing.
+
+        Args:
+            top_scores (torch.Tensor): Routing scores for selected experts,
+                shape (batch_size*seq_len, top_k)
+            selected_experts_indices (torch.Tensor): Expert indices selected for each token,
+                shape (batch_size*seq_len, top_k)
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                - top_scores_experts_sorted: Scores reordered to match expert ordering
+                - token_indices_experts_sorted: Token indices reordered to match expert ordering
+                - num_tokens_per_expert: Number of tokens assigned to each expert
+        """
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.view(-1),
+            bins=self.num_experts,
+            min=0,
+            max=self.num_experts,
+        )
+
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
         token_indices_experts_sorted = torch.argsort(
             selected_experts_indices.view(-1), stable=True
         )
 
-        top_scores = top_scores.view(-1)[token_indices_experts_sorted]
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
         token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
 
-        return top_scores, token_indices_experts_sorted, num_tokens_per_expert
-
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        return (
+            top_scores_experts_sorted,
+            token_indices_experts_sorted,
+            num_tokens_per_expert,
+        )
 
 
 class MoE(nn.Module):
@@ -258,6 +314,7 @@ class MoE(nn.Module):
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
         )
+        self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_expert = (
             GroupedExperts(
                 dim=dim,
@@ -302,11 +359,11 @@ class MoE(nn.Module):
         """
         bs, slen, dim = x.shape
 
-        # top_scores and selected_indices shape (bs*slen*top_k,)
+        # top_scores and selected_experts_indices shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
-            token_indices,
+            selected_experts_indices,
             num_tokens_per_expert,
         ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
 
@@ -318,19 +375,36 @@ class MoE(nn.Module):
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
+        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+        # num_tokens_per_expert shape (num_experts,)
+        # NOTE: the reason we need to compute num_tokens_per_expert again is:
+        #       1st computation in router is to update self.tokens_per_expert
+        #       which would be the same across all TP ranks.
+        #       2nd computation in reorderer is for the actual routing and experts computation
+        #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
+        #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+        (
+            top_scores_experts_sorted,
+            token_indices_experts_sorted,
+            num_tokens_per_expert,
+        ) = self.reorderer(top_scores, selected_experts_indices)
+
         # shape (bs*slen*top_k, dim)
-        token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
+        token_indices_experts_sorted = token_indices_experts_sorted.reshape(
+            -1, 1
+        ).expand(-1, dim)
 
         # shape (bs*slen*top_k, dim)
         routed_input = torch.gather(
             x.view(-1, dim),
             dim=0,
-            index=token_indices,
+            index=token_indices_experts_sorted,
         )
 
         if self.score_before_experts:
             routed_input = (
-                routed_input.to(torch.float32) * top_scores.reshape(-1, 1)
+                routed_input.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
         # shape (bs*slen*top_k, dim)
@@ -338,7 +412,8 @@ class MoE(nn.Module):
 
         if not self.score_before_experts:
             routed_output = (
-                routed_output.to(torch.float32) * top_scores.reshape(-1, 1)
+                routed_output.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
         # shared expert
@@ -349,7 +424,9 @@ class MoE(nn.Module):
         else:
             out = torch.zeros_like(x.reshape(bs * slen, dim))
 
-        out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
+        out = out.scatter_add(
+            dim=0, index=token_indices_experts_sorted, src=routed_output
+        )
         out = out.reshape(bs, slen, dim)
         return out
 

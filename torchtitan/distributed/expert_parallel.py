@@ -363,3 +363,52 @@ def expert_parallel(func: Callable) -> Callable:
         return out
 
     return wrapper
+
+
+# This class is to support Sequence Parallel for ETP=1
+# when EP borrows from all TP and part of DP
+class ReordererSequenceParallel(ParallelStyle):
+    def _prepare_inputput_fn(self, mod, inputs, device_mesh):
+        top_scores, selected_experts_indices = inputs
+
+        top_scores = DTensor.from_local(top_scores, device_mesh, (Replicate(),))
+        selected_experts_indices = DTensor.from_local(
+            selected_experts_indices, device_mesh, (Replicate(),)
+        )
+
+        # TODO: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
+        # if top_scores.shape[0] % device_mesh.size() != 0:
+        #     num_tokens = top_scores.shape[0]
+        #     tp_size = device_mesh.size()
+        #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
+        #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
+        #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
+        assert top_scores.shape[0] % device_mesh.size() == 0
+
+        # split on the bs*slen dimension
+        top_scores = top_scores.redistribute(device_mesh, (Shard(0),)).to_local()
+        selected_experts_indices = selected_experts_indices.redistribute(
+            device_mesh, (Shard(0),)
+        ).to_local()
+
+        return top_scores, selected_experts_indices
+
+    def _prepare_output_fn(self, mod, outputs, device_mesh):
+        top_scores, token_indices_experts_sorted, num_tokens_per_expert = outputs
+
+        # NOTE: As we shard routed tokens along bs*slen dim across the TP ranks,
+        #       the MoE gather and scatter still require global token indices.
+        num_tokens = top_scores.shape[0]
+        local_rank = device_mesh.get_local_rank()
+        token_indices_experts_sorted += num_tokens // device_mesh.size() * local_rank
+
+        return top_scores, token_indices_experts_sorted, num_tokens_per_expert
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=None,
+            input_fn=self._prepare_inputput_fn,
+            output_fn=self._prepare_output_fn,
+        )

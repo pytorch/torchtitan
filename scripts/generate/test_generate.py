@@ -125,6 +125,7 @@ def test_generate(
             tp=world_size,
             pp=1,
             ep=1,
+            etp=1,
             world_size=world_size,
         )
         world_mesh = parallel_dims.world_mesh
