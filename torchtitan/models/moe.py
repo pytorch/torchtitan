@@ -30,6 +30,7 @@ class MoEArgs:
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
+
 # TODO: keeping this for-loop implementation for comparison
 #       and readability, may remove later
 @expert_parallel
