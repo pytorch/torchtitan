@@ -61,6 +61,7 @@ initial_load_model_weights_only = true
 # initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-dcp"
 # initial_load_path = "/home/ankitageorge/ankita_test_bucket/tree/8b-safetensors/consolidated/"
 initial_load_path = "/mnt/mffuse2/tree/70b-hf/"
+# initial_load_path = "/mnt/mffuse3/70b-hf/"
 # initial_load_path = "/data/users/ankitageorge/8b-hf/"
 initial_load_in_hf = true
 
