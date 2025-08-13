@@ -22,12 +22,12 @@ workdir: .
 
 envs:
   CONFIG_FILE: "./torchtitan/models/llama3/train_configs/llama3_8b.toml"
-  HF_HUB_ENABLE_HF_TRANSFER: 1
   HF_TOKEN: ""
 
 setup: |
   pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
   pip install -r requirements.txt
+  python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer --hf_token=$HF_TOKEN
 run: |
   # Get head node IP (first node in the list)
   HEAD_NODE_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)

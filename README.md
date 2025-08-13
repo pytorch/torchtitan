@@ -171,7 +171,8 @@ Run:
 pip install "skypilot[kubernetes,aws]"  # or your cloud: [gcp], [azure], etc.
 
 # Launch a cluster and start training
-sky launch -c torchtitan-multinode multinode-trainer.sky.yaml
+export HF_TOKEN=... # if using a gated model from the HF Hub
+sky launch -c torchtitan-multinode multinode-trainer.sky.yaml --env HF_TOKEN
 
 # Tail logs
 sky logs torchtitan-multinode
@@ -184,7 +185,10 @@ Overrides (optional):
 
 ```bash
 # Increase number of ndoes and use a different config file without editing sky.yaml
-sky launch -c torchtitan-multinode multinode-trainer.sky.yaml --num-nodes 4 --env CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_70b.toml
+sky launch -c torchtitan-multinode multinode-trainer.sky.yaml \
+   --num-nodes 4 \
+   --env HF_TOKEN \
+   --env CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_70b.toml
 ```
 
 ## Citation
