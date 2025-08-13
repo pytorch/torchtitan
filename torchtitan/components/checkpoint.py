@@ -292,7 +292,6 @@ class CheckpointManager:
         else:
             self.purge_thread = None
 
-        self.mp = None
         self.staging_future = None
         self.save_future = None
         if async_mode == AsyncMode.DISABLED:
@@ -315,9 +314,6 @@ class CheckpointManager:
 
     def close(self):
         if hasattr(self, "enable_checkpoint") and self.enable_checkpoint:
-            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
-                self.mp_queue_send.put(Terminate())
-                self.mp.join()
             if (
                 hasattr(self, "purge_thread")
                 and self.purge_thread
