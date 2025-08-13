@@ -11,6 +11,7 @@ from typing import List
 
 from tests.integration_tests.features import OverrideDefinitions
 from tests.integration_tests.run_tests import _run_cmd
+
 from torchtitan.tools.logging import logger
 
 
@@ -97,7 +98,7 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
