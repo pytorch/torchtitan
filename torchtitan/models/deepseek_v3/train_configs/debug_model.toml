@@ -1,5 +1,3 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 debug training"
@@ -52,9 +50,10 @@ data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
-expert_parallel_degree = 1
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "1F1B"
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false
