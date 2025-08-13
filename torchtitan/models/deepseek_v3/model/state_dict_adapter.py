@@ -44,9 +44,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
             "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
-            "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_expert.w1",
-            "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_expert.w3",
-            "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.moe.shared_expert.w2",
+            "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
+            "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
+            "model.layers.{}.mlp.shared_experts.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
             "model.layers.{}.mlp.gate.e_score_correction_bias": "layers.{}.moe.expert_bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
@@ -163,11 +163,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
-
-                # torchtitan shape: (1, s[1], s[2]) -> HF shape: (s[1], s[2])
-                if "shared_expert" in key:
-                    value = value.squeeze(0)
-
                 hf_state_dict[new_key] = value
 
             else:
@@ -217,11 +212,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
-
-                # HF shape: (s[1], s[2]) -> torchtitan shape: (1, s[1], s[2])
-                if "shared_experts" in key:
-                    value = value.unsqueeze(0)
-
                 state_dict[new_key] = value
 
             else:
