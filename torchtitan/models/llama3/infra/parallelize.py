@@ -253,7 +253,7 @@ def _apply_ac_to_transformer_block(
         )
 
     if ac_config.mode == "full":
-        return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+        return ptd_checkpoint_wrapper(module, preserve_rng_state=False, debug=True)
 
     assert ac_config.mode == "selective", f"{ac_config.mode}"
     use_op_sac = ac_config.selective_ac_option == "op"
