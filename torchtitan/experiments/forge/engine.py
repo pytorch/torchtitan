@@ -216,7 +216,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
-                self.train_spec.state_dict_adapter(model_args)
+                self.train_spec.state_dict_adapter(
+                    model_args, job_config.model.hf_assets_path
+                )
                 if self.train_spec.state_dict_adapter
                 else None
             ),
