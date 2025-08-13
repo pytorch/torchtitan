@@ -78,7 +78,15 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./tests/assets/tokenizer"
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    """
+    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+    including model weights in .safetensors format, the model.safetensor.index.json file
+    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
+    """
+
+    tokenizer_path: str | None = None
+    """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
@@ -155,11 +163,11 @@ class LRScheduler:
     - 'cosine': smoothly decays learning rate following a cosine curve
     """
 
-    lr_min: float = 0.0
+    min_lr_factor: float = 0.0
     """
     Min lr ratio for lr scheduler.
-    If provided, the range of decay factor is scaled from 1 to `lr_min`
-    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.lr_min`.
+    If provided, the range of decay factor is scaled from 1 to `min_lr_factor`
+    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
     """
 
 
@@ -290,6 +298,7 @@ class Parallelism:
 
     pipeline_parallel_split_points: list[str] = field(default_factory=list)
     """
+    DEPRECATED: Use module_fqns_per_model_part instead.
     Specify comma-separated names of modules to use as the beginning of a split point.
     e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
     the first containing all the layers up to layers.0,
@@ -299,9 +308,31 @@ class Parallelism:
     but currently the split points must be specified manually.
     """
 
+    module_fqns_per_model_part: list[list[str]] | None = None
+    """
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    will create 3 chunks: the first containing tok_embeddings and layers.0,
+    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk compared to split points.
+    """
+
+    pipeline_parallel_first_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the first stage of pipeline parallelism. This is because
+    the first stage has the extra overhead of the embedding layer, which is not present in the other stages.
+    """
+
+    pipeline_parallel_last_stage_less_layers: int = 1
+    """
+    The number of layers to reduce in the last stage of pipeline parallelism. This is because
+    the last stage has the extra overhead of the output layer, which is not present in the other stages.
+    """
+
     pipeline_parallel_layers_per_stage: int | None = None
     """
-    The number of layers per (virtual) pipeline stage. If specified, the split points will be
+    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
     calculated from the number of layers and pipeline_parallel_degree. If not specified, the
     layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
     """
@@ -539,15 +570,25 @@ class MX:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """Temp work around for inductor performance gap"""
 
-    recipe_name: Literal["mxfp8"] = "mxfp8"
-    """If specified, creates float8 config from recipe name"""
+    recipe_name: str = "mxfp8_cublas"
+    """
+    If specified, creates MX config from recipe name. See
+    https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
+    """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
     """
-    Comma-separated list of fully qualified names of modules to skip applying mxfloat8 training to.
+    Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
     Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    """
+
+    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+    """
+    Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
+    This is a prototype feature that requires the torchao nightly build.
+    Example: --mx.moe_fqns_prototype="experts"
     """
 
 
@@ -618,49 +659,6 @@ class FaultTolerance:
     The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
     torchft are supported
     (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
-    """
-
-    sync_steps: int = 5
-    """
-    Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
-    is set.
-    """
-
-    should_quantize: bool = False
-    """
-    Whether to quantize the gradients before allreduce.
-
-    Disabled by default since the quantization does utilize the GPU
-    and uses more collectives. Enabling this requires knowing about
-    the tradeoffs between GPU utilization and communication.
-
-
-    This is only used when "semi_sync_method" is set.
-    """
-
-    fragment_sync_delay: int = 0
-    """
-    Controls the number of inner steps to wait before blocking on a
-    model fragment's synchronization. This is the "tao" parameter in
-    the Streaming DiLoCo paper.
-
-    By default, each model fragment will be synced at the same step
-    at which the allreduce is issued. Enabling delay can improve
-    communication and computation overlap, but at the cost of compromising
-    model quality
-
-    This is only used when "semi_sync_method" is set.
-    """
-
-    fragment_update_alpha: float = 0.0
-    """
-    Determines how to mix the local and global optimized parameters
-
-    By default, we just use the global parameters. This ensures all
-    DDP replicas have the same parameters after syncrhonizing on
-    the fragment. Tuning this can also affect the model quality.
-
-    This is only used when "semi_sync_method" is set.
     """
 
 

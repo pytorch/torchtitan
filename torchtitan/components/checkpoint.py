@@ -37,7 +37,7 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
-from torchtitan.protocols import StateDictAdapter
+from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -177,7 +177,7 @@ class CheckpointManager:
         checkpoint_config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with checkpoint_config.folder
-        sd_adapter (Optional[type[StateDictAdapter]]): The adapter used to convert model state
+        sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
 
@@ -191,7 +191,7 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
-        sd_adapter: StateDictAdapter | None,
+        sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
@@ -361,13 +361,7 @@ class CheckpointManager:
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
-            num_fqns_per_file = 30
-            # the use of 30 is just a heuristic for now.
-            # Once these fqns map to HF ones, we can use the fqn mapping
-            # from the model.safetensors.index.json file
-            for i, key in enumerate(state_dict.keys()):
-                group_num = (i // num_fqns_per_file) + 1
-                fqn_to_index_mapping[key] = group_num
+            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
 
             storage_writer = HuggingFaceStorageWriter(
                 path=os.path.join(checkpoint_id, "sharded"),
@@ -540,18 +534,32 @@ class CheckpointManager:
         model_only = False
         from_hf = False
         if not os.path.exists(self.folder):
+            model_only = self.initial_load_model_only
+            from_hf = self.initial_load_in_hf
+            if from_hf:
+                assert (
+                    model_only
+                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "checkpoint.initial_load_path is specified but the path is not valid."
                     )
-                model_only = self.initial_load_model_only
-                from_hf = self.initial_load_in_hf
                 if from_hf:
-                    assert (
-                        model_only
-                    ), "Only model can be loaded when loading from HF's safetensors checkpoint."
+                    logger.info(
+                        f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
+                    )
+            elif from_hf:
+                checkpoint_id = self.sd_adapter.hf_assets_path
+                if not os.path.isdir(checkpoint_id):
+                    raise ValueError(
+                        "model.hf_assets_path is being used to load HF weights but the path is not valid. \
+                        Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
+                    )
+                logger.info(
+                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                )
             else:
                 return False
         else:
@@ -559,6 +567,11 @@ class CheckpointManager:
                 logger.warning(
                     "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
                     f"Checkpointer will use the checkpoints from the checkpoint.folder {self.folder}."
+                )
+            if self.initial_load_in_hf:
+                logger.warning(
+                    "checkpoint.initial_load_in_hf is True but the checkpoint.folder exists. "
+                    "Checkpointer will not load from HF safetensors"
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:

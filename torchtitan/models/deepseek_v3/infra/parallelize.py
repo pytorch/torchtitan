@@ -17,7 +17,7 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.llama4.infra.expert_parallel import NoParallel
+from torchtitan.distributed.expert_parallel import NoParallel
 from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp, apply_moe_ep_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
@@ -122,6 +122,7 @@ def parallelize_deepseekv3(
                 if dp_mod_ep_mesh_dim_names
                 else None
             ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:

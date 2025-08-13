@@ -27,7 +27,7 @@ eps = 1e-15
 
 [lr_scheduler]
 warmup_steps = 600
-lr_min = 0.1
+min_lr_factor = 0.1
 
 [training]
 local_batch_size = 8

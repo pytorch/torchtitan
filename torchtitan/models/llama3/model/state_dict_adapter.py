@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger()
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -13,8 +16,11 @@ from .args import TransformerModelArgs
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None):
+        super().__init__(model_args, hf_assets_path)
+
         self.model_args = model_args
+        self.hf_assets_path = hf_assets_path
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",

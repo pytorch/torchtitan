@@ -36,7 +36,7 @@ class Encoder:
 
 
 @dataclass
-class Eval:
+class Validation:
     enable_classifier_free_guidance: bool = False
     """Whether to use classifier-free guidance during sampling"""
     classifier_free_guidance_scale: float = 5.0
@@ -45,8 +45,27 @@ class Eval:
     """How many denoising steps to sample when generating an image"""
     eval_freq: int = 100
     """Frequency of evaluation/sampling during training"""
+    save_img_count: int = 1
+    """ How many images to generate and save during validation, starting from
+    the beginning of validation set, -1 means generate on all samples"""
     save_img_folder: str = "img"
     """Directory to save image generated/sampled from the model"""
+    all_timesteps: bool = False
+    """Whether to generate all stratified timesteps per sample or use round robin"""
+
+
+@dataclass
+class Inference:
+    """Inference configuration"""
+
+    save_img_folder: str = "inference_results"
+    """Path to save the inference results"""
+    prompts_path: str = "./torchtitan/experiments/flux/inference/prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
+    local_batch_size: int = 2
+    """Batch size for inference"""
+    img_size: int = 256
+    """Image size for inference"""
 
 
 @dataclass
@@ -57,4 +76,5 @@ class JobConfig:
 
     training: Training = field(default_factory=Training)
     encoder: Encoder = field(default_factory=Encoder)
-    eval: Eval = field(default_factory=Eval)
+    validation: Validation = field(default_factory=Validation)
+    inference: Inference = field(default_factory=Inference)

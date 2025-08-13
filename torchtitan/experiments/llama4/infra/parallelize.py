@@ -21,19 +21,15 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
-from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
-    apply_compile,
-    apply_ddp,
-)
-from torchtitan.tools.logging import logger
-
-from .expert_parallel import (
+from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
     NoParallel,
     TensorParallel,
 )
+
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
+from torchtitan.tools.logging import logger
 
 
 def parallelize_llama(
@@ -143,6 +139,7 @@ def parallelize_llama(
                 if dp_mod_ep_mesh_dim_names
                 else None
             ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -274,6 +271,7 @@ def apply_fsdp(
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
     dp_mod_ep_mesh: DeviceMesh | None = None,
+    gradient_divide_factor: int | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -325,6 +323,12 @@ def apply_fsdp(
                 transformer_block.moe.experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
+            )
+            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
+            #       a different size than other parameters, the gradient division
+            #       factor should be consistent with data.
+            transformer_block.moe.experts.set_gradient_divide_factor(
+                gradient_divide_factor,
             )
 
         fully_shard(
@@ -385,3 +389,19 @@ def apply_moe_ep_tp(
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,
         )
+
+
+def apply_compile(model: nn.Module):
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
+    for layer_id, transformer_block in model.layers.named_children():
+        # TODO: remove when torch.compile supports fullgraph=True for llama4 moe
+        fullgraph = True
+        if transformer_block.moe_enabled:
+            fullgraph = False
+        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling each TransformerBlock with torch.compile")

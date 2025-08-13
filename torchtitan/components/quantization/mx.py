@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchtitan.config.job_config import JobConfig, MX
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,
@@ -21,9 +22,6 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
-
-# Maps titan recipe names to torchao mx recipe names
-NAME_MAP = {"mxfp8": "mxfp8_cublas"}
 
 
 class MXConverter(ModelConverter):
@@ -59,6 +57,12 @@ class MXConverter(ModelConverter):
             and job_config.parallelism.tensor_parallel_degree > 1
         ), "TP not yet supported with torch.compile for mxfp8"
 
+        # For MoE training with mxfp8, token group sizes must be multiples of 32
+        if job_config.mx.moe_fqns_prototype:
+            mxfp8_block_size = 32
+            set_token_group_alignment_size_m(mxfp8_block_size)
+            logger.info(f"Setting token group alignment size to {mxfp8_block_size}")
+
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
             MXFP8Dim1CastKernelChoice,
@@ -66,7 +70,7 @@ class MXConverter(ModelConverter):
         )
 
         mx_job_config: MX = job_config.mx
-        config = MXLinearConfig.from_recipe_name(NAME_MAP[mx_job_config.recipe_name])
+        config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         ]

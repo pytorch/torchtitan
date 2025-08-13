@@ -10,10 +10,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.moe import MoE
 from torchtitan.protocols import ModelProtocol
 
 from .args import TransformerModelArgs
-from .moe import MoE
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -296,12 +296,25 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args, attn_use_rope, fixed_attn_block_size)
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
-        self.moe_enabled = (
-            model_args.moe_enabled
-            and (layer_id + 1) % model_args.interleave_moe_layer_step == 0
-        )
+        moe_args = model_args.moe_args
+        self.moe_enabled = (layer_id + 1) % model_args.interleave_moe_layer_step == 0
         if self.moe_enabled:
-            self.moe = MoE(model_args)
+            dim = model_args.dim
+            hidden_dim = 4 * model_args.dim
+            ffn_dim_multiplier = model_args.ffn_dim_multiplier
+            hidden_dim = int(2 * hidden_dim / 3)
+            if ffn_dim_multiplier is not None:
+                hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+
+            hidden_dim_denom = 1
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim_denom = moe_args.top_k + moe_args.num_shared_experts
+
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim = int(hidden_dim / hidden_dim_denom)
+            hidden_dim += -hidden_dim % model_args.multiple_of
+
+            self.moe = MoE(moe_args, dim=dim, hidden_dim=hidden_dim)
         else:
             self.feed_forward = FeedForward(
                 dim=model_args.dim,
