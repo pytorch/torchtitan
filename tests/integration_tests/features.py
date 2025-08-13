@@ -30,7 +30,6 @@ def build_features_test_list() -> List[OverrideDefinitions]:
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = []
     integration_tests_flavors = [
         OverrideDefinitions(
             [
@@ -45,7 +44,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "1D compile",
@@ -54,7 +53,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
                 ],
@@ -74,7 +73,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
@@ -85,7 +84,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--training.compile",
+        #             "--compile.enable",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.enable_async_tensor_parallel",
         #         ],
@@ -96,10 +95,10 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -109,13 +108,13 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.folder hf_checkpoint",
                     "--checkpoint.last_save_model_only",
                     "--checkpoint.last_save_in_hf",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
                     "--checkpoint.initial_load_model_only",
                     "--checkpoint.initial_load_in_hf",
@@ -127,7 +126,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
                 ],
             ],
@@ -137,7 +136,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
@@ -232,14 +231,14 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
                     "--training.steps 20",
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -255,7 +254,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "PP+DP+TP 3D test with torch.compile",
@@ -303,8 +302,8 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 1",
-                    "--parallelism.data_parallel_replicate_degree 4",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
                 ]
             ],
             "DDP",
@@ -314,8 +313,8 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
                 ]
             ],
             "HSDP",
@@ -325,9 +324,9 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--activation_checkpoint.mode 'full'",
-                    "--model.flavor debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode='full'",
+                    "--model.flavor=debugmodel_flex_attn",
                 ]
             ],
             "FSDP+FLEX_ATTN",
@@ -337,10 +336,10 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--activation_checkpoint.mode selective",
-                    "--activation_checkpoint.selective_ac_option op",
-                    "--model.flavor debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode=selective",
+                    "--activation_checkpoint.selective_ac_option=op",
+                    "--model.flavor=debugmodel_flex_attn",
                 ]
             ],
             "FSDP + FLEX + per op SAC",
@@ -350,8 +349,8 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.context_parallel_degree 4",
-                    "--parallelism.context_parallel_rotate_method 'allgather'",
+                    "--parallelism.context_parallel_degree=4",
+                    "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
             ],
             "CP (allgather)",
@@ -361,8 +360,8 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.context_parallel_degree 4",
-                    "--parallelism.context_parallel_rotate_method 'alltoall'",
+                    "--parallelism.context_parallel_degree=4",
+                    "--parallelism.context_parallel_rotate_method='alltoall'",
                 ]
             ],
             "CP (alltoall)",
@@ -372,9 +371,9 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
                 ]
             ],
             "HSDP+TP",
@@ -384,8 +383,8 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "FSDP+CP",
@@ -395,9 +394,9 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 1",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "HSDP+CP (without dp_shard)",
@@ -407,9 +406,9 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "HSDP+CP (with dp_shard)",
@@ -419,9 +418,9 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "FSDP+TP+CP",
@@ -431,16 +430,16 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
+                    "--checkpoint.enable",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
                     "--training.enable_cpu_offload",
                     "--optimizer.early_step_in_backward",
                 ],
                 [
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
                     "--training.enable_cpu_offload",
                     "--optimizer.early_step_in_backward",
                 ],
@@ -449,11 +448,10 @@ def build_features_test_list() -> List[OverrideDefinitions]:
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
-        # TODO: re-enable this test once the issue is fixed
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--memory_estimation.enabled",
+        #             "--memory_estimation.enable",
         #         ]
         #     ],
         #     "FSDP2 Memory Tracking and Estimation",
@@ -463,7 +461,7 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
                     # placeholder for the generation script's generate step
@@ -486,13 +484,13 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 10",
                 ],
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 20",
@@ -531,11 +529,11 @@ def build_features_test_list() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--validation.enabled",
+                    "--validation.enable",
                     "--validation.dataset c4_test",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
@@ -544,4 +542,5 @@ def build_features_test_list() -> List[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
+
     return integration_tests_flavors

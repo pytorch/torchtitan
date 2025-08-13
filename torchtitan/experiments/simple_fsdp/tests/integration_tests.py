@@ -23,7 +23,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                     ],
                 ],
                 "1D",
@@ -33,7 +33,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--activation_checkpoint.mode selective",
                         "--activation_checkpoint.selective_ac_option op",
                     ],
@@ -45,31 +45,30 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--activation_checkpoint.mode full",
                     ],
                 ],
                 "1D with full AC",
                 "1d_full_ac",
             ),
-            # TODO: re-enable this test once the pytorch side issue is fixed
-            # OverrideDefinitions(
-            #     [
-            #         [
-            #             "--model.name llama3_simple_fsdp",
-            #             "--training.compile",
-            #             "--parallelism.tensor_parallel_degree 2",
-            #         ],
-            #     ],
-            #     "2D",
-            #     "2d",
-            # ),
+            OverrideDefinitions(
+                [
+                    [
+                        "--model.name llama3_simple_fsdp",
+                        "--compile.enable",
+                        "--parallelism.tensor_parallel_degree 2",
+                    ],
+                ],
+                "2D",
+                "2d",
+            ),
             # TODO: re-enable this test once the async TP issue is fixed
             # OverrideDefinitions(
             #     [
             #         [
             #             "--model.name llama3_simple_fsdp",
-            #             "--training.compile",
+            #             "--compile.enable",
             #             "--parallelism.tensor_parallel_degree 2",
             #             "--parallelism.enable_async_tensor_parallel",
             #         ],
@@ -81,13 +80,13 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                     ],
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                         "--training.steps 20",
                     ],
                 ],
@@ -98,17 +97,17 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                         "--parallelism.pipeline_parallel_degree 2",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
                     ],
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--training.steps 20",
-                        "--checkpoint.enable_checkpoint",
+                        "--checkpoint.enable",
                         "--parallelism.pipeline_parallel_degree 2",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
@@ -122,7 +121,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_shard_degree 1",
                         "--parallelism.data_parallel_replicate_degree 4",
                     ]
@@ -135,7 +134,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.data_parallel_replicate_degree 2",
                     ]
@@ -148,7 +147,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.data_parallel_replicate_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
@@ -162,7 +161,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_replicate_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
                     ]
@@ -175,7 +174,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.data_parallel_replicate_degree 2",
                         "--parallelism.context_parallel_degree 2",
@@ -189,7 +188,7 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
+                        "--compile.enable",
                         "--parallelism.data_parallel_shard_degree 2",
                         "--parallelism.tensor_parallel_degree 2",
                         "--parallelism.context_parallel_degree 2",
@@ -203,16 +202,16 @@ def build_simple_fsdp_test_list():
                 [
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                         "--training.steps 10",
                     ],
                     # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                     # excluded during loading to avoid errors caused by mismatched dp_degree.
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                         "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                         "--parallelism.tensor_parallel_degree 2",
                         "--training.steps 20",
@@ -220,8 +219,8 @@ def build_simple_fsdp_test_list():
                     # load at [tp:4].
                     [
                         "--model.name llama3_simple_fsdp",
-                        "--training.compile",
-                        "--checkpoint.enable_checkpoint",
+                        "--compile.enable",
+                        "--checkpoint.enable",
                         "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                         "--parallelism.tensor_parallel_degree 4",
                         "--training.steps 30",

@@ -28,7 +28,7 @@ def build_ft_test_list():
         [
             OverrideDefinitions(
                 [
-                    ["--training.steps 10", "--checkpoint.enable_checkpoint"],
+                    ["--training.steps 10", "--checkpoint.enable"],
                 ],
                 "Default TorchFT integration test",
                 "default_torchft",
