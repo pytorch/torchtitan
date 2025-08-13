@@ -16,12 +16,12 @@ from mm_collator import MultiModalCollator
 from tokenizer.tiktoken import BaseTokenizer, IGNORE_INDEX
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
+from transform import CLIPTransform
+from utils import load_image
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
-from transform import CLIPTransform
-from utils import load_image
 
 
 def _load_obelics_dataset(dataset_path: str):

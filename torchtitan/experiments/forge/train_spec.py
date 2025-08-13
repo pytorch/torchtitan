@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 # Import torchtitan.models to ensure all train specs are registered
 import torchtitan.models  # noqa: F401
-from torchtitan.protocols import BaseModelArgs, ModelProtocol, StateDictAdapter
+from torchtitan.protocols import BaseModelArgs, BaseStateDictAdapter, ModelProtocol
 from torchtitan.protocols.train_spec import (
     _train_specs,
     LossFunctionBuilder,
@@ -30,7 +30,7 @@ class ForgeTrainSpec:
     build_optimizers_fn: OptimizersBuilder
     build_lr_schedulers_fn: LRSchedulersBuilder
     build_loss_fn: LossFunctionBuilder
-    state_dict_adapter: type[StateDictAdapter] | None = None
+    state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 
 # Copy and transform train specs from torchtitan.protocols.train_spec._train_specs
