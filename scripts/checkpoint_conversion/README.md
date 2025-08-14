@@ -14,12 +14,10 @@ Note that your model definition needs to match your conversion script. For examp
 ### Comprehensive Check (KL Divergence)
 To ensure comprehensive end-to-end correctness we recommend using KL divergence loss to compare the logits between forward passes of both the original and converted model definitions. KL divergence quantifies the "difference" between two probability distributions. A result of zero or a very low KL divergence indicates that the model definitions are equivalent. This method is crucial as it evaluates the entire probability distribution, not just the highest probability at each step.
 
-In our `./scripts/checkpoint_conversion/example.py` this will be performing forward on dcp checkpoints loaded in `torchtitan` and safetensors checkpoints loaded in huggingface `AutoModelForCausalLM`. To convert Llama3 between HuggingFace and `torchtitan` we had to perform a permutation on several of the attention matrices to account for difference between HuggingFace and native Llama RoPE implementations. To demonstrate how a KL divergence test can reveal subtle inaccuracies such as this, we additionally compare the KL divergence between the original and converted model with and without the permutation. The results are as follows:
+In our `./scripts/checkpoint_conversion/numerical_test_example.py` this will be performing forward on dcp checkpoints loaded in `torchtitan` and safetensors checkpoints loaded in huggingface `AutoModelForCausalLM`. This script only tests `from_hf` direction since loading a huggingface checkpoint requires correctly converting the instantiated `torchtitan` state dict `to_hf` so that safetensors weights can be loaded into it. To convert Llama3 between HuggingFace and `torchtitan` we had to perform a permutation on several of the attention matrices to account for difference between HuggingFace and native Llama RoPE implementations. To demonstrate how a KL divergence test can reveal subtle inaccuracies such as this, we additionally compare the KL divergence between the original and converted model with and without the permutation. The results are as follows:
 
 ```
 $ python ./scripts/checkpoint_conversion/example.py
-Average loss for test from_hf is -4.951488641303202e-14
-Average loss for test to_hf is -4.951488641303202e-14
-Average loss for test from_hf_no_perm is 6.310602202574955e-06
-Average loss for test to_hf_no_perm is 2.0396773834363557e-05
+Average loss of test from_hf is -1.45365707318601e-13
+Average loss of test from_hf_no_perm is 5.368335223465692e-06
 ```

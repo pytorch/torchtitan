@@ -108,17 +108,11 @@ def forward_tt(config_path, checkpoint_path, test_set):
 if __name__ == "__main__":
     # hf params
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
-    hf_model_path = "outputs/test_checkpoint/step-0-tohf"  # safetensors checkpoint from convert_from_hf.py
-    # safetensors checkpoint from convert_from_hf.py but without using sd_adapter's permute
-    hf_model_path_no_perm = "outputs/test_checkpoint/step-0-tohfnoperm"
 
     # tt params
     config_path = "torchtitan/models/llama3/train_configs/llama3_8b.toml"
-    baseline_checkpoint_path = "outputs/test_checkpoint/step-0-fromllama"  # dcp checkpoint from convert_from_llama.py
-    checkpoint_path = (
-        "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_to_hf.py
-    )
-    # dcp checkpoint from convert_to_hf.py without using sd_adapter's permute
+    checkpoint_path = "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_from_hf.py
+    # dcp checkpoint from convert_from_hf.py without using sd_adapter's permute
     checkpoint_path_no_perm = "outputs/test_checkpoint/step-0-fromhfnoperm"
 
     # test params
@@ -145,31 +139,24 @@ if __name__ == "__main__":
 
     # baseline logits
     baseline_hf_outputs = forward_hf(hf_model_name, None, test_set)
-    baseline_tt_outputs = forward_tt(config_path, baseline_checkpoint_path, test_set)
 
-    # testing from hf script
+    # testing from hf conversion
     from_hf_outputs = forward_tt(config_path, checkpoint_path, test_set)
     from_hf_outputs_no_perm = forward_tt(config_path, checkpoint_path_no_perm, test_set)
-
-    # testing to hf script
-    to_hf_outputs = forward_hf(hf_model_name, hf_model_path, test_set)
-    to_hf_outputs_no_perm = forward_hf(hf_model_name, hf_model_path_no_perm, test_set)
 
     # Define the set of outputs to test loss for
     test_configs = {
         "from_hf": [baseline_hf_outputs, from_hf_outputs],
-        "to_hf": [to_hf_outputs, baseline_tt_outputs],
         "from_hf_no_perm": [baseline_hf_outputs, from_hf_outputs_no_perm],
-        "to_hf_no_perm": [to_hf_outputs_no_perm, baseline_tt_outputs],
     }
     avg_losses = {}
 
-    for test_name, (hf_outputs, tt_outputs) in test_configs.items():
+    for test_name, (baseline_outputs, conversion_outputs) in test_configs.items():
         total_loss = 0
-        for hf, tt in zip(hf_outputs, tt_outputs):
-            total_loss += loss_fn(hf, tt)
+        for baseline, outputs in zip(baseline_outputs, conversion_outputs):
+            total_loss += loss_fn(baseline, outputs)
         avg_loss = total_loss / len(test_set)
         avg_losses[test_name] = avg_loss.item()
 
     for test_name, avg_loss in avg_losses.items():
-        print(f"Average loss of test {test_name} is {avg_loss}")
+        print(f"Average loss for test {test_name} is {avg_loss}")
