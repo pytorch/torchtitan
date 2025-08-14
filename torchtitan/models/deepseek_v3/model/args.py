@@ -126,7 +126,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         """
         nparams_embedding = 0
         nparams_moe_router = 0
-        nparams_shared_expert = 0
+        nparams_shared_experts = 0
         nparams_experts = 0
         nparams_dense = 0
 
@@ -134,8 +134,8 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             if "embedding" in name:
                 nparams_embedding += p.numel()
                 nparams_dense += p.numel()
-            elif "moe.shared_expert" in name:
-                nparams_shared_expert += p.numel()
+            elif "moe.shared_experts" in name:
+                nparams_shared_experts += p.numel()
             elif "moe.router" in name:
                 nparams_moe_router += p.numel()
             elif "moe.experts" in name:
@@ -143,11 +143,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             else:
                 nparams_dense += p.numel()
 
-        nparams_sparse = nparams_moe_router + nparams_shared_expert + nparams_experts
+        nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
         nparams = nparams_dense + nparams_sparse
         nparams_sparse_active = (
             nparams_moe_router
-            + nparams_shared_expert
+            + nparams_shared_experts
             + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 

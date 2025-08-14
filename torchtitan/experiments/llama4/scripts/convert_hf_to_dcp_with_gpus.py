@@ -57,11 +57,11 @@ def convert_to_titan_fqns(fqn: str) -> list[str]:
     elif "feed_forward.router.weight" in fqn:
         return [f"layers.{layer}.moe.router.gate.weight"]
     elif "feed_forward.shared_expert.down_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.shared_expert.w2"]
+        return [f"layers.{layer}.moe.shared_experts.w2.weight"]
     elif "feed_forward.shared_expert.gate_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.shared_expert.w3"]
+        return [f"layers.{layer}.moe.shared_experts.w3.weight"]
     elif "feed_forward.shared_expert.up_proj.weight" in fqn:
-        return [f"layers.{layer}.moe.shared_expert.w1"]
+        return [f"layers.{layer}.moe.shared_experts.w1.weight"]
     elif "post_attention_layernorm.weight" in fqn:
         return [f"layers.{layer}.ffn_norm.weight"]
     elif "self_attn.k_proj" in fqn:
@@ -86,7 +86,7 @@ def convert_to_hf_shape(fqn: str, titan_fqns: list[str], dtensor: DTensor) -> li
     elif "shared_expert" in fqn:
         s = dtensor.shape
         # TODO: this is not right but I have to do this to load the checkpoint.
-        return torch.Size((s[2], s[1]))
+        return torch.Size((s[1], s[0]))
     return dtensor.shape
 
 
@@ -96,7 +96,7 @@ def convert_to_titan_tensors(fqn: str, full_tensor: torch.Tensor) -> torch.Tenso
     elif "shared_expert" in fqn:
         # TODO: this is not right but I have to do this to load the checkpoint.
         full_tensor = full_tensor.transpose(1, 0)
-        full_tensors = [full_tensor.unsqueeze(0)]
+        full_tensors = [full_tensor]
     else:
         full_tensors = [full_tensor]
     return full_tensors
