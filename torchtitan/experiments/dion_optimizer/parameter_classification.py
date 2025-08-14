@@ -57,13 +57,13 @@ def create_parameter_groups(
             if not param.requires_grad:
                 continue
 
+            # Add parameter name as attribute for debug logging
+            param._param_name = name
+
             # Check if this is an expert weight parameter
             if is_expert_param(name, param, model):
                 expert_type = classify_expert_param(name, param)
                 param_stats["expert"].append((name, param.shape, expert_type))
-                logger.info(
-                    f"EXPERT WEIGHT DETECTED: {name} (shape: {param.shape}) - {expert_type}"
-                )
 
                 # Expert weights can use either DION (for 2D matrices only) or a dedicated expert optimizer
                 expert_optimizer = getattr(dion_config, "expert_optimizer", None)
@@ -71,9 +71,6 @@ def create_parameter_groups(
                 if expert_optimizer is not None:
                     # Use dedicated expert optimizer if specified
                     expert_params.append(param)
-                    logger.info(
-                        f"  → Expert weight {name} will use {expert_optimizer.upper()} optimizer (dedicated expert optimizer)"
-                    )
                 elif param.ndim >= 2 and not is_head_param(name, param, model):
                     # Use matrix algorithm for expert matrices
                     # Dion only supports 2D, but Muon supports 3D+ (with flattening)
@@ -88,82 +85,36 @@ def create_parameter_groups(
                         or dion_config.algorithm.lower() == "muon"
                     )
 
-                    # Debug logging for the condition
-                    logger.info(f"DEBUG: parameter {name} classification:")
-                    logger.info(f"  - algorithm_name: {algorithm_name}")
-                    logger.info(f"  - dion_config.algorithm: {dion_config.algorithm}")
-                    logger.info(f"  - is_muon: {is_muon}")
-                    logger.info(f"  - param.ndim: {param.ndim}")
-                    logger.info(f"  - flatten_enabled: {flatten_enabled}")
-
                     # Simplified condition: Use matrix algorithm for any 2D+ tensors when algorithm is muon
                     if is_muon and param.ndim >= 2:
                         # Use Muon for 2D+ tensors when algorithm is MUON, or always for 2D tensors
                         dion_params.append(param)
-                        if param.ndim > 2:
-                            logger.info(
-                                f"  → Expert weight {name} will use {algorithm_name} optimizer ({param.ndim}D tensor - will be handled via flattening)"
-                            )
-                        else:
-                            logger.info(
-                                f"  → Expert weight {name} will use {algorithm_name} optimizer"
-                            )
                     else:
                         # Dion doesn't support 3D+, fall back to scalar optimizer
                         scalar_params.append(param)
-                        scalar_optimizer = getattr(
-                            dion_config, "scalar_optimizer", "adamw"
-                        )
-                        logger.info(
-                            f"  → Expert weight {name} will use {scalar_optimizer.upper()} optimizer ({param.ndim}D parameter - {algorithm_name} doesn't support >2D, flatten={flatten_enabled})"
-                        )
                 else:
                     # Fall back to scalar optimizer for 1D expert parameters
                     scalar_params.append(param)
-                    scalar_optimizer = getattr(dion_config, "scalar_optimizer", "adamw")
-                    logger.info(
-                        f"  → Expert weight {name} will use {scalar_optimizer.upper()} optimizer (1D parameter)"
-                    )
                 continue
 
             # Classify parameter based on shape and module type
             if is_routing_param(name, param, model):
-                routing_optimizer = getattr(dion_config, "routing_optimizer", "adamw")
-                logger.info(
-                    f"ROUTING PARAMETER: {name} (shape: {param.shape}) → will use {routing_optimizer.upper()}"
-                )
                 param_stats["routing"].append((name, param.shape))
                 routing_params.append(param)
             elif is_embedding_param(name, param, model):
-                embedding_optimizer = getattr(
-                    dion_config, "embedding_optimizer", "adamw"
-                )
-                logger.info(
-                    f"EMBEDDING PARAMETER: {name} (shape: {param.shape}) → will use {embedding_optimizer.upper()}"
-                )
                 param_stats["embedding"].append((name, param.shape))
                 embedding_params.append(param)
             elif is_head_param(name, param, model):
-                head_optimizer = getattr(dion_config, "head_optimizer", "adamw")
-                logger.info(
-                    f"HEAD PARAMETER: {name} (shape: {param.shape}) → will use {head_optimizer.upper()}"
-                )
                 param_stats["head"].append((name, param.shape))
                 head_params.append(param)
             elif param.ndim == 1:  # 1D scalar parameters (biases, layer norms)
-                scalar_optimizer = getattr(dion_config, "scalar_optimizer", "adamw")
                 param_stats["scalar"].append((name, param.shape))
                 scalar_params.append(param)
             elif param.ndim == 2:  # 2D matrix parameters
-                algorithm_name = dion_config.algorithm.upper()
-                logger.info(
-                    f"2D MATRIX PARAMETER: {name} (shape: {param.shape}) → will use {algorithm_name}"
-                )
                 param_stats["dion"].append((name, param.shape))
                 dion_params.append(param)
             else:
                 # For higher dimensional parameters, treat as scalar
-                scalar_optimizer = getattr(dion_config, "scalar_optimizer", "adamw")
                 param_stats["scalar"].append((name, param.shape))
                 scalar_params.append(param)
 
@@ -495,8 +446,10 @@ def create_routing_param_group(
     params: List[torch.Tensor], dion_config
 ) -> Dict[str, Any]:
     """Create parameter group for routing parameters (DeepSeek MoE routing layers)."""
-    # Get routing optimizer from config if available, otherwise use adamw
-    routing_optimizer = getattr(dion_config, "routing_optimizer", "adamw")
+    # Get routing optimizer from config if available, otherwise use the main optimizer
+    # This allows routing parameters to inherit the main optimizer choice (e.g., Lion)
+    main_optimizer = getattr(dion_config, "name", "adamw").lower()
+    routing_optimizer = getattr(dion_config, "routing_optimizer", main_optimizer)
     routing_lr_factor = getattr(dion_config, "routing_lr_factor", 1.0)
 
     return {

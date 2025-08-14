@@ -146,12 +146,35 @@ class Muon(Optimizer):
         lion_groups = []
         adamw_groups = []
 
+        # Debug logging for expert verification
+        expert_param_count = 0
+        muon_expert_count = 0
+        adamw_expert_count = 0
+
         for group in self.param_groups:
             # Increment step
             group["step"] += 1
 
             # Split parameter groups by algorithm
             algo = group["algorithm"]
+
+            # Check for expert parameters in this group
+            for param in group["params"]:
+                if hasattr(param, "_param_name"):
+                    param_name = param._param_name
+                    if self._is_expert_param_name(param_name):
+                        expert_param_count += 1
+                        if algo == "muon":
+                            muon_expert_count += 1
+                            print(
+                                f"🔥 MUON DEBUG: Expert parameter {param_name} (shape: {param.shape}) using MUON optimizer"
+                            )
+                        elif algo == "adamw":
+                            adamw_expert_count += 1
+                            print(
+                                f"⚠️  MUON DEBUG: Expert parameter {param_name} (shape: {param.shape}) using ADAMW optimizer"
+                            )
+
             if algo == "muon":
                 muon_groups.append(group)
             elif algo == "lion":
@@ -160,6 +183,15 @@ class Muon(Optimizer):
                 adamw_groups.append(group)
             else:
                 raise ValueError(f"Unknown algorithm: {algo}")
+
+        # Print summary of expert parameter optimization
+        if expert_param_count > 0:
+            print(f"🔥 MUON DEBUG STEP SUMMARY:")
+            print(f"   Total expert parameters: {expert_param_count}")
+            print(f"   Expert parameters using MUON: {muon_expert_count}")
+            print(f"   Expert parameters using ADAMW: {adamw_expert_count}")
+            print(f"   Muon groups: {len(muon_groups)}")
+            print(f"   AdamW groups: {len(adamw_groups)}")
 
         # Create async tasks for each algorithm
         muon_tasks = self._create_muon_tasks(muon_groups)
@@ -171,6 +203,26 @@ class Muon(Optimizer):
         runtime.run()
 
         return loss
+
+    def _is_expert_param_name(self, name: str) -> bool:
+        """Check if parameter name indicates it's an expert parameter."""
+        expert_patterns = [
+            "experts.",
+            ".expert.",
+            "expert_",
+            "moe.expert",
+            "shared_experts",
+            "routed_experts",
+            ".experts[",
+            ".w1.",
+            ".w2.",
+            ".w3.",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+        name_lower = name.lower()
+        return any(pattern in name_lower for pattern in expert_patterns)
 
     def _get_or_initialize_state(self, param: Tensor, algo: str) -> dict:
         """
@@ -381,6 +433,22 @@ def muon_update_batch_async(
     assert len(X) == len(G)
     assert len(X) == len(M)
     assert len(X) == world_size
+
+    # Debug logging for expert parameters in batch
+    expert_tensors_in_batch = 0
+    for i, x in enumerate(X):
+        if hasattr(x, "_param_name"):
+            param_name = x._param_name
+            if _is_expert_param_name_helper(param_name):
+                expert_tensors_in_batch += 1
+                print(
+                    f"🔥 MUON UPDATE: Processing expert tensor {param_name} (shape: {x.shape}) via Newton-Schulz orthogonalization"
+                )
+
+    if expert_tensors_in_batch > 0:
+        print(
+            f"🔥 MUON UPDATE BATCH: {expert_tensors_in_batch}/{len(X)} tensors are expert parameters"
+        )
 
     # Update momentum and compute the inputs for orthogonalization
     U = muon_update_pre_orthogonalize(
@@ -611,6 +679,27 @@ def adjust_lr_spectral_norm(lr, param_shape):
 
 
 # @torch.compile(fullgraph=True)
+def _is_expert_param_name_helper(name: str) -> bool:
+    """Helper function to check if parameter name indicates it's an expert parameter."""
+    expert_patterns = [
+        "experts.",
+        ".expert.",
+        "expert_",
+        "moe.expert",
+        "shared_experts",
+        "routed_experts",
+        ".experts[",
+        ".w1.",
+        ".w2.",
+        ".w3.",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+    name_lower = name.lower()
+    return any(pattern in name_lower for pattern in expert_patterns)
+
+
 def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
     """
     Newton-Schulz iteration to approximate the orthogonalization of X.
