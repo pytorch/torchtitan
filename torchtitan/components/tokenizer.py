@@ -84,13 +84,15 @@ class HuggingFaceTokenizer(BaseTokenizer):
         if not os.path.exists(tokenizer_path):
             if "assets/tokenizer" in tokenizer_path:
                 raise FileNotFoundError(
-                    "Detected deprecated ./assets/tokenizer path. Remove --model.tokenizer_path "
-                    "and download to --model.hf_assets_path using ./scripts/download_hf_assets.py"
+                    "Detected ./assets/tokenizer path which was deprecated in https://github.com/pytorch/torchtitan/pull/1540.\n"
+                    "Remove --model.tokenizer_path and download to --model.hf_assets_path using ./scripts/download_hf_assets.py\n"
+                    "See example: https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/deepseek_v3#download-tokenizer"
                 )
             else:
                 raise FileNotFoundError(
                     f"Tokenizer path '{tokenizer_path}' does not exist"
                 )
+
         # Define paths for different tokenizer file types
         tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
         vocab_txt_path = os.path.join(tokenizer_path, "vocab.txt")
@@ -165,17 +167,11 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 for f in os.listdir(tokenizer_path)
                 if os.path.isfile(os.path.join(tokenizer_path, f))
             ]
-            if "assets/tokenizer" in tokenizer_path:
-                raise FileNotFoundError(
-                    "Detected deprecated ./assets/tokenizer path. Remove --model.tokenizer_path "
-                    "and download to --model.hf_assets_path using ./scripts/download_hf_assets.py"
-                )
-            else:
-                raise FileNotFoundError(
-                    f"No supported tokenizer files found in '{tokenizer_path}'. "
-                    f"Available files: {available_files}. "
-                    "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
-                )
+            raise FileNotFoundError(
+                f"No supported tokenizer files found in '{tokenizer_path}'. "
+                f"Available files: {available_files}. "
+                "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
+            )
 
     def _get_token_from_config(self, config: dict[str, Any], key: str) -> Optional[str]:
         """
