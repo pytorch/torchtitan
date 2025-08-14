@@ -19,6 +19,7 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleMulti,
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
+    ScheduleDualPipeV,
 )
 
 from torchtitan.config import JobConfig
@@ -335,7 +336,7 @@ def pipeline_module_split(
     models = []
 
     schedule_class = get_schedule_class(pp_schedule)
-    style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
+    style = "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
 
     for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
         module_names = module_names_per_stage[stage_idx]
