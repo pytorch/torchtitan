@@ -166,14 +166,8 @@ class Muon(Optimizer):
                         expert_param_count += 1
                         if algo == "muon":
                             muon_expert_count += 1
-                            print(
-                                f"🔥 MUON DEBUG: Expert parameter {param_name} (shape: {param.shape}) using MUON optimizer"
-                            )
                         elif algo == "adamw":
                             adamw_expert_count += 1
-                            print(
-                                f"⚠️  MUON DEBUG: Expert parameter {param_name} (shape: {param.shape}) using ADAMW optimizer"
-                            )
 
             if algo == "muon":
                 muon_groups.append(group)
@@ -184,14 +178,7 @@ class Muon(Optimizer):
             else:
                 raise ValueError(f"Unknown algorithm: {algo}")
 
-        # Print summary of expert parameter optimization
-        if expert_param_count > 0:
-            print(f"🔥 MUON DEBUG STEP SUMMARY:")
-            print(f"   Total expert parameters: {expert_param_count}")
-            print(f"   Expert parameters using MUON: {muon_expert_count}")
-            print(f"   Expert parameters using ADAMW: {adamw_expert_count}")
-            print(f"   Muon groups: {len(muon_groups)}")
-            print(f"   AdamW groups: {len(adamw_groups)}")
+        # Summary logging is handled in parameter classification
 
         # Create async tasks for each algorithm
         muon_tasks = self._create_muon_tasks(muon_groups)
@@ -434,21 +421,7 @@ def muon_update_batch_async(
     assert len(X) == len(M)
     assert len(X) == world_size
 
-    # Debug logging for expert parameters in batch
-    expert_tensors_in_batch = 0
-    for i, x in enumerate(X):
-        if hasattr(x, "_param_name"):
-            param_name = x._param_name
-            if _is_expert_param_name_helper(param_name):
-                expert_tensors_in_batch += 1
-                print(
-                    f"🔥 MUON UPDATE: Processing expert tensor {param_name} (shape: {x.shape}) via Newton-Schulz orthogonalization"
-                )
-
-    if expert_tensors_in_batch > 0:
-        print(
-            f"🔥 MUON UPDATE BATCH: {expert_tensors_in_batch}/{len(X)} tensors are expert parameters"
-        )
+    # Expert parameter tracking (logging removed for cleaner output)
 
     # Update momentum and compute the inputs for orthogonalization
     U = muon_update_pre_orthogonalize(
