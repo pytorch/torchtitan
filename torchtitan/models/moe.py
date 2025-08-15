@@ -75,6 +75,17 @@ def _run_experts_for_loop(
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert = num_tokens_per_expert.tolist()
+    a, b, c, d, e, f, g, h = num_tokens_per_expert.tolist()
+    num_tokens_per_expert = [a, b, c, d, e, f, g, h]
+    torch._check(a > 0)
+    torch._check(b > 0)
+    torch._check(c > 0)
+    torch._check(d > 0)
+    torch._check(e > 0)
+    torch._check(f > 0)
+    torch._check(g > 0)
+    torch._check(h > 0)
+    torch._check(a + b + c + d + e + f + g + h < 49216)
 
     # side-effect code due to the usage of generate_permute_indices
     num_padding = x.shape[0] - sum(num_tokens_per_expert)
