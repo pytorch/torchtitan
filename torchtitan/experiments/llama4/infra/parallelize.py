@@ -385,10 +385,7 @@ def apply_fsdp(
         if next_transformer_block is not None:
             if transformer_block.moe_enabled and ep_degree > 1:
                 transformer_block.moe.experts.set_modules_to_forward_prefetch([next_transformer_block])
-                try:
-                    transformer_block.set_modules_to_forward_prefetch([next_transformer_block.moe.experts])
-                except:
-                    torch.distributed.breakpoint()
+                transformer_block.set_modules_to_forward_prefetch([next_transformer_block.moe.experts])
         else:
             # for non-ep code path
             if transformer_block.moe_enabled and ep_degree > 1:
