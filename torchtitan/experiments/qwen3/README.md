@@ -8,7 +8,7 @@ for FSDP support.
 
 #### Download Qwen3 tokenizer
 
-python scripts/download_tokenizer.py --repo_id Qwen/Qwen3-0.6B
+```python scripts/download_tokenizer.py --repo_id Qwen/Qwen3-0.6B
 
 
 #### Parity with HF
