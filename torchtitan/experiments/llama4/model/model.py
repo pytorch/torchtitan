@@ -297,7 +297,9 @@ class TransformerBlock(nn.Module):
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
         moe_args = model_args.moe_args
-        self.moe_enabled = (layer_id + 1) % model_args.interleave_moe_layer_step == 0
+        # self.moe_enabled = (layer_id + 1) % model_args.interleave_moe_layer_step == 0
+        # for debugging purpose. easy to showcase how to do explicit prefetching
+        self.moe_enabled = True
         if self.moe_enabled:
             dim = model_args.dim
             hidden_dim = 4 * model_args.dim
