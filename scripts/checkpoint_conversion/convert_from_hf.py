@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
+import torchtitan.experiments.flux  # noqa: F401
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpoint import ModelWrapper
