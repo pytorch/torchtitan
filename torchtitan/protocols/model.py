@@ -6,7 +6,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 import torch.nn as nn
@@ -55,5 +55,5 @@ class ModelProtocol(Protocol):
         """
         pass
 
-    def get_extra_metrics(self, parallel_dims: ParallelDims) -> None | dict:
+    def get_extra_metrics(self, parallel_dims: ParallelDims) -> None | dict[str, Any]:
         return None
