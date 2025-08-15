@@ -40,8 +40,8 @@ mu = 0.95                     # Momentum factor for Muon
 algorithm = "muon"           # Main algorithm to use for 2D matrices
 nesterov = false             # Whether to use Nesterov momentum
 # adjust_lr = "spectral_norm"  # How to adjust LR: "spectral_norm", "rms_norm", or None (commented for debugging)
-flatten = true               # Whether to flatten 3D+ tensors to 2D (needed for MoE experts)
-use_triton = true           # Whether to use Triton kernel for Newton-Schulz
+flatten = false               # Whether to flatten 3D+ tensors to 2D (needed for MoE experts)
+use_triton = false           # Whether to use Triton kernel for Newton-Schulz
 
 # Parameter-specific optimizer selection
 scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)

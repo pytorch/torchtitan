@@ -275,12 +275,28 @@ class Muon(Optimizer):
                         for i, p in enumerate(params[0].placements)
                         if p.is_shard() and params[0].device_mesh.size(i) > 1
                     ]
+
+                    # If we don't flatten 3D matrices, we can ignore shard placements along batch dimensions
+                    # Only keep placements that shard one of the two matrix dimensions
+                    is_batch_sharded = False
+                    if not flatten:
+                        matrix_dims = {params[0].ndim - 1, params[0].ndim - 2}
+                        is_batch_sharded = any(
+                            p.dim not in matrix_dims for _, p in shard_placements
+                        )
+                        shard_placements = [
+                            (i, p) for i, p in shard_placements if p.dim in matrix_dims
+                        ]
+
+                    # Check that we have no more than 1 sharded matrix dimension
+                    # Note that non-flattened 3D tensors can have additional sharded batch dimensions
+                    # Flattened 3D tensors are limited to one sharded dimension out of all dimensions
                     if len(shard_placements) == 1:
                         sharded_mesh_dim = shard_placements[0][0]
                         sharded_tensor_dim = shard_placements[0][1].dim
                     elif len(shard_placements) > 1:
                         raise NotImplementedError(
-                            "Muon does not support parameters with multiple sharded dimensions."
+                            "Muon does not support parameters with multiple sharded matrix dimensions."
                         )
 
                     # Check that the sharded mesh dimension matches optimizer's device mesh
@@ -308,6 +324,7 @@ class Muon(Optimizer):
                         device_rank=self._device_rank,
                         world_size=self._world_size,
                         shard_dim=sharded_tensor_dim,
+                        is_batch_sharded=is_batch_sharded,
                         process_group=self._process_group,
                         newton_schulz_func=self._newton_schulz_func,
                     )
@@ -408,6 +425,7 @@ def muon_update_batch_async(
     device_rank: int,  # Rank of the current device
     world_size: int,  # Total number of devices to parallelize over
     shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
+    is_batch_sharded: bool = False,  # Whether the tensor has additional sharded batch dimension
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
 ) -> Generator[None, None, None]:
@@ -420,8 +438,6 @@ def muon_update_batch_async(
     assert len(X) == len(G)
     assert len(X) == len(M)
     assert len(X) == world_size
-
-    # Expert parameter tracking (logging removed for cleaner output)
 
     # Update momentum and compute the inputs for orthogonalization
     U = muon_update_pre_orthogonalize(
@@ -477,9 +493,24 @@ def muon_update_batch_async(
         yield
         work.wait()
 
+    # The matrices are 3D tensors already sharded along the batch dimension
+    # Each local shard corresponds to whole matrices that can be orthogonalized independently
+    # But each device must orthogonalize all matrices in Muon's parameter batch
+    elif is_batch_sharded:
+        assert not flatten, "if flatten=True, we must have is_batch_sharded=False"
+        U = [
+            muon_update_newton_schulz(
+                u,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+            for u in U
+        ]
+
+    # Matrices are not sharded, so we can distribute the batch across different devices
+    # Get a single matrix of the batch corresponding to this device
     else:
-        # Matrices are not sharded, so we can directly orthogonalize
-        # Get a single matrix corresponding to this device
         single_matrix = U[device_rank]
         assert not isinstance(single_matrix, DTensor)
 
