@@ -6,12 +6,13 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 import torch.nn as nn
 
 from torchtitan.config import JobConfig
+from torchtitan.distributed import ParallelDims
 
 
 @dataclass
@@ -53,3 +54,6 @@ class ModelProtocol(Protocol):
             buffer_device: Optional device to place buffers on during initialization.
         """
         pass
+
+    def get_extra_metrics(self, parallel_dims: ParallelDims) -> None | dict[str, Any]:
+        return None
