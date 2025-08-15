@@ -11,6 +11,7 @@ from typing import Callable, Literal
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
@@ -21,36 +22,6 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
-
-
-# from torch.distributed._functional_collectives import all_to_all_single_autograd
-# TODO: there is memory leak issue with AC + all_to_all_single_autograd
-# This is a temporary fix by @rakkit https://github.com/pytorch/torchtitan/issues/1467
-class _A2A(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, out_splits, in_splits, group):
-        T_out = int(sum(out_splits))
-        y = x.new_empty((T_out,) + tuple(x.shape[1:]))  # allocate by output splits
-        dist.all_to_all_single(y, x.contiguous(), out_splits, in_splits, group=group)
-
-        ctx.in_splits = in_splits
-        ctx.out_splits = out_splits
-        ctx.group = group
-        return y
-
-    @staticmethod
-    def backward(ctx, grad_y):
-        # grad wrt input has length sum(in_splits)
-        T_in = int(sum(ctx.in_splits))
-        grad_x = grad_y.new_empty((T_in,) + tuple(grad_y.shape[1:]))
-        dist.all_to_all_single(
-            grad_x, grad_y.contiguous(), ctx.in_splits, ctx.out_splits, group=ctx.group
-        )
-        return grad_x, None, None, None
-
-
-def all_to_all_single_autograd(x, out_splits, in_splits, group):
-    return _A2A.apply(x, out_splits, in_splits, group)
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
