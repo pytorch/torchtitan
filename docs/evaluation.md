@@ -1,6 +1,6 @@
-# Validation and Evaluation in HF
+# Validation and Evaluation
 
-`torchtitan` provides direct and indirect support for validation to support user's training goals. Direct support is provided by the `Validator` class which interacts directly with the training loop, and indirect support is provided through [HuggingFace checkpoint conversion](https://github.com/pytorch/torchtitan/blob/main/docs/checkpoint.md#huggingface) for users who want to asynchronously do evaluation using external tools such as ELeutherAI's `lm_eval`.
+`torchtitan` provides direct and indirect support for validation to support user's training goals. Direct support is provided by the `Validator` class which interacts directly with the training loop, and indirect support is provided through [HuggingFace checkpoint conversion](https://github.com/pytorch/torchtitan/blob/main/docs/checkpoint.md#huggingface) for users who want to do evaluation using external tools such as ELeutherAI's `lm_eval`.
 
 ## Validation
 For users who want to perform validation directly during the training loop, we provide the `Validator` class which can be conveniently overloaded through the `TrainSpec` or configured in `JobConfig`. The validator class has access to and reuses many of the trainer's functions such as its parallelization, including pipelining.
@@ -12,7 +12,7 @@ Below is an example validation config:
 enabled = true
 dataset = "c4_validation"
 freq = 500
-steps = -1 #consume the entire validation set
+steps = -1 # consumes the entire validation set
 ```
 
 ## Third-Party Evaluation
@@ -26,6 +26,13 @@ Note that pip installing `lm-eval` may result in breaking `torchtitan` dev envir
 pip install "lm-eval[vllm]"
 lm_eval --model vllm \
     --model_args pretrained=./outputs/checkpoint/step-1000,tensor_parallel_size=8,dtype=auto,gpu_memory_utilization=0.8, \
-    --tasks lambada_openai \
+    --tasks mmlu \
     --batch_size auto
 ```
+|      Groups      |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+|------------------|------:|------|------|------|---|-----:|---|-----:|
+|mmlu              |      2|none  |      |acc   |↑  |0.6209|±  |0.0038|
+| - humanities     |      2|none  |      |acc   |↑  |0.5481|±  |0.0066|
+| - other          |      2|none  |      |acc   |↑  |0.7045|±  |0.0078|
+| - social sciences|      2|none  |      |acc   |↑  |0.7351|±  |0.0078|
+| - stem           |      2|none  |      |acc   |↑  |0.5357|±  |0.0085|

@@ -62,6 +62,6 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enabled = true
-freq = 5
-steps = 10
+enabled = false
+freq = 100
+steps = -1
