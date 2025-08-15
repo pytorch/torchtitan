@@ -10,8 +10,9 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.expert_parallel import expert_parallel
+from torchtitan.distributed.expert_parallel import indices_permutation_wrapper
 
 
 @dataclass
@@ -63,9 +64,8 @@ class FeedForward(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
-# TODO: keeping this for-loop implementation for comparison
+# NOTE: keeping this for-loop implementation for comparison
 #       and readability, may remove later
-@expert_parallel
 def _run_experts_for_loop(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -101,17 +101,15 @@ def _run_experts_for_loop(
     return out
 
 
-@expert_parallel
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
     w3: torch.Tensor,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
+    _num_tokens_per_expert: torch.Tensor | None,
+    offsets: torch.Tensor,
 ) -> torch.Tensor:
-    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-    # grouped mm between a 2D tensor and a 3D tensor
-    assert x.dim() == 2
+    assert offsets is not None
 
     h = F.silu(
         torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
@@ -142,16 +140,37 @@ class GroupedExperts(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor | None,
+        offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_grouped_mm:
-            return _run_experts_grouped_mm(
-                self.w1, self.w2, self.w3, x, num_tokens_per_expert
-            )
+        assert num_tokens_per_expert is not None or offsets is not None
+
+        if isinstance(self.w1, DTensor):
+            # Convert parameters from DTensors to plain Tensors, to work with
+            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
+            w1 = self.w1.to_local()
+            w2 = self.w2.to_local()
+            w3 = self.w3.to_local()
         else:
-            return _run_experts_for_loop(
-                self.w1, self.w2, self.w3, x, num_tokens_per_expert
-            )
+            w1 = self.w1
+            w2 = self.w2
+            w3 = self.w3
+
+        if self.use_grouped_mm:
+            if (
+                not isinstance(self.w1, DTensor)
+                or "ep" not in self.w1.device_mesh.mesh_dim_names
+            ):
+                # NOTE: If EP is not used, we need to permute the indices
+                #       to prepare for grouped_mm;
+                #       otherwise, EP will handle the permutation.
+                run_experts_fn = indices_permutation_wrapper(_run_experts_grouped_mm)
+            else:
+                assert offsets is not None
+                run_experts_fn = _run_experts_grouped_mm
+            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert, offsets)
+        else:
+            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)

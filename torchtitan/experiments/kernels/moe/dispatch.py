@@ -88,7 +88,9 @@ class AllToAllVDev2d(torch.autograd.Function):
             out_splits_offsets, grad_out_buf, grad_in_buf, grad_in_splits_offsets
         )
         ctx.group_name = group_name
-        return out
+
+        # TODO: why do we need this clone?
+        return out.clone()
 
     @staticmethod
     def backward(  # type: ignore[no-untyped-def]
