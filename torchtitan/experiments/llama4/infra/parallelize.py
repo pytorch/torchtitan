@@ -375,6 +375,27 @@ def apply_fsdp(
 
     fully_shard(model, **fsdp_config)
 
+    for layer_id, transformer_block in model.layers.items():
+        if layer_id == '0':
+            model.tok_embeddings.set_modules_to_forward_prefetch([transformer_block])
+
+        next_layer_id = str(int(layer_id) + 1)
+
+        next_transformer_block = model.layers[next_layer_id] if next_layer_id in model.layers else None
+        if next_transformer_block is not None:
+            if transformer_block.moe_enabled and ep_degree > 1:
+                transformer_block.moe.experts.set_modules_to_forward_prefetch([next_transformer_block])
+                try:
+                    transformer_block.set_modules_to_forward_prefetch([next_transformer_block.moe.experts])
+                except:
+                    torch.distributed.breakpoint()
+        else:
+            # for non-ep code path
+            if transformer_block.moe_enabled and ep_degree > 1:
+                transformer_block.moe.experts.set_modules_to_forward_prefetch([model.norm, model.output])
+            else:
+                transformer_block.set_modules_to_forward_prefetch([model.norm, model.output])
+
 
 def apply_moe_ep_tp(
     model: nn.Module,
