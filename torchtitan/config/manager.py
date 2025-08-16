@@ -172,7 +172,7 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        if self.config.model.tokenizer_path is not None:
+        if self.config.model.tokenizer_path:
             logger.warning(
                 "tokenizer_path is deprecated, use model.hf_assets_path instead. "
                 "Setting hf_assets_path to tokenizer_path temporarily."
