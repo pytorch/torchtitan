@@ -21,6 +21,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 
 # from torch.distributed._functional_collectives import all_to_all_single_autograd
@@ -49,8 +50,8 @@ class _A2A(torch.autograd.Function):
         return grad_x, None, None, None
 
 
-def all_to_all_single_autograd(x, out_splits, in_splits, group):
-    return _A2A.apply(x, out_splits, in_splits, group)
+# def all_to_all_single_autograd(x, out_splits, in_splits, group):
+#     return _A2A.apply(x, out_splits, in_splits, group)
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
