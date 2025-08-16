@@ -36,12 +36,12 @@ beta2 = 0.95
 eps = 1e-8
 
 # Muon-specific parameters
-mu = 0.95                     # Momentum factor for Muon
-algorithm = "muon"           # Main algorithm to use for 2D matrices
-nesterov = false             # Whether to use Nesterov momentum
-# adjust_lr = "spectral_norm"  # How to adjust LR: "spectral_norm", "rms_norm", or None (commented for debugging)
-flatten = true               # Whether to flatten 3D+ tensors to 2D (needed for MoE experts)
-use_triton = true           # Whether to use Triton kernel for Newton-Schulz
+mu = 0.95                       # Momentum factor for Muon
+algorithm = "muon"              # Main algorithm to use for 2D matrices
+nesterov = false                # Whether to use Nesterov momentum
+adjust_lr = "spectral_norm"     # How to adjust LR: "spectral_norm", "rms_norm", or None
+flatten = false                 # Whether to flatten 3D+ tensors to 2D (should only be used for convolution layers)
+use_triton = false              # Whether to use Triton kernel for Newton-Schulz
 
 # Parameter-specific optimizer selection
 scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
@@ -49,7 +49,7 @@ embedding_optimizer = "adamw"     # For embedding layers
 head_optimizer = "adamw"          # For model head/output layers
 routing_optimizer = "adamw"       # For routing layers (DeepSeek MoE)
 head_lr_scaling = true            # Apply 1/sqrt(dim) scaling to head layers
-# expert_optimizer = "adamw"        # Comment out to let experts use default classification (Muon for 2D matrices)
+# expert_optimizer = "adamw"      # Comment out to let experts use default classification (Muon for 2D matrices)
 
 # Learning rate scaling factors
 scalar_lr_factor = 1.0            # LR multiplier for scalar parameters

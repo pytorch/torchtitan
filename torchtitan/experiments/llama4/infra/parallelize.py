@@ -327,10 +327,17 @@ def apply_fsdp(
                 reshard_after_forward=reshard_after_forward,
             )
 
+        # Heuristic to detect shared experts, which are 3D tensors with very small batch dim
+        # Use Shard(1) instead, so we can avoid uneven sharding along the batch dimension
+        # Usually there's only 1 shared expert, but we allow any number < 8
+        def shared_expert_shard_1(p: nn.Parameter):
+            return Shard(1) if p.ndim == 3 and p.size(0) < 8 else Shard(0)
+
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
+            shard_placement_fn=shared_expert_shard_1,
         )
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 

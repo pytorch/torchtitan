@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.tools.logging import logger
 
@@ -41,6 +42,7 @@ def create_parameter_groups(
         "routing": [],
         "expert": [],
     }
+    dtensor_info = {}
 
     for model in model_parts:
         # Group parameters by type
@@ -60,10 +62,17 @@ def create_parameter_groups(
             # Add parameter name as attribute for debug logging
             param._param_name = name
 
+            # Log parameter placement
+            if isinstance(param, DTensor):
+                dtensor_info[name] = (
+                    param.device_mesh,
+                    param.placements,
+                    param.to_local().shape,
+                )
+
             # Check if this is an expert weight parameter
             if is_expert_param(name, param, model):
                 expert_type = classify_expert_param(name, param)
-                param_stats["expert"].append((name, param.shape, expert_type))
 
                 # Expert weights can use either DION (for 2D matrices only) or a dedicated expert optimizer
                 expert_optimizer = getattr(dion_config, "expert_optimizer", None)
@@ -71,13 +80,13 @@ def create_parameter_groups(
                 if expert_optimizer is not None:
                     # Use dedicated expert optimizer if specified
                     expert_params.append(param)
+                    param_stats["expert"].append(
+                        (name, param.shape, expert_type, expert_optimizer)
+                    )
                 elif param.ndim >= 2 and not is_head_param(name, param, model):
                     # Use matrix algorithm for expert matrices
                     # Dion only supports 2D, but Muon supports 3D+ (with flattening)
                     algorithm_name = dion_config.algorithm.upper()
-
-                    # Check if flatten is enabled (for Muon 3D+ tensor support)
-                    flatten_enabled = getattr(dion_config, "flatten", False)
 
                     # Handle case-insensitive algorithm matching
                     is_muon = (
@@ -89,12 +98,22 @@ def create_parameter_groups(
                     if is_muon and param.ndim >= 2:
                         # Use Muon for 2D+ tensors when algorithm is MUON, or always for 2D tensors
                         dion_params.append(param)
+                        param_stats["expert"].append(
+                            (name, param.shape, expert_type, "muon")
+                        )
                     else:
                         # Dion doesn't support 3D+, fall back to scalar optimizer
                         scalar_params.append(param)
+                        param_stats["expert"].append(
+                            (name, param.shape, expert_type, "scalar")
+                        )
                 else:
                     # Fall back to scalar optimizer for 1D expert parameters
                     scalar_params.append(param)
+                    param_stats["expert"].append(
+                        (name, param.shape, expert_type, "scalar")
+                    )
+
                 continue
 
             # Classify parameter based on shape and module type
@@ -156,6 +175,8 @@ def create_parameter_groups(
         logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Scalar parameters ({scalar_opt}): {len(param_stats['scalar'])}")
+    for name, shape in param_stats["scalar"]:
+        logger.info(f"  - {name}: {shape}")
 
     logger.info(
         f"Embedding parameters ({embedding_opt}): {len(param_stats['embedding'])}"
@@ -184,33 +205,25 @@ def create_parameter_groups(
         )
         if expert_optimizer is not None:
             logger.info(f"Expert optimizer configured: {expert_optimizer.upper()}")
-            for name, shape, expert_type in param_stats["expert"]:
-                logger.info(
-                    f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_optimizer.upper()}"
-                )
         else:
             logger.info(
                 "Expert optimizer not configured - using default classification:"
             )
-            for name, shape, expert_type in param_stats["expert"]:
-                # Check if this expert parameter actually uses the matrix algorithm
-                algorithm_name = dion_config.algorithm.upper()
-                is_muon = (
-                    algorithm_name in ["MUON", "muon"]
-                    or dion_config.algorithm.lower() == "muon"
-                )
-                flatten_enabled = getattr(dion_config, "flatten", False)
-
-                if (len(shape) == 2) or (is_muon and len(shape) >= 2):
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
-                    )
-                else:
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {scalar_opt}"
-                    )
+        for name, shape, expert_type, expert_opt in param_stats["expert"]:
+            logger.info(
+                f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_opt.upper()}"
+            )
     else:
         logger.info("No expert weight parameters detected in this model")
+
+    logger.info("=" * 40)
+    logger.info("DTENSOR INFO")
+    logger.info("=" * 40)
+
+    for name, (device_mesh, placements, local_shape) in dtensor_info.items():
+        logger.info(
+            f"{name:>40}: device mesh={device_mesh}, placements={placements}, local shape={local_shape}"
+        )
 
     logger.info("=" * 80)
 
@@ -287,7 +300,9 @@ def is_expert_param(name: str, param: torch.Tensor, model: nn.Module) -> bool:
         ".expert.",  # Alternative expert pattern
         "expert_",  # Expert prefix
         "moe.expert",  # MoE expert pattern
+        "shared_expert",  # DeepSeek shared experts
         "shared_experts",  # DeepSeek shared experts
+        "routed_expert",  # DeepSeek routed experts
         "routed_experts",  # DeepSeek routed experts
         ".experts[",  # Indexed expert pattern
         ".w1.",  # Expert feed-forward weights (common in MoE)
