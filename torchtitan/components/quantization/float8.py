@@ -24,6 +24,8 @@ AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
 class Float8Converter(ModelConverter):
+    fp8_token_group_alignment_size = 16
+
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
@@ -69,7 +71,7 @@ class Float8Converter(ModelConverter):
 
             # For fp8 grouped GEMM, token group sizes must be multiples of 16
             # (16 byte alignment / 1 byte per elem = 16 elements)
-            set_token_group_alignment_size_m(16)
+            set_token_group_alignment_size_m(self.fp8_token_group_alignment_size)
 
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
