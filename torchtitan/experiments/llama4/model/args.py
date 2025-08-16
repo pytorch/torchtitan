@@ -20,8 +20,8 @@ from torchtitan.tools.utils import has_cuda_capability
 @dataclass
 class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
+    n_layers: int = 2
+    n_heads: int = 2
     n_kv_heads: int | None = None
     vocab_size: int = 202048
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2

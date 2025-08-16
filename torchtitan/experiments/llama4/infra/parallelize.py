@@ -518,3 +518,6 @@ def apply_compile(model: nn.Module):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+    # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
+    torch._dynamo.config.capture_scalar_outputs = True
