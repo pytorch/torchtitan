@@ -22,8 +22,6 @@ Model parity test has been done and results suggest parity with HF implementatio
     - variants of Dense models up to 32B
     - MoE alternatives
     - Weight tying
-- Parallelism
-    - PP, CP
 - Testing
     - Model needs to be tested across different metrics
     - CI integration
