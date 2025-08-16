@@ -145,20 +145,28 @@ class MuonOptimizersContainer(OptimizersContainer):
         # Get the world mesh from parallel_dims
         world_mesh = parallel_dims.world_mesh
 
-        # For Muon, we primarily use the dp_shard mesh for distributed operations
+        # Try to find the appropriate distributed mesh
+        distributed_mesh = None
         if parallel_dims.dp_shard_enabled:
-            # Extract the dp_shard submesh
-            if "dp_shard" in world_mesh.mesh_dim_names:
-                distributed_mesh = world_mesh["dp_shard"]
-            elif "dp_shard_cp" in world_mesh.mesh_dim_names:
-                # If context parallel is enabled, use dp_shard_cp mesh
-                distributed_mesh = world_mesh["dp_shard_cp"]
+            candidate_names = ["dp_shard_cp", "dp_shard"]
         elif parallel_dims.dp_replicate_enabled:
-            # If no dp_shard but dp_replicate is enabled, use that
-            if "dp_replicate" in world_mesh.mesh_dim_names:
-                distributed_mesh = world_mesh["dp_replicate"]
-            elif "dp" in world_mesh.mesh_dim_names:
-                distributed_mesh = world_mesh["dp"]
+            candidate_names = ["dp_replicate", "dp"]
+        else:
+            return None  # No distributed mesh available for Muon
+
+        for name in candidate_names:
+            # There doesn't seem to be any way to tell if a flatten mesh exists
+            # except by actually trying to access it and checking for KeyError
+            try:
+                distributed_mesh = world_mesh[name]
+                break
+            except KeyError:
+                continue
+
+        if distributed_mesh is None:
+            raise RuntimeError(
+                f"Could not find DP shard or replicate mesh in world mesh: {world_mesh}"
+            )
 
         return distributed_mesh
 
@@ -318,7 +326,7 @@ def get_llama_muon_config() -> MuonOptimizerConfig:
     """Example Muon configuration optimized for LLaMA-style models."""
     return MuonOptimizerConfig(
         name="muon",
-        lr=3e-4,
+        lr=0.01,  # Should be much higher than AdamW LR
         weight_decay=0.1,
         mu=0.95,
         betas=(0.9, 0.95),
@@ -335,7 +343,7 @@ def get_mixed_algorithm_config() -> tuple[MuonOptimizerConfig, Dict[str, str]]:
     """Example configuration using different algorithms for different layers."""
     config = MuonOptimizerConfig(
         name="mixed",
-        lr=3e-4,
+        lr=2e-2,
         weight_decay=0.1,
     )
 
