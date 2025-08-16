@@ -158,6 +158,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     new_key = new_abstract_key.format(layer_num, expert_num)
                     hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
+                # Remove the GroupedExperts' weight from the state_dict to free memory
+                del value
+
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
