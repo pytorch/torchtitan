@@ -61,6 +61,7 @@ python scripts/checkpoint_conversion/convert_from_hf.py <hf_checkpoints_dir> <dc
 Some limitations:
 1. It can't be used to convert HF checkpoint on the fly using GPU DTensor, because of sharding and quantized blocks may not be aligned well and causing silent numerfical incorrectness.
 2. It can't be used for weight sync to generate a state dict of bf16 because fake quantization to fp8 is applied.
+3. When converting GroupedExperts weights from HF separate expert weights on-the-fly, `torch.split()` will cause huge GPU memory usage. This is because torchtitan GroupedExperts' weight has shape `(num_experts, dim1, dim2)`, and by default shard FSDP on dim-0. When we call `torch.split()` in `to_hf()` function on dim-0, this will incur and all-gather and get replicated expert memory.
 
 ## To be added
 - Parallelism
