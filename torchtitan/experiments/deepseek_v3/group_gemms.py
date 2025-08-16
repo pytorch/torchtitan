@@ -403,7 +403,7 @@ class DSGroupGEMM(GroupGEMMStrategy):
         fp8, scales = dsgemm_utils.prepare_fp8_weight(combined_weights)
 
         # prescale weights
-        # TODO - this creates 2 sets of weights, need to resolve this for traiing aspect.
+        # TODO - this creates 2 sets of weights, need to resolve this for training aspect.
         module.register_parameter(
             f"{submod_name}_fp8",
             nn.Parameter(

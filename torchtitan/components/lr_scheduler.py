@@ -124,7 +124,7 @@ def build_lr_schedulers(
             decay_steps = training_steps - warmup_steps
     else:
         decay_steps = training_steps - warmup_steps
-    # Add a vitual last step to prevent the learning rate from dropping to 0
+    # Add a virtual last step to prevent the learning rate from dropping to 0
     stable_steps = training_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = lr_scheduler_config.decay_type
     min_lr_factor = lr_scheduler_config.min_lr_factor

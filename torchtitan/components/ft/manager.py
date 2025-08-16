@@ -49,7 +49,7 @@ class FTManager:
         elif ft_config.process_group == "nccl":
             pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
         else:
-            raise ValueError(f"Unsuported process group: {ft_config.process_group}")
+            raise ValueError(f"Unsupported process group: {ft_config.process_group}")
 
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = ft_config.semi_sync_method is None

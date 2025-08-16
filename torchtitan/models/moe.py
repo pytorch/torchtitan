@@ -340,7 +340,7 @@ class MoE(nn.Module):
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
-        #       expert_bias is updated outside the model in an optimzer step pre hook
+        #       expert_bias is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = moe_args.load_balance_coeff
         if self.load_balance_coeff is not None:

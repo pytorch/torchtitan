@@ -53,7 +53,7 @@ python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
 - Parallelism: The model supports FSDP, HSDP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
-    - Notes on the current checkpointing implementation: To keep the model wieghts are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of envaluation, and sharding the weights of the module if it is a FSDPModule.
+    - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
 - CI for FLUX model. Supported periodically running integration tests on 8 GPUs, and unittests.
 
 

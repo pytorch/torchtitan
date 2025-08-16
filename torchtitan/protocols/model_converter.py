@@ -25,7 +25,7 @@ class ModelConverter(Protocol):
         ...
 
     def convert(self, model: nn.Module):
-        """Inplace convertion of the model."""
+        """Inplace conversion of the model."""
         ...
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
