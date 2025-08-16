@@ -14,12 +14,12 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .infra.parallelize import qwen3model
+from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
 from .model.model import Transformer
 
 __all__ = [
-    "qwen3model",
+    "parallelize_qwen3",
     "Qwen3ModelArgs",
     "Transformer",
     "qwen3_configs",
@@ -109,7 +109,7 @@ register_train_spec(
         name="qwen3",
         model_cls=Transformer,
         model_args=qwen3_configs,  # Change from dict to Mapping
-        parallelize_fn=qwen3model,
+        parallelize_fn=parallelize_qwen3,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,

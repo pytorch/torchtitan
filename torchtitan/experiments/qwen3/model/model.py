@@ -86,6 +86,11 @@ def apply_rotary_emb(
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+    Note:
+        This function adds .transpose(-2,-1) to match HF implementation. This method assumes that last
+        dimension is [real_0, real_1, ..., real_{N-1}, imag_0, imag_1, ..., imag_{N-1}] while Rope in Llama3
+        has [real_0, imag_0, real_1, imag_1, ..., real_{N-1}, imag_{N-1}]. This is the main difference
+        between Llama3 and Qwen3 Rope which is under investigation.
     """
     xk_complex = torch.view_as_complex(
         xk.view(*xk.shape[:-1], 2, xk.shape[-1] // 2)
@@ -158,6 +163,9 @@ class Attention(nn.Module):
             self.k_norm = nn.RMSNorm(
                 self.head_dim, eps=model_args.norm_eps, elementwise_affine=True
             )
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -173,6 +181,10 @@ class Attention(nn.Module):
         for linear in (self.wq, self.wk, self.wv):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        if self.q_norm is not None:
+            self.q_norm.reset_parameters()
+        if self.k_norm is not None:
+            self.k_norm.reset_parameters()
 
     def forward(
         self,

@@ -11,14 +11,14 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 1000
+log_freq = 10
 enable_tensorboard = true
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
 flavor = "8B"
-tokenizer_path = "./assets/tokenizer/Llama-3.1-8B"
+hf_assets_path = "./assets/hf/Llama-3.1-8B"
 # converters = ["float8"]
 
 [optimizer]
@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 1000
 compile = false
 dataset = "c4"
 

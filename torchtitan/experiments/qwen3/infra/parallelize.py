@@ -42,7 +42,7 @@ from torchtitan.models.llama3.infra.parallelize import (
 from torchtitan.tools.logging import logger
 
 
-def qwen3model(
+def parallelize_qwen3(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
