@@ -63,5 +63,6 @@ filter_fqns = ["output"]
 
 [validation]
 enabled = false
+dataset = "c4_validation"
 freq = 100
 steps = -1
