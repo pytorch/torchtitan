@@ -60,3 +60,9 @@ mode = "full" # ["none", "selective", "full"]
 enable_fsdp_float8_all_gather = true
 precompute_float8_dynamic_scale_for_fsdp = true
 filter_fqns = ["output"]
+
+[validation]
+enabled = false
+dataset = "c4_validation"
+freq = 500
+steps = -1
