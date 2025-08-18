@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 
