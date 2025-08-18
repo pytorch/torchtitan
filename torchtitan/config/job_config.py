@@ -509,12 +509,12 @@ class ActivationCheckpoint:
     'int' (e.g., 2) for every nth layer, or 'op' for op level ac.
     """
 
-    per_op_sac_force_recompute_mm_shapes_by_fqns: list[str] = field(
+    per_op_sac_force_save_mm_shapes_by_fqns: list[str] = field(
         default_factory=lambda: ["moe.router.gate"]
     )
     """
     When per-op selective ac is used, this list of fully qualified names is used
-    to determine which mm shapes to force recompute, rather than being considered
+    to determine which mm shapes to force save, rather than being considered
     by rest of the sac policy, e.g save every other mm. Only nn.Linear modules are
     supported today.
 

@@ -269,26 +269,26 @@ def _apply_ac_to_transformer_block(
             create_selective_checkpoint_contexts,
         )
 
-        mm_recompute_shapes = set()
-        if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
+        mm_save_shapes = set()
+        if len(ac_config.per_op_sac_force_save_mm_shapes_by_fqns) > 0:
             for module_fqn, submod in module.named_modules():
                 fqn = module_fqn
                 if base_fqn is not None:
                     fqn = f"{base_fqn}.{module_fqn}"
                 if not any(
                     filter_fqn in fqn
-                    for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+                    for filter_fqn in ac_config.per_op_sac_force_save_mm_shapes_by_fqns
                 ):
                     continue
                 if not isinstance(submod, nn.Linear):
                     raise ValueError(
-                        "per_op_sac_force_recompute_mm_shapes_by_fqns expected to match "
+                        "per_op_sac_force_save_mm_shapes_by_fqns expected to match "
                         f"a nn.Linear, but got: {submod}"
                     )
                 out_f, in_f = submod.weight.shape
-                mm_recompute_shapes.add((in_f, out_f))
+                mm_save_shapes.add((in_f, out_f))
             logger.debug(
-                f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
+                f"Selective op AC force saving mms with rhs shapes {mm_save_shapes}"
             )
 
         def _get_custom_policy(meta):
@@ -296,8 +296,8 @@ def _apply_ac_to_transformer_block(
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
                 if func == torch.ops.aten.mm.default:
-                    if args[1].shape in mm_recompute_shapes:
-                        return CheckpointPolicy.PREFER_RECOMPUTE
+                    if args[1].shape in mm_save_shapes:
+                        return CheckpointPolicy.MUST_SAVE
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
                 to_save = func in _save_list and not (
