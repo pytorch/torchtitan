@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from functools import cached_property
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -24,6 +23,7 @@ class ParallelDims:
     tp: int
     pp: int
     ep: int
+    etp: int
     world_size: int
 
     _world_mesh: DeviceMesh = None
@@ -32,18 +32,19 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp, ep = (
+        dp_replicate, dp_shard, cp, tp, pp, ep, etp = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
             self.tp,
             self.pp,
             self.ep,
+            self.etp,
         )
-        for d in (dp_replicate, cp, tp, pp, ep):
+        for d in (dp_replicate, cp, tp, pp, ep, etp):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
 
-        assert dp_shard == -1 or dp_shard >= 1, " dp_shard must -1 or >=1."
+        assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
         assert dp_shard >= 1
@@ -54,8 +55,13 @@ class ParallelDims:
         )
 
         if ep > 1:
-            # EP would borrow all cp and some dp_shard degree
-            assert ep % cp == 0 and (dp_shard * cp) % ep == 0
+            assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
+            if etp == tp:
+                # EP would borrow all cp and some dp_shard degree
+                assert ep % cp == 0 and (dp_shard * cp) % ep == 0
+            elif etp == 1:
+                # EP would borrow all cp and tp and some dp_shard degree
+                assert ep % (cp * tp) == 0 and (dp_shard * cp * tp) % ep == 0
 
     def build_mesh(self) -> DeviceMesh:
         # TODO: Current implementation of ParallelDims for dp2ep Expert Parallel
@@ -69,9 +75,15 @@ class ParallelDims:
     def _build_mesh_with_ep(self) -> DeviceMesh:
         # With ep, dp_shard and ep are derived submeshes:
         # dp_shard = dp_shard_mod_ep * dp_shard_in_ep
-        # ep = dp_shard_in_ep * cp
-        dp_shard_mod_ep = self.dp_shard * self.cp // self.ep
-        dp_shard_in_ep = self.ep // self.cp
+        if self.etp == self.tp:
+            # ep = dp_shard_in_ep * cp
+            dp_shard_mod_ep = self.dp_shard * self.cp // self.ep
+            dp_shard_in_ep = self.ep // self.cp
+        else:
+            assert self.etp == 1
+            # ep = dp_shard_in_ep * cp * tp
+            dp_shard_mod_ep = self.dp_shard * self.cp * self.tp // self.ep
+            dp_shard_in_ep = self.ep // (self.cp * self.tp)
 
         dims = []
         names = []
@@ -122,6 +134,8 @@ class ParallelDims:
             dp_shard_cp_mesh_dim_names.append("cp")
             dp_cp_mesh_dim_names.append("cp")
             ep_mesh_dim_names.append("cp")
+        if self.etp == 1 and self.tp_enabled:
+            ep_mesh_dim_names.append("tp")
 
         mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
         mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_shard_cp")
@@ -219,11 +233,22 @@ class ParallelDims:
     def ep_enabled(self):
         return self.ep > 1
 
-    @cached_property
+    @property
+    def etp_enabled(self):
+        return self.etp > 1
+
+    @property
+    def fsdp_gradient_divide_factor(self) -> int:
+        # This is needed for FSDP-sharded experts when Expert Parallel is enabled.
+        # Although the FSDP sharding of experts is done on a mesh of a different size than
+        # other parameters, the gradient division factor should be consistent with data.
+        return self.dp_replicate * self.dp_shard * self.cp
+
+    @property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
 
-    @cached_property
+    @property
     def seq_len_divisor(self):
         # Sequence Parallel requires that seq_len be divisible by TP degree.
         # https://github.com/pytorch/torchtitan/pull/640#discussion_r1849481001

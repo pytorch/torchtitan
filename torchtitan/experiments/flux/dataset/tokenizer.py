@@ -45,13 +45,31 @@ class FluxTestTokenizer(BaseTokenizer):
     def get_vocab_size(self) -> int:
         return self.tiktokenizer.vocab_size
 
-    def encode(self, text: str) -> torch.Tensor:
+    def encode(self, text: str | list[str]) -> torch.Tensor:
         """
         Use TikTokenizer to encode the text into tokens, and then pad and chunk the tokens to max_length.
         """
-        tokens = self.tiktokenizer.encode(text, add_bos=True, add_eos=True)
-        tokens = self._pad_and_chunk_tokens(tokens, self._max_length, self.pad_id)
-        return torch.tensor(tokens)
+        if isinstance(text, list):
+            if len(text) == 1:
+                # for single item in list encode and add batch dimension
+                tokens = self.tiktokenizer.encode(text[0], add_bos=True, add_eos=True)
+                tokens = self._pad_and_chunk_tokens(
+                    tokens, self._max_length, self.pad_id
+                )
+                return torch.tensor(tokens).unsqueeze(0)
+            else:
+                all_tokens = []
+                for t in text:
+                    tokens = self.tiktokenizer.encode(t, add_bos=True, add_eos=True)
+                    tokens = self._pad_and_chunk_tokens(
+                        tokens, self._max_length, self.pad_id
+                    )
+                    all_tokens.append(torch.tensor(tokens))
+                return torch.stack(all_tokens)
+        else:
+            tokens = self.tiktokenizer.encode(text, add_bos=True, add_eos=True)
+            tokens = self._pad_and_chunk_tokens(tokens, self._max_length, self.pad_id)
+            return torch.tensor(tokens)
 
     def decode(self, t: List[int]) -> str:
         """
@@ -90,7 +108,7 @@ class FluxTokenizer(BaseTokenizer):
 
     def encode(
         self,
-        s: str,
+        s: str | list[str],
     ) -> torch.Tensor:
         """
         Encode the prompt text into tokens.
@@ -124,7 +142,7 @@ def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseToke
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
     if job_config.training.test_mode:
         tokenizer_class = FluxTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = job_config.model.tokenizer_path
+        t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path
     else:
         tokenizer_class = FluxTokenizer
 

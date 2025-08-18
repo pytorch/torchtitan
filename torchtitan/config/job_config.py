@@ -78,7 +78,15 @@ class Model:
     flavor: str = "debugmodel"
     """Which model config to train"""
 
-    tokenizer_path: str = "./tests/assets/tokenizer"
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    """
+    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+    including model weights in .safetensors format, the model.safetensor.index.json file
+    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
+    """
+
+    tokenizer_path: str | None = None
+    """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
     converters: list[str] = field(default_factory=list)
@@ -366,9 +374,27 @@ class Parallelism:
 
     expert_parallel_degree: int = 1
     """
-    Expert parallelism degree. 1 means disabled.
-    Currently, only "dp2ep" is supported, with the following constraints:
-    context_parallel_degree <= expert_parallel_degree <= data_parallel_shard_degree * context_parallel_degree
+    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    Currently, it is supported with the following constraints:
+    - when etp = tp:
+      - cp <= ep <= dp_shard * cp
+      - ep % cp == 0
+      - dp_shard * cp % ep == 0
+    - when etp = 1:
+      - cp * tp <= ep <= dp_shard * cp * tp
+      - ep % (cp * tp) == 0
+      - dp_shard * cp * tp % ep == 0
+    Note that this is still an experimental feature. Some contrains will be
+    relaxed soon when we have more flexible DeviceMesh support.
+    """
+
+    expert_tensor_parallel_degree: int = 1
+    """
+    Expert tensor parallelism degree. 1 means disabled. No effect for non-MoE models, or when ep = 1.
+    With this option, the tensor parallel degree on routed experts can be different from that on other params.
+    Currently, we only support either
+    - [partial dp -> ep] etp = tp
+    - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
     """
 

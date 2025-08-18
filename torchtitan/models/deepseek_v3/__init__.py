@@ -19,6 +19,7 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from .infra.parallelize import parallelize_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
 from .model.model import DeepSeekV3Model
+from .model.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
     "parallelize_deepseekv3",
@@ -166,5 +167,6 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
 )

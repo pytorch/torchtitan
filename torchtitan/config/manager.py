@@ -170,27 +170,33 @@ class ConfigManager:
         return cls(**result)
 
     def _validate_config(self) -> None:
-        # TODO: temporary mitigation of BC breaking change in
+        # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        if not os.path.exists(self.config.model.tokenizer_path):
+        if self.config.model.tokenizer_path:
             logger.warning(
-                f"Tokenizer path {self.config.model.tokenizer_path} does not exist!"
+                "tokenizer_path is deprecated, use model.hf_assets_path instead. "
+                "Setting hf_assets_path to tokenizer_path temporarily."
+            )
+            self.config.model.hf_assets_path = self.config.model.tokenizer_path
+        if not os.path.exists(self.config.model.hf_assets_path):
+            logger.warning(
+                f"HF assets path {self.config.model.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
-                self.config.model.tokenizer_path = old_tokenizer_path
+                self.config.model.hf_assets_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
-                    "Please download the new tokenizer model (python scripts/download_tokenizer.py) and update your config."
+                    "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            if self.config.model.tokenizer_path.endswith("tokenizer.model"):
+            if self.config.model.hf_assets_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
-                    "(python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B) ",
+                    "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
                     " and update your config to the directory of the downloaded tokenizer.",
                 )
 

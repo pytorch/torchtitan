@@ -7,17 +7,16 @@
 
 set -ex
 
-# use envs as local overwrites for convenience
+# use envs as local overrides for convenience
 # e.g.
-# LOG_RANK=0,1 NGPU=4 ./run_train.sh
+# LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/flux/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
-
-TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/flux/train_configs/debug_model.toml"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
-TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.train --job.config_file ${CONFIG_FILE} "$@"
+-m torchtitan.experiments.flux.inference.infer --job.config_file ${CONFIG_FILE} \
+--checkpoint.enable_checkpoint \
+--checkpoint.exclude_from_loading=lr_scheduler,dataloader,optimizer "$@"

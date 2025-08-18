@@ -101,6 +101,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
+            etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
         )
 
@@ -307,7 +308,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
-                self.train_spec.state_dict_adapter(model_args)
+                self.train_spec.state_dict_adapter(
+                    model_args, job_config.model.hf_assets_path
+                )
                 if self.train_spec.state_dict_adapter
                 else None
             ),
