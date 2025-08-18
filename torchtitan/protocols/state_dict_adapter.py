@@ -60,23 +60,16 @@ class StateDictAdapter(BaseStateDictAdapter):
 
     def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
         if hf_assets_path:
-            index_files = [
-                "model.safetensors.index.json",
-                "diffusion_pytorch_model.safetensors.index.json",
-            ]
-
-            hf_safetensors_indx = None
-            for index_file in index_files:
-                mapping_path = os.path.join(hf_assets_path, index_file)
-                if os.path.exists(mapping_path):
-                    with open(mapping_path, "r") as f:
-                        hf_safetensors_indx = json.load(f)
-                    break
-            if hf_safetensors_indx is None:
+            mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+            try:
+                with open(mapping_path, "r") as f:
+                    hf_safetensors_indx = json.load(f)
+            except FileNotFoundError:
                 logger.warning(
-                    f"no safetensors index file found at hf_assets_path: {hf_assets_path}. \
-                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
+                    f"model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format."
                 )
+                hf_safetensors_indx = None
 
             if hf_safetensors_indx:
                 self.fqn_to_index_mapping = {}

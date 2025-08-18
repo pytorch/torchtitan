@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torchtitan.experiments.flux  # noqa: F401
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpoint import ModelWrapper
@@ -17,6 +16,8 @@ from torchtitan.components.checkpoint import ModelWrapper
 
 @torch.inference_mode()
 def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
+    if model_name == "flux":
+        import torchtitan.experiments.flux  # noqa: F401
     # initialize model to allocate memory for state dict
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]

@@ -387,6 +387,9 @@ class FluxValidationDataset(FluxDataset):
             val_timesteps = [1 / 8 * (i + 0.5) for i in range(8)]
             self.timestep_cycle = itertools.cycle(val_timesteps)
 
+        # Disable classifier free guidance for validation
+        self.job_config.training.classifier_free_guidance_prob = 0.0
+
     def __iter__(self):
         # Get parent iterator and add timesteps to each sample
         parent_iterator = super().__iter__()

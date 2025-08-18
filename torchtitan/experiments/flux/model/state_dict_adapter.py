@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import logging
 import os
 import re
@@ -15,12 +16,12 @@ import torch
 
 logger = logging.getLogger()
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
 from .args import FluxModelArgs
 
 
-class FluxStateDictAdapter(StateDictAdapter):
+class FluxStateDictAdapter(BaseStateDictAdapter):
     """
     State dict adapter for Flux model to convert between HuggingFace safetensors format
     and torchtitan DCP format.
@@ -29,12 +30,40 @@ class FluxStateDictAdapter(StateDictAdapter):
     """
 
     def __init__(self, model_args: FluxModelArgs, hf_assets_path: str | None):
-        # Add transformer path since we are only loading the transformer weights from hf_assets_path
-        if hf_assets_path:
-            hf_assets_path = os.path.join(hf_assets_path, "transformer")
 
-        # Call parent constructor to build fqn_to_index_mapping
-        super().__init__(model_args, hf_assets_path=hf_assets_path)
+        # Build fqn to index mapping if hf_assets_path
+        if hf_assets_path:
+            # If directory is multimodal ensure that hf_assets_path is to the folder containing transformer's safetensors
+            if os.path.exists(os.path.join(hf_assets_path, "model_index.json")):
+                hf_assets_path = os.path.join(hf_assets_path, "transformers")
+
+            # Check if safetensors index file exists
+            index_files = [
+                "model.safetensors.index.json",
+                "diffusion_pytorch_model.safetensors.index.json",
+            ]
+
+            hf_safetensors_indx = None
+            for index_file in index_files:
+                mapping_path = os.path.join(hf_assets_path, index_file)
+                if os.path.exists(mapping_path):
+                    with open(mapping_path, "r") as f:
+                        hf_safetensors_indx = json.load(f)
+                    break
+            if hf_safetensors_indx is None:
+                logger.warning(
+                    f"no safetensors index file found at hf_assets_path: {hf_assets_path}. \
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
+                )
+
+            if hf_safetensors_indx:
+                self.fqn_to_index_mapping = {}
+                for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    indx = re.search(r"\d+", raw_indx).group(0)
+                    self.fqn_to_index_mapping[hf_key] = indx
+            else:
+                self.fqn_to_index_mapping = None
+
         self.model_args = model_args
         self.hf_assets_path = hf_assets_path
 
@@ -282,10 +311,3 @@ class FluxStateDictAdapter(StateDictAdapter):
             state_dict[tt_fqn] = value
 
         return state_dict
-
-
-def build_flux_state_dict_adapter(
-    model_args: FluxModelArgs, hf_assets_path: str | None = None
-) -> FluxStateDictAdapter:
-    """Build a Flux state dict adapter."""
-    return FluxStateDictAdapter(model_args, hf_assets_path)
