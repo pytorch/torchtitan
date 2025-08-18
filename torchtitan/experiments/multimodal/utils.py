@@ -16,6 +16,7 @@ import torch
 import torchvision
 from torchvision.transforms.v2 import functional as F
 
+
 # NOTE Copied from torchtune.modules.transforms.vision_utils.tile_crop.py
 def tile_crop(image: torch.Tensor, tile_size: int) -> torch.Tensor:
     """

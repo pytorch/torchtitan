@@ -27,7 +27,7 @@
 # limitations under the License.
 
 
-""" PyTorch DeepSeek model."""
+"""PyTorch DeepSeek model."""
 
 
 import math

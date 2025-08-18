@@ -12,9 +12,10 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
 from tokenizers import AddedToken, Tokenizer
+from typing_extensions import override
+
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
-from typing_extensions import override
 
 
 class BaseTokenizer(ABC):

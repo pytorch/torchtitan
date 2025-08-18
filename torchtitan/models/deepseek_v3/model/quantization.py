@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+
 from torchtitan.tools.logging import logger
 
 # Fixed block size of 128x128 as specified in the algorithm
