@@ -124,6 +124,8 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model)
 
+    print(model)
+
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -506,9 +508,7 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
-    # torch._dynamo.config.capture_scalar_outputs = True
+    return
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for MoE
         fullgraph = True

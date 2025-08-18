@@ -51,6 +51,7 @@ class TransformerModelArgs(BaseModelArgs):
     auto_scale_hidden_dim: bool = True
     # frequency of using MoE layer instead of feedforward layer in a transformer block
     interleave_moe_layer_step: int = 2
+    # interleave_moe_layer_step: int = 6
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len

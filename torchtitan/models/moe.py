@@ -14,6 +14,28 @@ from torch import nn
 from torchtitan.distributed.expert_parallel import expert_parallel
 
 
+@torch._dynamo.config.patch(capture_scalar_outputs=True)
+@torch.compile(fullgraph=True)
+def overlapped_experts(routed_input, num_tokens_per_expert, experts, shared_experts, score_before_experts, x):
+    # shape (bs*slen*top_k, dim)
+    routed_output = experts(routed_input, num_tokens_per_expert)
+
+    if not score_before_experts:
+        assert False
+        routed_output = (
+            routed_output.to(torch.float32)
+            * top_scores_experts_sorted.reshape(-1, 1)
+        ).to(x.dtype)
+
+    # shared expert
+    if shared_experts is not None:
+        out = shared_experts(x)
+    else:
+        assert False
+        out = torch.zeros_like(x)
+
+    return routed_output, out
+
 @dataclass
 class MoEArgs:
     num_experts: int = 8
@@ -28,7 +50,8 @@ class MoEArgs:
     # token-choice
     top_k: int = 1
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
-    load_balance_coeff: float | None = 1e-3
+    # load_balance_coeff: float | None = 1e-3
+    load_balance_coeff: float | None = None
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -418,21 +441,7 @@ class MoE(nn.Module):
         args, _ = fsdp_state._pre_forward(module=self.experts, args=(routed_input, num_tokens_per_expert), kwargs={})
         routed_input, num_tokens_per_expert = args
 
-        # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-
-        if not self.score_before_experts:
-            assert False
-            routed_output = (
-                routed_output.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shared expert
-        if self.shared_experts is not None:
-            out = self.shared_experts(x)
-        else:
-            out = torch.zeros_like(x)
+        routed_output, out = overlapped_experts(routed_input, num_tokens_per_expert, self.experts, self.shared_experts, self.score_before_experts, x)
 
         routed_output = fsdp_state._post_forward(module=self.experts, input=(routed_input, num_tokens_per_expert), output=routed_output)
 
