@@ -88,6 +88,8 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            ep_a2a_impl=job_config.parallelism.expert_parallel_a2a_impl,
+            training_config=job_config.training,
         )
 
     if job_config.activation_checkpoint.mode != "none":

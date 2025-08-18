@@ -398,6 +398,13 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
+    expert_parallel_a2a_impl: Literal["default", "nvshmem"] = "default"
+    """
+    NVSHMEM-based all-to-all removes the need for device-to-host sync.
+    If building pytorch from source, one needs to `pip install nvshmem` before building.
+    Note that is highly experimental!
+    """
+
 
 @dataclass
 class Checkpoint:

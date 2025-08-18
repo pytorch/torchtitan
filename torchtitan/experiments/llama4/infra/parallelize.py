@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -18,7 +19,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP, Training as TrainingConfig
 from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.expert_parallel import (
@@ -101,6 +102,8 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            ep_a2a_impl=job_config.parallelism.expert_parallel_a2a_impl,
+            training_config=job_config.training,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -382,7 +385,11 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    ep_a2a_impl: Literal["default", "nvshmem"],
+    training_config: TrainingConfig,
 ):
+    assert ep_mesh is not None or tp_mesh is not None
+
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
             continue
@@ -428,16 +435,44 @@ def apply_moe_ep_tp(
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None:
+        elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
-        elif etp_enabled:
-            experts_mesh = ep_tp_mesh
-            experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+
+            if ep_a2a_impl == "default":
+                experts_plan = ExpertParallel()
+            else:  # ep_a2a_impl == "nvshmem"
+                bs = training_config.local_batch_size
+                seq_len = training_config.seq_len
+                top_k = transformer_block.moe.router.top_k
+                dim = transformer_block.moe.router.gate.weight.shape[1]
+                num_experts = transformer_block.moe.router.num_experts
+
+                num_tokens = bs * seq_len * top_k
+
+                # adjust num_tokens due to ReordererSequenceParallel
+                if tp_mesh is not None:
+                    num_tokens = num_tokens // tp_mesh.size()
+
+                import torch.distributed._symmetric_memory as symm_mem
+                from torch.distributed.distributed_c10d import _get_default_group
+                from torchtitan.distributed.expert_parallel import NVSHMEMExpertParallel
+
+                symm_mem.set_backend("NVSHMEM")
+                group_name = experts_mesh.get_group().group_name
+                symm_mem.enable_symm_mem_for_group(group_name)
+                symm_mem.enable_symm_mem_for_group(_get_default_group().group_name)
+
+                experts_plan = NVSHMEMExpertParallel(
+                    num_tokens=num_tokens,
+                    dim=dim,
+                    num_experts=num_experts,
+                    ep_mesh=experts_mesh,
+                    dtype=TORCH_DTYPE_MAP[training_config.mixed_precision_param],
+                )
         else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            experts_mesh = ep_tp_mesh
+            experts_plan = ExpertTensorParallel()
 
         parallelize_module(
             module=transformer_block.moe.experts,
