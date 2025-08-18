@@ -7,18 +7,10 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
-from collections import defaultdict
-from typing import Optional
-
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -29,11 +21,9 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import NoParallel
 from torchtitan.models.llama3.infra.parallelize import (
-    _apply_ac_to_transformer_block,
     apply_ac,
     apply_compile,
     apply_ddp,
