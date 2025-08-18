@@ -10,7 +10,7 @@ import torch
 
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
-from torchtitan.components.checkpoint import excluded_parameters_for_model_only
+from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
@@ -76,13 +76,11 @@ def forward_tt(config_path, checkpoint_path, test_set):
     # materalize model
     device = torch.device(device_type)
     model.to_empty(device=device)
-    with torch.no_grad():
-        model.init_weights()
+    model.init_weights(buffer_device=device)
     model.eval()
 
-    state_dict = model.state_dict()
-    for k in excluded_parameters_for_model_only:
-        state_dict.pop(k, None)
+    modelWrapper = ModelWrapper(model)
+    state_dict = modelWrapper._get_state_dict()
 
     # Checkpoint Loading
     logger.info(f"Loading checkpoint at: {checkpoint_path}")
