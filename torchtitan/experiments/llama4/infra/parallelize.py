@@ -401,7 +401,7 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
-            if not etp_enabled:
+            if ep_mesh is not None and not etp_enabled:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
