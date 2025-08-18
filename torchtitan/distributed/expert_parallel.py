@@ -371,27 +371,28 @@ class ReordererSequenceParallel(ParallelStyle):
 
     def _prepare_inputput_fn(self, mod, inputs, device_mesh):
         top_scores, selected_experts_indices = inputs
-
-        top_scores = DTensor.from_local(top_scores, device_mesh, (Replicate(),))
-        selected_experts_indices = DTensor.from_local(
-            selected_experts_indices, device_mesh, (Replicate(),)
-        )
         self.num_tokens = top_scores.shape[0]
 
-        # TODO: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
+        # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
         # if top_scores.shape[0] % device_mesh.size() != 0:
         #     num_tokens = top_scores.shape[0]
         #     tp_size = device_mesh.size()
         #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
         #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
         #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
-        assert self.num_tokens % device_mesh.size() == 0
 
-        # split on the bs*slen dimension
-        top_scores = top_scores.redistribute(device_mesh, (Shard(0),)).to_local()
-        selected_experts_indices = selected_experts_indices.redistribute(
-            device_mesh, (Shard(0),)
-        ).to_local()
+        def _split_along_first_dim(x: torch.Tensor) -> torch.Tensor:
+            assert x.is_contiguous()
+            assert self.num_tokens % device_mesh.size() == 0
+            local_num_tokens = self.num_tokens // device_mesh.size()
+            local_rank = device_mesh.get_local_rank()
+            offset = local_rank * local_num_tokens
+            output = x[offset : offset + local_num_tokens]
+
+            return output
+
+        top_scores = _split_along_first_dim(top_scores)
+        selected_experts_indices = _split_along_first_dim(selected_experts_indices)
 
         return top_scores, selected_experts_indices
 
