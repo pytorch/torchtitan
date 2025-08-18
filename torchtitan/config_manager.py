@@ -694,6 +694,8 @@ class Experimental:
 
     autop_force_bf16: bool = False
 
+    enable_simplefsdp_passes: bool = False
+
 @dataclass
 class Validation:
     enabled: bool = False

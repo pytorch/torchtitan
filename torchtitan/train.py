@@ -124,21 +124,49 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._inductor.config.allow_buffer_reuse = False
 
         # allow configuring inductor comms optimizations from torchtitan commandline
-        torch._inductor.config.bucket_all_gathers_fx = (
-            job_config.experimental.bucket_all_gathers_fx
-        )
-        torch._inductor.config.bucket_reduce_scatters_fx = (
-            job_config.experimental.bucket_reduce_scatters_fx
-        )
-        torch._inductor.config.reorder_for_compute_comm_overlap = (
-            job_config.experimental.reorder_for_compute_comm_overlap
-        )
-        torch._inductor.config.reorder_for_compute_comm_overlap_passes = (
-            job_config.experimental.reorder_for_compute_comm_overlap_passes
-        )
-        torch._inductor.config.reorder_prefetch_limit = (
-            job_config.experimental.reorder_prefetch_limit
-        )
+        if job_config.experimental.enable_simplefsdp_passes:
+            try:
+                from torch._inductor.simple_fsdp.bucket import bucket_fsdp_all_gather_concat_on_scheduler_ir
+            except ImportError:
+                print("Must use pytorch from unlanded https://github.com/pytorch/pytorch/pull/160282, e.g. torchtitan_conda_prod:5e4101faa448c2ee6b62ddd76ee08e8c")
+                raise
+
+            # Configs from Ruisi 
+
+            # set to 0.1 if you want to make bucketing more efficient with mixed dtype collectives
+            torch._inductor.config.simplefsdp.relax_ratio = 0
+            torch._inductor.config.allow_buffer_reuse = False
+            torch._inductor.config.simplefsdp.estimate_ir = False
+            torch._inductor.config.simplefsdp.estimate_verbose = False
+            torch._inductor.config.simplefsdp.save_estimation_path = "/mnt/mffuse/cache_ruisi/estimation_mast_"+job_config.model.flavor+".pkl"
+            # set to True after the first communication estimation results are saved. This would reduce decision making time.
+            torch._inductor.config.simplefsdp.load_cache = False 
+            torch._inductor.config.simplefsdp.enable_bucket_ir = True
+            torch._inductor.config.simplefsdp.enable_reorder_ir = True
+            torch._inductor.config.simplefsdp.simplefsdp_only = True # False for 2d True for 1d
+            torch._inductor.config.simplefsdp.peak_memory_offset = 0
+            torch._inductor.config.simplefsdp.bucketing_type = "auto"
+
+            # Don't use both sets of passes at the same time!
+            torch._inductor.config.bucket_all_gathers_fx = "none"
+            torch._inductor.config.bucket_reduce_scatters_fx = "none"
+            torch._inductor.config.reorder_for_compute_comm_overlap = False
+        else:
+            torch._inductor.config.bucket_all_gathers_fx = (
+                job_config.experimental.bucket_all_gathers_fx
+            )
+            torch._inductor.config.bucket_reduce_scatters_fx = (
+                job_config.experimental.bucket_reduce_scatters_fx
+            )
+            torch._inductor.config.reorder_for_compute_comm_overlap = (
+                job_config.experimental.reorder_for_compute_comm_overlap
+            )
+            torch._inductor.config.reorder_for_compute_comm_overlap_passes = (
+                job_config.experimental.reorder_for_compute_comm_overlap_passes
+            )
+            torch._inductor.config.reorder_prefetch_limit = (
+                job_config.experimental.reorder_prefetch_limit
+            )
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
