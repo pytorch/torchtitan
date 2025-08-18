@@ -110,6 +110,8 @@ def parallelize_llama(
     if job_config.training.compile:
         apply_compile(model)
 
+    print(model)
+
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -448,6 +450,7 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    return
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for llama4 moe
         fullgraph = True
