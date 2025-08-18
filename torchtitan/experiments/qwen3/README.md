@@ -19,9 +19,9 @@ Model parity test has been done and results suggest parity with HF implementatio
 
 #### To be added
 - Modeling
-    - variants of Dense models up to 32B
+    - Variants of Dense models up to 32B
     - MoE alternatives
     - Weight tying
 - Testing
-    - Model needs to be tested across different metrics
+    - The model should be tested against established performance benchmarks
     - CI integration

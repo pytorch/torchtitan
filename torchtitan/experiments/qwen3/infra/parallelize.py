@@ -110,6 +110,14 @@ def parallelize_qwen3(
         else:
             logger.info("Applied FSDP to the model")
 
+        if parallel_dims.dp_replicate_enabled:
+            logger.info("Applied HSDP to the model")
+        else:
+            logger.info("Applied FSDP to the model")
+
+        if parallel_dims.cp_enabled:
+            logger.info("Applied Context Parallel to the model")
+
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
