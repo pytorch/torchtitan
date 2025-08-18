@@ -6,9 +6,8 @@
 
 import logging
 
-from transformers import AutoTokenizer
-
 from torchtitan.tools.logging import logger
+from transformers import AutoTokenizer
 
 
 # HF AutoTokenizer will instantiate a root level logger, which will cause

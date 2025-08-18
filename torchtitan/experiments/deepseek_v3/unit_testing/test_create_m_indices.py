@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-
 from torchtitan.experiments.deepseek_v3.dsgemm_utils import (
     create_indices_from_offsets_nosync,
 )

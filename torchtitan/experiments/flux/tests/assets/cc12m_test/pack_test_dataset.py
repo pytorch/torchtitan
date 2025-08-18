@@ -36,11 +36,9 @@ def pack_wds_dataset(tar_destination, source_folder, number_of_samples):
                 print(f"Saved Key to tar file: {key}")
                 txt_path = os.path.join(root, filename.replace(".jpg", ".txt"))
                 # Write the file and its metadata to the TarWriter
-                with (
-                    open(img_path, "rb") as img_file,
-                    open(txt_path, "r") as txt_file,
-                    open(json_path, "r") as json_file,
-                ):
+                with open(img_path, "rb") as img_file, open(
+                    txt_path, "r"
+                ) as txt_file, open(json_path, "r") as json_file:
                     save_dict = {
                         "__key__": key,
                         "txt": txt_file.read(),
