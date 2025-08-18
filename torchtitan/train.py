@@ -360,8 +360,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            with torch.autograd.graph.manage_activations():
-                # with contextlib.nullcontext():
+            #with torch.autograd.graph.manage_activations():
+            with contextlib.nullcontext():
                 with self.train_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     pred = model_parts[0](inputs)
