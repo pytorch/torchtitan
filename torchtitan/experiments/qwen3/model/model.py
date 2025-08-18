@@ -17,16 +17,13 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import Qwen3ModelArgs
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
-def precompute_rope_cache(dim: int, max_seq_len: int, base: float = 1_000_000.0):
-    freqs = 1.0 / (
-        base
-        ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-    )
+def precompute_rope_cache(
+    dim: int, max_seq_len: int, base: float = 1_000_000.0
+) -> torch.Tensor:
+    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     # Create position indexes `[0, 1, ..., max_seq_len - 1]`
-    t = torch.arange(
-        max_seq_len, dtype=freqs.dtype, device=freqs.device
-    )
-    
+    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
+
     # Outer product of theta and position index; output tensor has
     # a shape of [max_seq_len, dim // 2]
     idx_theta = torch.outer(t, freqs).float()
@@ -38,24 +35,26 @@ def precompute_rope_cache(dim: int, max_seq_len: int, base: float = 1_000_000.0)
     rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
     return rope_cache
 
-def rotate_half(x):
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+
+def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
-    Reshape frequency tensor for broadcasting it with another tensor.
+    Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
 
     This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
     for the purpose of broadcasting the frequency tensor during element-wise operations.
 
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim),
+    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
     and the first seqlen elements will be sliced, but dim must match x.
 
     Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
+        rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
         x (torch.Tensor): Target tensor for broadcasting compatibility.
 
     Returns:
@@ -64,12 +63,16 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     ndim = x.ndim
     assert ndim > 1
     _, seqlen, _, head_dim = x.shape
-    freqs_cis = freqs_cis[0:seqlen]
-    assert freqs_cis.shape == (seqlen, head_dim * 2)
+    rope_cache = rope_cache[0:seqlen]
+    # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
+    assert rope_cache.shape == (seqlen, head_dim * 2)
     shape = [-1, seqlen, 1, head_dim * 2]
-    return freqs_cis.view(*shape)
+    return rope_cache.view(*shape)
 
-def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor):
+
+def apply_rotary_emb(
+    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     # input tensor x has shape [bsz, seq_len, num_heads, head_dim]
     head_dim = xq.shape[-1]
 
@@ -343,22 +346,24 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self.n_layers = model_args.n_layers
         self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
-        
+
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
         # Set persistent=False for now because Qwen3 Model hasn't supported Pipeline Parallel yet.
-        self.register_buffer("rope_cache", self._precompute_rope_cache(), persistent=False)
+        self.register_buffer(
+            "rope_cache", self._precompute_rope_cache(), persistent=False
+        )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-       
+
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
-        
+
         if self.model_args.enable_weight_tying:
             self.output.weight = self.tok_embeddings.weight
-        
+
         self.init_weights()
 
     def init_weights(
@@ -388,7 +393,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
-        
+
         # If weight tying is enabled, we don't need to initialize the output layer
         if self.output is not None and not self.model_args.enable_weight_tying:
             nn.init.trunc_normal_(
