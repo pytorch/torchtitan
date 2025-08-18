@@ -18,7 +18,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
-    ScheduleDualPipeV,
+    # ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
 

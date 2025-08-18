@@ -362,6 +362,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    enable_weight_tying: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -413,7 +414,8 @@ def apply_fsdp(
         )
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
+    # If weight tying is enabled, don't wrap the output layer again
+    if not enable_weight_tying and model.norm is not None and model.output is not None:
         fully_shard(
             [model.norm, model.output],
             **fsdp_config,

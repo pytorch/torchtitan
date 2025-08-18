@@ -12,16 +12,17 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.experiments.qwen3.model.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
-from .model.model import Transformer
+from .model.model import Qwen3Model
 
 __all__ = [
     "parallelize_qwen3",
     "Qwen3ModelArgs",
-    "Transformer",
+    "Qwen3Model",
     "qwen3_configs",
 ]
 
@@ -107,7 +108,7 @@ qwen3_configs = {
 register_train_spec(
     TrainSpec(
         name="qwen3",
-        model_cls=Transformer,
+        model_cls=Qwen3Model,
         model_args=qwen3_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=None,
@@ -117,5 +118,6 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=Qwen3StateDictAdapter,
     )
 )
