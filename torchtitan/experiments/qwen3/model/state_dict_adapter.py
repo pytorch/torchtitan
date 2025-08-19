@@ -7,7 +7,7 @@
 """
 This script is adapted from torchtitan/models/llama3/model/state_dict_adapter.py.
 
-We can use this script to adapt the checkpoint from HF to the format that we can load into the model and vice versa.
+We can use this script to adapt the checkpoint from HF to the format that we can load into the torchtitan model and vice versa.
 This can enable us to do a parity test with the HF implementation and make sure that our results are
 aligned with the HF implementation.
 
