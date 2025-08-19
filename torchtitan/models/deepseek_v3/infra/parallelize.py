@@ -47,12 +47,11 @@ def parallelize_deepseekv3(
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
-        if job_config.parallelism.enable_async_tensor_parallel:
-            # TODO(jianiw): This branch needs to be tested and enabled
-            raise NotImplementedError(
-                "Currently, async TP is not tested for deepseekv3. \
-                torch.compile is not supported yet, which is required for async TP."
-            )
+        if (
+            job_config.parallelism.enable_async_tensor_parallel
+            and not job_config.training.compile
+        ):
+            raise RuntimeError("Async TP requires --training.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -94,7 +93,9 @@ def parallelize_deepseekv3(
         apply_ac(model, job_config.activation_checkpoint)
 
     if job_config.training.compile:
-        raise NotImplementedError("torch.compile is not supported yet for deepseekv3")
+        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
+        torch._dynamo.config.capture_scalar_outputs = True
+        apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -250,6 +251,12 @@ def apply_non_moe_tp(
             device_mesh=tp_mesh,
             parallelize_plan=layer_plan,
         )
+
+    if enable_async_tp:
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._inductor.config._micro_pipeline_tp = True
+        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
