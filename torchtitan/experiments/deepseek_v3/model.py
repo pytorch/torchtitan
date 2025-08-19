@@ -559,7 +559,6 @@ class MoE(nn.Module):
     def combine_experts(self, submod_name: str):
         all_weights = []
         for expert in self.experts.values():
-
             lin = expert.get_submodule(submod_name)
             all_weights.append(lin.weight)
             lin.weight = None
@@ -700,10 +699,10 @@ class MoE(nn.Module):
                 output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
                     dim=1
                 )
-            gathered_tokens = all_to_all_single_autograd(
+            gathered_tokens, _, _ = all_to_all_single_autograd(
                 sorted_tokens,
-                output_splits.tolist(),
-                input_splits.tolist(),
+                output_splits,
+                input_splits,
                 self.ep_group,
             )
 
@@ -746,10 +745,10 @@ class MoE(nn.Module):
             )
             returned_tokens = token_return_buf[:seqlen_sorted_tokens]
         else:  # "torch_all_to_all"
-            returned_tokens = all_to_all_single_autograd(
+            returned_tokens, _, _ = all_to_all_single_autograd(
                 processed_tokens,
-                input_splits.tolist(),
-                output_splits.tolist(),
+                input_splits,
+                output_splits,
                 self.ep_group,
             )
 
