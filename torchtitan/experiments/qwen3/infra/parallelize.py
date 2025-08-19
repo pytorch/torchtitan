@@ -120,6 +120,10 @@ def parallelize_qwen3(
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
+    # Enable weight tying after applying parallelisms
+    if model.model_args.enable_weight_tying:
+        model.output.weight = model.tok_embeddings.weight
+
     return model
 
 
