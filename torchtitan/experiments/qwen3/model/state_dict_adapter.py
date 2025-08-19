@@ -21,8 +21,12 @@ from .args import Qwen3ModelArgs
 
 
 class Qwen3StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: Qwen3ModelArgs):
+    def __init__(self, model_args: Qwen3ModelArgs, hf_assets_path: str | None):
+        super().__init__(model_args, hf_assets_path)
+
         self.model_args = model_args
+        self.hf_assets_path = hf_assets_path
+
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
