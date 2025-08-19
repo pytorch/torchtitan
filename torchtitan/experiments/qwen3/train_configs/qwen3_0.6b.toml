@@ -9,7 +9,7 @@ profile_freq = 100
 
 [metrics]
 log_freq = 1
-enable_tensorboard = true
+enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
@@ -24,7 +24,7 @@ lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up
+warmup_steps = 2  # lr scheduler warm up, 20% total steps
 
 [training]
 local_batch_size = 4
@@ -33,7 +33,6 @@ max_norm = 1.0  # grad norm clipping
 steps = 10
 compile = false
 dataset = "c4"
-seed = 0
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -43,16 +42,12 @@ tensor_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = true
+enable_checkpoint = false
 folder = "checkpoint"
 interval = 500
 last_save_model_weights_only = false
 export_dtype = "float16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
-# initial_load_path = "/data/users/jianiw/torchtitan/outputs/checkpoint-seed/step-0"
-# exclude_from_loading = ["optimizer" , "lr_scheduler" , "dataloader"]
-initial_load_path = "/data/users/jianiw/model/qwen3-0.6b"
-initial_load_in_hf = true
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
