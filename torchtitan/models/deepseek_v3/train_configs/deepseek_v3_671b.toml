@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "671B"
-tokenizer_path = "./assets/tokenizer/DeepSeek-V3"
+hf_assets_path = "./assets/hf/DeepSeek-V3"
 # converters = ["float8"]
 
 [optimizer]
