@@ -15,7 +15,7 @@ save_tb_folder = "tb"
 [model]
 name = "qwen3"
 flavor = "0.6B"
-tokenizer_path = "./assets/tokenizer/Qwen3-0.6B"
+hf_assets_path = "./assets/hf/Qwen3-0.6B"
 # converters = ["float8"]
 
 [optimizer]
