@@ -8,7 +8,6 @@
 
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from torch import nn
 
