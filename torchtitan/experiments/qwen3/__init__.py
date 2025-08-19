@@ -16,12 +16,12 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
-from .model.model import Transformer
+from .model.model import Qwen3Model
 
 __all__ = [
     "parallelize_qwen3",
     "Qwen3ModelArgs",
-    "Transformer",
+    "Qwen3Model",
     "qwen3_configs",
 ]
 
@@ -107,7 +107,7 @@ qwen3_configs = {
 register_train_spec(
     TrainSpec(
         name="qwen3",
-        model_cls=Transformer,
+        model_cls=Qwen3Model,
         model_args=qwen3_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=None,

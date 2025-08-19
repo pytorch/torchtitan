@@ -38,6 +38,8 @@ class Qwen3ModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 151645
 
+    enable_weight_tying: bool = False
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
