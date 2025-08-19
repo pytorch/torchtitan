@@ -28,7 +28,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     Attributes:
         max_batch_size (int): Maximum batch size.
         max_seq_len (int): Maximum sequence length.
-        dtype (Literal["bf16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
         inter_dim (int): Intermediate dimension for MLP layers.
@@ -59,7 +58,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
-    dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048
     inter_dim: int = 10944
