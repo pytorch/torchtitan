@@ -10,7 +10,7 @@ Other model sizes are added to the args, but toml file configs need to be added 
 
 #### Download Qwen3 tokenizer
 
-```python scripts/download_tokenizer.py --repo_id Qwen/Qwen3-0.6B```
+```python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --asset tokenizer```
 
 
 #### Parity with HF
