@@ -36,20 +36,17 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_layers (int): Number of transformer layers.
         n_dense_layers (int): Number of dense layers in the model.
         n_heads (int): Number of attention heads.
-        n_routed_experts (int): Number of routed experts for MoE layers.
-        n_shared_experts (int): Number of shared experts for MoE layers.
-        n_activated_experts (int): Number of activated experts in MoE layers.
+        norm_eps (float): Epsilon value used for RMSNorm.
+        moe_args (MoEArgs): MoE configuration.
         n_expert_groups (int): Number of expert groups.
         n_limited_groups (int): Number of limited groups for MoE routing.
-        score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
-        route_scale (float): Scaling factor for routing scores.
-        use_grouped_mm (bool): Whether to use grouped matrix multiplication for MoE layers.
-        load_balance_coeff (float | None): Auxiliary-Loss-Free Load balancing coefficient for MoE layers.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
         qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
         v_head_dim (int): Dimension for value projections.
+        use_flex_attn (bool): Whether to use FlexAttention.
+        attn_mask_type (str): Type of attention mask.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
