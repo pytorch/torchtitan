@@ -17,7 +17,6 @@ Other model sizes are added to the args, but toml file configs need to be added 
 
 Model parity test has been done and results suggest parity with HF implementation.
 
-
 #### To be added
 - Modeling
     - Variants of Dense models up to 32B
