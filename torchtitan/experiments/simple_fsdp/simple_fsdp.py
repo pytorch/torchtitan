@@ -81,34 +81,51 @@ def _distribute_dtensor(
     if len(placements) == 1:
         assert placements[0].is_replicate() or placements[0].is_shard()
         if placements[0].is_shard():
-            # For FSDP + TP dtensor placement
+            if inner_mesh.mesh_dim_names == ("ep", "tp"):
+                # For FSDP + EP + TP dtensor placement
+                append_placements = (
+                    inner_spec.placements[0],
+                    inner_spec.placements[1],
+                )
+            else:
+                # For FSDP + TP dtensor placement
+                append_placements = (inner_spec.placements[0],)
             shard_dim = placements[0].dim
             split_factor = inner_spec.num_shards_map[shard_dim]
             tensor_placement = (
                 (
                     _StridedShard(shard_dim, split_factor=split_factor)
-                    if split_factor > 1
+                    if split_factor > 1 and "tp" in inner_mesh.mesh_dim_names
                     else placements[0]
                 ),
-                inner_spec.placements[0],
-            )
+            ) + append_placements
         else:
             # For DDP + TP dtensor placement
             tensor_placement = (placements[0], inner_spec.placements[0])
     elif len(placements) == 2:
-        assert placements[0].is_replicate() and placements[1].is_shard()
-        # For HSDP + TP dtensor placement
-        shard_dim = placements[1].dim
-        split_factor = inner_spec.num_shards_map[shard_dim]
-        tensor_placement = (
-            placements[0],
-            (
-                _StridedShard(shard_dim, split_factor=split_factor)
-                if split_factor > 1
-                else placements[1]
-            ),
-            inner_spec.placements[0],
-        )
+        if placements[0].is_replicate() and placements[1].is_shard():
+            if inner_mesh.mesh_dim_names == ("ep", "tp"):
+                # For HSDP + EP + TP dtensor placement
+                append_placements = (
+                    inner_spec.placements[0],
+                    inner_spec.placements[1],
+                )
+            else:
+                # For HSDP + TP dtensor placement
+                append_placements = (inner_spec.placements[0],)
+            shard_dim = placements[1].dim
+            split_factor = inner_spec.num_shards_map[shard_dim]
+            tensor_placement = (
+                placements[0],
+                (
+                    _StridedShard(shard_dim, split_factor=split_factor)
+                    if split_factor > 1 and "tp" in inner_mesh.mesh_dim_names
+                    else placements[1]
+                ),
+            ) + append_placements
+        elif placements[0].is_replicate() and placements[1].is_replicate():
+            # For DDP + TP dtensor placement
+            tensor_placement = (placements[0], placements[1], inner_spec.placements[0])
     else:
         raise ValueError(
             f"Unsupported placement {placements} for distributing DTensor {tensor}"
@@ -185,7 +202,14 @@ def fsdp_policy():
 
 class ReplicateComputation(torch.nn.Module):
     def __init__(
-        self, device_mesh, param_sharding, mode, regional_ac, mp_policy, tp_mesh
+        self,
+        device_mesh,
+        param_sharding,
+        mode,
+        regional_ac,
+        mp_policy,
+        tp_mesh,
+        tp_ep_mesh,
     ):
         super().__init__()
         self.device_mesh = device_mesh
@@ -198,20 +222,18 @@ class ReplicateComputation(torch.nn.Module):
         self.param_dtype = mp_policy.param_dtype
         self.reduce_dtype = mp_policy.reduce_dtype
         self.tp_mesh = tp_mesh
+        self.tp_ep_mesh = tp_ep_mesh
 
     def replicate_compute(self, x):
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
-
-        # support for FSDP/DDP/HSDP + TP (assuming TP shards the inner-most dim)
+        # support FSDP/DDP/HSDP + (EP) + TP (assuming TP shards the inner-most dim)
         if x._spec.mesh.mesh_dim_names[-1] == "tp":
-            tp_placement = x._spec.placements[-1]
             # TODO: remove tp_mesh as an input arg to data_parallel API and use x._spec.mesh["tp"]
             #       after DeviceMesh supports slicing a non-root mesh
             # dp_mesh, tp_mesh = self.device_mesh, x._spec.mesh["tp"]
-            dp_mesh, tp_mesh = self.device_mesh, self.tp_mesh
-
+            dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
             sharded_dtensor = DTensor.from_local(
@@ -226,13 +248,41 @@ class ReplicateComputation(torch.nn.Module):
                 backward_dtype=self.reduce_dtype,
             )
 
-            # re-wrap 1D all-gathered DTensor on dp_mesh to 1D DTensor on tp_mesh
+            # re-wrap 1D all-gathered DTensor on dp_mesh to 1D DTensor on tp_mesh/ep_mesh
             # TODO: DTensor should support this mesh collasping operation
             replicated_local_tensor = replicated_dtensor.to_local(
                 grad_placements=self.grad_placements
             )
+
+            if (
+                len(x._spec.mesh.mesh_dim_names) == 3
+                or len(x._spec.mesh.mesh_dim_names) == 4
+            ) and x._spec.mesh.mesh_dim_names[-2] == "ep":
+                # for FSDP/HSDP + EP + TP case
+                local_placement = (x._spec.placements[-2], x._spec.placements[-1])
+                local_mesh = self.tp_ep_mesh
+                assert self.tp_ep_mesh is not None, "tp_ep_mesh cannot be None"
+            else:
+                local_placement = (x._spec.placements[-1],)
+                local_mesh = self.tp_mesh
+
             output = DTensor.from_local(
-                replicated_local_tensor, tp_mesh, (tp_placement,)
+                replicated_local_tensor, local_mesh, local_placement
+            )
+        elif x._spec.mesh.mesh_dim_names[-1] == "ep":
+            dp_mesh = self.device_mesh
+            # # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
+            sharded_local_tensor = x.to_local()
+            sharded_dtensor = DTensor.from_local(
+                sharded_local_tensor, dp_mesh, self.param_sharding
+            )
+            output = sharded_dtensor.redistribute(
+                placements=self.compute_placements,
+                forward_dtype=self.param_dtype,
+                backward_dtype=self.reduce_dtype,
+            ).to_local(grad_placements=self.grad_placements)
+            output = DTensor.from_local(
+                output, self.tp_ep_mesh, (x._spec.placements[-1],)
             )
         else:
             output = x.redistribute(
@@ -271,6 +321,10 @@ def data_parallel(
     ac_mode: str = "none",
     mp_policy: Optional[MixedPrecisionPolicy] = None,
     tp_mesh: Optional[DeviceMesh] = None,
+    tp_ep_mesh: Optional[DeviceMesh] = None,
+    dp_mod_ep_mesh: Optional[DeviceMesh] = None,
+    ep_modules: Optional[List[nn.Module]] = None,
+    ep_shared_experts: Optional[List[nn.Module]] = None,
 ):
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -292,6 +346,24 @@ def data_parallel(
 
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
+        if tp_ep_mesh is not None and mod in ep_modules:
+            local_device_mesh = dp_mod_ep_mesh
+        else:
+            local_device_mesh = device_mesh
+
+        if ep_shared_experts is not None and mod in ep_shared_experts:
+            # shared experts are not sharded
+            local_param_sharding = (Replicate(),)
+            local_mode = "replicate"
+            if mode == "hybrid_shard":
+                local_param_sharding = (
+                    Replicate(),
+                    Replicate(),
+                )
+        else:
+            local_param_sharding = param_sharding
+            local_mode = mode
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
                 distribute_tensor_func = (
@@ -300,7 +372,9 @@ def data_parallel(
                 mod.register_parameter(
                     p_name,
                     nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
+                        distribute_tensor_func(
+                            p, local_device_mesh, local_param_sharding
+                        )
                     ),
                 )
                 # to be compatible with DCP, we use a customized _register_parametrization
@@ -309,12 +383,13 @@ def data_parallel(
                 #     mod,
                 #     p_name,
                 #     ReplicateComputation(
-                #         device_mesh,
-                #         param_sharding,
-                #         mode,
+                #         local_device_mesh,
+                #         local_param_sharding,
+                #         local_mode,
                 #         regional_ac,
                 #         mp_policy=mp_policy,
                 #         tp_mesh=tp_mesh,
+                #         tp_ep_mesh=tp_ep_mesh,
                 #     ),
                 #     unsafe=True,
                 # )
@@ -323,12 +398,13 @@ def data_parallel(
             mod,
             list(params_dict.keys()),
             ReplicateComputation(
-                device_mesh,
-                param_sharding,
-                mode,
+                local_device_mesh,
+                local_param_sharding,
+                local_mode,
                 regional_ac,
                 mp_policy=mp_policy,
                 tp_mesh=tp_mesh,
+                tp_ep_mesh=tp_ep_mesh,
             ),
         )
     return model
