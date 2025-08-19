@@ -44,8 +44,7 @@ def parallelize_deepseekv3(
         return (
             torch.randint(
                 0,
-                # job_config.training.vocab_size,
-                model.vocab_size,
+                model.model_args.vocab_size,
                 (global_batch_size, job_config.training.seq_len),
                 device=torch.device("cuda"),
             ),
@@ -63,9 +62,6 @@ def parallelize_deepseekv3(
     #     lambda bucket_idx: 1000 / parallel_dims.tp
     # )
 
-    # bail out
-    return model
-
     # if job_config.experimental.autop_force_bf16:
     #     logger.info("Forcing bf16 on model")
     #     model = model.bfloat16()
@@ -73,13 +69,17 @@ def parallelize_deepseekv3(
     # param_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
     # reduce_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce]
     # mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    # with AutoParallel(
-    #     model,
-    #     input_fn,
-    #     world_mesh,
-    #     mp_policy=mp_policy,
-    #     compile=job_config.training.compile,
-    # ) as autop:
+    mp_policy = None
+    with AutoParallel(
+        model,
+        input_fn,
+        world_mesh,
+        mp_policy=mp_policy,
+        compile=job_config.training.compile,
+    ) as autop:
+        # currently errors due to missing sharding prop rules
+        torch.distributed.breakpoint()
+
     #     autop.add_parameter_memory_constraint(low=None, high=None)
 
     #     possible_input_shardings = {
