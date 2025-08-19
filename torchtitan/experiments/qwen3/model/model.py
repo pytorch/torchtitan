@@ -349,7 +349,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
-        # Set persistent=False for now because Qwen3 Model hasn't supported Pipeline Parallel yet.
         self.register_buffer(
             "rope_cache", self._precompute_rope_cache(), persistent=False
         )
@@ -360,9 +359,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
-
-        if self.model_args.enable_weight_tying:
-            self.output.weight = self.tok_embeddings.weight
 
         self.init_weights()
 
@@ -395,7 +391,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         cutoff_factor = 3
 
         # If weight tying is enabled, we don't need to initialize the output layer
-        if self.output is not None and not self.model_args.enable_weight_tying:
+        if self.output is not None:
             nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,

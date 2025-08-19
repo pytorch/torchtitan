@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -119,6 +120,10 @@ def parallelize_qwen3(
             enable_compile=job_config.training.compile,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
+
+    # Enable weight tying after applying parallelisms
+    if model.model_args.enable_weight_tying:
+        model.output.weight = model.tok_embeddings.weight
 
     return model
 
