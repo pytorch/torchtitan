@@ -14,11 +14,11 @@ from typing import Any
 
 import torch
 
-logger = logging.getLogger()
-
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
 from .args import FluxModelArgs
+
+logger = logging.getLogger()
 
 
 class FluxStateDictAdapter(BaseStateDictAdapter):
