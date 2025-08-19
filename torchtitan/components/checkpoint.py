@@ -55,12 +55,6 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-# For now, we will manually pop the freqs_cis buffer, as we made this permanent
-# temporarily and we don't want to include it in the exported state_dict.
-# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-excluded_parameters_for_model_only = {"freqs_cis"}
-
-
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
@@ -70,9 +64,6 @@ class ModelWrapper(Stateful):
         state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
-        # Exclude parameters that should not be saved
-        for excluded_key in excluded_parameters_for_model_only:
-            state_dict.pop(excluded_key, None)
         return state_dict
 
     def state_dict(self) -> dict[str, Any]:

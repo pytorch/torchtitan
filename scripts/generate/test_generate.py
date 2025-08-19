@@ -24,7 +24,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     RowwiseParallel,
 )
-from torchtitan.components.checkpoint import excluded_parameters_for_model_only
 from torchtitan.components.metrics import build_device_memory_monitor
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -143,8 +142,6 @@ def test_generate(
     model.eval()
 
     state_dict = model.state_dict()
-    for k in excluded_parameters_for_model_only:
-        state_dict.pop(k, None)
 
     # Checkpoint Loading
     begin = time.monotonic()
