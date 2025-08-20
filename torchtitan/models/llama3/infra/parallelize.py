@@ -240,6 +240,7 @@ _save_list = {
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
 }
 
 
