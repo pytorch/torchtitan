@@ -82,8 +82,9 @@ class Validator(BaseValidator):
         step: int,
     ) -> None:
         # Set model to eval mode
+        for model in model_parts:
+            model.eval()
         model = model_parts[0]
-        model.eval()
 
         parallel_dims = self.parallel_dims
 
@@ -174,7 +175,8 @@ class Validator(BaseValidator):
                 module.reshard()
 
         # Set model back to train mode
-        model.train()
+        for model in model_parts:
+            model.train()
 
 
 def build_validator(
