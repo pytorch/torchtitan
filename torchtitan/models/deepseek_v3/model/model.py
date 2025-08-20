@@ -322,7 +322,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=True
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
         self.layers = torch.nn.ModuleDict()
