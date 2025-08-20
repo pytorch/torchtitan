@@ -48,9 +48,11 @@ class _A2A(torch.autograd.Function):
         )
         return grad_x, None, None, None
 
+
 # We should delete this, either by ensuring that the _A2A above actually works with dynamo,
-# or by killing it in favor of AC2, see https://github.com/pytorch/torchtitan/issues/1467#issuecomment-3181235004
-class _A2A_functional_collectives(torch.autograd.Function):
+# or by killing it in favor of AC2,
+# see https://github.com/pytorch/torchtitan/issues/1467#issuecomment-3181235004
+class _A2AFunCol(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, out_splits, in_splits, group_name):
         if isinstance(out_splits, torch.Tensor):
@@ -58,7 +60,9 @@ class _A2A_functional_collectives(torch.autograd.Function):
         if isinstance(in_splits, torch.Tensor):
             in_splits = in_splits.tolist()
 
-        y = torch.ops._c10d_functional.all_to_all_single.default(x.contiguous(), out_splits, in_splits, group_name)
+        y = torch.ops._c10d_functional.all_to_all_single.default(
+            x.contiguous(), out_splits, in_splits, group_name
+        )
         y = torch.ops._c10d_functional.wait_tensor.default(y)
 
         ctx.in_splits = in_splits
@@ -69,7 +73,9 @@ class _A2A_functional_collectives(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_y):
         # grad wrt input has length sum(in_splits)
-        grad_x = torch.ops._c10d_functional.all_to_all_single.default(grad_y.contiguous(), ctx.in_splits, ctx.out_splits, ctx.group_name)
+        grad_x = torch.ops._c10d_functional.all_to_all_single.default(
+            grad_y.contiguous(), ctx.in_splits, ctx.out_splits, ctx.group_name
+        )
         grad_x = torch.ops._c10d_functional.wait_tensor.default(grad_x)
         return grad_x, None, None, None
 
@@ -80,11 +86,14 @@ class _A2A_functional_collectives(torch.autograd.Function):
 # - we should also make sure that dist.all_to_all gets remapped properly by dynamo
 @torch.compiler.allow_in_graph
 def all_to_all_single_autograd_dynamo_friendly(x, out_splits, in_splits, group_name):
-    return _A2A_functional_collectives.apply(x, out_splits, in_splits, group_name)
+    return _A2AFunCol.apply(x, out_splits, in_splits, group_name)
+
 
 def all_to_all_single_autograd(x, out_splits, in_splits, group):
     if torch.compiler.is_compiling():
-        return all_to_all_single_autograd_dynamo_friendly(x, out_splits, in_splits, group.group_name)
+        return all_to_all_single_autograd_dynamo_friendly(
+            x, out_splits, in_splits, group.group_name
+        )
     else:
         return _A2A.apply(x, out_splits, in_splits, group_name)
 
