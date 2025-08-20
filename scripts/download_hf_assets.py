@@ -76,8 +76,8 @@ def download_hf_assets(
             "merges.txt",
             "special_tokens_map.json",
         ],
-        "safetensors": ["*.safetensors", "model.safetensors.index.json"],
-        "index": ["model.safetensors.index.json"],
+        "safetensors": ["*.safetensors", "*model.safetensors.index.json"],
+        "index": ["*model.safetensors.index.json"],
         "config": ["config.json", "generation_config.json"],
     }
 
