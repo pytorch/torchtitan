@@ -9,7 +9,30 @@
 
 import torch
 import torch.nn.functional as F
+
+from quack.rmsnorm import QuackRMSNorm
 from torch import nn
+
+# Global toggle to switch between nn.RMSNorm and QuackRMSNorm
+USE_QUACK_RMSNORM = True
+
+
+def get_rmsnorm(dim, eps):
+    """
+    Returns either nn.RMSNorm or QuackRMSNorm based on the global toggle.
+
+    Args:
+        dim (int): The dimension of the input tensor
+        eps (float): The epsilon value for numerical stability
+
+    Returns:
+        nn.Module: The RMSNorm implementation to use
+    """
+    if USE_QUACK_RMSNORM:
+        return QuackRMSNorm(dim, eps=eps)
+    else:
+        return nn.RMSNorm(dim, eps=eps)
+
 
 from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -273,8 +296,8 @@ class TransformerBlock(nn.Module):
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
         )
-        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention_norm = get_rmsnorm(model_args.dim, model_args.norm_eps)
+        self.ffn_norm = get_rmsnorm(model_args.dim, model_args.norm_eps)
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -342,7 +365,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = get_rmsnorm(model_args.dim, model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()
 
