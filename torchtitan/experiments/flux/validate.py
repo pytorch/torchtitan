@@ -104,6 +104,10 @@ class FluxValidator(Validator):
         model = model_parts[0]
         model.eval()
 
+        # Disable cfg dropout during validation
+        training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
+        self.job_config.training.classifier_free_guidance_prob = 0.0
+
         save_img_count = self.job_config.validation.save_img_count
 
         parallel_dims = self.parallel_dims
@@ -243,6 +247,9 @@ class FluxValidator(Validator):
 
         # Set model back to train mode
         model.train()
+
+        # re-enable cfg dropout for training
+        self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
 
 
 def build_flux_validator(
