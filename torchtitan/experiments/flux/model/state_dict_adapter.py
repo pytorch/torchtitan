@@ -67,7 +67,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
         self.model_args = model_args
         self.hf_assets_path = hf_assets_path
 
-        # mapping containing direct 1 to 1 mappings
+        # mapping containing direct 1 to 1 mappings from HF to torchtitan
         self.from_hf_map_direct = {
             "x_embedder.bias": "img_in.bias",
             "x_embedder.weight": "img_in.weight",
@@ -113,30 +113,6 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
             "transformer_blocks.{}.norm1_context.linear.weight": "double_blocks.{}.txt_mod.lin.weight",
         }
 
-        # mapping containing state dict layers that need to be split/combined
-        self.from_hf_map_combine = {
-            "single_transformer_blocks.{}.attn.to_k.bias": "single_blocks.{}.linear1.bias",
-            "single_transformer_blocks.{}.attn.to_k.weight": "single_blocks.{}.linear1.weight",
-            "single_transformer_blocks.{}.attn.to_q.bias": "single_blocks.{}.linear1.bias",
-            "single_transformer_blocks.{}.attn.to_q.weight": "single_blocks.{}.linear1.weight",
-            "single_transformer_blocks.{}.attn.to_v.bias": "single_blocks.{}.linear1.bias",
-            "single_transformer_blocks.{}.attn.to_v.weight": "single_blocks.{}.linear1.weight",
-            "single_transformer_blocks.{}.proj_mlp.bias": "single_blocks.{}.linear1.bias",
-            "single_transformer_blocks.{}.proj_mlp.weight": "single_blocks.{}.linear1.weight",
-            "transformer_blocks.{}.attn.add_k_proj.bias": "double_blocks.{}.txt_attn.qkv.bias",
-            "transformer_blocks.{}.attn.add_k_proj.weight": "double_blocks.{}.txt_attn.qkv.weight",
-            "transformer_blocks.{}.attn.add_q_proj.bias": "double_blocks.{}.txt_attn.qkv.bias",
-            "transformer_blocks.{}.attn.add_q_proj.weight": "double_blocks.{}.txt_attn.qkv.weight",
-            "transformer_blocks.{}.attn.add_v_proj.bias": "double_blocks.{}.txt_attn.qkv.bias",
-            "transformer_blocks.{}.attn.add_v_proj.weight": "double_blocks.{}.txt_attn.qkv.weight",
-            "transformer_blocks.{}.attn.to_k.bias": "double_blocks.{}.img_attn.qkv.bias",
-            "transformer_blocks.{}.attn.to_k.weight": "double_blocks.{}.img_attn.qkv.weight",
-            "transformer_blocks.{}.attn.to_q.bias": "double_blocks.{}.img_attn.qkv.bias",
-            "transformer_blocks.{}.attn.to_q.weight": "double_blocks.{}.img_attn.qkv.weight",
-            "transformer_blocks.{}.attn.to_v.bias": "double_blocks.{}.img_attn.qkv.bias",
-            "transformer_blocks.{}.attn.to_v.weight": "double_blocks.{}.img_attn.qkv.weight",
-        }
-
         # combination plan to keep track of the order of layers to be combined
         self.combination_plan = {
             "single_blocks.{}.linear1.bias": [
@@ -173,6 +149,13 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
             ],
         }
 
+        # reverse of combination plan: maps fqns to the fqn they are combined into
+        self.reverse_combination_plan = {
+            value: key
+            for key, value_list in self.combination_plan.items()
+            for value in value_list
+        }
+
     # original flux implementation and HF swap shift and scale
     # https://github.com/huggingface/diffusers/blob/main/scripts/convert_flux_to_diffusers.py#L63-L68
     def _swap_scale_shift(self, weight):
@@ -185,9 +168,6 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
 
         to_hf_map_direct = {
             v: k for k, v in self.from_hf_map_direct.items() if v is not None
-        }
-        to_hf_map_combine = {
-            v: k for k, v in self.from_hf_map_combine.items() if v is not None
         }
         hf_state_dict = {}
 
@@ -217,13 +197,8 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
 
                 hf_state_dict[new_key] = value
 
-            elif key in to_hf_map_combine:
-                # handle combined mapping
-                new_key = to_hf_map_combine[key]
-
-                if new_key is None:
-                    continue
-
+            elif key in self.combination_plan:
+                # handle splitting layers
                 if key in [
                     "single_blocks.{}.linear1.bias",
                     "single_blocks.{}.linear1.weight",
@@ -288,9 +263,9 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
                     new_key = new_key.format(layer_num)
 
                 state_dict[new_key] = value
-            elif key in self.from_hf_map_combine:
+            elif key in self.reverse_combination_plan:
                 # collect the layers that need to be combined
-                tt_abstract_key = self.from_hf_map_combine[key]
+                tt_abstract_key = self.reverse_combination_plan[key]
                 if tt_abstract_key is None:
                     continue
                 to_combine[tt_abstract_key.format(layer_num)][
