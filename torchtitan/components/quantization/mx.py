@@ -52,9 +52,12 @@ class MXConverter(ModelConverter):
         ), "MXFP8 is only supported on SM100 or architectures"
 
         # TP not yet supported with torch.compile
+
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
         assert not (
-            job_config.training.compile
-            and job_config.parallelism.tensor_parallel_degree > 1
+            model_compile_enabled and job_config.parallelism.tensor_parallel_degree > 1
         ), "TP not yet supported with torch.compile for mxfp8"
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32

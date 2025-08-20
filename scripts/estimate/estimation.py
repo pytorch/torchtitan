@@ -33,9 +33,9 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
-    if job_config.training.compile or job_config.parallelism.enable_compiled_autograd:
+    if job_config.compile.enable or job_config.parallelism.enable_compiled_autograd:
         logger.info("Compile mode is not supported yet. Switching to eager mode.")
-        job_config.training.compile = False
+        job_config.compile.enable = False
         job_config.parallelism.enable_compiled_autograd = False
 
     # init fake pg
