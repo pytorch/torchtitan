@@ -25,7 +25,6 @@ __all__ = [
     "qwen3_configs",
 ]
 
-
 # Adding different variants of the model
 
 qwen3_configs = {
