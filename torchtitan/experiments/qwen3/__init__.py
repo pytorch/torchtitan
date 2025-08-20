@@ -17,6 +17,7 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
 from .model.model import Qwen3Model
+from .model.state_dict_adapter import Qwen3StateDictAdapter
 
 __all__ = [
     "parallelize_qwen3",
@@ -116,5 +117,6 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=Qwen3StateDictAdapter,
     )
 )
