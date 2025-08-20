@@ -309,7 +309,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
+                    model_args,
+                    job_config.model.hf_assets_path
+                    if job_config.checkpoint.enable_checkpoint
+                    and job_config.checkpoint.last_save_in_hf
+                    else None,
                 )
                 if self.train_spec.state_dict_adapter
                 else None

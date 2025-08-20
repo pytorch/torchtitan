@@ -67,7 +67,7 @@ class StateDictAdapter(BaseStateDictAdapter):
             except FileNotFoundError:
                 logger.warning(
                     f"model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
-                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format."
+                    Defaulting to saving final checkpoint to a single safetensors file."
                 )
                 hf_safetensors_indx = None
 
