@@ -12,7 +12,6 @@ Other model sizes are added to the args, but toml file configs need to be added 
 
 ```python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --assets tokenizer```
 
-
 #### Parity with HF
 
 Model parity test has been done and results suggest parity with HF implementation.
