@@ -105,12 +105,3 @@ python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outp
 
 
 That's it. You have now successfully converted a sharded `torchtitan` checkpoint for use with pytorch formats.
-
-### PyTorch Meta Llama
-
-An example script for converting the original Llama3 checkpoints into DCP format to be used with `torchtitan` can be found in `scripts/convert_from_llama.py`.
-
-The script expects a path to the original checkpoint files, and a path to an output directory:
-```bash
-python -m scripts.convert_from_llama <input_dir> <output_dir>
-```
