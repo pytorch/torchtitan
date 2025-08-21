@@ -131,7 +131,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 print("Must use pytorch from unlanded https://github.com/pytorch/pytorch/pull/160282, e.g. torchtitan_conda_prod:5e4101faa448c2ee6b62ddd76ee08e8c")
                 raise
 
-            # Configs from Ruisi 
+            # Configs from Ruisi
 
             # set to 0.1 if you want to make bucketing more efficient with mixed dtype collectives
             torch._inductor.config.simplefsdp.relax_ratio = 0
@@ -140,10 +140,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             torch._inductor.config.simplefsdp.estimate_verbose = False
             torch._inductor.config.simplefsdp.save_estimation_path = "/mnt/mffuse/cache_ruisi/estimation_mast_"+job_config.model.flavor+".pkl"
             # set to True after the first communication estimation results are saved. This would reduce decision making time.
-            torch._inductor.config.simplefsdp.load_cache = False 
+            torch._inductor.config.simplefsdp.load_cache = False
             torch._inductor.config.simplefsdp.enable_bucket_ir = True
             torch._inductor.config.simplefsdp.enable_reorder_ir = True
-            torch._inductor.config.simplefsdp.simplefsdp_only = True # False for 2d True for 1d
+            torch._inductor.config.simplefsdp.simplefsdp_only = False # False for 2d True for 1d
             torch._inductor.config.simplefsdp.peak_memory_offset = 0
             torch._inductor.config.simplefsdp.bucketing_type = "auto"
 
