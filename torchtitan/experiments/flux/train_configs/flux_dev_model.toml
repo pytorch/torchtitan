@@ -56,7 +56,7 @@ custom_args_module = "torchtitan.experiments.flux.job_config"
 mode = "full"
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 1_000
 last_save_model_only = true

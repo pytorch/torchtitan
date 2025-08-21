@@ -398,13 +398,13 @@ class Parallelism:
 
 @dataclass
 class Checkpoint:
-    enable_checkpoint: bool = False
+    enable: bool = False
     """Whether to enable checkpoint"""
 
     folder: str = "checkpoint"
     """
     The folder to store the checkpoints.
-    When enable_checkpoint is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
+    When enable is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
     interval: int = 500

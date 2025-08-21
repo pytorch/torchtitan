@@ -311,7 +311,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.train_spec.state_dict_adapter(
                     model_args,
                     job_config.model.hf_assets_path
-                    if job_config.checkpoint.enable_checkpoint
+                    if job_config.checkpoint.enable
                     and job_config.checkpoint.last_save_in_hf
                     else None,
                 )
@@ -643,7 +643,7 @@ if __name__ == "__main__":
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
-                config.checkpoint.enable_checkpoint
+                config.checkpoint.enable
             ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")

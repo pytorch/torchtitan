@@ -44,10 +44,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -57,7 +57,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
                 ],
             ],
