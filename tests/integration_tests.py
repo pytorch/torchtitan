@@ -57,7 +57,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "1D compile",
@@ -66,7 +66,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
                 ],
@@ -86,7 +86,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
@@ -97,7 +97,7 @@ def build_test_list():
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--training.compile",
+        #             "--compile.enable",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.enable_async_tensor_parallel",
         #         ],
@@ -267,7 +267,7 @@ def build_test_list():
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "PP+DP+TP 3D test with torch.compile",
@@ -464,7 +464,7 @@ def build_test_list():
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--memory_estimation.enabled",
+        #             "--memory_estimation.enable",
         #         ]
         #     ],
         #     "FSDP2 Memory Tracking and Estimation",

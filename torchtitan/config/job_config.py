@@ -218,9 +218,6 @@ class Training:
     This feature only takes effect when data_parallel_shard_degree > 1
     """
 
-    compile: bool = False
-    """Whether to compile the model"""
-
     gc_freq: int = 50
     """Python garbage control scheduling interval, in steps"""
 
@@ -551,6 +548,17 @@ class ActivationCheckpoint:
 
 
 @dataclass
+class Compile:
+    enable: bool = False
+    """Whether to apply torch.compile"""
+
+    components: list[Literal["model", "loss"]] = field(
+        default_factory=lambda: ["model", "loss"]
+    )
+    """Which components to compile"""
+
+
+@dataclass
 class Float8:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
@@ -630,7 +638,7 @@ class Comm:
 
 @dataclass
 class MemoryEstimation:
-    enabled: bool = False
+    enable: bool = False
     """Whether to estimate memory usage for FSDP"""
 
     disable_fake_mode: bool = False
@@ -747,6 +755,7 @@ class JobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    compile: Compile = field(default_factory=Compile)
     float8: Float8 = field(default_factory=Float8)
     mx: MX = field(default_factory=MX)
     comm: Comm = field(default_factory=Comm)
