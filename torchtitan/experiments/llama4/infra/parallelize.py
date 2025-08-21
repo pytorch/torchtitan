@@ -62,12 +62,15 @@ def parallelize_llama(
     ):
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
+            and not model_compile_enabled
         ):
-            raise RuntimeError("Async TP requires --training.compile")
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -107,11 +110,10 @@ def parallelize_llama(
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if job_config.training.compile:
-        apply_compile(model)
-
+    if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
+        apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -375,6 +377,57 @@ def apply_fsdp(
 
     fully_shard(model, **fsdp_config)
 
+    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
+    # in EP could interfere with implicit prefetching in FSDP
+    if ep_degree == 1:
+        return
+
+    # forward
+    transformer_blocks = list(model.layers.values())
+    next_transformer_blocks = transformer_blocks[1:] + [None]
+
+    if model.tok_embeddings is not None and model.layers is not None:
+        model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
+
+    for transformer_block, next_transformer_block in zip(
+        transformer_blocks, next_transformer_blocks
+    ):
+        if next_transformer_block is not None:
+            if next_transformer_block.moe_enabled:
+                transformer_block.set_modules_to_forward_prefetch(
+                    [next_transformer_block, next_transformer_block.moe.experts]
+                )
+            else:
+                transformer_block.set_modules_to_forward_prefetch(
+                    [next_transformer_block]
+                )
+        elif model.norm is not None and model.output is not None:
+            transformer_block.set_modules_to_forward_prefetch(
+                [model.norm, model.output]
+            )
+
+    # backward
+    reversed_transformer_blocks = list(reversed(model.layers.values()))
+    prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
+
+    if model.norm is not None and model.output is not None and model.layers is not None:
+        model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+
+    for transformer_block, prev_transformer_block in zip(
+        reversed_transformer_blocks, prev_transformer_blocks
+    ):
+        if prev_transformer_block is not None:
+            if prev_transformer_block.moe_enabled:
+                transformer_block.set_modules_to_backward_prefetch(
+                    [prev_transformer_block, prev_transformer_block.moe.experts]
+                )
+            else:
+                transformer_block.set_modules_to_backward_prefetch(
+                    [prev_transformer_block]
+                )
+        elif model.tok_embeddings is not None:
+            transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
 
 def apply_moe_ep_tp(
     model: nn.Module,
@@ -401,7 +454,7 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
-            if not etp_enabled:
+            if ep_mesh is not None and not etp_enabled:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
@@ -452,7 +505,7 @@ def apply_compile(model: nn.Module):
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.layers.named_children():
-        # TODO: remove when torch.compile supports fullgraph=True for llama4 moe
+        # TODO: remove when torch.compile supports fullgraph=True for MoE
         fullgraph = True
         if transformer_block.moe_enabled:
             fullgraph = False

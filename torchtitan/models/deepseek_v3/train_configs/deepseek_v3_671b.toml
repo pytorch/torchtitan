@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "671B"
-tokenizer_path = "./assets/tokenizer/DeepSeek-V3"
+hf_assets_path = "./assets/hf/DeepSeek-V3"
 # converters = ["float8"]
 
 [optimizer]
@@ -46,7 +46,7 @@ dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 8
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
@@ -62,7 +62,12 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=true
+components = ["loss"] # ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false

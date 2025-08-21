@@ -47,6 +47,7 @@ CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_671b.toml
 - Tensor Parallel (TP)
 - Expert Parallel (EP)
 - Pipeline Parallel (PP)
+- torch.compile
 
 
 ## HuggingFace -> DCP Checkpoint Conversion
@@ -65,8 +66,8 @@ Some limitations:
 ## To be added
 - Parallelism
     - Context Parallel support for DeepSeek V3
-- torch.compile
 - Quantization
 - Testing
-    - performance and loss converging tests
-    - CI integration
+    - loss converging tests (verified)
+    - perfomance (WIP)
+    - CI integration (WIP)
