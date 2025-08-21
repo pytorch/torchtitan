@@ -145,7 +145,7 @@ def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
     torch._inductor.config._micro_pipeline_tp = True
     enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
-    logger.info("Async Tensor Parallelism is enabled")
+    logger.info("Async TP is enabled")
 
 
 def apply_tp(
@@ -245,7 +245,6 @@ _save_list = {
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
 }
 
 
