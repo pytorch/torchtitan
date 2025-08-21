@@ -25,7 +25,7 @@ class FluxModel(nn.Module, ModelProtocol):
     """
     Transformer model for flow matching on sequences.
 
-    Agrs:
+    Args:
         model_args: FluxModelArgs.
 
     Attributes:

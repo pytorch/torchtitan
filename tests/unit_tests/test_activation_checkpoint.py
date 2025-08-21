@@ -171,7 +171,7 @@ class TestApplyAC(unittest.TestCase):
         self.assertEqual(mem_with_force_last, 1.0)
         self.assertEqual(mem_full_ac, 0.0)
         # Note: SAC > no-AC here because it unnecessarily saves "output"
-        # even that is not needed for recomputaion and output is double
+        # even that is not needed for recomputation and output is double
         # the size of the other two mms.
 
     def test_correctness(self):

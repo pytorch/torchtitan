@@ -85,7 +85,7 @@ def generate_image(
 ) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
-    For randomized noise generation, the random seend should already be set at the begining of training.
+    For randomized noise generation, the random seend should already be set at the beginning of training.
     Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
     """
 
