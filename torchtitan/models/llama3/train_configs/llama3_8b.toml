@@ -63,6 +63,7 @@ filter_fqns = ["output"]
 
 [validation]
 enabled = true
+local_batch_size=1
 dataset = "alpaca_validation"
 freq = 2
-steps = 5
+steps = -1

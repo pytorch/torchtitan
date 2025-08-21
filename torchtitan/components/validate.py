@@ -147,6 +147,9 @@ class Validator(BaseValidator):
                     else torch.tensor([-1.0], device=device_type)
                 )
             else:
+                logger.info(
+                    f"[Validation Debug]  Rank {torch.distributed.get_rank()} batch {batch_idx} start"
+                )
                 with self.validation_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     with self.maybe_enable_amp:
@@ -155,7 +158,7 @@ class Validator(BaseValidator):
                         logger.info(
                             f"[Validation Debug]  Rank {torch.distributed.get_rank()} batch {batch_idx} Loss {loss}"
                         )
-                        # print(
+                        # logger.info(
                         #     f"[Validation Debug] Rank {torch.distributed.get_rank()}. Batch {batch_idx}. input_dict['input'].shape",
                         #     str(input_dict["input"].shape),
                         # )
@@ -168,7 +171,7 @@ class Validator(BaseValidator):
             num_steps += 1
 
         logger.info(
-            f"[Validation Debug] Rank {torch.distributed.get_rank()} Validation done. "
+            f"[Validation Debug] Rank {torch.distributed.get_rank()} Validation done at batch {batch_idx}. "
         )
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
