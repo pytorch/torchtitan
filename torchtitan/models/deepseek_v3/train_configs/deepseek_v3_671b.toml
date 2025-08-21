@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "671B"
-hf_assets_path = "./assets/hf/DeepSeek-V3"
+hf_assets_path = "./assets/hf/DeepSeek-V3.1-Base"
 # converters = ["float8"]
 
 [optimizer]
@@ -54,7 +54,7 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable_checkpoint = true
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
