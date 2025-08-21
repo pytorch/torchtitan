@@ -319,7 +319,7 @@ class MetricsProcessor:
     num_flops_per_token: int
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
-    model_parts: list[torch.nn.Module]  | None
+    model_parts: list[torch.nn.Module] | None
 
     def __init__(
         self,
