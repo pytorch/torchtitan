@@ -246,6 +246,10 @@ def init_attention_mask(
     eos_id: int | None,
     cp_device_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
 ) -> None:
+
+    # This is not functional yet because we currently gate the use of Flex + CP
+    # while we continue debugging accuracy issues. However, we want to evaluate
+    # the user experience with CP enabled.
     if cp_device_mesh is not None:
         FlexAttention.compiled_create_block_mask = functools.partial(
             create_cp_block_mask, device_mesh=cp_device_mesh
