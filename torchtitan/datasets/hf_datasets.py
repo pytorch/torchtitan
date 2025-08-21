@@ -27,9 +27,19 @@ def _load_c4_dataset(dataset_path: str, split: str):
     return load_dataset(dataset_path, name="en", split=split, streaming=True)
 
 
+def _load_alpaca_dataset(dataset_path: str, split: str):
+    """Load Alpaca dataset with default configuration."""
+    return load_dataset(dataset_path, split=split, streaming=False)
+
+
 def _process_c4_text(sample: dict[str, Any]) -> str:
     """Process C4 dataset sample text."""
     return sample["text"]
+
+
+def _process_alpaca_text(sample: dict[str, Any]) -> str:
+    """Process C4 dataset sample text."""
+    return sample["instruction"] + sample["output"]
 
 
 @dataclass
@@ -55,6 +65,11 @@ DATASETS = {
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="validation"),
         text_processor=_process_c4_text,
+    ),
+    "alpaca_validation": DatasetConfig(
+        path="yahma/alpaca-cleaned",
+        loader=partial(_load_alpaca_dataset, split="train[95%:]"),
+        text_processor=_process_alpaca_text,
     ),
 }
 

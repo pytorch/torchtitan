@@ -18,6 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
+from torchtitan.tools.logging import logger
 
 
 class BaseValidator:
@@ -62,6 +63,7 @@ class Validator(BaseValidator):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        print(f"dp_world_size: {dp_world_size}, dp_rank: {dp_rank}")  # 2, 0
         self.validation_dataloader = build_hf_validation_dataloader(
             job_config=job_config,
             dp_world_size=dp_world_size,
@@ -91,7 +93,7 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
-        for input_dict, labels in self.validation_dataloader:
+        for batch_idx, (input_dict, labels) in enumerate(self.validation_dataloader):
             if (
                 self.job_config.validation.steps != -1
                 and num_steps >= self.job_config.validation.steps
@@ -150,11 +152,24 @@ class Validator(BaseValidator):
                     with self.maybe_enable_amp:
                         predictions = model(inputs)
                         loss = self.loss_fn(predictions, labels)
+                        logger.info(
+                            f"[Validation Debug]  Rank {torch.distributed.get_rank()} batch {batch_idx} Loss {loss}"
+                        )
+                        # print(
+                        #     f"[Validation Debug] Rank {torch.distributed.get_rank()}. Batch {batch_idx}. input_dict['input'].shape",
+                        #     str(input_dict["input"].shape),
+                        # )
+
+                        # print("input_dict: ", input_dict)
+                        # exit()
 
             accumulated_losses.append(loss.detach())
 
             num_steps += 1
 
+        logger.info(
+            f"[Validation Debug] Rank {torch.distributed.get_rank()} Validation done. "
+        )
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps

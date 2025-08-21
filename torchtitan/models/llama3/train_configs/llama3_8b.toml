@@ -62,7 +62,7 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enabled = false
-dataset = "c4_validation"
-freq = 100
-steps = -1
+enabled = true
+dataset = "alpaca_validation"
+freq = 2
+steps = 5
