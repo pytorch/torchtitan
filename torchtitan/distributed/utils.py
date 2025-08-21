@@ -206,9 +206,7 @@ def get_train_context(
 
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
-                assert (
-                    ScaledDotProductAttention.backends
-                ), "No valid SDPA backends with CP."
+
                 stack.enter_context(cp_context)
 
             yield
