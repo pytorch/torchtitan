@@ -31,7 +31,6 @@ local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 10
-compile = false
 dataset = "c4"
 
 [parallelism]
@@ -52,6 +51,10 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=false
+components = ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false

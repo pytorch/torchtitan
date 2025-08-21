@@ -220,7 +220,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = (
             f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh "
-            f"--model.name llama3_simple_fsdp --training.compile "
+            f"--model.name llama3_simple_fsdp --compile.enable "
         )
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
