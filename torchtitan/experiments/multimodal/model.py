@@ -839,7 +839,7 @@ class Vit(nn.Module):
         Processes images and returns the tokens and hidden states.
 
         Multiple images per sample: we add a dimension num_imgs to the input. This is useful when a single
-        sample constains multiple images, for example:
+        sample contains multiple images, for example:
 
         - sample 1: "<image> what animal is this?"
         - sample 2: "I like <image> more than <image>"
@@ -999,7 +999,7 @@ class VisionEncoder(nn.Module):
 class FeedForwardForDecoder(nn.Module):
     """
     FeedForward module for the decoder. It's different from the one in the encoder.
-    This is the component which is orignally used in llama3.
+    This is the component which is originally used in llama3.
     """
 
     def __init__(
@@ -1301,7 +1301,7 @@ class FusionLayer(nn.Module):
     """
     Deep Fusion model architectures combine pretrained encoder models with pretrained
     language models by infusing the encoder outputs into the middle layers of the LLM.
-    This allows the language model to interpret the enocder outputs as text and
+    This allows the language model to interpret the encoder outputs as text and
     "understand" any modality for which you can train an decoder. To enable the language model
     to adapt to the encoder outputs, the FusionLayer fuses a new learnable layer to an existing
     decoder (language model) layer. This additional layer can take the encoder embeddings and

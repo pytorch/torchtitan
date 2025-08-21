@@ -246,8 +246,8 @@ class FluxDataset(IterableDataset, Stateful):
             # TODO: Add support for robust data loading and error handling.
             # Currently, we assume the dataset is well-formed and does not contain corrupted samples.
             # If a corrupted sample is encountered, the program will crash and throw an exception.
-            # You can NOT try to catch the exception and continue, becuase the iterator within dataset
-            # is not broken after raising an exception, so calling next() will thorw StopIteration and might cause re-loop.
+            # You can NOT try to catch the exception and continue, because the iterator within dataset
+            # is not broken after raising an exception, so calling next() will throw StopIteration and might cause re-loop.
             try:
                 sample = next(dataset_iterator)
             except StopIteration:

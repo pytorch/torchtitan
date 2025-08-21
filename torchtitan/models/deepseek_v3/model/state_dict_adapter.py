@@ -36,7 +36,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
             "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
             "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            # Transfomer Layer
+            # Transformer Layer
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE Module
@@ -65,7 +65,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         self, expert_weights_by_layer: dict[str, Any], n_experts: int
     ) -> torch.Tensor:
         """
-        Concatenate the weights of seprate experts into GroupedExpert weights.
+        Concatenate the weights of separate experts into GroupedExpert weights.
         """
         for layer, abstract_keys in list(expert_weights_by_layer.items()):
             for abstract_key, experts in list(abstract_keys.items()):
@@ -137,7 +137,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into seprate expert's wegiht.
+        2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -149,7 +149,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
 
-                # Split expert weights into seperate expert weights
+                # Split expert weights into separate expert weights
                 split_values = self._split_experts_weights(
                     value, self.model_args.moe_args.num_experts
                 )
@@ -178,7 +178,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concate seprate expert's wegiht into GroupedExperts' weight.
+        3. Concate separate expert's wegiht into GroupedExperts' weight.
         """
         # dequantize the tensor in state_dict and remove the scale_inv tensor
         hf_state_dict = self._dequantize(hf_state_dict)
@@ -193,7 +193,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = self.from_hf_map[abstract_key]
                 new_key = new_key.format(layer_num)
 
-                # Store the expert's weight in expert_weights_by_layer for concating later.
+                # Store the expert's weight in expert_weights_by_layer for concatenating later.
                 if layer_num not in expert_weights_by_layer:
                     expert_weights_by_layer[layer_num] = {}
                 if abstract_key not in expert_weights_by_layer[layer_num]:

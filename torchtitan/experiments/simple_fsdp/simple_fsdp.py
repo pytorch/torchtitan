@@ -227,7 +227,7 @@ class ReplicateComputation(torch.nn.Module):
             )
 
             # re-wrap 1D all-gathered DTensor on dp_mesh to 1D DTensor on tp_mesh
-            # TODO: DTensor should support this mesh collasping operation
+            # TODO: DTensor should support this mesh collapsing operation
             replicated_local_tensor = replicated_dtensor.to_local(
                 grad_placements=self.grad_placements
             )
