@@ -11,6 +11,7 @@ from torchtitan.config.job_config import (
     ActivationCheckpoint,
     Checkpoint,
     Comm,
+    Compile,
     Float8,
     LRScheduler,
     Model,
@@ -31,6 +32,7 @@ class ForgeJobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    compile: Compile = field(default_factory=Compile)
     float8: Float8 = field(default_factory=Float8)
     comm: Comm = field(default_factory=Comm)
 

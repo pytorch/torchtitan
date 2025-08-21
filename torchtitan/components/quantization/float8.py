@@ -28,8 +28,12 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config: Float8 = job_config.float8
+        compile_config = job_config.compile
+        model_compile_enabled = (
+            compile_config.enable and "model" in compile_config.components
+        )
         if has_cuda_capability(8, 9) or (
-            float8_config.emulate and not job_config.training.compile
+            float8_config.emulate and not model_compile_enabled
         ):
             pass
         else:

@@ -62,12 +62,15 @@ def parallelize_llama(
     ):
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
+            and not model_compile_enabled
         ):
-            raise RuntimeError("Async TP requires --training.compile")
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -107,7 +110,7 @@ def parallelize_llama(
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if job_config.training.compile:
+    if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
         apply_compile(model)

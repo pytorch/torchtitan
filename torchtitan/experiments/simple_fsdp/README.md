@@ -13,7 +13,7 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 ### Enable SimpleFSDP Training
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name llama3_simple_fsdp --training.compile
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name llama3_simple_fsdp --compile.enable
 ```
 
 ### Composability Support

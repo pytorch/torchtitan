@@ -37,12 +37,15 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
+            and not model_compile_enabled
         ):
-            raise RuntimeError("Async TP requires --training.compile")
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -99,7 +102,7 @@ def parallelize_llama(
         )
         logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
 
-    if job_config.training.compile:
+    if model_compile_enabled:
         torch._inductor.config.reorder_for_peak_memory = False
         model = torch.compile(model, fullgraph=True)
 

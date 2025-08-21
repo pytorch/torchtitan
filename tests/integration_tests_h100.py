@@ -32,7 +32,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
                 ],
@@ -54,7 +54,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.pipeline_parallel_degree=2",
@@ -71,7 +71,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                     "--parallelism.context_parallel_degree=2",

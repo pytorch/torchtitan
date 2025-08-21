@@ -41,7 +41,6 @@ local_batch_size = 8
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
 steps = 10
-compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -66,7 +65,11 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=false
+components = ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false
