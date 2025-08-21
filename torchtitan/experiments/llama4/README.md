@@ -26,5 +26,5 @@ python scripts/download_hf_assets.py --assets tokenizer --repo_id meta-llama/Lla
 - Quantization
     - efficient float8 Grouped MM kernels (from torchao)
 - Testing
-    - perfomance and loss converging tests
+    - performance and loss converging tests
     - CI integration

@@ -116,4 +116,4 @@ Here's a typical comparison setup (maintaining an overall DP degree of 4):
 
 To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You might also need to set the `deterministic` mode to ensure consistent training behavior.
 
-We also provided an example of verifying the numerical consistency across parallism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
+We also provided an example of verifying the numerical consistency across parallelism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.

@@ -4,7 +4,7 @@ For offline explorations, we recommend the same steps, unless otherwise noted.
 
 ## Adding the model
 
-Please refer to the [Llama 3 folder](.llama3) as an example.
+Please refer to the [Llama 3 folder](llama3) as an example.
 
 The folder should be organized as follows
 - `model` folder: a self-contained folder of model definition and args

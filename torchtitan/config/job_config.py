@@ -35,7 +35,7 @@ class Profiling:
     """Trace files location"""
 
     profile_freq: int = 10
-    """How often to collect profile traces, in interations"""
+    """How often to collect profile traces, in iterations"""
 
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
@@ -381,7 +381,7 @@ class Parallelism:
       - cp * tp <= ep <= dp_shard * cp * tp
       - ep % (cp * tp) == 0
       - dp_shard * cp * tp % ep == 0
-    Note that this is still an experimental feature. Some contrains will be
+    Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
     """
 

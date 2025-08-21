@@ -16,7 +16,7 @@ class Training:
     img_size: int = 256
     """Image width to sample"""
     test_mode: bool = False
-    """Whether to use intergration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
+    """Whether to use integration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
 
 
 @dataclass
@@ -71,7 +71,7 @@ class Inference:
 @dataclass
 class JobConfig:
     """
-    Extend the tyro parser with custom config classe for Flux model.
+    Extend the tyro parser with custom config classes for Flux model.
     """
 
     training: Training = field(default_factory=Training)
