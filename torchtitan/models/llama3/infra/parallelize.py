@@ -67,12 +67,6 @@ def parallelize_llama(
         job_config.compile.enable and "model" in job_config.compile.components
     )
     if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not model_compile_enabled
-        ):
-            raise RuntimeError("Async TP requires torch.compile")
-
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -89,8 +83,8 @@ def parallelize_llama(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
+        maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -139,12 +133,26 @@ def parallelize_llama(
     return model
 
 
+def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
+    if not job_config.parallelism.enable_async_tensor_parallel:
+        return
+
+    if not (job_config.compile.enable and "model" in job_config.compile.components):
+        raise RuntimeError("Async TP requires --training.compile")
+
+    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+    torch._inductor.config._micro_pipeline_tp = True
+    enable_symm_mem_for_group(tp_mesh.get_group().group_name)
+
+    logger.info("Async Tensor Parallelism is enabled")
+
+
 def apply_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -221,14 +229,8 @@ def apply_tp(
             parallelize_plan=layer_plan,
         )
 
-    if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
-        torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
-
     logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )
 
@@ -243,6 +245,7 @@ _save_list = {
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
 }
 
 
