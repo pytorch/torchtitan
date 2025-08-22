@@ -33,7 +33,7 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 10
 compile = false
 dataset = "c4"
 
@@ -45,12 +45,13 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
-folder = "checkpoint"
+enable_checkpoint = true
+folder = "hf__checkpoint"
 interval = 500
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+last_save_in_hf = true
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
