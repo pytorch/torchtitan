@@ -355,17 +355,24 @@ class CheckpointManager:
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
-
-            storage_writer = HuggingFaceStorageWriter(
-                path=os.path.join(checkpoint_id, "sharded"),
-                save_distributed=True,
-                fqn_to_index_mapping=fqn_to_index_mapping,
+            if fqn_to_index_mapping:
+                storage_writer = HuggingFaceStorageWriter(
+                    path=os.path.join(checkpoint_id, "sharded"),
+                    save_distributed=True,
+                    fqn_to_index_mapping=fqn_to_index_mapping,
+                    enable_consolidation=False,
+                )
+            else:
                 # the reason for only enabling consolidation if there is
                 # no mapping is because no mapping implies that we save all fqns
                 # to one file. This means we only need one rank to consolidate.
                 # Otherwise we should use consolidate_safetensors_files_on_every_rank
-                enable_consolidation=fqn_to_index_mapping is None,
-            )
+                storage_writer = HuggingFaceStorageWriter(
+                    path=checkpoint_id,
+                    save_distributed=True,
+                    enable_consolidation=True,
+                )
+
         else:
             checkpoint_save_id = checkpoint_id
 
