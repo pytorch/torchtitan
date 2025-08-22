@@ -256,7 +256,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_warmup_plus_decay_exceeds_training(self):
         """Test when warmup + decay steps exceed training steps."""
         # Create a job config where warmup + decay steps > training steps
-        # Expected behaviro: warmup steps = 5, decay steps = 5
+        # Expected behavior: warmup steps = 5, decay steps = 5
         config = self.create_job_config(
             training_steps=10,
             warmup_steps=5,

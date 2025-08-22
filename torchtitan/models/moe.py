@@ -340,7 +340,7 @@ class MoE(nn.Module):
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
-        #       expert_bias is updated outside the model in an optimzer step pre hook
+        #       expert_bias is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = moe_args.load_balance_coeff
         if self.load_balance_coeff is not None:
@@ -350,13 +350,14 @@ class MoE(nn.Module):
                 torch.zeros(num_experts, dtype=torch.float32),
                 persistent=True,
             )
-            self.register_buffer(
-                "tokens_per_expert",
-                torch.zeros(num_experts, dtype=torch.float32),
-                persistent=False,
-            )
         else:
             self.expert_bias = None
+        # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
+        self.register_buffer(
+            "tokens_per_expert",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=False,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -378,12 +379,12 @@ class MoE(nn.Module):
         ) = self.router(x, self.expert_bias)
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
+        # and also to count the expert usage
         # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
-        if self.load_balance_coeff is not None:
-            with torch.no_grad():
-                self.tokens_per_expert.add_(num_tokens_per_expert)
+        with torch.no_grad():
+            self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
@@ -444,11 +445,11 @@ class MoE(nn.Module):
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
 
-        if self.load_balance_coeff is not None:
-            with torch.device(buffer_device):
+        with torch.device(buffer_device):
+            self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )
+            if self.load_balance_coeff is not None:
                 self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )
-                self.tokens_per_expert = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )

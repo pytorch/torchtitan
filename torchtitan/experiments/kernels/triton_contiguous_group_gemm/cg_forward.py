@@ -29,7 +29,7 @@ GROUP_SIZE_M = 128
 
 # ============ Triton kernel for contiguous grouped GEMM ============
 
-# L2 Caching optmization
+# L2 Caching optimization
 
 
 @triton.jit

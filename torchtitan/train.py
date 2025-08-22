@@ -294,6 +294,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         )
         self.metrics_processor.optimizers = self.optimizers
+        self.metrics_processor.model_parts = self.model_parts
 
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.

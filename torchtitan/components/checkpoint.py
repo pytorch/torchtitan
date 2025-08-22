@@ -138,7 +138,7 @@ class CheckpointManager:
 
         We solve this in the Model and Optimizer wrapper classes by flattening the state dicts
         from each object into one state dict before saving/loading. We rely on the individual
-        state_dicts to not collide, which is gauranteed for the model by correct pipeline
+        state_dicts to not collide, which is guaranteed for the model by correct pipeline
         splitting and for the optimizer by the flattening support described in (1).
 
     3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
@@ -146,12 +146,12 @@ class CheckpointManager:
 
     Note: TorchFT checkpointing flow
 
-    There are two types of checkpoints: when TorchFT is enabled: 1) the full perisistent
+    There are two types of checkpoints: when TorchFT is enabled: 1) the full persistent
     checkpoint, 2) the per-replica checkpoint.
 
-    The full perisistent checkpoint is saved by the replica with
+    The full persistent checkpoint is saved by the replica with
     ``ft_manager.participating_rank() == 0``. It contains everything including the model,
-    optimizer, lr_scheduler, dataloader, and train_state. Right now the full perisistent
+    optimizer, lr_scheduler, dataloader, and train_state. Right now the full persistent
     checkpoint is loaded by all replicas. However, we can optimize it to only load if
     there are no other alive replicas.
 
@@ -294,7 +294,7 @@ class CheckpointManager:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
         else:
             raise ValueError(
-                f"Unkown checkpoint async_mode {checkpoint_config.async_mode}"
+                f"Unknown checkpoint async_mode {checkpoint_config.async_mode}"
             )
 
         logger.info(

@@ -118,7 +118,7 @@ class FlexAttention(torch.nn.Module):
         mask_mod: _mask_mod_signature, fixed_block_size: int
     ) -> _mask_mod_signature:
         """
-        Given an arbirary mask_mod, divide the input sequence to blocks
+        Given an arbitrary mask_mod, divide the input sequence to blocks
         and only allow attention within the same block.
 
         Args:
