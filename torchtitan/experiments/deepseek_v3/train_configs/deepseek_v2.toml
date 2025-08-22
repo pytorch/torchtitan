@@ -56,7 +56,7 @@ context_parallel_degree = 1
 # expert_parallel_degree = 2  set in custom_args
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 model_weights_only = false

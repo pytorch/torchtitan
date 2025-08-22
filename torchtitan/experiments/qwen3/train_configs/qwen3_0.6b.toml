@@ -41,7 +41,7 @@ tensor_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_weights_only = false

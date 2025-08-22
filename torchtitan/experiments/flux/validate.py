@@ -9,7 +9,6 @@ from typing import Generator
 
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -238,12 +237,6 @@ class FluxValidator(Validator):
             global_avg_loss = loss.item()
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
-
-        # Reshard after run forward pass
-        # This is to ensure the model weights are sharded the same way for checkpoint saving.
-        for module in model.modules():
-            if isinstance(module, FSDPModule):
-                module.reshard()
 
         # Set model back to train mode
         model.train()

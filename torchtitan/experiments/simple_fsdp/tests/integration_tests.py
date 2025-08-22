@@ -78,10 +78,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -91,14 +91,14 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
                     "--training.steps 20",
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -180,20 +180,20 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 10",
                 ],
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 20",
                 ],
                 # load at [tp:4].
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 4",
                     "--training.steps 30",

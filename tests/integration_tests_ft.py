@@ -32,7 +32,7 @@ def build_test_list():
     integration_tests_flavors["debug_model.toml"] = [
         OverrideDefinitions(
             [
-                ["--training.steps 10", "--checkpoint.enable_checkpoint"],
+                ["--training.steps 10", "--checkpoint.enable"],
             ],
             "Default TorchFT integration test",
             "default_torchft",

@@ -334,7 +334,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # Build validator if validation is configured
-        if job_config.validation.enabled:
+        if job_config.validation.enable:
             assert self.train_spec.build_validator_fn is not None
 
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -593,7 +593,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
                 # Run validation if validator is available
                 if (
-                    self.job_config.validation.enabled
+                    self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
                     self.validator.validate(self.model_parts, self.step)
@@ -648,7 +648,7 @@ if __name__ == "__main__":
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
-                config.checkpoint.enable_checkpoint
+                config.checkpoint.enable
             ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")

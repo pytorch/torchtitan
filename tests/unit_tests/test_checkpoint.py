@@ -83,7 +83,7 @@ class DummyJobConfig:
     def __init__(self, job):
         self.job = job
         self.checkpoint = CheckpointConfig(
-            enable_checkpoint=True,
+            enable=True,
             async_mode="disabled",
             folder="",
             interval=1,
@@ -114,7 +114,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.ft_manager = DummyFTManager()
 
         ckpt_cfg = CheckpointConfig(
-            enable_checkpoint=True,
+            enable=True,
             async_mode="DISABLED",
             folder="",
             interval=1,

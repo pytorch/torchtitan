@@ -49,7 +49,7 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 8
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true

@@ -55,7 +55,7 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 last_save_model_only = false
@@ -76,7 +76,7 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enabled = false
+enable = false
 dataset = "c4_validation"
 freq = 5
 steps = 10
