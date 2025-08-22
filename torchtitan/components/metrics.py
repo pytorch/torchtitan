@@ -319,6 +319,7 @@ class MetricsProcessor:
     num_flops_per_token: int
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
+    model_parts: list[torch.nn.Module] | None
 
     def __init__(
         self,
@@ -349,6 +350,7 @@ class MetricsProcessor:
         self.num_flops_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
+        self.model_parts = None
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
