@@ -583,7 +583,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if self.job_config.enable and self.validator.should_validate(self.step):
+                if (
+                    self.job_config.validation.enable
+                    and self.validator.should_validate(self.step)
+                ):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
