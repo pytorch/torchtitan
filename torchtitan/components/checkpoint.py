@@ -369,8 +369,12 @@ class CheckpointManager:
                 path=os.path.join(checkpoint_id, "sharded"),
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
+                # the reason for only enabling consolidation if there is
+                # no mapping is because no mapping implies that we save all fqns
+                # to one file. This means we only need one rank to consolidate.
+                # Otherwise we should use consolidate_safetensors_files_on_every_rank
+                enable_consolidation=fqn_to_index_mapping is None,
             )
-
         else:
             checkpoint_save_id = checkpoint_id
 
@@ -397,7 +401,7 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
-        if to_hf:
+        if to_hf and self.sd_adapter.fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
