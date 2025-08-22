@@ -160,6 +160,13 @@ class Trainer(ForgeEngine):
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
+        # Create the FlexAttention mask according to the input
+        if getattr(self.model_args, "use_flex_attn", False):
+            cp_mesh = (
+                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+            )
+            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],

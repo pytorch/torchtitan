@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import TransformerModelArgs
@@ -395,7 +395,6 @@ class Transformer(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -415,11 +414,6 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=eos_id
-            )
-
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 

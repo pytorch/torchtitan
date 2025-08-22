@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import Qwen3ModelArgs
@@ -411,7 +411,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
-        eos_id: int | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -425,18 +424,11 @@ class Qwen3Model(nn.Module, ModelProtocol):
                 This will always be the input batch regardless of the pipeline stage.
                 This field is required for non-first PP stages to perform document
                 masking attention (to analyze the boundary of the document).
-            eos_id (int | None): End-of-sequence token ID. If not provided, uses self.eos_id.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens,
-                eos_id=eos_id,
-            )
-
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 

@@ -50,14 +50,6 @@ class TransformerModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-        if (
-            job_config.parallelism.pipeline_parallel_degree > 1
-            and self.use_flex_attn
-            and self.attn_mask_type == "block_causal"
-        ):
-            raise RuntimeError(
-                "PP + block causal FlexAttention support will be fixed soon."
-            )
         self.max_seq_len = seq_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
