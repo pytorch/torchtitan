@@ -1,5 +1,3 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 16B model training"
@@ -22,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "16B"
-tokenizer_path = "./assets/tokenizer/deepseek-moe-16b-base"
+hf_assets_path = "./assets/hf/deepseek-moe-16b-base"
 # converters = ["float8"]
 
 [optimizer]
@@ -41,7 +39,6 @@ local_batch_size = 8
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 1000
-compile = false
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -50,9 +47,10 @@ data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
-expert_parallel_degree = 1
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
+expert_parallel_degree = 8
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = false
@@ -63,7 +61,12 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=true
+components = ["loss"] # ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false

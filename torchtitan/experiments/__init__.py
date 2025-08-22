@@ -5,4 +5,5 @@
 # LICENSE file in the root directory of this source tree.
 
 import torchtitan.experiments.llama4  # noqa: F401
+import torchtitan.experiments.qwen3
 import torchtitan.experiments.simple_fsdp  # noqa: F401

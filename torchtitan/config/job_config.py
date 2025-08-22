@@ -35,7 +35,7 @@ class Profiling:
     """Trace files location"""
 
     profile_freq: int = 10
-    """How often to collect profile traces, in interations"""
+    """How often to collect profile traces, in iterations"""
 
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
@@ -218,9 +218,6 @@ class Training:
     This feature only takes effect when data_parallel_shard_degree > 1
     """
 
-    compile: bool = False
-    """Whether to compile the model"""
-
     gc_freq: int = 50
     """Python garbage control scheduling interval, in steps"""
 
@@ -374,9 +371,27 @@ class Parallelism:
 
     expert_parallel_degree: int = 1
     """
-    Expert parallelism degree. 1 means disabled.
-    Currently, only "dp2ep" is supported, with the following constraints:
-    context_parallel_degree <= expert_parallel_degree <= data_parallel_shard_degree * context_parallel_degree
+    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    Currently, it is supported with the following constraints:
+    - when etp = tp:
+      - cp <= ep <= dp_shard * cp
+      - ep % cp == 0
+      - dp_shard * cp % ep == 0
+    - when etp = 1:
+      - cp * tp <= ep <= dp_shard * cp * tp
+      - ep % (cp * tp) == 0
+      - dp_shard * cp * tp % ep == 0
+    Note that this is still an experimental feature. Some constraints will be
+    relaxed soon when we have more flexible DeviceMesh support.
+    """
+
+    expert_tensor_parallel_degree: int = 1
+    """
+    Expert tensor parallelism degree. 1 means disabled. No effect for non-MoE models, or when ep = 1.
+    With this option, the tensor parallel degree on routed experts can be different from that on other params.
+    Currently, we only support either
+    - [partial dp -> ep] etp = tp
+    - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
     """
 
@@ -533,6 +548,17 @@ class ActivationCheckpoint:
 
 
 @dataclass
+class Compile:
+    enable: bool = False
+    """Whether to apply torch.compile"""
+
+    components: list[Literal["model", "loss"]] = field(
+        default_factory=lambda: ["model", "loss"]
+    )
+    """Which components to compile"""
+
+
+@dataclass
 class Float8:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
@@ -612,7 +638,7 @@ class Comm:
 
 @dataclass
 class MemoryEstimation:
-    enabled: bool = False
+    enable: bool = False
     """Whether to estimate memory usage for FSDP"""
 
     disable_fake_mode: bool = False
@@ -729,6 +755,7 @@ class JobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    compile: Compile = field(default_factory=Compile)
     float8: Float8 = field(default_factory=Float8)
     mx: MX = field(default_factory=MX)
     comm: Comm = field(default_factory=Comm)

@@ -104,7 +104,7 @@ class FluxTrainer(Trainer):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
+        # explicitly convert flux model to be Bfloat16 no matter FSDP is applied or not
         model = self.model_parts[0]
 
         # image in latent space transformed by self.auto_encoder
