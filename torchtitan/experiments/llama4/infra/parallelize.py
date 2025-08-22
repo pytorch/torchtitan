@@ -28,12 +28,9 @@ from torchtitan.distributed.expert_parallel import (
     ReordererSequenceParallel,
     TensorParallel,
 )
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 
-from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
-    apply_ddp,
-    maybe_enable_async_tp,
-)
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
 

@@ -19,16 +19,13 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
-    apply_ddp,
-    maybe_enable_async_tp,
-)
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
 
