@@ -77,43 +77,40 @@ def parallelize_deepseekv3(
         mp_policy=mp_policy,
         compile=job_config.training.compile,
     ) as autop:
-        # currently errors due to missing sharding prop rules
-        torch.distributed.breakpoint()
+        autop.add_parameter_memory_constraint(low=None, high=None)
 
-    #     autop.add_parameter_memory_constraint(low=None, high=None)
-
-    #     possible_input_shardings = {
-    #         # maps relative to mesh dim names used in torchtitan
-    #         "dp_replicate": Shard(0),
-    #         "dp_shard": Shard(0),
-    #         "tp": Replicate(),
-    #     }
-    #     # only used if loss parallel is enabled
-    #     possible_output_shardings = {
-    #         # maps relative to mesh dim names used in torchtitan
-    #         "dp_shard": Shard(0),
-    #         "tp": Shard(2),
-    #     }
-    #     assert all(
-    #         name in possible_input_shardings for name in world_mesh.mesh_dim_names
-    #     ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
-    #     x_sharding = tuple(
-    #         possible_input_shardings[name] for name in world_mesh.mesh_dim_names
-    #     )
-    #     out_sharding = x_sharding
-    #     if parallel_dims.loss_parallel_enabled:
-    #         out_sharding = tuple(
-    #             possible_output_shardings[name]
-    #             for name in world_mesh.mesh_dim_names
-    #             if name != "dp_replicate"
-    #         )
-    #     autop.add_input_constraints([x_sharding])
-    #     autop.add_output_constraints([out_sharding])
-    #     t0 = time.time()
-    #     sharding_placement = autop.optimize_placement()
-    #     t1 = time.time()
-    #     logger.info(f"AutoParallel took {t1 - t0} seconds")
-    #     parallel_mod = autop.apply_placement(sharding_placement)
+        possible_input_shardings = {
+            # maps relative to mesh dim names used in torchtitan
+            "dp_replicate": Shard(0),
+            "dp_shard": Shard(0),
+            "tp": Replicate(),
+        }
+        # only used if loss parallel is enabled
+        possible_output_shardings = {
+            # maps relative to mesh dim names used in torchtitan
+            "dp_shard": Shard(0),
+            "tp": Shard(2),
+        }
+        assert all(
+            name in possible_input_shardings for name in world_mesh.mesh_dim_names
+        ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
+        x_sharding = tuple(
+            possible_input_shardings[name] for name in world_mesh.mesh_dim_names
+        )
+        out_sharding = x_sharding
+        if parallel_dims.loss_parallel_enabled:
+            out_sharding = tuple(
+                possible_output_shardings[name]
+                for name in world_mesh.mesh_dim_names
+                if name != "dp_replicate"
+            )
+        autop.add_input_constraints([x_sharding])
+        autop.add_output_constraints([out_sharding])
+        t0 = time.time()
+        sharding_placement = autop.optimize_placement()
+        t1 = time.time()
+        logger.info(f"AutoParallel took {t1 - t0} seconds")
+        parallel_mod = autop.apply_placement(sharding_placement)
 
     if parallel_dims.loss_parallel_enabled:
 
