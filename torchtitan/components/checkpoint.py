@@ -391,7 +391,6 @@ class CheckpointManager:
                 async_stager=self.stager,
             )
         else:
-            start = time.monotonic()
             ret = dcp.save(
                 state_dict,
                 storage_writer=storage_writer,
