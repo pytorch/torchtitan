@@ -9,6 +9,7 @@ from typing import Any, Generic, Iterator, TypeVar
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
@@ -340,6 +341,9 @@ def build_optimizers_with_moe_load_balancing(
     )
 
     # for MoE auxiliary-loss-free load balancing
+    def _is_recomputation_enabled(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
@@ -349,25 +353,52 @@ def build_optimizers_with_moe_load_balancing(
         )
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
+        tokens_per_expert_list = []
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
-                if transformer_block.moe_enabled:
+                if not transformer_block.moe_enabled:
+                    continue
+                if transformer_block.moe.load_balance_coeff is None:
+                    return
+                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                if _is_recomputation_enabled(transformer_block):
+                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
+                    # This does not affect to expert choice, but affects the experts usage metrics.
+                    # We divide by 2 to correct for this double-counting due to recomputation
+                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                    tokens_per_expert = tokens_per_expert // 2
+                tokens_per_expert_list.append(tokens_per_expert)
+
+        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
+
+        if dp_cp_mesh is not None:
+            # Perform single all-reduce to get global statistics across all processes
+            pg = dp_cp_mesh.get_group()
+            torch.distributed.all_reduce(
+                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
+            )
+
+        moe_layer_idx = 0
+        with torch.no_grad():
+            for model_part in model_parts:
+                for transformer_block in model_part.layers.values():
+                    if not transformer_block.moe_enabled:
+                        continue
                     moe = transformer_block.moe
-                    if moe.load_balance_coeff is None:
-                        return
 
-                    if dp_cp_mesh is not None:
-                        torch.distributed.all_reduce(
-                            moe.tokens_per_expert, group=dp_cp_mesh.get_group()
-                        )
+                    tokens_per_expert = tokens_per_expert_by_layer[
+                        moe_layer_idx
+                    ].float()
+                    moe_layer_idx += 1
 
-                    with torch.no_grad():
-                        expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                            moe.tokens_per_expert.mean() - moe.tokens_per_expert
-                        )
-                        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-                        moe.expert_bias.add_(expert_bias_delta)
-                        moe.tokens_per_expert.zero_()
+                    # update the expert bias
+                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                        tokens_per_expert.mean() - tokens_per_expert
+                    )
+                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    moe.expert_bias.add_(expert_bias_delta)
+                    moe.tokens_per_expert.zero_()
 
     optimizers.register_step_pre_hook(
         lambda *args, **kwargs: _update_expert_bias(
