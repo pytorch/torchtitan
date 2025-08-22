@@ -411,10 +411,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         # Create the FlexAttention mask according to the input
         if getattr(self.model_args, "use_flex_attn", False):
-            cp_device_mesh = (
+            cp_mesh = (
                 parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
             )
-            init_attention_mask(inputs, self.tokenizer.eos_id, cp_device_mesh)
+            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
