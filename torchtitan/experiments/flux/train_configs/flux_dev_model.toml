@@ -64,7 +64,7 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [validation]
-enabled = false
+enable = false
 dataset = "coco-validation"
 local_batch_size = 32
 steps = 1

@@ -100,7 +100,7 @@ class Trainer(ForgeEngine):
         self.step = 0
 
         # Build validator if validation is configured
-        if job_config.validation.enabled:
+        if job_config.validation.enable:
             self.validator = build_validator(
                 job_config=job_config,
                 dp_world_size=self.dp_degree,
@@ -290,10 +290,7 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enabled
-                    and self.validator.should_validate(self.step)
-                ):
+                if self.job_config.enable and self.validator.should_validate(self.step):
                     self.validator.validate(self.model_parts)
 
                 self.checkpointer.save(

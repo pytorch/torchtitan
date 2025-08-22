@@ -65,7 +65,7 @@ def build_test_list():
             "last_save_model_only_fp32",
         ),
         OverrideDefinitions(
-            [["--validation.enabled"]], "Flux Validation Test", "validation"
+            [["--validation.enable"]], "Flux Validation Test", "validation"
         ),
         # Parallelism tests.
         OverrideDefinitions(

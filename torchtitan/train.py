@@ -310,10 +310,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
                     model_args,
-                    job_config.model.hf_assets_path
-                    if job_config.checkpoint.enable
-                    and job_config.checkpoint.last_save_in_hf
-                    else None,
+                    (
+                        job_config.model.hf_assets_path
+                        if job_config.checkpoint.enable
+                        and job_config.checkpoint.last_save_in_hf
+                        else None
+                    ),
                 )
                 if self.train_spec.state_dict_adapter
                 else None
@@ -336,7 +338,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # Build validator if validation is configured
-        if job_config.validation.enabled:
+        if job_config.validation.enable:
             assert self.train_spec.build_validator_fn is not None
 
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -587,10 +589,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enabled
-                    and self.validator.should_validate(self.step)
-                ):
+                if self.job_config.enable and self.validator.should_validate(self.step):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started

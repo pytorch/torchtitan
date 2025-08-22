@@ -542,7 +542,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--validation.enabled",
+                    "--validation.enable",
                     "--validation.dataset c4_test",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",

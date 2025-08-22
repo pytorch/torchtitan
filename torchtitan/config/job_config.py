@@ -710,7 +710,7 @@ class Experimental:
 
 @dataclass
 class Validation:
-    enabled: bool = False
+    enable: bool = False
     """Enable validation to default run validation after each training loop"""
 
     dataset: str = "c4_validation"

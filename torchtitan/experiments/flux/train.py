@@ -78,7 +78,7 @@ class FluxTrainer(Trainer):
             job_config=job_config,
         )
 
-        if job_config.validation.enabled:
+        if job_config.validation.enable:
             self.validator.flux_init(
                 device=self.device,
                 _dtype=self._dtype,
