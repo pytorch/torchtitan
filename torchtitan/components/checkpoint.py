@@ -23,7 +23,9 @@ from torch.distributed.checkpoint import (
     HuggingFaceStorageReader,
     HuggingFaceStorageWriter,
 )
-from torch.distributed.checkpoint._consolidate_hf_safetensors import consolidate_safetensors_files_on_every_rank
+from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+    consolidate_safetensors_files_on_every_rank,
+)
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -367,8 +369,6 @@ class CheckpointManager:
                 path=os.path.join(checkpoint_id, "sharded"),
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
-                # enable_consolidation=True,
-                # thread_count_consolidation=5,
             )
 
         else:
@@ -397,10 +397,14 @@ class CheckpointManager:
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
             )
-            print("Time to save: ", time.monotonic() - start, " seconds")
 
         if to_hf:
-            consolidate_safetensors_files_on_every_rank(input_dir=os.path.join(checkpoint_id, "sharded"), output_dir=checkpoint_id, fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping, num_threads=5)
+            consolidate_safetensors_files_on_every_rank(
+                input_dir=os.path.join(checkpoint_id, "sharded"),
+                output_dir=checkpoint_id,
+                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                num_threads=5,
+            )
 
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
