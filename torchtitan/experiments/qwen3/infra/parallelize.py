@@ -45,12 +45,22 @@ def parallelize_qwen3(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    if (
+        job_config.parallelism.context_parallel_degree > 1
+        and model.model_args.use_flex_attn
+    ):
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
+            and not model_compile_enabled
         ):
-            raise RuntimeError("Async TP requires --training.compile")
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -75,7 +85,7 @@ def parallelize_qwen3(
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if job_config.training.compile:
+    if model_compile_enabled:
         apply_compile(model)
 
     if parallel_dims.fsdp_enabled:
@@ -100,11 +110,6 @@ def parallelize_qwen3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
-
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
 
@@ -116,7 +121,7 @@ def parallelize_qwen3(
         apply_ddp(
             model,
             world_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
