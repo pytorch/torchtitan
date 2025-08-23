@@ -4,15 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from logging import raiseExceptions
 import re
-from typing import Any
+from typing import Any, Dict
 
 import torch
 
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 from .quantization import calculate_scale_shape, dequantize_from_fp8
+
+from torch.distributed.tensor.placement_types import (
+    _StridedShard,
+    Shard,
+    Replicate
+)
+
+from torch.distributed.tensor import DTensor
 
 
 class DeepSeekV3StateDictAdapter(StateDictAdapter):
@@ -20,8 +30,10 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
     StateDictAdapter for DeepSeekV3 model.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs, hf_assets_path: str | None):
+    def __init__(self, model_args: DeepSeekV3ModelArgs, hf_assets_path: str | None, parallel_dims: ParallelDims):
+        super().__init__(model_args, hf_assets_path, parallel_dims)
         self.model_args = model_args
+        self.parallel_dims = parallel_dims
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
@@ -52,7 +64,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "lm_head.weight": "output.weight",
         }
 
-    def _split_experts_weights(
+    def _split_experts_weight(
         self, weight: torch.Tensor, n_experts: int
     ) -> list[torch.Tensor]:
         """
@@ -83,6 +95,134 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     return stacked_tensor
 
         return None
+
+    def _get_local_experts_weights(
+        self, abstract_key: str, layer_id: str, grouped_expert_weight: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Spliting the GroupedExperts weight and find the corresponding individual expert's weight in local tensor.
+
+        Potential experts weights shard placements:
+        - FSDP + EP when dp_mod_ep * ep <= num_experts: 
+            - StridedShard(0)Shard(0)
+        - FSDP + EP when dp_mod_ep * ep <= num_experts:
+            - Shard(1)Shard(0) 
+        - FSDP + ETP + EP when dp_mod_ep * ep <= num_experts:
+            - w1/w3: StridedShard(0)Shard(0)Shard(1)
+            - w2: StridedShard(0)Shard(0)Shard(2)
+        - FSDP + ETP + EP when dp_mod_ep * ep > num_experts:
+            - w1/w3: StridedShard(1)Shard(0)Shard(1)
+            - w2: Shard(1)Shard(0)Shard(2)
+        """
+        world_mesh = self.parallel_dims.world_mesh
+        num_experts = grouped_expert_weight.shape[0]
+
+        # Matching DTensor sharding placement and device mesh dims,
+        # find the dtensor dims that shard on dim-0 (num_experts dim)
+        original_placements = grouped_expert_weight.placements
+        world_mesh_names = []
+        dim_0_placements = []
+        for i, name in enumerate(world_mesh.mesh_dim_names):
+            placement = original_placements[i]
+            if placement.dim == 0:
+                world_mesh_names.append(name)
+                dim_0_placements.append(placement) 
+        
+        start_index, end_index = None, None
+        # StridedShard(0)Shard(0)
+        if len(dim_0_placements) == 2:
+            assert isinstance(dim_0_placements[0], _StridedShard)
+            strided_shard_mesh = world_mesh[world_mesh_names[0]]
+            strided_degree, strided_rank = strided_shard_mesh.size(), strided_shard_mesh.get_local_rank()
+            shard_mesh = world_mesh[world_mesh_names[1]]
+            shard_degree, shard_rank = shard_mesh.size(), shard_mesh.get_local_rank()
+            start_index, end_index = self._get_strided_shard_shard_slice(strided_degree, strided_rank, shard_degree, shard_rank, num_experts)
+        # Shard(0)
+        elif len(dim_0_placements) == 1:
+            assert not isinstance(dim_0_placements[0], _StridedShard)
+            shard_mesh = world_mesh[world_mesh_names[0]]
+            shard_degree, shard_rank = shard_mesh.size(), shard_mesh.get_local_rank()
+            block_size = num_experts // shard_degree
+            if block_size * shard_degree != num_experts:
+                raise ValueError("Not supported. num_experts can not be evenly divided by Shard(0) dimension degree.")
+            
+            start_index = block_size * shard_rank
+            end_index = start_index + block_size
+        else:
+            raise NotImplementedError(f"The DTensor placements {original_placements} for GroupedExperts is not supported in StateDictAdapter")
+
+        # Calculate the new placement for individual expert weights
+        new_placements = []
+        for i, name in enumerate(world_mesh.mesh_dim_names):
+            placement = original_placements[i]
+            if placement.dim == 0:
+                new_placements.append(Replicate())
+            elif isinstance(placement, Shard):
+                # Individual expert weight has only 2 dimensions
+                new_placements.append(Shard(placement.dim-1))
+            elif isinstance(placement, _StridedShard):
+                new_placements.append(_StridedShard(placement.dim-1, placement.split_factor))
+            else:
+                raise ValueError("Not supported new placements!")
+        print(f"Original placements: {original_placements}, new placements {new_placements}")
+       
+        assert isinstance(grouped_expert_weight, DTensor), "GroupedExperts weight is not a DTensor"
+        local_grouped_weights = grouped_expert_weight._local_tensor
+        assert local_grouped_weights.shape[0] == int(end_index - start_index), "Local tensor shape mismatch!"
+
+        # Create new DTensor for each individual expert weights
+        local_expert_fqn = {}
+        for expert_id in range(start_index, end_index):
+            new_key = abstract_key.format(layer_id, expert_id)
+            new_value = local_grouped_weights[expert_id - start_index, :, :].squeeze
+            local_expert_fqn[new_key] = DTensor.from_local(new_value, world_mesh, new_placements, run_check=False)
+
+        return local_expert_fqn
+            
+    
+    def _get_strided_shard_shard_slice(
+        self,
+        strided_shard_dim_degree: int,
+        strided_shard_dim_rank: int,
+        shard_dim_degree: int,
+        shard_dim_rank: int,
+        dim_size_to_split: int,
+    ) -> tuple[int, int]:
+        """
+        Given a [StridedShard(dim=i), Shard(dim=i)] placement, caculate the start index 
+        and end index on dim-i for GPU rank (strided_shard_dim_degree, shard_dim_rank)
+        
+        GPU Layout (strided_shard_rank, shard_rank):
+
+        StridedShard Rank                  Shard rank
+                        ┌─────────────────┐  
+                    0   │    GPU(0, 0)    │  0  
+                    ────┼─────────────────┤     
+                    1   │    GPU(1, 0)    │  
+                    ────┼─────────────────┤  
+                    2   │    GPU(2, 0)    │  
+                  ──────┼─────────────────┼────  
+                    0   │    GPU(0, 1)    │  1
+                    ────┼─────────────────┤  
+                    1   │    GPU(1, 1)    │  
+                    ────┼─────────────────┤  
+                    2   │    GPU(2, 1)    │
+                        └─────────────────┘
+
+        Calulate the start_index from inner dimesion (Shard(dim=i)) to outer demension (StridedShard(dim=i)).
+        """
+
+        block_size = dim_size_to_split // (strided_shard_dim_degree * shard_dim_degree)
+        
+        # Error out if can not evenly divded
+        if block_size * (strided_shard_dim_degree * shard_dim_degree) != dim_size_to_split:
+            raise ValueError(f"Not supported split for strided_shard_dim_degree {strided_shard_dim_degree}, shard_dim_degree {shard_dim_degree}, dim_size_to_split {dim_size_to_split}")
+
+        start_index = block_size * (strided_shard_dim_degree * shard_dim_rank + strided_shard_dim_rank)
+        end_index = start_index + block_size
+
+        return start_index, end_index
+
 
     def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -149,14 +289,16 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
 
-                # Split expert weights into separate expert weights
-                split_values = self._split_experts_weights(
-                    value, self.model_args.moe_args.num_experts
+                # # Split expert weights into separate expert weights
+                # split_values = self._split_experts_weights(
+                #     value, self.model_args.moe_args.num_experts
+                # )
+                local_expert_fqn = self._get_local_experts_weights(
+                    new_abstract_key, layer_num, value
                 )
+                print(f"groupedWeight placements {value.placements}, local experts keys {local_expert_fqn.keys()}")
 
-                for expert_num in range(0, self.model_args.moe_args.num_experts):
-                    new_key = new_abstract_key.format(layer_num, expert_num)
-                    hf_state_dict[new_key] = split_values[expert_num].squeeze()
+                hf_state_dict.update(local_expert_fqn)
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -169,9 +311,11 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
+        # Prepare for dequantization
         hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
             hf_state_dict
         )
+        print(f"[to_hf] state_dict keys before return: {hf_state_dict_with_scale_inv.keys()}")
         return hf_state_dict_with_scale_inv
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:

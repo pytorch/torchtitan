@@ -11,6 +11,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+from torchtitan.distributed.parallel_dims import ParallelDims
+
 logger = logging.getLogger()
 
 from .model import BaseModelArgs
@@ -27,7 +29,7 @@ class BaseStateDictAdapter(ABC):
     """
 
     @abstractmethod
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None, parallel_dims: ParallelDims):
         pass
 
     @abstractmethod
@@ -58,7 +60,7 @@ class BaseStateDictAdapter(ABC):
 class StateDictAdapter(BaseStateDictAdapter):
     """State dict adapter base class which provides convenient default behavior to build fqn_to_index_mapping"""
 
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None, parallel_dims: ParallelDims):
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:

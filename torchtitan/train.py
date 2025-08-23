@@ -23,7 +23,7 @@ from torchtitan.components.metrics import (
     ensure_pp_loss_visible,
 )
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, parallel_dims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -311,7 +311,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
+                    model_args, job_config.model.hf_assets_path, self.parallel_dims
                 )
                 if self.train_spec.state_dict_adapter
                 else None
@@ -538,6 +538,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     @record
     def train(self):
         job_config = self.job_config
+
+        # Following hacky print only works for debug_model
+        # w1 = self.model_parts[0].layers["1"].moe.experts.w1
+        # w2 = self.model_parts[0].layers["1"].moe.experts.w2
+        # w3 = self.model_parts[0].layers["1"].moe.experts.w3
+
+        # logger.info(f"w1 placements is: {w1.placements}, {type(w1.placements)}")
+        # logger.info(f"w2 placements is: {w2.placements}")
+        # logger.info(f"w3 placements is: {w3.placements}")
+        # logger.info(f"device mesh: {self.parallel_dims.world_mesh}, {self.parallel_dims.world_mesh.mesh_dim_names} {self.parallel_dims.world_mesh['dp_shard']}")
+
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
