@@ -10,14 +10,15 @@ from typing import Any
 
 logger = logging.getLogger()
 
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import TransformerModelArgs
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None):
-        super().__init__(model_args, hf_assets_path)
+    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None, parallel_dims: ParallelDims):
+        super().__init__(model_args, hf_assets_path, parallel_dims)
 
         self.model_args = model_args
         self.hf_assets_path = hf_assets_path
