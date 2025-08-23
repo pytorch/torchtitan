@@ -10,7 +10,7 @@ from typing import Tuple
 import torch
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.attention import build_attention
 from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -364,7 +364,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -383,10 +382,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=eos_id
-            )
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
