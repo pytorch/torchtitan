@@ -57,6 +57,10 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
@@ -64,4 +68,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
         mkdir artifacts-to-be-uploaded
-        TEST_WITH_ROCM=${{ matrix.is-rocm }} python ./tests/integration_tests.py artifacts-to-be-uploaded --ngpu 8
+        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests artifacts-to-be-uploaded --ngpu 8

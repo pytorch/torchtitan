@@ -3,20 +3,20 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
+from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_llama
 from .infra.pipeline import pipeline_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
+from .model.state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
     "parallelize_llama",
@@ -29,12 +29,13 @@ __all__ = [
 
 llama3_configs = {
     "debugmodel": TransformerModelArgs(
-        dim=256, n_layers=6, n_heads=16, rope_theta=500000
+        dim=256, n_layers=6, n_heads=16, vocab_size=2000, rope_theta=500000
     ),
     "debugmodel_flex_attn": TransformerModelArgs(
         dim=256,
         n_layers=6,
         n_heads=16,
+        vocab_size=2000,
         rope_theta=500000,
         use_flex_attn=True,
         attn_mask_type="block_causal",
@@ -72,14 +73,16 @@ llama3_configs = {
 register_train_spec(
     TrainSpec(
         name="llama3",
-        cls=Transformer,
-        config=llama3_configs,
+        model_cls=Transformer,
+        model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
-        build_tokenizer_fn=build_tiktoken_tokenizer,
+        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        build_validator_fn=build_validator,
+        state_dict_adapter=Llama3StateDictAdapter,
     )
 )

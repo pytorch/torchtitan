@@ -10,7 +10,7 @@ from torch import nn
 
 from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
 
-from torchtitan.protocols.train_spec import BaseModelArgs
+from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 
 

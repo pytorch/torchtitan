@@ -17,6 +17,8 @@ from .loss import build_mse_loss
 from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
+from .model.state_dict_adapter import FluxStateDictAdapter
+from .validate import build_flux_validator
 
 __all__ = [
     "FluxModelArgs",
@@ -108,8 +110,8 @@ flux_configs = {
 register_train_spec(
     TrainSpec(
         name="flux",
-        cls=FluxModel,
-        config=flux_configs,
+        model_cls=FluxModel,
+        model_args=flux_configs,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
@@ -117,5 +119,7 @@ register_train_spec(
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
+        build_validator_fn=build_flux_validator,
+        state_dict_adapter=FluxStateDictAdapter,
     )
 )

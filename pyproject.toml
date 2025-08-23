@@ -17,8 +17,7 @@ dependencies = [
     "datasets>=2.21.0",
 
     # Tokenization
-    "blobfile",
-    "tiktoken",
+    "tokenizers",
 
     # Miscellaneous
     "tomli>=1.1.0",

@@ -12,6 +12,7 @@ from torch.optim import Adam
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config import ConfigManager
 
 
 class TestLRScheduler(unittest.TestCase):
@@ -36,11 +37,9 @@ class TestLRScheduler(unittest.TestCase):
         warmup_steps=None,
         decay_ratio=None,
         decay_type=None,
-        lr_min=None,
+        min_lr_factor=None,
     ):
         # Create a job config with the specified parameters
-        from torchtitan.config_manager import ConfigManager
-
         args = [
             "--training.steps",
             str(training_steps),
@@ -59,7 +58,11 @@ class TestLRScheduler(unittest.TestCase):
         args += (
             ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
         )
-        args += ["--lr_scheduler.lr_min", str(lr_min)] if lr_min is not None else []
+        args += (
+            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
+            if min_lr_factor is not None
+            else []
+        )
 
         config_manager = ConfigManager()
         # Create base config with parameters passed directly
@@ -75,11 +78,13 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=None,  # Use default decay: start decay immediately
             decay_type=None,
-            lr_min=None,
+            min_lr_factor=None,
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -115,11 +120,13 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=0.5,  # 50% of steps for decay
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -154,11 +161,13 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=None,
             decay_type="linear",
-            lr_min=0.2,  # 20% of base LR as minimum
+            min_lr_factor=0.2,  # 20% of base LR as minimum
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Step through all steps
         for _ in range(10):
@@ -175,11 +184,13 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=10,  # More than training steps
             decay_ratio=None,
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -209,11 +220,13 @@ class TestLRScheduler(unittest.TestCase):
             warmup_steps=2,
             decay_ratio=0.0,  # 0% of steps for decay (no decay)
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [
@@ -243,17 +256,19 @@ class TestLRScheduler(unittest.TestCase):
     def test_warmup_plus_decay_exceeds_training(self):
         """Test when warmup + decay steps exceed training steps."""
         # Create a job config where warmup + decay steps > training steps
-        # Expected behaviro: warmup steps = 5, decay steps = 5
+        # Expected behavior: warmup steps = 5, decay steps = 5
         config = self.create_job_config(
             training_steps=10,
             warmup_steps=5,
             decay_ratio=0.8,  # 80% of steps for decay (8 steps)
             decay_type="linear",
-            lr_min=0.0,
+            min_lr_factor=0.0,
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(self.optimizer_container, config)
+        lr_scheduler = build_lr_schedulers(
+            self.optimizer_container, config.lr_scheduler, config.training.steps
+        )
 
         # Expected adjustment factors for each step
         expected_factors = [

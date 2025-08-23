@@ -382,7 +382,7 @@ class MoEGate(nn.Module):
         if self.topk_method == "noaux_tc":
             self.e_score_correction_bias = nn.Parameter(
                 # Changed from torch.empty to torch.rand to avoid non-even
-                # distribution for runs without actual weigths
+                # distribution for runs without actual weights
                 torch.rand((self.n_routed_experts))
             )
         self.reset_parameters()
@@ -519,7 +519,7 @@ class MoE(nn.Module):
 
         assert (
             MoE.group_mm in MoE.group_gemm_strategies
-        ), f"selected group gemm {self.group_mm} is not avaiable!"
+        ), f"selected group gemm {self.group_mm} is not available!"
         # keep active gg ready
         self.group_gemm_instance = MoE.group_gemm_strategies[MoE.group_mm]
         self._buffer_initialized = False
@@ -695,7 +695,7 @@ class MoE(nn.Module):
             # TODO: don't use `received`
             gathered_tokens = token_gather_buf[:received]
         else:  # "torch_all_to_all"
-            # Prepare input ans output splits
+            # Prepare input and output splits
             with torch.no_grad():
                 output_splits = tokens_per_expert_group.view(self.ep_size, -1).sum(
                     dim=1
@@ -1349,7 +1349,7 @@ class DeepseekForCausalLM(torch.nn.Module):
 
             # Keep only the unprocessed tokens:
             # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-            # some of the inputs are exclusivelly passed as part of the cache (e.g. when passing input_embeds as
+            # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
             # input)
             if (
                 attention_mask is not None

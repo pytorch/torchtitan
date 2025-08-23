@@ -7,7 +7,6 @@
 # pyre-unsafe
 import logging
 
-import numpy as np
 import torch
 
 from reference_utils import (

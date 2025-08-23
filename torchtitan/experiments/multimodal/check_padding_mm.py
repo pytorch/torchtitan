@@ -8,7 +8,7 @@ import click
 from mm_dataset import build_mm_dataloader
 from tokenizer.tiktoken import build_tiktoken_tokenizer
 
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger
 
 
@@ -39,7 +39,7 @@ def main(
             str(batch_size),
             "--training.seq_len",
             str(seq_len),
-            "--model.tokenizer_path",
+            "--model.hf_assets_path",
             tokenizer_path,
         ]
     )

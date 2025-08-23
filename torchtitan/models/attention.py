@@ -6,10 +6,12 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import functools
 from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor.experimental._attention import create_cp_block_mask
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -77,10 +79,14 @@ class FlexAttention(torch.nn.Module):
         return (self.attn_mask_type, self.fixed_block_size)
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float | None = None,
     ) -> torch.Tensor:
         block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
+        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
 
     @staticmethod
     def _get_causal_mask_mod() -> _mask_mod_signature:
@@ -114,7 +120,7 @@ class FlexAttention(torch.nn.Module):
         mask_mod: _mask_mod_signature, fixed_block_size: int
     ) -> _mask_mod_signature:
         """
-        Given an arbirary mask_mod, divide the input sequence to blocks
+        Given an arbitrary mask_mod, divide the input sequence to blocks
         and only allow attention within the same block.
 
         Args:
@@ -146,7 +152,7 @@ class FlexAttention(torch.nn.Module):
 
     @staticmethod
     @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
+    def init_attention_mask(batch: torch.Tensor, eos_id: int | None) -> None:
         # batch is [b, s, h, d] shape
         for mask_key in FlexAttention.used_attn_mask_types:
             attn_mask_type, fixed_block_size = mask_key
@@ -207,11 +213,15 @@ class ScaledDotProductAttention(torch.nn.Module):
             cls.backends.insert(0, SDPBackend.CUDNN_ATTENTION)
 
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float | None = None,
     ) -> torch.Tensor:
         assert self.backends, "SDPA Backends should not be empty."
         with sdpa_kernel(self.backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
 
 
 def build_attention(
@@ -231,5 +241,18 @@ def build_attention(
         return ScaledDotProductAttention(attn_mask_type)
 
 
-def init_attention_mask(batch: torch.Tensor, eos_id: int | None = None) -> None:
+def init_attention_mask(
+    batch: torch.Tensor,
+    eos_id: int | None,
+    cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
+) -> None:
+
+    # This is not functional yet because we currently gate the use of Flex + CP
+    # while we continue debugging accuracy issues. However, we want to evaluate
+    # the user experience with CP enabled.
+    if cp_mesh is not None:
+        FlexAttention.compiled_create_block_mask = functools.partial(
+            create_cp_block_mask, device_mesh=cp_mesh
+        )
+
     FlexAttention.init_attention_mask(batch, eos_id)

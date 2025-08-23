@@ -8,26 +8,21 @@
 # https://github.com/pytorch/FBGEMM/blob/main/fbgemm_gpu/experimental/gemm/triton_gemm
 
 # pyre-unsafe
-import functools
 import logging
 
 import os
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import Tuple
 
 import torch
 
 import triton
 import triton.language as tl
-from triton import Config as TConfig
-
-from triton.runtime import driver  # @manual
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from tma_autotuning import (
     _NV_CONFIGS,
-    ALIGN_SIZE_M,
     CudaUtils,
     early_config_prune,
     TmaDescriptorHelper,
@@ -727,6 +722,7 @@ def grouped_gemm_forward(
     w: torch.Tensor,
     m_sizes: torch.Tensor,
     tma_size: int = 128,
+    using_fp8: bool = False,
 ) -> torch.Tensor:
     """
     M*G style grouped GEMM with TMA and Float8 support.
@@ -892,7 +888,7 @@ def grouped_gemm_backward(
 
     # Compute grad_x using flat linear implementation
     try:
-        logging.info(f"Computing grad_x with flat linear kernel")
+        logging.info("Computing grad_x with flat linear kernel")
 
         # Use TMA-optimized implementation
         grad_x = grouped_gemm_dx_tma(
@@ -909,7 +905,7 @@ def grouped_gemm_backward(
 
     # Compute grad_w using flat linear style implementation
     try:
-        logging.info(f"Computing grad_w with flat linear kernel")
+        logging.info("Computing grad_w with flat linear kernel")
 
         grad_w = grouped_gemm_dw_tma(
             x, grad_output, m_sizes, num_sms=NUM_SMS, tma_size=tma_size
@@ -1203,14 +1199,14 @@ def grouped_gemm_dw_tma(
 # ======== PyTorch wrapper functions ========
 
 
-class GroupedGEMM_mg(torch.autograd.Function):
+class GroupedGemmMg(torch.autograd.Function):
     """
     Autograd function for GroupedGEMM with M*G grouping.
     Supports both standard and FP8 quantized operations.
     """
 
     @staticmethod
-    def forward(ctx, x, w, m_sizes, use_tma=True, tma_size=128):
+    def forward(ctx, x, w, m_sizes, use_tma=True, tma_size=128, using_fp8=False):
         """
         Forward pass of GroupedGEMM.
 
@@ -1301,4 +1297,4 @@ def mg_grouped_gemm(
     Returns:
         Output tensor, shape [M_total, N]
     """
-    return GroupedGEMM_mg.apply(x, w, m_sizes, use_tma, tma_size, using_fp8)
+    return GroupedGemmMg.apply(x, w, m_sizes, use_tma, tma_size, using_fp8)

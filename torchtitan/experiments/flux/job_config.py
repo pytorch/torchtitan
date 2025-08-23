@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Training:
-    classifer_free_guidance_prob: float = 0.0
+    classifier_free_guidance_prob: float = 0.0
     """Classifier-free guidance with probability `p` to dropout each text encoding independently.
     If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
     For example, if `n = 2` and `p = 0.447`, the unconditional model is trained in 20% of all steps"""
     img_size: int = 256
     """Image width to sample"""
     test_mode: bool = False
-    """Whether to use intergration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
+    """Whether to use integration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
 
 
 @dataclass
@@ -36,8 +36,8 @@ class Encoder:
 
 
 @dataclass
-class Eval:
-    enable_classifer_free_guidance: bool = False
+class Validation:
+    enable_classifier_free_guidance: bool = False
     """Whether to use classifier-free guidance during sampling"""
     classifier_free_guidance_scale: float = 5.0
     """Classifier-free guidance scale when sampling"""
@@ -45,16 +45,36 @@ class Eval:
     """How many denoising steps to sample when generating an image"""
     eval_freq: int = 100
     """Frequency of evaluation/sampling during training"""
+    save_img_count: int = 1
+    """ How many images to generate and save during validation, starting from
+    the beginning of validation set, -1 means generate on all samples"""
     save_img_folder: str = "img"
     """Directory to save image generated/sampled from the model"""
+    all_timesteps: bool = False
+    """Whether to generate all stratified timesteps per sample or use round robin"""
+
+
+@dataclass
+class Inference:
+    """Inference configuration"""
+
+    save_img_folder: str = "inference_results"
+    """Path to save the inference results"""
+    prompts_path: str = "./torchtitan/experiments/flux/inference/prompts.txt"
+    """Path to file with newline separated prompts to generate images for"""
+    local_batch_size: int = 2
+    """Batch size for inference"""
+    img_size: int = 256
+    """Image size for inference"""
 
 
 @dataclass
 class JobConfig:
     """
-    Extend the tyro parser with custom config classe for Flux model.
+    Extend the tyro parser with custom config classes for Flux model.
     """
 
     training: Training = field(default_factory=Training)
     encoder: Encoder = field(default_factory=Encoder)
-    eval: Eval = field(default_factory=Eval)
+    validation: Validation = field(default_factory=Validation)
+    inference: Inference = field(default_factory=Inference)

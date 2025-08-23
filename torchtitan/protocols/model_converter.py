@@ -7,7 +7,7 @@ from typing import Dict, List, Protocol, Union
 
 import torch.nn as nn
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -25,7 +25,7 @@ class ModelConverter(Protocol):
         ...
 
     def convert(self, model: nn.Module):
-        """Inplace convertion of the model."""
+        """Inplace conversion of the model."""
         ...
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):

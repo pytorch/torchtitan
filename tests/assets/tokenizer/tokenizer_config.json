@@ -1,0 +1,29 @@
+{
+  "added_tokens_decoder": {
+    "128000": {
+      "content": "<|begin_of_text|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "128001": {
+      "content": "<|end_of_text|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "bos_token": "<|begin_of_text|>",
+  "clean_up_tokenization_spaces": true,
+  "eos_token": "<|end_of_text|>",
+  "model_input_names": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "model_max_length": 131072,
+  "tokenizer_class": "PreTrainedTokenizerFast"
+}

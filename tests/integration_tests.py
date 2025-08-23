@@ -67,7 +67,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "1D compile",
@@ -76,7 +76,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
                 ],
@@ -96,7 +96,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--training.compile",
+                    "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
@@ -107,7 +107,7 @@ def build_test_list():
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--training.compile",
+        #             "--compile.enable",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.enable_async_tensor_parallel",
         #         ],
@@ -118,10 +118,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -131,23 +131,41 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.enable",
+                    "--checkpoint.folder hf_checkpoint",
+                    "--checkpoint.last_save_model_only",
+                    "--checkpoint.last_save_in_hf",
+                ],
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+                    "--checkpoint.initial_load_model_only",
+                    "--checkpoint.initial_load_in_hf",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "last_save_model_weights_only_fp32",
+            "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
+            "model_only_hf_checkpoint",
         ),
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.enable",
+                    "--checkpoint.last_save_model_only",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Model Only fp32",
+            "last_save_model_only_fp32",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.last_save_model_only",
                     "--checkpoint.export_dtype bfloat16",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only bf16",
-            "last_save_model_weights_only_bf16",
+            "Checkpoint Integration Test - Save Model Only bf16",
+            "last_save_model_only_bf16",
         ),
         OverrideDefinitions(
             [
@@ -236,14 +254,14 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
                     "--training.steps 20",
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -259,7 +277,7 @@ def build_test_list():
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--training.compile",
+                    "--compile.enable",
                 ],
             ],
             "PP+DP+TP 3D test with torch.compile",
@@ -336,6 +354,19 @@ def build_test_list():
             ],
             "FSDP+FLEX_ATTN",
             "fsdp+flex_attn",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode=selective",
+                    "--activation_checkpoint.selective_ac_option=op",
+                    "--model.flavor=debugmodel_flex_attn",
+                ]
+            ],
+            "FSDP + FLEX + per op SAC",
+            "fsdp+flex_attn+per_op_sac",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -422,7 +453,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--training.enable_cpu_offload",
@@ -440,20 +471,20 @@ def build_test_list():
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--memory_estimation.enable",
+        #         ]
+        #     ],
+        #     "FSDP2 Memory Tracking and Estimation",
+        #     "fsdp2_memory_estimation",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [
-                    "--memory_estimation.enabled",
-                ]
-            ],
-            "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_memory_estimation",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
                     # placeholder for the generation script's generate step
@@ -476,13 +507,13 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 10",
                 ],
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 20",
@@ -497,7 +528,6 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--float8.force_recompute_fp8_weight_in_bwd",
                     "--float8.emulate",
                 ],
             ],
@@ -518,6 +548,21 @@ def build_test_list():
             "Gradient accumulation",
             "gradient_accumulation",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--validation.enable",
+                    "--validation.dataset c4_test",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_degree=2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                ],
+            ],
+            "Validation test with tp, cp, pp",
+            "validation_tp_cp_pp",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors

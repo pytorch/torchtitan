@@ -4,8 +4,8 @@ To accelerate contributions to and innovations around `torchtitan`, we are addin
 
 We provide this `experiments/` folder to host experiments that add significant value to `torchtitan`, with the following principles. We refer to the part of `torchtitan` outside `experiments` as `core`.
 1. Each subfolder in `experiments` will be an experiment, with a clear theme which can be flexible, such as
-    - a new model, or preferably a new model architecture, with its training infrastructure including parallelization functions;
-    - an enhancement or addition to the existing infrastructure of `torchtitan`.
+    - A new model, or preferably a new model architecture, with its training infrastructure including parallelization functions. Please see the [instructions](/torchtitan/models/README.md) on how to contribute a new model.
+    - An enhancement or addition to the existing infrastructure of `torchtitan`.
 2. It is the contributors' responsibility to justify the value of an experiment. `torchtitan` team will review proposals on a case-by-case basis. As part of the contribution, the contributors should provide documentation that clearly showcases the motivation and innovation of an experiment, including reports on performance and loss convergence.
 3. An experiment should reuse existing `torchtitan` code as much as possible, such as modules in [`components/`](../components/) (via a new [`TrainSpec`](../protocols/train_spec.py)) and [`train.py`](../train.py). For a list of extension points we provide, please refer to [docs/extension.md](../../docs/extension.md).
     - The extension points are subject to change. We kindly request that contributors provide feedback if they encounter issues reusing any components, rather than simply using a copy-and-paste approach.
