@@ -425,6 +425,8 @@ class CheckpointManager:
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
+                # import fbvscode
+                # fbvscode.set_trace()
                 self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
@@ -522,6 +524,7 @@ class CheckpointManager:
 
         model_only = False
         from_hf = False
+        # torch.distributed.breakpoint()
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf

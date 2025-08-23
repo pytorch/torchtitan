@@ -11,6 +11,9 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -154,8 +157,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
-        with torch.device("meta"):
+        with torch.device("cuda"):
+            # import fbvscode
+            # fbvscode.set_trace()
             model = self.train_spec.model_cls(model_args)
+            # model = torch.nn.Linear(1024, 1024, device="cuda")
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -257,14 +263,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
+            import copy
+            model.init_weights()
+            ref_model = copy.deepcopy(model)
+            ref_model = self.train_spec.parallelize_fn(ref_model, parallel_dims, job_config)
+            ref_model.train()
+            self.ref_model_parts = [ref_model]
+
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
-
-            model.to_empty(device=init_device)
-            with torch.no_grad():
-                model.init_weights(buffer_device=buffer_device)
             model.train()
-
             self.model_parts = [model]
+
+            
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
@@ -294,6 +304,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.model_parts
             )
         )
+
+        self.ref_optimizers = self.train_spec.build_optimizers_fn(
+            self.ref_model_parts, job_config.optimizer, parallel_dims, self.ft_manager
+        )
+        self.ref_lr_schedulers = self.train_spec.build_lr_schedulers_fn(
+            self.ref_optimizers, job_config.lr_scheduler, job_config.training.steps
+        )
+        self.ref_optimizers.register_step_post_hook(
+            lambda *args, **kwargs: model_converters.post_optimizer_hook(
+                self.ref_model_parts
+            )
+        )
+
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
@@ -307,6 +330,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            states={"train_state": self},
+            checkpoint_config=job_config.checkpoint,
+            sd_adapter=(
+                self.train_spec.state_dict_adapter(
+                    model_args, job_config.model.hf_assets_path
+                )
+                if self.train_spec.state_dict_adapter
+                else None
+            ),
+            base_folder=job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        self.ref_checkpointer = CheckpointManager(
+            dataloader=self.dataloader,
+            model_parts=self.ref_model_parts,
+            optimizers=self.ref_optimizers,
+            lr_schedulers=self.ref_lr_schedulers,
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
@@ -460,16 +501,32 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs)
                     loss = self.loss_fn(pred, labels)
+
+                    import copy
+                    ref_inputs = copy.deepcopy(inputs)
+                    ref_pred = self.ref_model_parts[0](ref_inputs)
+                    ref_loss = self.loss_fn(ref_pred, labels)
+
+                    try:
+                        assert torch.equal(pred, ref_pred)
+                        assert torch.equal(loss, ref_loss)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
+                    
                 # need to free to before bwd to avoid peaking memory
                 del pred
+                del ref_pred
                 loss.backward()
+                ref_loss.backward()
 
-        return loss
+        return loss, ref_loss
 
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
+        self.ref_optimizers.zero_grad()
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
 
@@ -478,25 +535,72 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         parallel_dims = self.parallel_dims
 
         accumulated_losses = []
+        ref_accumulated_losses = []
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
         for microbatch in range(self.gradient_accumulation_steps):
+            # import fbvscode
+            # fbvscode.set_trace()
+            for param, ref_param in zip(self.model_parts[0].parameters(), self.ref_model_parts[0].parameters()):
+                full_param = param.full_tensor()
+                ref_full_param = ref_param.full_tensor()
+                try:
+                    assert torch.equal(full_param, ref_full_param)
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
+
             input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            loss, ref_loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
+            ref_accumulated_losses.append(ref_loss.detach())
+
+        for param, ref_param in zip(self.model_parts[0].parameters(), self.ref_model_parts[0].parameters()):
+            full_param = param.full_tensor()
+            ref_full_param = ref_param.full_tensor()
+            full_param_grad = param.grad.full_tensor()
+            ref_full_param_grad = ref_param.grad.full_tensor()
+            try:
+                assert torch.equal(full_param, ref_full_param)
+            except:
+                import fbvscode
+                fbvscode.set_trace()
+            try:
+                assert torch.equal(full_param_grad, ref_full_param_grad)
+            except:
+                import fbvscode
+                fbvscode.set_trace()
+
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
-            foreach=True,
+            foreach=False,
             pp_mesh=(
                 parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
             ),
             ep_enabled=parallel_dims.ep_enabled,
         )
+        ref_grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.ref_model_parts for p in m.parameters()],
+            self.job_config.training.max_norm,
+            foreach=False,
+            pp_mesh=(
+                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+            ),
+            ep_enabled=parallel_dims.ep_enabled,
+        )
+        try:
+            assert torch.equal(grad_norm, ref_grad_norm)
+        except:
+            import fbvscode
+            fbvscode.set_trace()
         self.checkpointer.maybe_wait_for_staging()
+        self.ref_checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+        self.ref_optimizers.step()
+        self.ref_lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -540,6 +644,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
+        self.ref_checkpointer.load(step=job_config.checkpoint.load_step)
+
+        # import fbvscode
+        # fbvscode.set_trace()
         logger.info(f"Training starts at step {self.step + 1}")
 
         leaf_folder = (
