@@ -64,9 +64,6 @@ def parallelize_llama(
     ):
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -90,6 +87,9 @@ def parallelize_llama(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model)
