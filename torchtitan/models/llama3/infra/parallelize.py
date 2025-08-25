@@ -245,7 +245,7 @@ def _apply_ac_to_transformer_block(
         )
 
     if ac_config.mode == "full":
-        return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+        return ptd_checkpoint_wrapper(module, preserve_rng_state=False, early_stop=ac_config.early_stop)
 
     assert ac_config.mode == "selective", f"{ac_config.mode}"
     use_op_sac = ac_config.selective_ac_option == "op"
@@ -311,6 +311,7 @@ def _apply_ac_to_transformer_block(
             module,
             context_fn=selective_checkpointing_context_fn,
             preserve_rng_state=False,
+            early_stop=ac_config.early_stop,
         )
     elif use_layer_sac:
         # Checkpoint every `ac_freq` of the modules passed to this function
@@ -318,7 +319,7 @@ def _apply_ac_to_transformer_block(
         ptd_checkpoint_wrapper.__dict__.setdefault("_count", 0)
         ptd_checkpoint_wrapper._count += 1
         if not ac_freq or ptd_checkpoint_wrapper._count % ac_freq == 0:
-            return ptd_checkpoint_wrapper(module, preserve_rng_state=False)
+            return ptd_checkpoint_wrapper(module, preserve_rng_state=False, early_stop=ac_config.early_stop)
         else:
             return module
 
