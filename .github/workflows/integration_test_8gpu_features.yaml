@@ -1,5 +1,4 @@
-name: 8 GPU Integration Test - Core Features
-
+name: 8 GPU Feature Tests
 on:
   push:
     branches: [ main ]
