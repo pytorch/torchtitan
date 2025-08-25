@@ -19,10 +19,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import (
-    HuggingFaceStorageReader,
-    HuggingFaceStorageWriter,
-)
+from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -37,6 +34,12 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.models.deepseek_v3.model.deepseek_v3_storage_reader import (
+    DeepSeekV3HuggingFaceStorageReader,
+)
+from torchtitan.models.deepseek_v3.model.deepseek_v3_planner import (
+    DeepSeekV3LoadPlanner,
+)
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -412,9 +415,22 @@ class CheckpointManager:
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
+            storage_reader = DeepSeekV3HuggingFaceStorageReader(
+                path=checkpoint_id,
+                block_size=128,
+                thread_count=4
+            )
+
+            # Use custom planner for key mapping between TorchTitan and HuggingFace formats
+            planner = DeepSeekV3LoadPlanner()
+
+            # Let DCP handle the metadata reading internally
+            # The planner will access the metadata in create_local_plan() after DCP calls read_metadata()
+
             dcp.load(
                 hf_state_dict,
-                storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
+                storage_reader=storage_reader,
+                planner=planner,
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
