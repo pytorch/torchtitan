@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torchtitan.experiments.llama4  # noqa: F401
-import torchtitan.experiments.qwen3
-import torchtitan.experiments.simple_fsdp  # noqa: F401
-import torchtitan.experiments.evaluation  # noqa: F401
+
+# Import the built-in models here so that the corresponding register_model_spec()
+# will be called.
+import torchtitan.experiments.evaluation.llama3 # noqa: F401
