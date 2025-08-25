@@ -18,6 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
+from torchtitan.tools.logging import logger
 
 
 class BaseValidator:
@@ -67,6 +68,7 @@ class Validator(BaseValidator):
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
+            infinite=self.job_config.validation.steps != -1,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
@@ -74,6 +76,11 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
+
+        if self.job_config.validation.steps == -1:
+            logger.warning(
+                "Setting validation steps to -1 could cause hangs due to mismatch among ranks."
+            )
 
     @torch.no_grad()
     def validate(
