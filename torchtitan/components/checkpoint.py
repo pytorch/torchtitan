@@ -186,7 +186,7 @@ class CheckpointManager:
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
-        self.enable_checkpoint = checkpoint_config.enable_checkpoint
+        self.enable = checkpoint_config.enable
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -216,10 +216,10 @@ class CheckpointManager:
 
         async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
-            self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+            self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.ft_manager
 
-        if not self.enable_checkpoint and self.ft_manager is None:
+        if not self.enable and self.ft_manager is None:
             return
 
         self.states = states
@@ -305,7 +305,7 @@ class CheckpointManager:
         self.close()
 
     def close(self):
-        if hasattr(self, "enable_checkpoint") and self.enable_checkpoint:
+        if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
@@ -517,7 +517,7 @@ class CheckpointManager:
         if self.ft_manager:
             self._ft_load()
 
-        if not self.enable_checkpoint:
+        if not self.enable:
             return False
 
         model_only = False
@@ -739,7 +739,7 @@ class CheckpointManager:
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable_checkpoint:
+        if not self.enable:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:
