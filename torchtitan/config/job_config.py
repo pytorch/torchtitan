@@ -182,6 +182,9 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
+    synthetic_data: bool = False
+    """Use synthetic data"""
+
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
