@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.dataloader import DataloaderStopIteration
+from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
@@ -135,7 +135,7 @@ class Trainer(ForgeEngine):
             except StopIteration as ex:
                 # If data runs out during gradient accumulation, that
                 # entire step will not be executed.
-                raise DataloaderStopIteration() from ex
+                raise DataloaderExhaustedError() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -292,7 +292,7 @@ class Trainer(ForgeEngine):
                 self.gc_handler.run(self.step)
                 try:
                     self.train_step(data_iterator)
-                except DataloaderStopIteration:
+                except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 

@@ -15,7 +15,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.dataloader import DataloaderStopIteration
+from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
@@ -386,7 +386,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             except StopIteration as ex:
                 # If data runs out during gradient accumulation, that
                 # entire step will not be executed.
-                raise DataloaderStopIteration() from ex
+                raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             ntokens_batch = labels.numel()
             self.ntokens_seen += ntokens_batch
@@ -583,7 +583,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.gc_handler.run(self.step)
                 try:
                     self.train_step(data_iterator)
-                except DataloaderStopIteration:
+                except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
