@@ -541,7 +541,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for microbatch in range(self.gradient_accumulation_steps):
             # import fbvscode
             # fbvscode.set_trace()
-            for param, ref_param in zip(self.model_parts[0].parameters(), self.ref_model_parts[0].parameters()):
+            for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
                 full_param = param.full_tensor()
                 ref_full_param = ref_param.full_tensor()
                 try:
@@ -555,12 +555,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             accumulated_losses.append(loss.detach())
             ref_accumulated_losses.append(ref_loss.detach())
 
-        for param, ref_param in zip(self.model_parts[0].parameters(), self.ref_model_parts[0].parameters()):
+        for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
             full_param = param.full_tensor()
             ref_full_param = ref_param.full_tensor()
             full_param_grad = param.grad.full_tensor()
             ref_full_param_grad = ref_param.grad.full_tensor()
             try:
+                
                 assert torch.equal(full_param, ref_full_param)
             except:
                 import fbvscode
@@ -643,8 +644,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def train(self):
         job_config = self.job_config
 
-        self.checkpointer.load(step=job_config.checkpoint.load_step)
-        self.ref_checkpointer.load(step=job_config.checkpoint.load_step)
+        # self.checkpointer.load(step=job_config.checkpoint.load_step)
+        # self.ref_checkpointer.load(step=job_config.checkpoint.load_step)
 
         # import fbvscode
         # fbvscode.set_trace()
@@ -698,6 +699,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )
+                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                    full_param = param.full_tensor()
+                    ref_full_param = ref_param.full_tensor()
+                    try:
+                        assert torch.equal(full_param, ref_full_param)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
+                self.checkpointer.load(step=job_config.checkpoint.load_step)
+                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                    full_param = param.full_tensor()
+                    ref_full_param = ref_param.full_tensor()
+                    try:
+                        assert torch.equal(full_param, ref_full_param)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
 
                 # Run validation if validator is available
                 if (
