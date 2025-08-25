@@ -16,8 +16,14 @@ from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.tools.logging import logger
 
-
-class DataloaderStopIteration(StopIteration):
+# NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
+# According to PEP 479, raising a `StopIteration` or its subclass from within a
+# generator will wrap it in a `RuntimeError`. Since this exception is designed
+# to be raised from a generator-based dataloader and caught by the training loop,
+# inheriting from `StopIteration` would make it uncatchable and would crash the
+# program.
+# See: https://peps.python.org/pep-0479/
+class DataloaderExhaustedError(Exception):
     """An exception that indicates dataloader exhaustion."""
 
     pass
