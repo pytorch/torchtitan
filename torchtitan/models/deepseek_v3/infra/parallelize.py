@@ -92,7 +92,10 @@ def parallelize_deepseekv3(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    if job_config.compile.enable and "model" in job_config.compile.components:
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
+    if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
         apply_compile(model)
@@ -147,7 +150,7 @@ def parallelize_deepseekv3(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
