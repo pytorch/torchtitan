@@ -23,7 +23,7 @@ from torchtitan.components.metrics import (
     ensure_pp_loss_visible,
 )
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.distributed import ParallelDims, parallel_dims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
@@ -107,6 +107,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         world_mesh = parallel_dims.world_mesh
+        print(f"Worldmesh in trainer init : {world_mesh}")
         if parallel_dims.dp_enabled:
             dp_mesh = world_mesh["dp"]
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
@@ -257,6 +258,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
+            print(
+                f"the world mesh before applying parallelize_fn {parallel_dims.world_mesh}"
+            )
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
 
             model.to_empty(device=init_device)
@@ -311,7 +315,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path, self.parallel_dims
+                    model_args,
+                    job_config.model.hf_assets_path,
                 )
                 if self.train_spec.state_dict_adapter
                 else None
@@ -548,7 +553,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # logger.info(f"w2 placements is: {w2.placements}")
         # logger.info(f"w3 placements is: {w3.placements}")
         # logger.info(f"device mesh: {self.parallel_dims.world_mesh}, {self.parallel_dims.world_mesh.mesh_dim_names} {self.parallel_dims.world_mesh['dp_shard']}")
-
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
