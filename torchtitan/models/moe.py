@@ -216,7 +216,7 @@ class TokenChoiceTopKRouter(nn.Module):
         elif self.score_func == "softmax":
             scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
-            raise NotImplementedError(f"Unknown score function {self.score_function}")
+            raise NotImplementedError(f"Unknown score function {self.score_func}")
 
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
