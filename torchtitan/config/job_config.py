@@ -69,6 +69,9 @@ class Metrics:
     enable_wandb: bool = False
     """Whether to log metrics to Weights & Biases"""
 
+    log_norm_freq: int = -1
+    """How often to log norms in iterations"""
+
 
 @dataclass
 class Model:
@@ -137,6 +140,37 @@ class Optimizer:
     is not compatible with gradients clipping, users should not call
     register_post_accumulate_grad_hook after the optimizer is built.
     """
+
+    # Below is Scion-specific configs
+    is_light: bool = False
+    """Whether to use Scion's light (memory-saving) version"""
+
+    zeropower_backend: str = "newtonschulz5"
+    "Which `zeropower_backend` to use."
+
+    backend_steps: int = 5
+    """Number of steps for the Scion backend"""
+
+    momentum: float = 0.95
+    """Scion momentum to use"""
+
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Scion"""
+
+    embed_lr: float | None = None
+    """Embedding layer learning rate"""
+
+    unembed_lr: float | None = None
+    """Unembedding layer learning rate"""
+
+    embed_str_match: str | None = None
+    """String to match for embedding layer parameter group"""
+
+    unembed_str_match: str | None = None
+    """String to match for unembedding layer parameter group"""
+
+    router_str_match: str | None = None
+    """String to match for MoE router layer parameter group"""
 
 
 @dataclass
