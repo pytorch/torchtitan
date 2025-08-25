@@ -68,6 +68,4 @@ filter_fqns = ["output"]
 enabled = false
 dataset = "c4_validation"
 freq = 500
-# Set steps to -1 to consume all the data in the dataset
-# WARNING: When setting to -1 there could be hangs due to mismatch among ranks
 steps = 1200  # Recommend value for c4_validation with world-size = 8
