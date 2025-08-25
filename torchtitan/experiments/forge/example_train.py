@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.dataloader import DataloaderStopIteration
+from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
@@ -100,7 +100,7 @@ class Trainer(ForgeEngine):
         self.step = 0
 
         # Build validator if validation is configured
-        if job_config.validation.enabled:
+        if job_config.validation.enable:
             self.validator = build_validator(
                 job_config=job_config,
                 dp_world_size=self.dp_degree,
@@ -135,7 +135,7 @@ class Trainer(ForgeEngine):
             except StopIteration as ex:
                 # If data runs out during gradient accumulation, that
                 # entire step will not be executed.
-                raise DataloaderStopIteration() from ex
+                raise DataloaderExhaustedError() from ex
             data_load_start = time.perf_counter()
             input_dict, labels = batch
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -160,6 +160,13 @@ class Trainer(ForgeEngine):
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
+        # Create the FlexAttention mask according to the input
+        if getattr(self.model_args, "use_flex_attn", False):
+            cp_mesh = (
+                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+            )
+            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
@@ -285,15 +292,12 @@ class Trainer(ForgeEngine):
                 self.gc_handler.run(self.step)
                 try:
                     self.train_step(data_iterator)
-                except DataloaderStopIteration:
+                except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enabled
-                    and self.validator.should_validate(self.step)
-                ):
+                if self.job_config.enable and self.validator.should_validate(self.step):
                     self.validator.validate(self.model_parts)
 
                 self.checkpointer.save(

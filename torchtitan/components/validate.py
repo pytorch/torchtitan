@@ -8,7 +8,6 @@ from typing import Generator
 
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
@@ -89,8 +88,8 @@ class Validator(BaseValidator):
         step: int,
     ) -> None:
         # Set model to eval mode
-        model = model_parts[0]
-        model.eval()
+        for model in model_parts:
+            model.eval()
 
         parallel_dims = self.parallel_dims
 
@@ -155,7 +154,7 @@ class Validator(BaseValidator):
                 with self.validation_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     with self.maybe_enable_amp:
-                        predictions = model(inputs)
+                        predictions = model_parts[0](inputs)
                         loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
@@ -174,14 +173,9 @@ class Validator(BaseValidator):
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
-        # Reshard after run forward pass
-        # This is to ensure the model weights are sharded the same way for checkpoint saving.
-        for module in model.modules():
-            if isinstance(module, FSDPModule):
-                module.reshard()
-
         # Set model back to train mode
-        model.train()
+        for model in model_parts:
+            model.train()
 
 
 def build_validator(

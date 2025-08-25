@@ -44,10 +44,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -57,7 +57,7 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--checkpoint.last_save_model_only",
                 ],
             ],
@@ -65,7 +65,7 @@ def build_test_list():
             "last_save_model_only_fp32",
         ),
         OverrideDefinitions(
-            [["--validation.enabled"]], "Flux Validation Test", "validation"
+            [["--validation.enable"]], "Flux Validation Test", "validation"
         ),
         # Parallelism tests.
         OverrideDefinitions(

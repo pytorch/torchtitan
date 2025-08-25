@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
@@ -51,16 +52,7 @@ def parallelize_deepseekv3(
     ):
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
     if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not model_compile_enabled
-        ):
-            raise RuntimeError("Async TP requires --training.compile")
-
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -79,8 +71,8 @@ def parallelize_deepseekv3(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            enable_async_tp=False,
         )
+        maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
@@ -100,6 +92,9 @@ def parallelize_deepseekv3(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
@@ -155,7 +150,7 @@ def parallelize_deepseekv3(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
@@ -167,7 +162,6 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -260,13 +254,7 @@ def apply_non_moe_tp(
             parallelize_plan=layer_plan,
         )
 
-    if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
-        torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
-
     logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )
