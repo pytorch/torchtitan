@@ -15,9 +15,7 @@ from torch.distributed.tensor import DTensor
 
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-from torchtitan.tools.logging import logger
 
 from .args import DeepSeekV3ModelArgs
 from .quantization import calculate_scale_shape, dequantize_from_fp8
@@ -134,9 +132,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         # Find all the device mesh dimensios that shard on dim-i
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
-            print(
-                f"In _caculate_indices_from_placements, placement dim = {placement.dim} {type(placement.dim)}, {dim} {type(dim)}"
-            )
             if placement.dim == dim:
                 mesh_names.append(name)
                 dim_i_placements.append(placement)
@@ -161,8 +156,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 strided_degree, strided_rank, shard_degree, shard_rank, dim_size
             )
 
-            return start_index, end_index
-
         elif len(dim_i_placements) == 1:
             # Handle single Shard(i) case
             assert not isinstance(
@@ -182,8 +175,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             start_index = block_size * shard_rank
             end_index = start_index + block_size
 
-            return start_index, end_index
-
         elif len(dim_i_placements) == 0:
             # No need to split on this dimension
             return start_index, end_index
@@ -192,6 +183,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             raise NotImplementedError(
                 f"Unsupported DTensor placements for GroupedExperts: {dtensor_placements} {dim_i_placements} {mesh_names}"
             )
+
+        return start_index, end_index
+
 
     def _get_local_experts_weights(
         self,
@@ -331,7 +325,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         """
         Concatenate the weights of separate experts into GroupedExperts weights.
         """
-        logger.info(f"Concatenating for key {abstract_key} ")
         for layer in expert_weights_by_layer.keys():
             # If we have all the experts for this abstract_key, concatenate them
             experts = expert_weights_by_layer[layer][abstract_key]
@@ -363,11 +356,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 if not expert_weights_by_layer[layer]:
                     del expert_weights_by_layer[layer]
 
-                logger.info(f"Concatenated for key {abstract_key} at layer {layer}")
-
                 return stacked_dtensor
-            else:
-                logger.info("no enough experts to concate")
 
         return None
 
@@ -475,9 +464,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate separate expert's wegiht into GroupedExperts' weight.
         """
-        print(
-            f"At the beginning of from_hf, the loaded state_dict is {hf_state_dict.keys()}"
-        )
+
         # dequantize the tensor in state_dict and remove the scale_inv tensor
 
         hf_state_dict = self._dequantize(hf_state_dict)
