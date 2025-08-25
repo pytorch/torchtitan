@@ -40,6 +40,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=3072,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "1.7B": Qwen3ModelArgs(
         vocab_size=151936,
@@ -52,6 +53,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=6144,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "4B": Qwen3ModelArgs(
         vocab_size=151936,
@@ -64,6 +66,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=9728,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "8B": Qwen3ModelArgs(
         vocab_size=151936,
