@@ -160,6 +160,37 @@ srun torchrun --nnodes 2
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
 
+### Multi-Node Training (SkyPilot)
+You can run the same multi-node job on the cloud with [SkyPilot](https://skypilot.readthedocs.io/) using the provided `multinode-trainer.sky.yaml`, which mirrors `multinode_trainer.slurm` (sets node count, per-node GPUs, environment, and launches `torchrun`).
+
+Run:
+
+```bash
+# For setup steps, see:
+# https://docs.skypilot.co/en/latest/getting-started/installation.html 
+pip install "skypilot[kubernetes,aws]"  # or your cloud: [gcp], [azure], etc.
+
+# Launch a cluster and start training
+export HF_TOKEN=... # if using a gated model from the HF Hub
+sky launch -c torchtitan-multinode multinode-trainer.sky.yaml --env HF_TOKEN
+
+# Tail logs
+sky logs torchtitan-multinode
+
+# Stop the cluster when done
+sky down torchtitan-multinode
+```
+
+Overrides (optional):
+
+```bash
+# Increase number of ndoes and use a different config file without editing sky.yaml
+sky launch -c torchtitan-multinode multinode-trainer.sky.yaml \
+   --num-nodes 4 \
+   --env HF_TOKEN \
+   --env CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_70b.toml
+```
+
 ## Citation
 
 We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
