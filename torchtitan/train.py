@@ -360,8 +360,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            #with torch.autograd.graph.manage_activations():
-            with contextlib.nullcontext():
+            offload_context = contextlib.nullcontext()
+            if self.job_config.offloading.mode == "sequential":
+                offload_ratio = self.job_config.offloading.offload_ratio
+                offload_context = torch.autograd.graph.manage_activations(offload_ratio=offload_ratio)
+
+            with offload_context:
                 with self.train_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     pred = model_parts[0](inputs)

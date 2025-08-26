@@ -1,5 +1,6 @@
 import torch
 import logging
+import random
 from torch.nn import Module
 from torch.autograd.graph import saved_tensors_hooks
 from typing import NamedTuple
@@ -60,16 +61,21 @@ class activation_offload_with_overlap(saved_tensors_hooks):
 
     """
 
-    def __init__(self, module: Module) -> None:
+    def __init__(self, module: Module, offload_ratio: float = 1.0) -> None:
         global next_module_id
 
         module_id = next_module_id
         module_id_to_module[module_id] = module
         next_module_id += 1
+        self.ignore_types = [torch.complex64, torch.int64]
+        self.min_tensor_size_bytes = 1 * 1024 * 1024
+        self.offload_ratio = max(0.0, min(1.0, offload_ratio))
+        self.tensors_offloaded = 0
+        self.tensors_kept_on_gpu = 0
 
         # logger.info(f"This is module {id(module):#x}, {module_id}.")
 
-        def get_num_bytes_tensor( x: torch.Tensor ) -> int:
+        def get_num_bytes_tensor(x: torch.Tensor) -> int:
             # get the number of bytes in a tensor, for memory management purposes
             return x.element_size() * x.nelement() #x.element_size() * x._base_storage().nbytes()
 
@@ -87,8 +93,14 @@ class activation_offload_with_overlap(saved_tensors_hooks):
             # TODO: Insert optional policy for deciding whether to offload.
             # Migrate to be like non-reentrant activation checkpointing in the
             # future to reuse the selective activation checkpointing logic.
-            if device_tensor.numel() < 1 * 1024 * 1024:
+            if (device_tensor.numel() < self.min_tensor_size_bytes) or (device_tensor.dtype in self.ignore_types):
                 # logger.info(f"Ignoring activation tensor of {num_bytes} bytes, size = {sizes}, dtype = {device_tensor.dtype}")
+                return (device_tensor.device, device_tensor)
+
+            should_offload = (self.tensors_offloaded / (self.tensors_offloaded + self.tensors_kept_on_gpu + 1) < self.offload_ratio)
+            # should_offload = random.random() < self.offload_ratio
+            if not should_offload:
+                self.tensors_kept_on_gpu += 1
                 return (device_tensor.device, device_tensor)
 
             current_stream = torch.cuda.current_stream()
@@ -106,6 +118,7 @@ class activation_offload_with_overlap(saved_tensors_hooks):
                 cpu_tensor = device_tensor.to(torch.device("cpu"), non_blocking=True)
                 # logger.info(f"Record d2h event.")
                 d2h_event = offload_stream.record_event()
+                self.tensors_offloaded += 1
 
             module_to_cpu_tensors[module].append(cpu_tensor)
             module_to_pack_infos[module].append(PackInfo(d2h_event, device_tensor))

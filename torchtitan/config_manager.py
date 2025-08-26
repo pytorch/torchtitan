@@ -551,6 +551,12 @@ class Experimental:
 
 
 @dataclass
+class Offloading:
+    mode: Literal["multistream", "sequential", "none"] = "none"
+    offload_ratio: float = 0.0
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -568,6 +574,7 @@ class JobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    offloading: Offloading = field(default_factory=Offloading)
     float8: Float8 = field(default_factory=Float8)
     mx: MX = field(default_factory=MX)
     comm: Comm = field(default_factory=Comm)
