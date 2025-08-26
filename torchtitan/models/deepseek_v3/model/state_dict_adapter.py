@@ -6,6 +6,7 @@
 
 
 import re
+from threading import local
 from typing import Any, Dict
 
 import torch
@@ -276,46 +277,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             local_expert_tensors[expert_key] = expert_dtensor
 
         return local_expert_tensors
-
-    def _chunk_local_expert_weights(
-        self,
-        local_tensor: torch.Tensor,
-        dtensor_placements: tuple,
-        dtensor_shape: tuple,
-        device_mesh: DeviceMesh,
-    ):
-        """
-        Chunk the local individual experts weight, assemble back to GroupedExperts weights DTensor.
-
-        This method is a placeholder for future implementation of expert weight concatenation.
-
-        Args:
-            local_tensor: Concatenated local individual expert weights
-        """
-
-        # Calculate the index range on dim-i to chunk
-        for i in range(1, len(dtensor_placements)):
-            dim_size = dtensor_shape[i]
-            start_index, end_index = self._caculate_indices_from_placements(
-                dim=i,
-                dim_size=dim_size,
-                dtensor_placements=dtensor_placements,
-                device_mesh=device_mesh,
-            )
-            # No need to chunk on current dimension
-            if start_index is None or end_index is None:
-                continue
-
-            # Chunk local_tensor on dim-i
-            local_tensor = local_tensor.narrow(i, start_index, end_index - start_index)
-
-        # Assemble DTensor
-        grouped_expert_weights = DTensor.from_local(
-            local_tensor, device_mesh, dtensor_placements, run_check=False
-        )
-
-        return grouped_expert_weights
-
+        
     def _concatenate_local_expert_weights(
         self,
         expert_weights_by_layer: dict[str, Any],
@@ -323,7 +285,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         device_mesh: DeviceMesh,
     ) -> torch.Tensor:
         """
-        Concatenate the weights of separate experts into GroupedExperts weights.
+        Try to concatenate the weights of separate experts into GroupedExperts weights.
         """
         for layer in expert_weights_by_layer.keys():
             # If we have all the experts for this abstract_key, concatenate them
@@ -335,20 +297,15 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             if len(experts) == expected_n_experts:
                 sorted_expert_ids = sorted(experts.keys())
                 sorted_experts = [experts[i] for i in sorted_expert_ids]
-                local_tensor = torch.stack(sorted_experts, dim=0)
-
+                local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
+                
                 assert (
                     abstract_key in self.grouped_expert_weight_placements
                     and abstract_key in self.grouped_expert_weight_shape
                 ), f"GroupedExperts weight metadata {self.grouped_expert_weight_placements} {self.grouped_expert_weight_shape} can not be None!"
 
-                stacked_dtensor = self._chunk_local_expert_weights(
-                    local_tensor,
-                    dtensor_placements=self.grouped_expert_weight_placements[
-                        abstract_key
-                    ],
-                    dtensor_shape=self.grouped_expert_weight_shape[abstract_key],
-                    device_mesh=device_mesh,
+                stacked_dtensor = DTensor.from_local(
+                    local_tensor, device_mesh, self.grouped_expert_weight_placements[abstract_key], run_check=False
                 )
 
                 # Remove these experts from the tracking dict to free memory

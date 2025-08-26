@@ -418,16 +418,7 @@ class CheckpointManager:
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
-
-            # [rank0]:after sd converter, placement is DeviceMesh((dp_shard_mod_ep=2, dp_shard_in_ep=2, tp=2), device: 'cuda', stride: (4, 2, 1))
-            print(
-                f"after sd converter, placement is {state_dict['layers.3.moe.experts.w3'].device_mesh}, type {type(state_dict['layers.3.moe.experts.w3'])}, placement {state_dict['layers.3.moe.experts.w3'].placements}"
-            )
-
-            # [rank0]:after sd converter, model placement is DeviceMesh((dp_shard_mod_ep=2, ep=2, tp=2), device: 'cuda', stride: (4, 2, 1))
-            # model_state_dict = self.states[MODEL].state_dict()
-            # print(f"after sd converter, model placement is {model_state_dict['layers.3.moe.experts.w3'].device_mesh}")
-
+            
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
