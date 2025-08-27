@@ -102,7 +102,7 @@ def main():
     )
     parser.add_argument(
         "--test_suite",
-        default="",
+        default="features",
         choices=["features", "models", "h100"],
         help="Which test suite to run. If not specified, torchtitan composibility tests will be run",
     )

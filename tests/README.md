@@ -31,11 +31,12 @@ pip install -r requirements.txt
 To run the integration tests:
 
 ```bash
-python -m tests.integration_tests.<test_module> <output_dir> [--config_path CONFIG_PATH] [--test_name TEST_NAME] [--ngpu NGPU]
+python -m tests.integration_tests.run_tests <output_dir> [--config_path CONFIG_PATH] [--test_suite TEST_SUITE] [--test_name TEST_NAME] [--ngpu NGPU]
 ```
 
 Arguments:
 - `output_dir`: (Required) Directory where test outputs will be stored
+- `--test_suite`: (Optional) Specific test suite to run by name (default: "features")
 - `--config_path`: (Optional) Path to the base config file (default: "./tests/integration_tests/base_config.toml")
 - `--test_name`: (Optional) Specific test to run by name (default: "all")
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
@@ -43,16 +44,14 @@ Arguments:
 Examples:
 ```bash
 # Run all model integration tests with 8 GPUs
-python -m tests.integration_tests.models test_output
+python -m tests.integration_tests.run_tests test_output
 
 # Run only core functionality tests for features
-python -m tests.integration_tests.features test_output
+python -m tests.integration_tests.run_tests test_output --test_suite features
 
 # Run a specific test with 2 GPUs
-python -m tests.integration_tests.features test_output --test_name gradient_accumulation --ngpu 2
+python -m tests.integration_tests.run_tests test_output --test_suite features --test_name gradient_accumulation --ngpu 2
 
-# Run H100-specific tests
-python -m tests.integration_tests.h100 test_output
 ```
 
 ### Running Unit Tests
