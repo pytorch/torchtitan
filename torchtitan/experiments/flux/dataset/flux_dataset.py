@@ -367,6 +367,7 @@ class FluxValidationDataset(FluxDataset):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         generate_timesteps: bool = True,
+        infinite: bool = False,
     ) -> None:
         # Call parent constructor correctly
         super().__init__(
@@ -377,7 +378,7 @@ class FluxValidationDataset(FluxDataset):
             job_config=job_config,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
-            infinite=False,
+            infinite=infinite,
         )
 
         # Initialize timestep generation for validation
@@ -406,6 +407,7 @@ def build_flux_validation_dataloader(
     # This parameter is not used, keep it for compatibility
     tokenizer: BaseTokenizer | None,
     generate_timestamps: bool = True,
+    infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
@@ -423,6 +425,7 @@ def build_flux_validation_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         generate_timesteps=generate_timestamps,
+        infinite=infinite,
     )
 
     return ParallelAwareDataloader(
