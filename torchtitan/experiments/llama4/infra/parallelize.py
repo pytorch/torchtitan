@@ -20,9 +20,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
@@ -97,6 +95,9 @@ def parallelize_llama(
             etp_enabled=parallel_dims.etp_enabled,
         )
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
@@ -105,9 +106,6 @@ def parallelize_llama(
             use_flex_attn,
         )
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE

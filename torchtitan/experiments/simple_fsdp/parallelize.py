@@ -9,8 +9,8 @@ import torch.nn as nn
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
@@ -62,6 +62,9 @@ def parallelize_llama(
 
     if job_config.activation_checkpoint.mode != "none":
         use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
         apply_ac(
             model,
             job_config.activation_checkpoint,
