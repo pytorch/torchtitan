@@ -22,9 +22,9 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import NoParallel
 from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
     apply_compile,
     apply_ddp,
     apply_fsdp,
@@ -82,7 +82,13 @@ def parallelize_qwen3(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled,
+            use_flex_attn,
+        )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
