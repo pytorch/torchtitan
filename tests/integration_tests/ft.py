@@ -88,7 +88,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             )
 
 
-def run_tests(args, test_list: List[OverrideDefinitions]):
+def run_tests(args, test_list: list[OverrideDefinitions]):
     if args.ngpu < 8:
         logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return
