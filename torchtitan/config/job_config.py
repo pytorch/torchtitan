@@ -729,7 +729,10 @@ class Validation:
     """Frequency of validation"""
 
     steps: int = -1
-    """Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset"""
+    """
+    Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
+    WARNING: When setting to -1 there could be hangs due to mismatch among ranks
+    """
 
     def __post_init__(self):
         assert (

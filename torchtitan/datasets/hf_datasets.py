@@ -209,6 +209,7 @@ def build_hf_validation_dataloader(
     dp_rank: int,
     tokenizer: BaseTokenizer,
     job_config: JobConfig,
+    infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a validation data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
@@ -223,7 +224,7 @@ def build_hf_validation_dataloader(
         seq_len=seq_len,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        infinite=False,
+        infinite=infinite,
     )
 
     return ParallelAwareDataloader(

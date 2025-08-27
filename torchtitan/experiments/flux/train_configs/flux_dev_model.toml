@@ -67,7 +67,7 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 enable = false
 dataset = "coco-validation"
 local_batch_size = 32
-steps = 1
+steps = 12  # Recommended value with the current settings and world_size=8
 freq = 1000
 enable_classifier_free_guidance = true
 classifier_free_guidance_scale = 5.0
