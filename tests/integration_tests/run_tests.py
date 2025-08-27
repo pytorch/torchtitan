@@ -8,13 +8,13 @@ import argparse
 import os
 import subprocess
 
+from torchtitan.tools.logging import logger
+
 from tests.integration_tests import OverrideDefinitions
 
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
-
-from torchtitan.tools.logging import logger
 
 
 _TEST_SUITES_FUNCTION = {
