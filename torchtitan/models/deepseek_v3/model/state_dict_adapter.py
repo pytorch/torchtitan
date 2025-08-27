@@ -453,14 +453,18 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     expert_weights_by_layer, titan_abstract_key, value.device_mesh
                 )
 
-                if stacked_value is not None:
-                    local_tensor = stacked_value._local_tensor
 
-                    tensor_list = local_tensor.tolist()
-                    # Save to JSON file
-                    import json
-                    with open(f'my_implementation_tensor_{new_key}.json', 'w') as f:
-                        json.dump(tensor_list, f)
+                if stacked_value is not None:
+                    if torch.distributed.get_rank() == 0:
+                        print("saving tensor to json file")
+                        local_tensor = stacked_value._local_tensor
+                        print("stacked_value: ", stacked_value.shape, stacked_value.device_mesh, stacked_value.placements, "local_tensor: ", local_tensor.shape)
+                        
+                        tensor_list = local_tensor.tolist()
+                        # Save to JSON file
+                        import json
+                        with open(f'my_imp_tensor_222_{new_key}.json', 'w') as f:
+                            json.dump(tensor_list, f)
                     state_dict[new_key] = stacked_value
 
             elif "layers" in key:

@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from torchtitan.models.attention import build_attention
-from torchtitan.models.moe import FeedForward, MoE
+from torchtitan.models.moe import FeedForward, MoE, print_tensor_stats
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
@@ -295,9 +295,12 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
+        print_tensor_stats(f"input of TransformerBlock {self.layer_id}: ", x)
         x = x + self.attention(self.attention_norm(x), freqs_cis)
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            x = self.ffn_norm(x)
+            print_tensor_stats(f"After ffn_norm : ", x)
+            x = x + self.moe(x)
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
@@ -385,8 +388,11 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
+
+        token_inputs = h
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            # reset before each layer
+            h = layer(token_inputs, self.freqs_cis)
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h) if self.output is not None else h
         return output
