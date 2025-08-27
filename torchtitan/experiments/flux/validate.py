@@ -82,7 +82,7 @@ class FluxValidator(Validator):
 
         if self.job_config.validation.steps == -1:
             logger.warning(
-                "Setting validation steps to -1 could cause hangs due to mismatch among ranks."
+                "Setting validation steps to -1 might cause hangs because of unequal sample counts across ranks when dataset is exhausted."
             )
 
     def flux_init(
