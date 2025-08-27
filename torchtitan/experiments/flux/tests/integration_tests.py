@@ -83,7 +83,7 @@ def build_flux_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--validation.enabled",
+                    "--validation.enable",
                 ]
             ],
             "Flux Validation Test",
