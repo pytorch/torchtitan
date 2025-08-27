@@ -326,13 +326,13 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         for key, weight in state_dict.items():
             if key.endswith(".weight") and key + "_scale_inv" in state_dict:
                 scale_inv = state_dict[key + "_scale_inv"]
-                # dequantized_weight = dequantize_from_fp8(
-                #     weight, scale_inv, dtype=torch.float32
-                # )
-                # # update the weight and remove the scale_inv tensor
-                # state_dict[key] = dequantized_weight
+                dequantized_weight = dequantize_from_fp8(
+                    weight, scale_inv, dtype=torch.float32
+                )
+                # update the weight and remove the scale_inv tensor
+                state_dict[key] = dequantized_weight
 
-                state_dict[key] = weight
+                # state_dict[key] = weight
                 scale_inv_keys.append(key + "_scale_inv")
 
         for key in scale_inv_keys:
@@ -452,7 +452,15 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 stacked_value = self._concatenate_local_expert_weights(
                     expert_weights_by_layer, titan_abstract_key, value.device_mesh
                 )
+
                 if stacked_value is not None:
+                    local_tensor = stacked_value._local_tensor
+
+                    tensor_list = local_tensor.tolist()
+                    # Save to JSON file
+                    import json
+                    with open(f'my_implementation_tensor_{new_key}.json', 'w') as f:
+                        json.dump(tensor_list, f)
                     state_dict[new_key] = stacked_value
 
             elif "layers" in key:
