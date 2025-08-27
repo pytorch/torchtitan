@@ -9,7 +9,7 @@ import os
 
 from typing import List
 
-from tests.integration_tests.features import OverrideDefinitions
+from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import _run_cmd
 
 from torchtitan.tools.logging import logger

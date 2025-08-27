@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from .features import OverrideDefinitions
+from tests.integration_tests import OverrideDefinitions
 
 
 def build_model_tests_list() -> list[OverrideDefinitions]:

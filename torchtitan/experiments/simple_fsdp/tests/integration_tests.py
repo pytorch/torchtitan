@@ -7,7 +7,8 @@
 import argparse
 import os
 
-from tests.integration_tests.run_tests import OverrideDefinitions, run_tests
+from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests.run_tests import run_tests
 
 
 def build_simple_fsdp_test_list():
@@ -16,222 +17,219 @@ def build_simple_fsdp_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = []
-    integration_tests_flavors.extend(
-        [
-            OverrideDefinitions(
+    integration_tests_flavors = [
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
                 ],
-                "1D",
-                "1d",
-            ),
-            OverrideDefinitions(
+            ],
+            "1D",
+            "1d",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--activation_checkpoint.mode selective",
-                        "--activation_checkpoint.selective_ac_option op",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
                 ],
-                "1D with selective op AC",
-                "1d_sac_op",
-            ),
-            OverrideDefinitions(
+            ],
+            "1D with selective op AC",
+            "1d_sac_op",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--activation_checkpoint.mode full",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--activation_checkpoint.mode full",
                 ],
-                "1D with full AC",
-                "1d_full_ac",
-            ),
-            OverrideDefinitions(
+            ],
+            "1D with full AC",
+            "1d_full_ac",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 2",
                 ],
-                "2D",
-                "2d",
-            ),
-            # TODO: re-enable this test once the async TP issue is fixed
-            # OverrideDefinitions(
-            #     [
-            #         [
-            #             "--model.name llama3_simple_fsdp",
-            #             "--compile.enable",
-            #             "--parallelism.tensor_parallel_degree 2",
-            #             "--parallelism.enable_async_tensor_parallel",
-            #         ],
-            #     ],
-            #     "2D async TP",
-            #     "2d_asynctp",
-            # ),
-            OverrideDefinitions(
+            ],
+            "2D",
+            "2d",
+        ),
+        # TODO: re-enable this test once the async TP issue is fixed
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--model.name llama3_simple_fsdp",
+        #             "--compile.enable",
+        #             "--parallelism.tensor_parallel_degree 2",
+        #             "--parallelism.enable_async_tensor_parallel",
+        #         ],
+        #     ],
+        #     "2D async TP",
+        #     "2d_asynctp",
+        # ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                    ],
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                        "--training.steps 20",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
                 ],
-                "Checkpoint Integration Test - Save Load Full Checkpoint",
-                "full_checkpoint",
-            ),
-            OverrideDefinitions(
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ],
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--training.steps 20",
-                        "--checkpoint.enable",
-                        "--parallelism.pipeline_parallel_degree 2",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
+                    "--training.steps 20",
                 ],
-                "PP+DP+TP 3D test with save/load resume ckpt",
-                "pp_dp_tp",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+            ],
+            "Checkpoint Integration Test - Save Load Full Checkpoint",
+            "full_checkpoint",
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_shard_degree 1",
-                        "--parallelism.data_parallel_replicate_degree 4",
-                    ]
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                 ],
-                "DDP",
-                "ddp",
-                ngpu=4,
-            ),
-            OverrideDefinitions(
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                    ]
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--training.steps 20",
+                    "--checkpoint.enable",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                 ],
-                "HSDP",
-                "hsdp",
-                ngpu=4,
-            ),
-            OverrideDefinitions(
+            ],
+            "PP+DP+TP 3D test with save/load resume ckpt",
+            "pp_dp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ]
-                ],
-                "HSDP+TP",
-                "hsdp+tp",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.data_parallel_replicate_degree 4",
+                ]
+            ],
+            "DDP",
+            "ddp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                    ]
-                ],
-                "DDP+TP",
-                "ddp+tp",
-                ngpu=4,
-            ),
-            OverrideDefinitions(
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                ]
+            ],
+            "HSDP",
+            "hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.data_parallel_replicate_degree 2",
-                        "--parallelism.context_parallel_degree 2",
-                    ]
-                ],
-                "HSDP+CP (with dp_shard)",
-                "hsdp+cp_with_dp_shard",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--parallelism.data_parallel_shard_degree 2",
-                        "--parallelism.tensor_parallel_degree 2",
-                        "--parallelism.context_parallel_degree 2",
-                    ]
-                ],
-                "FSDP+TP+CP",
-                "fsdp+tp+cp",
-                ngpu=8,
-            ),
-            OverrideDefinitions(
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ]
+            ],
+            "DDP+TP",
+            "ddp+tp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                        "--training.steps 10",
-                    ],
-                    # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-                    # excluded during loading to avoid errors caused by mismatched dp_degree.
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                        "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                        "--parallelism.tensor_parallel_degree 2",
-                        "--training.steps 20",
-                    ],
-                    # load at [tp:4].
-                    [
-                        "--model.name llama3_simple_fsdp",
-                        "--compile.enable",
-                        "--checkpoint.enable",
-                        "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                        "--parallelism.tensor_parallel_degree 4",
-                        "--training.steps 30",
-                    ],
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ]
+            ],
+            "HSDP+CP (with dp_shard)",
+            "hsdp+cp_with_dp_shard",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ]
+            ],
+            "FSDP+TP+CP",
+            "fsdp+tp+cp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
+                    "--training.steps 10",
                 ],
-                "Optional checkpoint",
-                "optional_checkpoint",
-                ngpu=4,
-            ),
-        ]
-    )
+                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
+                # excluded during loading to avoid errors caused by mismatched dp_degree.
+                [
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--training.steps 20",
+                ],
+                # load at [tp:4].
+                [
+                    "--model.name llama3_simple_fsdp",
+                    "--compile.enable",
+                    "--checkpoint.enable",
+                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
+                    "--parallelism.tensor_parallel_degree 4",
+                    "--training.steps 30",
+                ],
+            ],
+            "Optional checkpoint",
+            "optional_checkpoint",
+            ngpu=4,
+        ),
+    ]
     return integration_tests_flavors
 
 

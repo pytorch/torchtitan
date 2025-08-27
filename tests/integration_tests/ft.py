@@ -11,7 +11,7 @@ import os
 import subprocess
 from typing import List
 
-from .features import OverrideDefinitions
+from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,19 +23,17 @@ def build_ft_test_list():
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = []
-    integration_tests_flavors.extend(
-        [
-            OverrideDefinitions(
-                [
-                    ["--training.steps 10", "--checkpoint.enable"],
-                ],
-                "Default TorchFT integration test",
-                "default_torchft",
-                ngpu=8,
-            )
-        ]
-    )
+    integration_tests_flavors = [
+        OverrideDefinitions(
+            [
+                ["--training.steps 10", "--checkpoint.enable"],
+            ],
+            "Default TorchFT integration test",
+            "default_torchft",
+            ngpu=8,
+        )
+    ]
+
     return integration_tests_flavors
 
 

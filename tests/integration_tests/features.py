@@ -5,23 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List
 
-
-@dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
-
-    override_args: Sequence[Sequence[str]] = tuple(tuple(" "))
-    test_descr: str = "default"
-    test_name: str = "default"
-    ngpu: int = 4
-
-    def __repr__(self):
-        return self.test_descr
+from tests.integration_tests import OverrideDefinitions
 
 
 def build_features_test_list() -> List[OverrideDefinitions]:

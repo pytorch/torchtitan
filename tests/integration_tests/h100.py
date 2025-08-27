@@ -4,11 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import argparse
 import logging
-import os
 
-from .features import OverrideDefinitions
+from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,64 +76,3 @@ def build_h100_tests_list():
         ),
     ]
     return integration_tests_flavors
-
-
-def run_tests(args, test_list=None):
-    """Run all H100 integration tests"""
-    # build integration tests list
-    if test_list is None:
-        test_list = build_h100_tests_list()
-
-    for test_flavor in test_list:
-        # Filter by test_name if specified
-        if args.test_name != "all" and test_flavor.test_name != args.test_name:
-            continue
-
-        # Check if config file exists
-        assert args.config_path.endswith(
-            ".toml"
-        ), "Base config path must end with .toml"
-        assert os.path.exists(
-            args.config_path
-        ), f"Base config path {args.config_path} does not exist"
-
-        # Check if we have enough GPUs
-        if args.ngpu < test_flavor.ngpu:
-            logger.info(
-                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                f" because --ngpu arg is {args.ngpu}"
-            )
-        else:
-            # Import run_single_test from run_tests.py
-            from tests.integration_tests.run_tests import run_single_test
-
-            run_single_test(test_flavor, args.config_path, args.output_dir)
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
-    parser.add_argument(
-        "--test_name",
-        default="all",
-        help="Specific test name to run (e.g., 'tp_only', 'full_checkpoint'). Use 'all' to run all tests (default: all)",
-    )
-    parser.add_argument("--ngpu", default=8, type=int)
-    args = parser.parse_args()
-
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    if os.listdir(args.output_dir):
-        raise RuntimeError("Please provide an empty output directory.")
-
-    test_list = build_h100_tests_list()
-    run_tests(args, test_list)
-
-
-if __name__ == "__main__":
-    main()
