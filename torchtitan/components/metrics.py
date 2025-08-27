@@ -144,7 +144,9 @@ class WandBLogger(BaseLogger):
         os.makedirs(log_dir, exist_ok=True)
 
         self.wandb.init(
+            entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
+            name=os.getenv("WANDB_RUN_NAME", None),
             dir=log_dir,
             config=job_config.to_dict(),
         )
