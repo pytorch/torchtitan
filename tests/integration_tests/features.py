@@ -5,12 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from typing import List
-
 from tests.integration_tests import OverrideDefinitions
 
 
-def build_features_test_list() -> List[OverrideDefinitions]:
+def build_features_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the

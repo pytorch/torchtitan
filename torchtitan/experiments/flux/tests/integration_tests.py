@@ -7,15 +7,13 @@
 import argparse
 import os
 
-from typing import List
-
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import _run_cmd
 
 from torchtitan.tools.logging import logger
 
 
-def build_flux_test_list():
+def build_flux_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
@@ -138,7 +136,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             )
 
 
-def run_tests(args, test_list: List[OverrideDefinitions]):
+def run_tests(args, test_list: list[OverrideDefinitions]):
     """Run all integration tests to test the core features of TorchTitan
     Override the run_tests function in run_tests.py because FLUX model
     uses different train.py in command to run the model"""

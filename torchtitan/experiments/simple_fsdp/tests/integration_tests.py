@@ -11,7 +11,7 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
 
 
-def build_simple_fsdp_test_list():
+def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the

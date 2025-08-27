@@ -9,7 +9,6 @@ import concurrent.futures
 import logging
 import os
 import subprocess
-from typing import List
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -17,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def build_ft_test_list():
+def build_ft_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
