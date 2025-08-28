@@ -151,6 +151,9 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     ):
                         self._data.set_epoch(self._data.epoch + 1)
 
+    def __len__(self):
+        return len(self._data)
+
     def load_state_dict(self, state_dict):
         self._token_buffer = state_dict["token_buffer"]
 
