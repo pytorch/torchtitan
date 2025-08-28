@@ -96,8 +96,6 @@ def parallelize_deepseekv3(
         job_config.compile.enable and "model" in job_config.compile.components
     )
     if model_compile_enabled:
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
-        torch._dynamo.config.capture_scalar_outputs = True
         apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
