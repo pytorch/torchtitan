@@ -76,6 +76,10 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
+
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
@@ -84,9 +88,6 @@ def parallelize_llama(
             use_flex_attn,
         )
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model)

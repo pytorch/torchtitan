@@ -48,9 +48,7 @@ def parallelize_deepseekv3(
         """
 
     use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if (
-        job_config.parallelism.context_parallel_degree > 1 and use_flex_attn
-    ):
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
