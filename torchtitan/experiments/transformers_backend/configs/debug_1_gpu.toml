@@ -20,7 +20,6 @@ enable_wandb = false
 
 [model]
 name = "llama3"
-hf_name = "Llama-3.2-3B"
 flavor = "debugmodel"
 tokenizer_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
 

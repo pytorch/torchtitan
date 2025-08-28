@@ -28,19 +28,26 @@ __all__ = [
 ]
 
 
-hf_configs = {
-    "debugmodel": HFTransformerModelArgs(
-        dim=256,
+flavors = {
+    "debug": HFTransformerModelArgs(
+        dim=1,
         n_layers=6,
         n_heads=16,
         rope_theta=500000,
     ),
+    "medium": HFTransformerModelArgs(
+        dim=40,
+        n_layers=24,
+        n_heads=32,
+        rope_theta=500000,
+    ),
+    "full": HFTransformerModelArgs(),
 }
 
 hf_train_spec = TrainSpec(
     name="hf_auto_model",
     model_cls=LlamaForCausalLM,
-    model_args=hf_configs,
+    model_args=flavors,
     parallelize_fn=parallelize_hf_transformers,
     pipelining_fn=pipeline_llama,
     build_optimizers_fn=build_optimizers,
