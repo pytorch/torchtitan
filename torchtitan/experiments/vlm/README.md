@@ -16,4 +16,4 @@ Distributed training usually does not play nice with input of varying shapes. To
 Then we scatter the patch embeddings to their actual positions in the LLM input tokens.
 This result in a very simple and general interface to train modern VLM with interleaved data and native resolution & aspect ratio.
 By setting the appropriate dataloader hyperparameters, we can easily reduce the amount of padding tokens.
-We leverage Flex Attention to efficiently handle varying number of patches per image.
+We leverage FlexAttention to efficiently handle varying number of patches per image.
