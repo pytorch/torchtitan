@@ -19,14 +19,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
-)
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
@@ -66,30 +58,6 @@ def parallelize_vlm(
 
     if parallel_dims.tp_enabled:
         raise NotImplementedError("TP support for VLM training is still in progress.")
-        # if (
-        #     job_config.parallelism.enable_async_tensor_parallel
-        #     and not job_config.training.compile
-        # ):
-        #     raise RuntimeError("Async TP requires --training.compile")
-        #
-        # enable_float8_linear = "float8" in job_config.model.converters
-        # float8_is_rowwise = job_config.float8.recipe_name in (
-        #     "rowwise",
-        #     "rowwise_with_gw_hp",
-        # )
-        #
-        # # For now, float8 all-gather with TP is only supported for tensorwise
-        # # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # # all-gather happens in high precision.
-        # enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-        #
-        # apply_tp(
-        #     model,
-        #     world_mesh["tp"],
-        #     loss_parallel=not job_config.parallelism.disable_loss_parallel,
-        #     enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-        #     enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-        # )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -138,6 +106,7 @@ def parallelize_vlm(
         )
 
     return model
+
 
 # for selective op activation checkpointing
 _save_list = {
@@ -248,7 +217,9 @@ def apply_ac(model: nn.Module, ac_config):
         )
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model {type(model).__name__}")
+    logger.info(
+        f"Applied {ac_config.mode} activation checkpointing to the model {type(model).__name__}"
+    )
 
 
 def apply_compile(model: nn.Module):
@@ -260,7 +231,9 @@ def apply_compile(model: nn.Module):
         transformer_block = torch.compile(transformer_block, fullgraph=True)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info(f"Compiling each TransformerBlock of {type(model).__name__} with torch.compile")
+    logger.info(
+        f"Compiling each TransformerBlock of {type(model).__name__} with torch.compile"
+    )
 
 
 def apply_fsdp(

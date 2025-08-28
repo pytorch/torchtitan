@@ -1,5 +1,8 @@
 # torchtitan Config.toml
 
+[experimental]
+custom_args_module = "torchtitan.experiments.vlm.assets.job_config"
+
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 Siglip2 VLM debug training"
@@ -24,7 +27,7 @@ enable_wandb = false
 name = "llama3-siglip2"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
-hf_assets_path = "./tests/assets/tokenizer"
+hf_assets_path = "torchtitan/experiments/vlm/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
@@ -39,13 +42,16 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-local_batch_size = 8
+local_batch_size = 32
 seq_len = 4096
+max_patches_per_image = 1024
+max_images_per_batch = 64
+# packing_buffer_size = 100
 max_norm = 1.0  # grad norm clipping
 steps = 10
 compile = false
-# dataset = "c4_test"
-dataset_path = "HuggingFaceM4/OBELICS"
+# dataset = "obelics"
+dataset = "cc12m"
 
 [parallelism]
 data_parallel_replicate_degree = 1

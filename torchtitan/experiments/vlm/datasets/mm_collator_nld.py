@@ -5,132 +5,142 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any
 
-import einops as E
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from torchtitan.tools.logging import logger
 
-
-IGNORE_INDEX = -100
+from .image_utils import (
+    convert_to_patches,
+    pad_empty_images_to_target_batch_size,
+    pad_patches,
+)
+from .text_utils import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
 
 
 @dataclass
 class MultiModalCollatorNLD:
-    """Collator that works with patches in NLD format (N=batch, L=patches, D=patch_features)"""
+    """Multimodal collator that works with image patches in NLD format.
+    N: Number of images (vision encoder's batch size)
+    L: Length of patches (vision encoder's sequence length)
+    D: Dimension of a patch (3 * spatial_patch_size**2 * temporral patch_size)
+
+    This module provides a collator class that handles both image and text data,
+    converting images to patches and preparing text for model input.
+
+    Example:
+        >>> # Initialize collator
+        >>> collator = MultiModalCollatorNLD(
+        ...     batch_size=2,
+        ...     seq_len=32,
+        ...     max_images_per_batch=4,
+        ...     max_patch_per_image=6,
+        ...     patch_size=16,
+        ...     padding_idx=0,
+        ... )
+        >>>
+        >>> # Create sample batch
+        >>> batch = [
+        ...     {
+        ...         "input_ids": torch.tensor([1, 2, 3]),
+        ...         "labels": torch.tensor([2, 3, 4]),
+        ...         "pixel_values": [
+        ...             torch.randn(1, 32, 32, 3),
+        ...             torch.randn(1, 32, 48, 3)
+        ...         ]
+        ...     },
+        ...     {
+        ...         "input_ids": torch.tensor([5, 6]),
+        ...         "labels": torch.tensor([6, 7]),
+        ...         "pixel_values": [
+        ...             torch.randn(1, 32, 32, 3)   # One image
+        ...         ]
+        ...     }
+        ... ]
+        >>>
+        >>> # Collate batch
+        >>> outputs = collator(batch)
+        >>>
+        >>> # Examine outputs
+        >>> print(outputs["input_ids"].shape)     # (2, 32)     - Padded to seq_len
+        >>> print(outputs["labels"].shape)        # (2, 32)     - Padded to seq_len
+        >>> print(outputs["pixel_values"].shape)  # (4, 6, 768) - (N=4 images, L=6 patches, D=16*16*3)
+        >>> print(outputs["grid_thw"].shape)      # (4, 6, 3)   - Coordinates for each patch
+        >>>
+        >>> # The collated batch has:
+        >>> # 1. Text tensors padded to max length
+        >>> # 2. Images converted to patches in NLD format
+        >>> # 3. Grid coordinates for each patch
+        >>> # 4. All tensors properly batched and padded
+    """
+
+    batch_size: int  # LLM's batch size
+    seq_len: int  # LLM's maximum sequence length
+
+    patch_size: int  # Patch size for converting images to patches
+    max_images_per_batch: int  # Vision Encoder's batch size
+    max_patches_per_image: int  # Vision Encoder's sequence length
 
     padding_idx: int = 0
-    ignore_idx: int = IGNORE_INDEX
-    max_images_per_batch: int = 5
-    max_patch_per_image: int = 256  # Maximum patches per image
-    patch_size: int = 16  # Patch size for converting images to patches
-    merge_size: int = 1  # Merge size for converting spatial patches to channel dim
-    seq_len: int = 2048
+    ignore_idx: int = -100
 
-    def convert_to_patches(
-        self, pixel_values: torch.Tensor
+    def process_images(
+        self, all_images: list[torch.Tensor]
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Process a list of image tensors into patches with coordinate grids.
+
+        Args:
+            all_images: list of image tensors, each of shape (T, H, W, 3)
+
+        Returns:
+            patches: Tensor of shape (N, L, D) or None if no images
+            grids: Tensor of shape (N, L, 3) or None if no images
+        """
+        if not all_images:
+            return None, None
+
+        patch_list, grid_list = [], []
+        for img in all_images:
+            # Convert single image to patches
+            patches, grids = convert_to_patches(img, patch_size=self.patch_size)
+
+            # Pad/truncate to max patches
+            patches, grids = pad_patches(patches, grids, self.max_patches_per_image)
+
+            patch_list.append(patches)
+            grid_list.append(grids)
+
+        # Stack all images
+        patches = torch.stack(patch_list)
+        grids = torch.stack(grid_list)
+
+        # Pad to max_images_per_batch with empty images
+        patches, grids = pad_empty_images_to_target_batch_size(
+            patches, grids, self.max_images_per_batch
+        )
+
+        return patches, grids
+
+    def process_text(
+        self,
+        batch: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Direct NTHWC -> NLD conversion using einops."""
-        N, T, H, W, C = pixel_values.shape
-        ps = self.patch_size
-        device = pixel_values.device
-        patches = E.rearrange(
-            pixel_values, "n t (h p1) (w p2) c -> n (t h w) (p1 p2 c)", p1=ps, p2=ps
-        )
+        """Process text inputs and labels from batch.
 
-        coords = torch.meshgrid(
-            torch.arange(T, device=device),
-            torch.arange(H // ps, device=device),
-            torch.arange(W // ps, device=device),
-            indexing="ij",
-        )
-        grid = E.rearrange(torch.stack(coords), "coords t h w -> (t h w) coords")
-        grid = grid.unsqueeze(0).expand(N, -1, -1)  # (N, t*h*w, 3)
+        Args:
+            batch: list of dictionaries containing "input_ids" and "labels"
 
-        # All patches are valid since we resize images to be divisible by patch_size
-        return patches, grid
+        Returns:
+            input_ids: Tensor of shape (B, L)
+            labels: Tensor of shape (B, L)
 
-    def _pad_to_max(self, patches, grids):
-        """Pad or truncate to max_patch_per_image."""
-        N, L, D = patches.shape
-        if L == self.max_patch_per_image:
-            return patches, grids
-        elif L < self.max_patch_per_image:
-            # Pad
-            pad_len = self.max_patch_per_image - L
-            zero_patches = torch.zeros(N, pad_len, D, device=patches.device)
-            invalid_grids = torch.full(
-                (grids.shape[0], pad_len, 3), -1, device=grids.device
-            )
-            return torch.cat([patches, zero_patches], 1), torch.cat(
-                [grids, invalid_grids], 1
-            )
-        else:
-            # Truncate
-            return (
-                patches[:, : self.max_patch_per_image],
-                grids[:, : self.max_patch_per_image],
-            )
-
-    def __call__(
-        self, batch: List[Dict[str, Any]]
-    ) -> tuple[Dict[str, torch.Tensor | None], torch.Tensor]:
-        """Encode batch with patch-based approach."""
-        if not batch:
-            return None
-
-        # Count images per sample and total images
-        images_per_sample = []
-        for sample in batch:
-            num_images = (
-                len(sample.get("pixel_values", [])) if "pixel_values" in sample else 0
-            )
-            images_per_sample.append(num_images)
-
-        # Remove samples from end until total images <= max_images_per_batch
-        total_images = sum(images_per_sample)
-        while total_images > self.max_images_per_batch and batch:
-            removed_images = images_per_sample.pop()
-            total_images -= removed_images
-            batch.pop()
-            logger.warning(f"Removed sample with {removed_images} images to keep total images <= {self.max_images_per_batch}")
-
-        all_images = [
-            img
-            for sample in batch
-            if "pixel_values" in sample
-            for img in sample["pixel_values"]
-        ]
-
-        if all_images:
-            patch_list, grid_list = [], []
-            for img in all_images:
-                p, g = self.convert_to_patches(img.unsqueeze(0))
-                p, g = self._pad_to_max(p, g)
-                patch_list.append(p[0])
-                grid_list.append(g[0])
-            patches = torch.stack(patch_list)
-            grids = torch.stack(grid_list)
-
-            if len(all_images) < self.max_images_per_batch:
-                blank_count = self.max_images_per_batch - len(all_images)
-                blank_patches = torch.zeros(
-                    blank_count,
-                    self.max_patch_per_image,
-                    patches.shape[2],
-                    device=patches.device,
-                )
-                blank_grids = torch.full(
-                    (blank_count, self.max_patch_per_image, 3), -1, device=grids.device
-                )
-                patches = torch.cat([patches, blank_patches], dim=0)
-                grids = torch.cat([grids, blank_grids], dim=0)
-        else:
-            patches = grids = None
-
-        # Text processing
+        Note:
+            B = batch size (padded if needed)
+            L = sequence length (padded/truncated to seq_len)
+        """
+        # Pad sequences in batch
         input_ids = pad_sequence(
             [s["input_ids"] for s in batch],
             batch_first=True,
@@ -142,47 +152,70 @@ class MultiModalCollatorNLD:
             padding_value=self.padding_idx,
         )
 
-        # Pad along batch dimension if needed
-        batch_size = len(batch)
-        if input_ids.size(0) < batch_size:
-            padding_needed = batch_size - input_ids.size(0)
-            padding_input = (
-                torch.ones(padding_needed, input_ids.size(1), dtype=torch.long)
-                * self.padding_idx
-            )
-            padding_labels = (
-                torch.ones(padding_needed, labels.size(1), dtype=torch.long)
-                * self.padding_idx
-            )
-            input_ids = torch.cat([input_ids, padding_input], dim=0)
-            labels = torch.cat([labels, padding_labels], dim=0)
-
         # Handle sequence length
-        current_length = input_ids.size(1)
-        desired_length = self.seq_len + 1  # Extra token for label shift and cut
-        if current_length < desired_length:
-            padding_length = desired_length - current_length
-            padding_input = (
-                torch.ones(batch_size, padding_length, dtype=torch.long)
-                * self.padding_idx
-            )
-            padding_labels = (
-                torch.ones(batch_size, padding_length, dtype=torch.long)
-                * self.padding_idx
-            )
-            input_ids = torch.cat([input_ids, padding_input], dim=1)
-            labels = torch.cat([labels, padding_labels], dim=1)
-        elif current_length > self.seq_len:
-            input_ids = input_ids[:, :desired_length]
-            labels = labels[:, :desired_length]
+        input_ids, labels = pad_text_batch(
+            input_ids,
+            labels,
+            self.seq_len + 1,  # Extra token for label shifting
+            padding_idx=self.padding_idx,
+            ignore_idx=self.ignore_idx,
+        )
+        input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
+            input_ids,
+            labels,
+            self.batch_size,
+            padding_idx=self.padding_idx,
+            ignore_idx=self.ignore_idx,
+        )
 
-        labels[labels == self.padding_idx] = self.ignore_idx
-        # Cut and shift
-        input_ids = input_ids[:, :-1]
-        labels = labels[:, 1:]
+        return input_ids[:, :-1], labels[:, 1:]  # Shift for next token prediction
 
-        return {
-            "input": input_ids,
-            "pixel_values": patches,
-            "grid_thw": grids,
-        }, labels
+    def __call__(
+        self, batch: list[dict[str, Any]]
+    ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
+        """Encode batch with patch-based approach.
+
+        Args:
+            batch: list of dictionaries containing:
+                - input_ids: Tensor of shape (S)
+                - labels: Tensor of shape (L)
+                - pixel_values: list of tensors, each (1, H, W, 3)
+
+        Returns:
+            Dictionary containing:
+                - input_ids: Tensor of shape (B, L)
+                - labels: Tensor of shape (B, L)
+                - pixel_values: Tensor of shape (N, L, D)
+                - grid_thw: Tensor of shape (N, L, 3)
+        """
+        # Count images per sample and total images
+        images_per_sample = []
+        for sample in batch:
+            num_images = len(sample.get("pixel_values", []))
+            images_per_sample.append(num_images)
+
+        # Remove samples from end until total images <= max_images_per_batch
+        total_images = sum(images_per_sample)
+        while total_images > self.max_images_per_batch and batch:
+            removed_images = images_per_sample.pop()
+            total_images -= removed_images
+            batch.pop()
+            logger.warning(
+                f"Removed sample with {removed_images} images to keep "
+                f"total images <= {self.max_images_per_batch}"
+            )
+
+        # Process all images in batch
+        all_images = [
+            img
+            for sample in batch
+            if "pixel_values" in sample
+            for img in sample["pixel_values"]
+        ]
+        patches, grids = self.process_images(all_images)
+
+        # Process text and pad to batch size
+        input_ids, labels = self.process_text(batch)
+        input_dict = {"input": input_ids, "pixel_values": patches, "grid_thw": grids}
+
+        return input_dict, labels
