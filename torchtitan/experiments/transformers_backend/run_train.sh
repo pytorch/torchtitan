@@ -16,7 +16,7 @@ export LOG_RANK=${LOG_RANK:-0}
 # Option to switch between debug and train
 MODE=${MODE:-"train"}  # Set MODE=debug or MODE=train
 
-CONFIG_FILE=${CONFIG_FILE:-"configs/debug_fsdp_2_gpu.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"configs/debug_1_gpu.toml"}
 
 if [ "$MODE" = "debug" ]; then
     PYTHON_CMD="debugpy-run -m torch.distributed.run --"
