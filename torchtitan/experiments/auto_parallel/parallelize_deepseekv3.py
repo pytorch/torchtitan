@@ -13,8 +13,7 @@ from autoparallel.api import AutoParallel
 from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
-
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
 from torchtitan.tools.logging import logger
@@ -22,7 +21,6 @@ from torchtitan.tools.logging import logger
 
 def parallelize_deepseekv3(
     model,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -33,6 +31,7 @@ def parallelize_deepseekv3(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    world_mesh = parallel_dims.world_mesh
 
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
@@ -75,7 +74,7 @@ def parallelize_deepseekv3(
         input_fn,
         world_mesh,
         mp_policy=mp_policy,
-        compile=job_config.training.compile,
+        compile=job_config.compile,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
@@ -98,7 +97,10 @@ def parallelize_deepseekv3(
             possible_input_shardings[name] for name in world_mesh.mesh_dim_names
         )
         out_sharding = x_sharding
-        if parallel_dims.loss_parallel_enabled:
+        loss_parallel_enabled = (
+            parallel_dims.tp_enabled and not job_config.parallelism.disable_loss_parallel
+        )
+        if loss_parallel_enabled:
             out_sharding = tuple(
                 possible_output_shardings[name]
                 for name in world_mesh.mesh_dim_names
@@ -112,7 +114,7 @@ def parallelize_deepseekv3(
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
 
-    if parallel_dims.loss_parallel_enabled:
+    if loss_parallel_enabled:
 
         # current PyTorch's implementation of loss parallel assumes
         # that the DTensor has a 1d device mesh. This is not true

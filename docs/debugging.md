@@ -37,19 +37,19 @@ You can override it at runtime via CLI with:
 To inspect how configuration values are interpreted—including those from `.toml` files and CLI overrides—run the config manager directly:
 
 ```bash
-python -m torchtitan.config_manager [your cli args...]
+python -m torchtitan.config.manager [your cli args...]
 ```
 
 For example,
 
 ```bash
-python -m torchtitan.config_manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
+python -m torchtitan.config.manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
 ```
 
 To list all available CLI flags and usage:
 
 ```bash
-python -m torchtitan.config_manager --help
+python -m torchtitan.config.manager --help
 ```
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
@@ -100,7 +100,7 @@ For multiple experimental runs with different parallelism configs, we need to us
 
 
 ```bash
-NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
+NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
 ```
 
 **Note**: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
@@ -116,4 +116,4 @@ Here's a typical comparison setup (maintaining an overall DP degree of 4):
 
 To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You might also need to set the `deterministic` mode to ensure consistent training behavior.
 
-We also provided an example of verifying the numerical consistency across parallism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
+We also provided an example of verifying the numerical consistency across parallelism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.

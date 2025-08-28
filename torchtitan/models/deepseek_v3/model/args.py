@@ -7,15 +7,15 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
@@ -27,7 +27,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     Attributes:
         max_batch_size (int): Maximum batch size.
         max_seq_len (int): Maximum sequence length.
-        dtype (Literal["bf16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
         inter_dim (int): Intermediate dimension for MLP layers.
@@ -35,20 +34,17 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_layers (int): Number of transformer layers.
         n_dense_layers (int): Number of dense layers in the model.
         n_heads (int): Number of attention heads.
-        n_routed_experts (int): Number of routed experts for MoE layers.
-        n_shared_experts (int): Number of shared experts for MoE layers.
-        n_activated_experts (int): Number of activated experts in MoE layers.
+        norm_eps (float): Epsilon value used for RMSNorm.
+        moe_args (MoEArgs): MoE configuration.
         n_expert_groups (int): Number of expert groups.
         n_limited_groups (int): Number of limited groups for MoE routing.
-        score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
-        route_scale (float): Scaling factor for routing scores.
-        use_grouped_mm (bool): Whether to use grouped matrix multiplication for MoE layers.
-        load_balance_coeff (float | None): Auxiliary-Loss-Free Load balancing coefficient for MoE layers.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
         qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
         v_head_dim (int): Dimension for value projections.
+        use_flex_attn (bool): Whether to use FlexAttention.
+        attn_mask_type (str): Type of attention mask.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
@@ -58,7 +54,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
-    dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 102400
     dim: int = 2048
     inter_dim: int = 10944
@@ -67,16 +62,13 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     n_dense_layers: int = 1
     n_heads: int = 16
     norm_eps: float = 1e-5  # eps used for RMSNorm
+
     # MoE
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+    # TODO: node-limited routing is not supported yet
     n_expert_groups: int = 1
     n_limited_groups: int = 1
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
-    route_scale: float = 1.0
-    use_grouped_mm: bool = True
-    load_balance_coeff: float = 1e-3
+
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
@@ -85,6 +77,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     v_head_dim: int = 128
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 10000.0
@@ -93,12 +86,24 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        """
-        Update the model_config config from the given job config.
-        """
-        self.vocab_size = tokenizer.vocab_size
-        self.max_seq_len = job_config.training.seq_len
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
+
+        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
+            logger.warning(
+                "Failed to use grouped mm, which is only supported on SM90 or later",
+            )
+            self.moe_args.use_grouped_mm = False
+
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
+            )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """
@@ -106,7 +111,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         """
         nparams_embedding = 0
         nparams_moe_router = 0
-        nparams_shared_expert = 0
+        nparams_shared_experts = 0
         nparams_experts = 0
         nparams_dense = 0
 
@@ -114,8 +119,8 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             if "embedding" in name:
                 nparams_embedding += p.numel()
                 nparams_dense += p.numel()
-            elif "moe.shared_expert" in name:
-                nparams_shared_expert += p.numel()
+            elif "moe.shared_experts" in name:
+                nparams_shared_experts += p.numel()
             elif "moe.router" in name:
                 nparams_moe_router += p.numel()
             elif "moe.experts" in name:
@@ -123,12 +128,12 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             else:
                 nparams_dense += p.numel()
 
-        nparams_sparse = nparams_moe_router + nparams_shared_expert + nparams_experts
+        nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
         nparams = nparams_dense + nparams_sparse
         nparams_sparse_active = (
             nparams_moe_router
-            + nparams_shared_expert
-            + nparams_experts * self.n_activated_experts // self.n_routed_experts
+            + nparams_shared_experts
+            + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
         logger.info(

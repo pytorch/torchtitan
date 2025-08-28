@@ -5,21 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Iterable, Optional
+from typing import Optional
 
 import torch
-from torch.distributed.fsdp import FSDPModule
 
-from torchtitan.config_manager import ConfigManager, JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
-from .dataset.tokenizer import build_flux_tokenizer
 from .infra.parallelize import parallelize_encoders
 from .model.autoencoder import load_ae
 from .model.hf_embedder import FluxEmbedder
-from .sampling import generate_image, save_image
 from .utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -36,7 +33,7 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.world_mesh,
+            self.parallel_dims.world_mesh,
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
@@ -54,11 +51,11 @@ class FluxTrainer(Trainer):
         )
 
         # load components
-        model_config = self.train_spec.config[job_config.model.flavor]
+        model_args = self.train_spec.model_args[job_config.model.flavor]
 
         self.autoencoder = load_ae(
             job_config.encoder.autoencoder_path,
-            model_config.autoencoder_params,
+            model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
             random_init=job_config.training.test_mode,
@@ -77,10 +74,18 @@ class FluxTrainer(Trainer):
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
-            world_mesh=self.world_mesh,
             parallel_dims=self.parallel_dims,
             job_config=job_config,
         )
+
+        if job_config.validation.enable:
+            self.validator.flux_init(
+                device=self.device,
+                _dtype=self._dtype,
+                autoencoder=self.autoencoder,
+                t5_encoder=self.t5_encoder,
+                clip_encoder=self.clip_encoder,
+            )
 
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
@@ -99,7 +104,7 @@ class FluxTrainer(Trainer):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        # explicitely convert flux model to be Bfloat16 no matter FSDP is applied or not
+        # explicitly convert flux model to be Bfloat16 no matter FSDP is applied or not
         model = self.model_parts[0]
 
         # image in latent space transformed by self.auto_encoder
@@ -127,83 +132,26 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        latent_noise_pred = model(
-            img=latents,
-            img_ids=latent_pos_enc,
-            txt=t5_encodings,
-            txt_ids=text_pos_enc,
-            y=clip_encodings,
-            timesteps=timesteps,
-        )
+        with self.maybe_enable_amp:
+            latent_noise_pred = model(
+                img=latents,
+                img_ids=latent_pos_enc,
+                txt=t5_encodings,
+                txt_ids=text_pos_enc,
+                y=clip_encodings,
+                timesteps=timesteps,
+            )
 
-        # Convert sequence of patches to latent shape
-        pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-        target = noise - labels
-        loss = self.loss_fn(pred, target)
+            # Convert sequence of patches to latent shape
+            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+            target = noise - labels
+            loss = self.loss_fn(pred, target)
         # pred.shape=(bs, seq_len, vocab_size)
         # need to free to before bwd to avoid peaking memory
         del (pred, noise, target)
         loss.backward()
 
         return loss
-
-    def eval_step(self, prompt: str = "A photo of a cat"):
-        """
-        Evaluate the Flux model.
-        1) generate and save images every few steps. Currently, we run the eval and on the same
-        prompts across all DP ranks. We will change this behavior to run on validation set prompts.
-        Due to random noise generation, results could be different across DP ranks cause we assign
-        different random seeds to each DP rank.
-        2) [TODO] Calculate loss with fixed t value on validation set.
-        """
-
-        t5_tokenizer, clip_tokenizer = build_flux_tokenizer(self.job_config)
-
-        image = generate_image(
-            device=self.device,
-            dtype=self._dtype,
-            job_config=self.job_config,
-            model=self.model_parts[0],
-            prompt=prompt,  # TODO(jianiw): change this to a prompt from validation set
-            autoencoder=self.autoencoder,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
-            t5_encoder=self.t5_encoder,
-            clip_encoder=self.clip_encoder,
-        )
-
-        save_image(
-            name=f"image_rank{str(torch.distributed.get_rank())}_{self.step}.png",
-            output_dir=os.path.join(
-                self.job_config.job.dump_folder, self.job_config.eval.save_img_folder
-            ),
-            x=image,
-            add_sampling_metadata=True,
-            prompt=prompt,
-        )
-
-        # Reshard after run forward pass in eval_step.
-        # This is to ensure the model weights are sharded the same way for checkpoint saving.
-        for module in self.model_parts[0].modules():
-            if isinstance(module, FSDPModule):
-                module.reshard()
-
-    def train_step(
-        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
-        super().train_step(data_iterator)
-
-        # Evaluate the model during training
-        if (
-            self.step % self.job_config.eval.eval_freq == 0
-            or self.step == self.job_config.training.steps
-        ):
-            model = self.model_parts[0]
-            model.eval()
-            # We need to set reshard_after_forward before last forward pass.
-            # So the model wieghts are sharded the same way for checkpoint saving.
-            self.eval_step()
-            model.train()
 
 
 if __name__ == "__main__":
@@ -219,7 +167,7 @@ if __name__ == "__main__":
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
-                config.checkpoint.enable_checkpoint
+                config.checkpoint.enable
             ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")

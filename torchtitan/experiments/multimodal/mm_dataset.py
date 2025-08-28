@@ -20,7 +20,7 @@ from transform import CLIPTransform
 from utils import load_image
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 

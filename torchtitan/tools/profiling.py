@@ -11,7 +11,7 @@ import time
 
 import torch
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import Profiling as ProfilingConfig
 from torchtitan.tools.logging import logger
 
 # the number of warmup steps before the active step in each profiling cycle
@@ -24,35 +24,39 @@ PERFETTO_UI_ROOT_URL = (
 )
 
 @contextlib.contextmanager
-def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
+def maybe_enable_profiling(
+    profiling_config: ProfilingConfig,
+    *,
+    global_step: int = 0,
+    base_folder: str = "",
+    leaf_folder: str = "",
+):
     # get user defined profiler settings
-    enable_profiling = config.profiling.enable_profiling
+    enable_profiling = profiling_config.enable_profiling
 
     if enable_profiling:
-        dump_dir = config.job.dump_folder
-        save_trace_dir = config.profiling.save_traces_folder
-        trace_dir = os.path.join(dump_dir, save_trace_dir)
-        profile_freq = config.profiling.profile_freq
+        trace_dir = os.path.join(base_folder, profiling_config.save_traces_folder)
+        profile_freq = profiling_config.profile_freq
 
         rank = torch.distributed.get_rank()
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
-            curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name)
+            curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name, leaf_folder)
             if not os.path.exists(curr_trace_dir):
                 os.makedirs(curr_trace_dir, exist_ok=True)
 
             logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
-            filename = f"{curr_trace_dir}/rank{rank}_trace.json"
+            output_file = os.path.join(curr_trace_dir, f"rank{rank}_trace.json")
 
-            prof.export_chrome_trace(filename)
+            prof.export_chrome_trace(output_file)
             log_str = f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             # not directly landable on upstream titan,
             # but conveniently prints the internal url for perfetto on manifold for mast jobs
             manifold_mount_prefix = "/mnt/mffuse/"
-            if filename.find(manifold_mount_prefix) == 0:
-                manifold_path = os.path.join("torchtrain_datasets/tree", filename.split(manifold_mount_prefix)[1])
+            if output_file.find(manifold_mount_prefix) == 0:
+                manifold_path = os.path.join("torchtrain_datasets/tree", output_file.split(manifold_mount_prefix)[1])
                 perfetto_url = (
                     PERFETTO_UI_ROOT_URL
                     + "#!/?url=https://interncache-all.fbcdn.net/manifold/"
@@ -93,11 +97,18 @@ def maybe_enable_profiling(config: JobConfig, *, global_step: int = 0):
 
 
 @contextlib.contextmanager
-def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
-    enable_snapshot = config.profiling.enable_memory_snapshot
+def maybe_enable_memory_snapshot(
+    profiling_config: ProfilingConfig,
+    *,
+    global_step: int = 0,
+    base_folder: str = "",
+    leaf_folder: str = "",
+):
+    enable_snapshot = profiling_config.enable_memory_snapshot
     if enable_snapshot:
-        snapshot_folder = config.profiling.save_memory_snapshot_folder
-        snapshot_dir = os.path.join(config.job.dump_folder, snapshot_folder)
+        snapshot_dir = os.path.join(
+            base_folder, profiling_config.save_memory_snapshot_folder
+        )
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
         rank = torch.distributed.get_rank()
@@ -122,21 +133,22 @@ def maybe_enable_memory_snapshot(config: JobConfig, *, global_step: int = 0):
                     # dump as iteration_0_exit if OOM at iter 1
                     curr_step = self.step_num - 1
                     dir_name = f"iteration_{curr_step}_exit"
-                curr_snapshot_dir = os.path.join(snapshot_dir, dir_name)
+                curr_snapshot_dir = os.path.join(snapshot_dir, dir_name, leaf_folder)
                 if not os.path.exists(curr_snapshot_dir):
                     os.makedirs(curr_snapshot_dir, exist_ok=True)
                 logger.info(f"Dumping memory snapshot at step {curr_step}")
                 begin = time.monotonic()
-                with open(
-                    f"{curr_snapshot_dir}/rank{rank}_memory_snapshot.pickle", "wb"
-                ) as output:
+                output_file = os.path.join(
+                    curr_snapshot_dir, f"rank{rank}_memory_snapshot.pickle"
+                )
+                with open(output_file, "wb") as output:
                     pickle.dump(torch.cuda.memory._snapshot(), output)
                 logger.info(
                     f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
                 )
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
-        profiler = MemoryProfiler(global_step, config.profiling.profile_freq)
+        profiler = MemoryProfiler(global_step, profiling_config.profile_freq)
         try:
             yield profiler
         except torch.OutOfMemoryError as e:

@@ -7,11 +7,11 @@ This folder contains the scripts for converting officially released Llama 4 chec
 
 From Meta format:
 ```bash
-CONFIG_FILE=../train_configs/llama4_16.toml ./convert_meta_to_dcp.sh --checkpoint.enable_checkpoint --checkpoint.convert_path=[checkpoint_folder] --checkpoint.convert_load_every_n_ranks=8
+CONFIG_FILE=../train_configs/llama4_16.toml ./convert_meta_to_dcp.sh --checkpoint.enable --checkpoint.convert_path=[checkpoint_folder] --checkpoint.convert_load_every_n_ranks=8
 ```
 
 
 From HuggingFace format:
 ```bash
-CONFIG_FILE=../train_configs/llama4_16.toml  ./convert_hf_to_dcp_with_gpus.sh --checkpoint.enable_checkpoint --checkpoint.convert_path=[checkpoint_folder] --checkpoint.convert_load_every_n_ranks=8
+CONFIG_FILE=../train_configs/llama4_16.toml  ./convert_hf_to_dcp_with_gpus.sh --checkpoint.enable --checkpoint.convert_path=[checkpoint_folder] --checkpoint.convert_load_every_n_ranks=8
 ```

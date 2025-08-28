@@ -22,7 +22,7 @@ enable_wandb = false
 name = "deepseek_v2"
 flavor = "deepseek-ai/DeepSeek-V2-Lite"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/tokenizer"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
@@ -35,7 +35,7 @@ implementation = "foreach"
 warmup_steps = 100  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
-lr_min = 0.1
+min_lr_factor = 0.1
 
 [training]
 local_batch_size = 2 # 8
@@ -56,7 +56,7 @@ context_parallel_degree = 1
 # expert_parallel_degree = 2  set in custom_args
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 model_weights_only = false

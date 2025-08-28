@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.quantization.float8 import Float8Converter
-from torchtitan.config_manager import ConfigManager
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     build_model_converters,
@@ -22,8 +22,8 @@ def build_parallel_dims(job_config, world_size):
         tp=parallelism_config.tensor_parallel_degree,
         pp=parallelism_config.pipeline_parallel_degree,
         ep=parallelism_config.expert_parallel_degree,
+        etp=parallelism_config.expert_tensor_parallel_degree,
         world_size=world_size,
-        enable_loss_parallel=not parallelism_config.disable_loss_parallel,
     )
     return parallel_dims
 

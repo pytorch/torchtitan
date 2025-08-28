@@ -6,9 +6,12 @@
 
 [![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
-[![ICLR](https://img.shields.io/badge/ICLR-2025-blue.svg)](https://iclr.cc/virtual/2025/poster/29620)
+[![ICLR](https://img.shields.io/badge/ICLR-2025-violet.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](./LICENSE)
+[![pip](https://img.shields.io/pypi/v/torchtitan?color=blue)](https://pypi.org/project/torchtitan/)
+[![conda](https://img.shields.io/conda/vn/conda-forge/torchtitan?color=green)](https://anaconda.org/conda-forge/torchtitan)
+
 
 </div>
 
@@ -17,6 +20,8 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 
 ## Latest News
+- [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
+- [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
 - [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
 - [2025/04] Training the diffusion model [FLUX](torchtitan/experiments/flux/) with FSDP/HSDP is available as an experiment.
@@ -33,7 +38,7 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 Our mission is to accelerate innovation in the field of generative AI by empowering researchers and developers to explore new modeling architectures and infrastructure techniques.
 
-The guiding principles when building `torchtitan`
+The Guiding Principles when building `torchtitan`
 * Designed to be easy to understand, use and extend for different training purposes.
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
@@ -86,17 +91,40 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
+One can choose to install `torchtitan` from a stable release, a nightly build, or directly run the source code. Please [install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
+
+### Stable releases
+One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `pip` or `conda`.
+```sh
+pip install torchtitan
+```
+```sh
+conda install conda-forge::torchtitan
+```
+Note that each stable release pins the nightly versions of `torch` and `torchao`. Please see [release.md](docs/release.md) for more details.
+
+### Nightly builds
+
+This method requires the nightly build of PyTorch. You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
+
+```sh
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+```
+
+### From source
+
+This method requires the nightly build of PyTorch or the latest PyTorch built [from source](https://github.com/pytorch/pytorch?tab=readme-ov-file#from-source).
+
 ```bash
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-[For AMD GPU] pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3 --force-reinstall
 ```
 
 ### Downloading a tokenizer
 
-`torchtitan` currently supports training Llama 3.1 (8B, 70B, 405B) out of the box. To get started training these models, we need to download a tokenizer.model. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Llama-3.1-8B) repository to ensure you have access to the Llama model weights.
+`torchtitan` currently supports training Llama 3.1 (8B, 70B, 405B) out of the box. To get started training these models, we need to download the tokenizer. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Llama-3.1-8B) repository to ensure you have access to the Llama model weights.
 
 Once you have confirmed access, you can run the following command to download the Llama 3.1 tokenizer to your local machine.
 
@@ -104,7 +132,7 @@ Once you have confirmed access, you can run the following command to download th
 # Get your HF token from https://huggingface.co/settings/tokens
 
 # Llama 3.1 tokenizer
-python scripts/download_tokenizer.py --repo_id meta-llama/Llama-3.1-8B --hf_token=...
+python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer --hf_token=...
 ```
 
 ### Start a training run

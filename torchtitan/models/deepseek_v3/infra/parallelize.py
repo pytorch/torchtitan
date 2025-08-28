@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
@@ -15,10 +16,15 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.llama4.infra.expert_parallel import NoParallel
-from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.experiments.llama4.infra.parallelize import (
+    apply_compile,
+    apply_fsdp,
+    apply_moe_ep_tp,
+)
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
@@ -26,18 +32,27 @@ from torchtitan.tools.logging import logger
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    if parallel_dims.tp_enabled:
-        if job_config.parallelism.enable_async_tensor_parallel:
-            # TODO(jianiw): This branch needs to be tested and enabled
-            raise NotImplementedError(
-                "Currently, async TP is not tested for deepseekv3. \
-                torch.compile is not supported yet, which is required for async TP."
-            )
+    world_mesh = parallel_dims.world_mesh
+    # TODO: TP currently cannot handle uneven seq_len because we set
+    #       `use_local_output=True` to use plain Tensors for legacy reasons.
+    #       Need to revisit this.
+    assert (
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
+        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
+        """
 
+    if (
+        job_config.parallelism.context_parallel_degree > 1
+        and model.model_args.use_flex_attn
+    ):
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+
+    if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -54,10 +69,10 @@ def parallelize_deepseekv3(
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            enable_async_tp=False,
         )
+        maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
@@ -66,16 +81,24 @@ def parallelize_deepseekv3(
             ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
                 world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled and parallel_dims.ep_enabled
+                if parallel_dims.tp_enabled
+                and parallel_dims.ep_enabled
+                and parallel_dims.etp_enabled
                 else None
             ),
+            etp_enabled=parallel_dims.etp_enabled,
         )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    if job_config.training.compile:
-        raise NotImplementedError("torch.compile is not supported yet for deepseekv3")
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
+    if model_compile_enabled:
+        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
+        torch._dynamo.config.capture_scalar_outputs = True
+        apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -101,11 +124,13 @@ def parallelize_deepseekv3(
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
             dp_mod_ep_mesh=(
                 world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if dp_mod_ep_mesh_dim_names
+                if parallel_dims.ep_enabled
                 else None
             ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -125,7 +150,7 @@ def parallelize_deepseekv3(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
@@ -137,7 +162,6 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -178,10 +202,18 @@ def apply_non_moe_tp(
                 input_layouts=(Shard(1), Replicate()),
                 desired_input_layouts=(Replicate(), Replicate()),
             ),
-            # use_local_output=False make the output to be a DTensor instead of a plain Tensor
+            # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
+            # so that the intermedidate results k is generated as a DTensor and its gradient is
+            # correctly handled by the autograd engine.
             "attention.wkv_a": NoParallel(use_local_output=False),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
             "attention.kv_norm": NoParallel(use_local_output=False),
+            # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
+            "attention.sdpa": prepare_module_input(
+                input_layouts=(Shard(1), Shard(1), Shard(1)),
+                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+                use_local_output=True,
+            ),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
@@ -223,6 +255,6 @@ def apply_non_moe_tp(
         )
 
     logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )

@@ -6,4 +6,5 @@
 
 import torchtitan.experiments.auto_parallel  # noqa: F401
 import torchtitan.experiments.llama4  # noqa: F401
+import torchtitan.experiments.qwen3
 import torchtitan.experiments.simple_fsdp  # noqa: F401

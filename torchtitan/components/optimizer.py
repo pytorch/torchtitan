@@ -9,22 +9,23 @@ from typing import Any, Generic, Iterator, TypeVar
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,
     set_optimizer_state_dict,
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "OptimizersContainer",
     "build_optimizers",
+    "build_optimizers_with_moe_load_balancing",
 ]
 
 
@@ -242,15 +243,14 @@ class FTOptimizersContainer(OptimizersContainer):
 
 def build_optimizers(
     model_parts: list[nn.Module],
-    job_config: JobConfig,
+    optimizer_config: OptimizerConfig,
     parallel_dims: ParallelDims,
-    world_mesh: DeviceMesh,
-    ft_manager: FTManager,
+    ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
     This function creates a ``OptimizersContainer`` for the given model parts.
-    ``job_config`` should define the correct optimizer name and parameters.
+    ``optimizer_config`` should define the correct optimizer name and parameters.
     This function currently supports creating ``OptimizersContainer`` and
     ``OptimizersInBackwardContainer``.
 
@@ -262,10 +262,10 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        job_config (JobConfig): Job config containing the optimizer name and parameters.
+        optimizer_config (OptimizerConfig): Optimizer config containing the optimizer name and parameters.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
-    optim_in_bwd = job_config.optimizer.early_step_in_backward
+    optim_in_bwd = optimizer_config.early_step_in_backward
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
             raise NotImplementedError(
@@ -275,19 +275,19 @@ def build_optimizers(
             raise NotImplementedError(
                 "Optimizers in backward is not supported with Pipeline Parallel."
             )
-        if ft_manager.enabled:
+        if ft_manager and ft_manager.enabled:
             raise NotImplementedError(
                 "TorchFT is not supported with optimizers in backward."
             )
 
-    name = job_config.optimizer.name
-    lr = job_config.optimizer.lr
-    beta1 = job_config.optimizer.beta1
-    beta2 = job_config.optimizer.beta2
-    eps = job_config.optimizer.eps
-    weight_decay = job_config.optimizer.weight_decay
+    name = optimizer_config.name
+    lr = optimizer_config.lr
+    beta1 = optimizer_config.beta1
+    beta2 = optimizer_config.beta2
+    eps = optimizer_config.eps
+    weight_decay = optimizer_config.weight_decay
 
-    optim_implementation = job_config.optimizer.implementation
+    optim_implementation = optimizer_config.implementation
     assert optim_implementation in ["fused", "foreach", "for-loop"]
 
     fused = optim_implementation == "fused"
@@ -315,13 +315,95 @@ def build_optimizers(
             model_parts, optimizer_cls, optimizer_kwargs
         )
 
-    if ft_manager.enabled:
+    if ft_manager and ft_manager.enabled:
         return FTOptimizersContainer(
             model_parts,
             optimizer_cls,
             optimizer_kwargs,
             ft_manager.manager,
-            use_ft_optimizer=job_config.fault_tolerance.semi_sync_method is None,
+            use_ft_optimizer=ft_manager.use_async_quorum,
         )
 
     return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
+
+
+def build_optimizers_with_moe_load_balancing(
+    model_parts: list[nn.Module],
+    optimizer_config: OptimizerConfig,
+    parallel_dims: ParallelDims,
+    ft_manager: FTManager | None = None,
+) -> OptimizersContainer:
+    optimizers = build_optimizers(
+        model_parts=model_parts,
+        optimizer_config=optimizer_config,
+        parallel_dims=parallel_dims,
+        ft_manager=ft_manager,
+    )
+
+    # for MoE auxiliary-loss-free load balancing
+    def _is_recomputation_enabled(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+
+    def _update_expert_bias(
+        model_parts: list[nn.Module],
+        parallel_dims: ParallelDims,
+    ):
+        dp_cp_mesh = (
+            parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
+        )
+        # TODO: Currently this sync is blocking (thus exposed) and happens on the
+        # default compute stream. Need to assess if this is OK performance-wise.
+        tokens_per_expert_list = []
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if not transformer_block.moe_enabled:
+                    continue
+                if transformer_block.moe.load_balance_coeff is None:
+                    return
+                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                if _is_recomputation_enabled(transformer_block):
+                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
+                    # This does not affect to expert choice, but affects the experts usage metrics.
+                    # We divide by 2 to correct for this double-counting due to recomputation
+                    # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                    tokens_per_expert = tokens_per_expert // 2
+                tokens_per_expert_list.append(tokens_per_expert)
+
+        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
+
+        if dp_cp_mesh is not None:
+            # Perform single all-reduce to get global statistics across all processes
+            pg = dp_cp_mesh.get_group()
+            torch.distributed.all_reduce(
+                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
+            )
+
+        moe_layer_idx = 0
+        with torch.no_grad():
+            for model_part in model_parts:
+                for transformer_block in model_part.layers.values():
+                    if not transformer_block.moe_enabled:
+                        continue
+                    moe = transformer_block.moe
+
+                    tokens_per_expert = tokens_per_expert_by_layer[
+                        moe_layer_idx
+                    ].float()
+                    moe_layer_idx += 1
+
+                    # update the expert bias
+                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                        tokens_per_expert.mean() - tokens_per_expert
+                    )
+                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    moe.expert_bias.add_(expert_bias_delta)
+                    moe.tokens_per_expert.zero_()
+
+    optimizers.register_step_pre_hook(
+        lambda *args, **kwargs: _update_expert_bias(
+            model_parts, parallel_dims=parallel_dims
+        )
+    )
+
+    return optimizers

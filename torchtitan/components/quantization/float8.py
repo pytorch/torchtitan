@@ -8,8 +8,9 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.config_manager import Float8, JobConfig
+from torchtitan.config.job_config import Float8, JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,
@@ -27,8 +28,12 @@ class Float8Converter(ModelConverter):
         self.enabled = False
 
         float8_config: Float8 = job_config.float8
+        compile_config = job_config.compile
+        model_compile_enabled = (
+            compile_config.enable and "model" in compile_config.components
+        )
         if has_cuda_capability(8, 9) or (
-            float8_config.emulate and not job_config.training.compile
+            float8_config.emulate and not model_compile_enabled
         ):
             pass
         else:
@@ -66,14 +71,13 @@ class Float8Converter(ModelConverter):
                 job_config.parallelism.context_parallel_degree == 1
             ), "Float8 MoE training prototype does not yet support context parallelism"
 
+            # For fp8 grouped GEMM, token group sizes must be multiples of 16
+            # (16 byte alignment / 1 byte per elem = 16 elements)
+            set_token_group_alignment_size_m(16)
+
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
                 "using `float8_config.enable_fsdp_float8_all_gather` together "
-                "with `float8_config.recipe_name` is not supported"
-            )
-
-            assert not float8_config.force_recompute_fp8_weight_in_bwd, (
-                "using `float8_config.force_recompute_fp8_weight_in_bwd` together "
                 "with `float8_config.recipe_name` is not supported"
             )
 
@@ -97,7 +101,6 @@ class Float8Converter(ModelConverter):
             )
             self.config = Float8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-                force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
                 emulate=float8_config.emulate,
             )
             # for precompute_float8_dynamic_scale_for_fsdp
@@ -165,7 +168,7 @@ class Float8Converter(ModelConverter):
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+            module_filter_fn=self.filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="

@@ -44,10 +44,10 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                 ],
                 [
-                    "--checkpoint.enable_checkpoint",
+                    "--checkpoint.enable",
                     "--training.steps 20",
                 ],
             ],
@@ -57,12 +57,15 @@ def build_test_list():
         OverrideDefinitions(
             [
                 [
-                    "--checkpoint.enable_checkpoint",
-                    "--checkpoint.last_save_model_weights_only",
+                    "--checkpoint.enable",
+                    "--checkpoint.last_save_model_only",
                 ],
             ],
-            "Checkpoint Integration Test - Save Model Weights Only fp32",
-            "last_save_model_weights_only_fp32",
+            "Checkpoint Integration Test - Save Model Only fp32",
+            "last_save_model_only_fp32",
+        ),
+        OverrideDefinitions(
+            [["--validation.enable"]], "Flux Validation Test", "validation"
         ),
         # Parallelism tests.
         OverrideDefinitions(
@@ -106,7 +109,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     t5_encoder_version_arg = (
         "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
     )
-    tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
+    hf_assets_path_arg = "--model.hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
@@ -118,7 +121,7 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
-        cmd += " " + tokenzier_path_arg
+        cmd += " " + hf_assets_path_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(

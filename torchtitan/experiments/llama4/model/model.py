@@ -9,11 +9,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.models.attention import build_attention
+from torchtitan.models.moe import MoE
+from torchtitan.protocols import ModelProtocol
 
 from .args import TransformerModelArgs
-from .moe import MoE
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -296,12 +296,25 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args, attn_use_rope, fixed_attn_block_size)
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
-        self.moe_enabled = (
-            model_args.moe_enabled
-            and (layer_id + 1) % model_args.interleave_moe_layer_step == 0
-        )
+        moe_args = model_args.moe_args
+        self.moe_enabled = (layer_id + 1) % model_args.interleave_moe_layer_step == 0
         if self.moe_enabled:
-            self.moe = MoE(model_args)
+            dim = model_args.dim
+            hidden_dim = 4 * model_args.dim
+            ffn_dim_multiplier = model_args.ffn_dim_multiplier
+            hidden_dim = int(2 * hidden_dim / 3)
+            if ffn_dim_multiplier is not None:
+                hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+
+            hidden_dim_denom = 1
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim_denom = moe_args.top_k + moe_args.num_shared_experts
+
+            if model_args.auto_scale_hidden_dim:
+                hidden_dim = int(hidden_dim / hidden_dim_denom)
+            hidden_dim += -hidden_dim % model_args.multiple_of
+
+            self.moe = MoE(moe_args, dim=dim, hidden_dim=hidden_dim)
         else:
             self.feed_forward = FeedForward(
                 dim=model_args.dim,
@@ -365,7 +378,7 @@ class Transformer(nn.Module, ModelProtocol):
         tok_embeddings (ParallelEmbedding): Token embeddings.
         layers (torch.nn.ModuleList): List of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
-        output (ColumnParallelLinear): Linear layer for final output.
+        output (Linear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
 
     """
@@ -375,18 +388,12 @@ class Transformer(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
-        # TODO persistent should be set to false, since this buffer can be recomputed.
-        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
-        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
-        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
-        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
-        # initialized by the checkpoint, or we need to add a separate initializer for
-        # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
+        self.register_buffer(
+            "freqs_cis", self._precompute_freqs_cis(), persistent=False
+        )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -441,7 +448,11 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        input_batch: torch.Tensor | None = None,
+    ):
         """
         Perform a forward pass through the Transformer model.
 
@@ -459,11 +470,6 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
-            )
-
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 

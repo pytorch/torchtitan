@@ -7,10 +7,9 @@
 import torch
 import torch.nn as nn
 
-from torch.distributed import DeviceMesh
-
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_tp
 from torchtitan.tools.logging import logger
 
@@ -19,7 +18,6 @@ from .simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 def parallelize_llama(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
@@ -30,13 +28,17 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
-        ):
-            raise RuntimeError("Async TP requires --training.compile")
+    # TODO: TP currently cannot handle uneven seq_len because we set
+    #       `use_local_output=True` to use plain Tensors for legacy reasons.
+    #       Need to revisit this.
+    assert (
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
+        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
+        """
 
+    if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -48,14 +50,14 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        tp_mesh = world_mesh["tp"]
+        tp_mesh = parallel_dims.world_mesh["tp"]
         apply_tp(
             model,
-            world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            tp_mesh,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
@@ -84,15 +86,14 @@ def parallelize_llama(
 
         model = data_parallel(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             mode=dp_mode,
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
-            tp_mesh=tp_mesh if parallel_dims.tp_enabled else None,
         )
         logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
 
-    if job_config.training.compile:
+    if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
         model = torch.compile(model, fullgraph=True)
 

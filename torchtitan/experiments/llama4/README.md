@@ -12,7 +12,7 @@ https://github.com/pytorch/torchtitan/issues/1118
 #### Download Llama 4 tokenizer
 ```bash
 # Llama 4 tokenizer.model
-python scripts/download_tokenizer.py --repo_id meta-llama/Llama-4-Scout-17B-16E --hf_token=...
+python scripts/download_hf_assets.py --assets tokenizer --repo_id meta-llama/Llama-4-Scout-17B-16E --hf_token=...
 ```
 
 #### To be added
@@ -26,5 +26,5 @@ python scripts/download_tokenizer.py --repo_id meta-llama/Llama-4-Scout-17B-16E 
 - Quantization
     - efficient float8 Grouped MM kernels (from torchao)
 - Testing
-    - perfomance and loss converging tests
+    - performance and loss converging tests
     - CI integration

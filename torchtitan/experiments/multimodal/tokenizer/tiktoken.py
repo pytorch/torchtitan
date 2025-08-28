@@ -32,7 +32,7 @@ import torch
 from tiktoken.load import load_tiktoken_bpe
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 IMAGE_TOKEN_ID = 128256
@@ -232,4 +232,4 @@ class TikTokenizer(BaseTokenizer):
 
 
 def build_tiktoken_tokenizer(job_config: JobConfig) -> TikTokenizer:
-    return TikTokenizer(job_config.model.tokenizer_path)
+    return TikTokenizer(job_config.model.hf_assets_path)

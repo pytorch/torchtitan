@@ -13,7 +13,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import LRScheduler as LRSchedulerConfig
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -82,12 +82,14 @@ class LRSchedulersContainer(Stateful):
 
 
 def build_lr_schedulers(
-    optimizers: OptimizersContainer, job_config: JobConfig
+    optimizers: OptimizersContainer,
+    lr_scheduler_config: LRSchedulerConfig,
+    training_steps: int,
 ) -> LRSchedulersContainer:
     """Create a LRSchedulerContainer for the given optimizers and job config.
 
     This function creates a ``LRSchedulersContainer`` for the given optimizers.
-    ``job_config`` should define the correct lr scheduler parameters.
+    ``lr_scheduler_config`` should define the correct lr scheduler parameters.
 
     **Note**
     Users who want to customize the lr scheduler behavior can create their own
@@ -99,9 +101,10 @@ def build_lr_schedulers(
     Args:
         optimizers (OptimizersContainer): The corresponding optimizers for the
             lr_schedulers.
+        lr_scheduler_config (LRSchedulerConfig): The lr scheduler config.
+        training_steps (int): The total number of training steps.
     """
-    training_steps = job_config.training.steps
-    warmup_steps = int(job_config.lr_scheduler.warmup_steps)
+    warmup_steps = int(lr_scheduler_config.warmup_steps)
 
     if warmup_steps > training_steps:
         logger.warning(
@@ -110,8 +113,8 @@ def build_lr_schedulers(
         )
         warmup_steps = training_steps
 
-    if job_config.lr_scheduler.decay_ratio is not None:
-        decay_steps = round(training_steps * job_config.lr_scheduler.decay_ratio)
+    if lr_scheduler_config.decay_ratio is not None:
+        decay_steps = round(training_steps * lr_scheduler_config.decay_ratio)
         if warmup_steps + decay_steps > training_steps:
             logger.warning(
                 f"Warmup ({warmup_steps}) + decay ({decay_steps}) steps exceed "
@@ -121,10 +124,10 @@ def build_lr_schedulers(
             decay_steps = training_steps - warmup_steps
     else:
         decay_steps = training_steps - warmup_steps
-    # Add a vitual last step to prevent the learning rate from dropping to 0
+    # Add a virtual last step to prevent the learning rate from dropping to 0
     stable_steps = training_steps + 1 - warmup_steps - decay_steps
-    lr_decay_type = job_config.lr_scheduler.decay_type
-    lr_min = job_config.lr_scheduler.lr_min
+    lr_decay_type = lr_scheduler_config.decay_type
+    min_lr_factor = lr_scheduler_config.min_lr_factor
 
     def linear_warmup_stable_decay(
         current_step: int,
@@ -132,7 +135,7 @@ def build_lr_schedulers(
         stable_steps: int,
         decay_steps: int,
         lr_decay_type: str,
-        lr_min: float,
+        min_lr_factor: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -147,7 +150,7 @@ def build_lr_schedulers(
         2. `sqrt`: decays as 1 minus the square root of the decay progress.
         3. `cosine`: follows a cosine curve, decaying according to the values of the half-period of the cosine function.
 
-        If `lr_min` is specified, the decay range is scaled from 1 to `lr_min`
+        If `min_lr_factor` is specified, the decay range is scaled from 1 to `min_lr_factor`
         to ensure the learning rate does not drop below this minimum value.
         """
         warmup_stable_steps = warmup_steps + stable_steps
@@ -173,7 +176,7 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
-            curr_adjustment = lr_min + (1 - lr_min) * curr_adjustment
+            curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
         return curr_adjustment
 
     lr_lambda = functools.partial(
@@ -182,6 +185,6 @@ def build_lr_schedulers(
         stable_steps=stable_steps,
         decay_steps=decay_steps,
         lr_decay_type=lr_decay_type,
-        lr_min=lr_min,
+        min_lr_factor=min_lr_factor,
     )
     return LRSchedulersContainer(optimizers, lr_lambda)

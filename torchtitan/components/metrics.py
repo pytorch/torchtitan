@@ -14,14 +14,14 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
 
 if TYPE_CHECKING:
-    from torchtitan.protocols.train_spec import BaseModelArgs
+    from torchtitan.protocols import BaseModelArgs
 
 
 # named tuple for passing device memory stats for logging
@@ -144,7 +144,9 @@ class WandBLogger(BaseLogger):
         os.makedirs(log_dir, exist_ok=True)
 
         self.wandb.init(
+            entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
+            name=os.getenv("WANDB_RUN_NAME", None),
             dir=log_dir,
             config=job_config.to_dict(),
         )
@@ -261,6 +263,12 @@ def _build_metric_logger(
         dump_dir, metrics_config.save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
     )
 
+    if job_config.fault_tolerance.enable:
+        base_log_dir = os.path.join(
+            base_log_dir,
+            f"replica_{job_config.fault_tolerance.replica_id}",
+        )
+
     if metrics_config.save_for_all_ranks:
         base_log_dir = os.path.join(
             base_log_dir, f"rank_{torch.distributed.get_rank()}"
@@ -313,6 +321,7 @@ class MetricsProcessor:
     num_flops_per_token: int
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
+    model_parts: list[torch.nn.Module] | None
 
     def __init__(
         self,
@@ -343,6 +352,7 @@ class MetricsProcessor:
         self.num_flops_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
+        self.model_parts = None
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
@@ -403,7 +413,7 @@ class MetricsProcessor:
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
-            f"{color.yellow}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
@@ -412,6 +422,39 @@ class MetricsProcessor:
 
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+
+    def log_validation(self, loss: float, step: int):
+        time_delta = time.perf_counter() - self.time_last_log
+
+        device_mem_stats = self.device_memory_monitor.get_peak_stats()
+
+        # tokens per second per device, abbreviated as tps
+        tps = self.ntokens_since_last_log / (
+            time_delta * self.parallel_dims.non_data_parallel_size
+        )
+
+        metrics = {
+            "validation_metrics/loss": loss,
+            "validation_metrics/throughput(tps)": tps,
+            "validation_metrics/memory/max_active(GiB)": device_mem_stats.max_active_gib,
+            "validation_metrics/memory/max_active(%)": device_mem_stats.max_active_pct,
+            "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+            "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
+        }
+        self.logger.log(metrics, step)
+
+        color = self.color
+        logger.info(
+            f"{color.yellow}validate step: {step:2}  "
+            f"{color.green}loss: {loss:7.4f}  "
+            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.blue}tps: {round(tps):,}{color.reset}"
+        )
+
+        self.ntokens_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 

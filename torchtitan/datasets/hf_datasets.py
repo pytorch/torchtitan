@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
 
@@ -209,6 +209,7 @@ def build_hf_validation_dataloader(
     dp_rank: int,
     tokenizer: BaseTokenizer,
     job_config: JobConfig,
+    infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a validation data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
@@ -223,7 +224,7 @@ def build_hf_validation_dataloader(
         seq_len=seq_len,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        infinite=False,
+        infinite=infinite,
     )
 
     return ParallelAwareDataloader(
