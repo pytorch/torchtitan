@@ -155,7 +155,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = self.train_spec.model_cls(model_args)
+            model = self.train_spec.model_cls(model_args.convert_to_hf_config())
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
