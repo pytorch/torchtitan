@@ -65,28 +65,28 @@ class TestApplyAC(unittest.TestCase):
         ac_config_no_force = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
+            per_op_sac_force_save_mm_shapes_by_fqns=[],  # Empty list
         )
         apply_ac(model_selective_ac, ac_config_no_force)
         flops_selective_ac = get_bw_flops(model_selective_ac)
 
-        # 3. Per-op SAC with force recompute "moe.router.gate"
-        # This leads to two mms being recomputed since they share the same shape!
+        # 3. Per-op SAC with force save "moe.router.gate"
+        # This leads to two mms being saved since they share the same shape!
         model_with_force_first = ToyModule()
         ac_config_with_force_first = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+            per_op_sac_force_save_mm_shapes_by_fqns=["moe.router.gate"],
         )
         apply_ac(model_with_force_first, ac_config_with_force_first)
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
-        # 4. Per-op SAC with force recompute "output"
+        # 4. Per-op SAC with force save "output"
         model_with_force_last = ToyModule()
         ac_config_with_force_last = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
+            per_op_sac_force_save_mm_shapes_by_fqns=["output"],
         )
         apply_ac(model_with_force_last, ac_config_with_force_last)
         flops_with_force_last = get_bw_flops(model_with_force_last)
@@ -101,8 +101,8 @@ class TestApplyAC(unittest.TestCase):
 
         self.assertEqual(flops_no_ac, 8.0)
         self.assertEqual(flops_selective_ac, 9.0)
-        self.assertEqual(flops_with_force_first, 10.0)
-        self.assertEqual(flops_with_force_last, 11.0)
+        self.assertEqual(flops_with_force_first, 8.0)
+        self.assertEqual(flops_with_force_last, 9.0)
         self.assertEqual(flops_full_ac, 12.0)
 
     def test_mem(self):
@@ -131,28 +131,28 @@ class TestApplyAC(unittest.TestCase):
         ac_config_no_force = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
+            per_op_sac_force_save_mm_shapes_by_fqns=[],  # Empty list
         )
         apply_ac(model_selective_ac, ac_config_no_force)
         mem_selective_ac = get_act_mem(model_selective_ac)
 
-        # 3. Per-op SAC with force recompute "moe.router.gate"
-        # This leads to two mms being recomputed since they share the same shape!
+        # 3. Per-op SAC with force save "moe.router.gate"
+        # This leads to two mms being saved since they share the same shape!
         model_with_force_first = ToyModule().cuda()
         ac_config_with_force_first = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+            per_op_sac_force_save_mm_shapes_by_fqns=["moe.router.gate"],
         )
         apply_ac(model_with_force_first, ac_config_with_force_first)
         mem_with_force_first = get_act_mem(model_with_force_first)
 
-        # 4. Per-op SAC with force recompute "output"
+        # 4. Per-op SAC with force save "output"
         model_with_force_last = ToyModule().cuda()
         ac_config_with_force_last = ACConfig(
             mode="selective",
             selective_ac_option="op",
-            per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
+            per_op_sac_force_save_mm_shapes_by_fqns=["output"],
         )
         apply_ac(model_with_force_last, ac_config_with_force_last)
         mem_with_force_last = get_act_mem(model_with_force_last)
@@ -167,8 +167,8 @@ class TestApplyAC(unittest.TestCase):
 
         self.assertEqual(mem_no_ac, 2.0)
         self.assertEqual(mem_selective_ac, 3.0)
-        self.assertEqual(mem_with_force_first, 2.0)
-        self.assertEqual(mem_with_force_last, 1.0)
+        self.assertEqual(mem_with_force_first, 4.0)
+        self.assertEqual(mem_with_force_last, 3.0)
         self.assertEqual(mem_full_ac, 0.0)
         # Note: SAC > no-AC here because it unnecessarily saves "output"
         # even that is not needed for recomputation and output is double
@@ -184,7 +184,7 @@ class TestApplyAC(unittest.TestCase):
             ACConfig(
                 mode="selective",
                 selective_ac_option="op",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=[],
+                per_op_sac_force_save_mm_shapes_by_fqns=[],
             ),
         )
         model_force_first = ToyModule()
@@ -194,7 +194,7 @@ class TestApplyAC(unittest.TestCase):
             ACConfig(
                 mode="selective",
                 selective_ac_option="op",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+                per_op_sac_force_save_mm_shapes_by_fqns=["moe.router.gate"],
             ),
         )
 
@@ -205,7 +205,7 @@ class TestApplyAC(unittest.TestCase):
             ACConfig(
                 mode="selective",
                 selective_ac_option="op",
-                per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
+                per_op_sac_force_save_mm_shapes_by_fqns=["output"],
             ),
         )
 
