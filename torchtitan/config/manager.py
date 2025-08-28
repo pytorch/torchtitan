@@ -159,6 +159,14 @@ class ConfigManager:
         if not is_dataclass(cls):
             return data
 
+        valid_fields = set(f.name for f in fields(cls))
+        if invalid_fields := set(data) - valid_fields:
+            raise ValueError(
+                f"Invalid field names in {cls} data: {invalid_fields}.\n"
+                "Please modify your .toml config file or override these fields from the command line.\n"
+                "Run `NGPU=1 ./run_train.sh --help` to read all valid fields."
+            )
+
         result = {}
         for f in fields(cls):
             if f.name in data:
