@@ -42,7 +42,8 @@ class DatasetConfig:
 # Add your dataset here here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
-        path="allenai/c4",
+        # path="allenai/c4",
+        path="/home/vishal9/mffuse/c4",
         loader=partial(_load_c4_dataset, split="train"),
         text_processor=_process_c4_text,
     ),

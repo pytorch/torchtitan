@@ -110,6 +110,7 @@ class ConfigManager:
             return self.config_cls
 
         JobConfigExtended = importlib.import_module(module_path).JobConfig
+        print(f"{module_path=} {JobConfigExtended().to_dict()=} {self._merge_configs(self.config_cls, JobConfigExtended)().to_dict()=}")
         return self._merge_configs(self.config_cls, JobConfigExtended)
 
     @staticmethod
