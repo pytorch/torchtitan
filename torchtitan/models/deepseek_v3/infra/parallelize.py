@@ -219,6 +219,12 @@ def apply_non_moe_tp(
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), Replicate()),
                 desired_input_layouts=(Replicate(), Replicate()),
+                # input_kwarg_layouts={
+                #     "position_ids": Replicate(),
+                # },
+                # desired_input_kwarg_layouts={
+                #     "position_ids": Replicate(),
+                # },
             ),
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is

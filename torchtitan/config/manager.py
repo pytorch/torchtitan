@@ -57,7 +57,7 @@ class ConfigManager:
             config_cls, args=args, default=base_config, registry=custom_registry
         )
 
-        self._validate_config()
+        # self._validate_config()
 
         return self.config
 

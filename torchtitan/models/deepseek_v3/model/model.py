@@ -117,7 +117,9 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     return freqs_cis
 
 
-def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+def apply_rotary_emb(
+    x: torch.Tensor, freqs_cis: torch.Tensor, position_ids: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
 
@@ -130,7 +132,10 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+    if position_ids is None:
+        freqs_cis = freqs_cis[: x.size(1)].view(1, x.size(1), 1, x.size(-1))
+    else:
+        freqs_cis = freqs_cis[position_ids].view(x.shape[0], x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     return y.to(dtype)
 
@@ -181,6 +186,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -207,7 +213,7 @@ class Attention(nn.Module):
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
+        q_pe = apply_rotary_emb(q_pe, freqs_cis, position_ids=position_ids)
         q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # Key-value projection
@@ -215,7 +221,7 @@ class Attention(nn.Module):
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         k_pe = apply_rotary_emb(
-            k_pe.unsqueeze(2), freqs_cis
+            k_pe.unsqueeze(2), freqs_cis, position_ids=position_ids
         )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
         kv = self.wkv_b(
@@ -284,7 +290,12 @@ class TransformerBlock(nn.Module):
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+    ):
         """
         Forward pass for the Transformer block.
 
@@ -295,7 +306,9 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+        x = x + self.attention(
+            self.attention_norm(x), freqs_cis, position_ids=position_ids
+        )
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
         else:
@@ -364,6 +377,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer model.
@@ -385,7 +399,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, self.freqs_cis, position_ids=position_ids)
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h) if self.output is not None else h
         return output
