@@ -182,6 +182,18 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
+    dataset_type: Literal["huggingface", "nanoset", "preprocessed"] = "huggingface"
+    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed']"""
+
+    dataset_folders: list[str] = field(default_factory=list)
+    """List of folders containing tokenized datasets for Nanoset"""
+
+    dataset_weights: list[str] | None = None
+    """Optional list of weights for weighted sampling from datasets"""
+
+    dataset_random_seed: int = 1234
+    """Random seed for dataset shuffling"""
+
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
@@ -198,6 +210,9 @@ class Training:
 
     steps: int = 10000
     """How many train steps to run"""
+
+    epochs: int | None = None
+    """Override steps to instead train by epochs of the dataset. Requires a deterministic length dataset"""
 
     enable_cpu_offload: bool = False
     """
@@ -407,7 +422,7 @@ class Checkpoint:
     When enable is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
-    interval: int = 500
+    interval: int | Literal["epoch"] = 500
     """Checkpointing interval in steps."""
 
     initial_load_path: str | None = None
