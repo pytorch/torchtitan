@@ -69,7 +69,7 @@ enable = false
 dataset = "coco-validation"
 freq = 5
 local_batch_size = 8
-steps = 1
+steps = 48  # Recommended value with the current settings and world_size=8
 # args for sampling images
 enable_classifier_free_guidance = true
 classifier_free_guidance_scale = 5.0

@@ -67,5 +67,5 @@ filter_fqns = ["output"]
 [validation]
 enable = false
 dataset = "c4_validation"
-freq = 100
-steps = -1
+freq = 500
+steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192
