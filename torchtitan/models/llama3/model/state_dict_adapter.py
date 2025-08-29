@@ -16,7 +16,11 @@ from .args import TransformerModelArgs
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None):
+    def __init__(
+        self,
+        model_args: TransformerModelArgs,
+        hf_assets_path: str | None,
+    ):
         super().__init__(model_args, hf_assets_path)
 
         self.model_args = model_args
