@@ -46,7 +46,7 @@ deepseekv3_configs = {
             route_norm=True,
             score_before_experts=False,
         ),
-        q_lora_rank=256,  # for test, original is 0
+        q_lora_rank=0,
         kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
@@ -135,7 +135,7 @@ deepseekv3_configs = {
         dim=7168,
         inter_dim=18432,
         moe_inter_dim=2048,
-        n_layers=4,
+        n_layers=61,
         n_dense_layers=3,
         n_heads=128,
         moe_args=MoEArgs(

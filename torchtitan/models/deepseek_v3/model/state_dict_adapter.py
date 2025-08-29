@@ -378,8 +378,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 )
                 # update the weight and remove the scale_inv tensor
                 state_dict[key] = dequantized_weight
-
-                # state_dict[key] = weight
                 scale_inv_keys.append(key + "_scale_inv")
 
         for key in scale_inv_keys:
@@ -411,10 +409,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 # add weight_scale_inv to the state_dict
                 weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
                     expected_scale_shape, dtype=torch.float32
-                )
-        print(
-            f"In _add_quantize_scale_inv_tensors, the added weight_scale_inv_state_dict: {weight_scale_inv_state_dict.keys()}"
-        )
 
         state_dict.update(weight_scale_inv_state_dict)
         return state_dict

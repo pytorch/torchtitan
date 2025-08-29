@@ -418,7 +418,6 @@ class CheckpointManager:
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
-
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)

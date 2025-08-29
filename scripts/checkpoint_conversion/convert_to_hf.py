@@ -44,7 +44,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=None,
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
