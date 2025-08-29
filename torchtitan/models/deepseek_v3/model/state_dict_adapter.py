@@ -6,15 +6,12 @@
 
 
 import re
-from typing import Any, Dict
+from typing import Any
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-
 from torch.distributed.tensor import DTensor
-
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
-
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
@@ -206,7 +203,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         titan_abstract_key: str,
         layer_id: str,
         grouped_expert_weight: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Split GroupedExperts weight into individual expert weights for local processing.
 
@@ -290,79 +287,116 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
         return local_expert_tensors
 
-    def _concatenate_local_expert_weights(
+    def _concatenate_expert_weights_dtensor(
         self,
-        expert_weights_by_layer: dict[str, Any],
+        expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]],
         abstract_key: str,
+        layer_num: str,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         """
-        Try to concatenate the weights of separate experts into GroupedExperts weights.
+        Args:
+            expert_weights_by_layer: Dictionary tracking expert weights by layer, abstract key, and expert ID.
+                Structure: {
+                    layer_id: {
+                        abstract_key: {
+                            expert_id: tensor_weight
+                        }
+                    }
+                }
+                Used to collect individual expert weights before concatenating them into GroupedExperts.
+            abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
+            layer_num: Layer identifier
+            device_mesh: DeviceMesh for the target GroupedExperts weight DTensor
+
+        Returns:
+            Concatenated GroupedExperts weight DTensor if all experts are available, otherwise None
         """
-        for layer in expert_weights_by_layer.keys():
-            # If we have all the experts for this abstract_key, concatenate them
-            experts = expert_weights_by_layer[layer][abstract_key]
-            expected_n_experts = (
-                self.local_experts_indices[abstract_key][1]
-                - self.local_experts_indices[abstract_key][0]
-            )
-            if len(experts) == expected_n_experts:
-                sorted_expert_ids = sorted(experts.keys())
-                sorted_experts = [experts[i] for i in sorted_expert_ids]
-                local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
+        # If we have all the experts for this abstract_key, concatenate them
+        experts = expert_weights_by_layer[layer_num][abstract_key]
+        expected_n_experts = (
+            self.local_experts_indices[abstract_key][1]
+            - self.local_experts_indices[abstract_key][0]
+        )
+        if len(experts) < expected_n_experts:
+            return None
 
-                assert (
-                    abstract_key in self.grouped_expert_weight_placements
-                    and abstract_key in self.grouped_expert_weight_shape
-                ), "GroupedExperts weight metadata (placements, shape) can not be None!"
+        sorted_expert_ids = sorted(experts.keys())
+        sorted_experts = [experts[i] for i in sorted_expert_ids]
+        local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
 
-                stacked_dtensor = DTensor.from_local(
-                    local_tensor,
-                    device_mesh,
-                    self.grouped_expert_weight_placements[abstract_key],
-                    run_check=False,
-                )
+        assert (
+            abstract_key in self.grouped_expert_weight_placements
+            and abstract_key in self.grouped_expert_weight_shape
+        ), "GroupedExperts weight metadata (placements, shape) can not be None!"
 
-                # Remove these experts from the tracking dict to free memory
-                del expert_weights_by_layer[layer][abstract_key]
-                if not expert_weights_by_layer[layer]:
-                    del expert_weights_by_layer[layer]
+        stacked_dtensor = DTensor.from_local(
+            local_tensor,
+            device_mesh,
+            self.grouped_expert_weight_placements[abstract_key],
+            run_check=False,
+        )
 
-                return stacked_dtensor
+        del expert_weights_by_layer[layer_num][abstract_key]
+        if not expert_weights_by_layer[layer_num]:
+            del expert_weights_by_layer[layer_num]
 
-        return None
+        return stacked_dtensor
 
     def _split_experts_weights(
         self, weight: torch.Tensor, n_experts: int
     ) -> list[torch.Tensor]:
         """
-        Split the weights of the experts into a list of tensors.
+        Split the weights of the experts into a list of tensors. Used for offline conversion.
+
+        NOTE: If we use this function for online conversion, torch.split() might incur communication
+        to gather the weight, which causing OOM.
+
         """
         split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
         return split_weight
 
     def _concatenate_expert_weights(
-        self, expert_weights_by_layer: dict[str, Any], n_experts: int
-    ) -> torch.Tensor:
+        self,
+        expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]],
+        abstract_key: str,
+        layer_num: str,
+        n_experts: int,
+    ) -> torch.Tensor | None:
         """
-        Concatenate the weights of separate experts into GroupedExpert weights.
+        Concatenated GroupedExperts weight using torch.stack(). Used for offline conversion.
+
+        Args:
+            expert_weights_by_layer: Dictionary tracking expert weights by layer, abstract key, and expert ID.
+                Structure: {
+                    layer_id: {
+                        abstract_key: {
+                            expert_id: tensor_weight
+                        }
+                    }
+                }
+                Used to collect individual expert weights before concatenating them into GroupedExperts.
+            abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
+            layer_num: Layer identifier
+            n_experts: Number of experts in the GroupedExperts module
+
+        Returns:
+            Concatenated GroupedExperts weight if all experts are available, otherwise None
         """
-        for layer, abstract_keys in list(expert_weights_by_layer.items()):
-            for abstract_key, experts in list(abstract_keys.items()):
-                # If we have all the experts for this abstract_key, concatenate them
-                if len(experts) == n_experts:
-                    sorted_expert_ids = sorted(experts.keys())
-                    sorted_experts = [experts[i] for i in sorted_expert_ids]
-                    stacked_tensor = torch.stack(sorted_experts, dim=0)
+        # If we have all the experts for this abstract_key, concatenate them
+        experts = expert_weights_by_layer[layer_num][abstract_key]
+        if len(experts) < n_experts:
+            return None
 
-                    # Remove these experts from the tracking dict to free memory
-                    del expert_weights_by_layer[layer][abstract_key]
-                    if not expert_weights_by_layer[layer]:
-                        del expert_weights_by_layer[layer]
+        sorted_expert_ids = sorted(experts.keys())
+        sorted_experts = [experts[i] for i in sorted_expert_ids]
+        stacked_tensor = torch.stack(sorted_experts, dim=0)
 
-                    return stacked_tensor
+        del expert_weights_by_layer[layer_num][abstract_key]
+        if not expert_weights_by_layer[layer_num]:
+            del expert_weights_by_layer[layer_num]
 
-        return None
+        return stacked_tensor
 
     def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -503,12 +537,18 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 ] = value
 
                 if isinstance(value, DTensor):
-                    stacked_value = self._concatenate_local_expert_weights(
-                        expert_weights_by_layer, titan_abstract_key, value.device_mesh
+                    stacked_value = self._concatenate_expert_weights_dtensor(
+                        expert_weights_by_layer,
+                        titan_abstract_key,
+                        layer_num,
+                        value.device_mesh,
                     )
                 else:  # keep this path to be compatibile with offline conversion
                     stacked_value = self._concatenate_expert_weights(
-                        expert_weights_by_layer, self.model_args.moe_args.num_experts
+                        expert_weights_by_layer,
+                        titan_abstract_key,
+                        layer_num,
+                        self.model_args.moe_args.num_experts,
                     )
 
                 if stacked_value is not None:
