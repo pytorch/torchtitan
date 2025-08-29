@@ -21,8 +21,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.models.llama3.infra.parallelize import (
     apply_ac,
     apply_compile,
