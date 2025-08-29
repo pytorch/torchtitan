@@ -44,13 +44,11 @@ class TestApplyAC(unittest.TestCase):
     def test_flops(self):
         def get_bw_flops(model_fn):
             x = torch.randn(512, 512, requires_grad=True)
-            with torch.utils.checkpoint.set_checkpoint_early_stop(False):
-                out = model_fn(x)
+            out = model_fn(x)
             out.backward()
 
             x = torch.randn(512, 512, requires_grad=True)
-            with torch.utils.checkpoint.set_checkpoint_early_stop(False):
-                out = model_fn(x)
+            out = model_fn(x)
             with FlopCounterMode(display=False) as mode:
                 out.backward()
             return mode.get_total_flops() / (512**3 * 2)
@@ -66,6 +64,7 @@ class TestApplyAC(unittest.TestCase):
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
+            early_stop=False,
         )
         apply_ac(model_selective_ac, ac_config_no_force, False, False)
         flops_selective_ac = get_bw_flops(model_selective_ac)
@@ -77,6 +76,7 @@ class TestApplyAC(unittest.TestCase):
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
+            early_stop=False,
         )
         apply_ac(model_with_force_first, ac_config_with_force_first, False, False)
         flops_with_force_first = get_bw_flops(model_with_force_first)
@@ -87,6 +87,7 @@ class TestApplyAC(unittest.TestCase):
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
+            early_stop=False,
         )
         apply_ac(model_with_force_last, ac_config_with_force_last, False, False)
         flops_with_force_last = get_bw_flops(model_with_force_last)
@@ -95,6 +96,7 @@ class TestApplyAC(unittest.TestCase):
         model_with_full_ac = ToyModule()
         ac_config_full_ac = ACConfig(
             mode="full",
+            early_stop=False,
         )
         apply_ac(model_with_full_ac, ac_config_full_ac, False, False)
         flops_full_ac = get_bw_flops(model_with_full_ac)
