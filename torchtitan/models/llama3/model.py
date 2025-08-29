@@ -18,7 +18,6 @@ from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.models.attention import build_attention, init_attention_mask
 from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
-from torchtitan.offloading import activation_offload_with_overlap
 
 
 @dataclass
@@ -42,9 +41,6 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
-    multistream_offload: bool = False
-    offload_ratio: float = 0.0
-
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
@@ -61,9 +57,6 @@ class TransformerModelArgs(BaseModelArgs):
                 "FlexAttention is not compatible with CP yet. "
                 "We are still working on this."
             )
-
-        self.multistream_offload = (job_config.offloading.mode == "multistream")
-        self.offload_ratio = job_config.offloading.offload_ratio
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
@@ -354,9 +347,6 @@ class TransformerBlock(nn.Module):
         else:
             self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
 
-        self.multistream_offload = model_args.multistream_offload
-        self.offload_ratio = model_args.offload_ratio
-
     def forward(
         self,
         x: torch.Tensor,
@@ -373,13 +363,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        offload_context = contextlib.nullcontext()
-        if self.multistream_offload:
-            offload_context = activation_offload_with_overlap(self, offload_ratio=self.offload_ratio)
-        with offload_context:
-            h = x + self.attention(self.attention_norm(x), freqs_cis)
-            out = h + self.feed_forward(self.ffn_norm(h))
-            return out
+        h = x + self.attention(self.attention_norm(x), freqs_cis)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
 
     def init_weights(self):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -521,6 +507,6 @@ class Transformer(nn.Module, ModelProtocol):
 
         Returns:
             Transformer: Transformer model.
-
         """
+
         return cls(model_args)

@@ -7,6 +7,7 @@ description = "Llama 3 8B training"
 
 [profiling]
 enable_profiling = true
+enable_memory_snapshot = true
 save_traces_folder = "profile_trace"
 profile_freq = 100
 
@@ -58,7 +59,7 @@ selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac ba
 
 [offloading]
 mode = "multistream"  # ["multistream", "sequential", "none"]
-offload_ratio = 0.8
+offload_ratio = 1.0
 
 [float8]
 enable_fsdp_float8_all_gather = false

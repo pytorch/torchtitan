@@ -7,6 +7,8 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
+import contextlib
+import functools
 from collections import defaultdict
 
 import torch
@@ -30,6 +32,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
+from torchtitan.offloading import activation_offload_with_overlap
 
 
 def parallelize_llama(
@@ -74,6 +77,9 @@ def parallelize_llama(
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
+
+    if job_config.offloading.mode == "multistream":
+        apply_ao(model, job_config.offloading)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
@@ -296,6 +302,29 @@ def apply_ac(model: nn.Module, ac_config):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+
+def _apply_act_offloading_to_transformer_block(module: nn.Module, ao_config):
+    offload_context = contextlib.nullcontext
+    if ao_config.mode == "multistream":
+        offload_context = functools.partial(activation_offload_with_overlap, module, ao_config.offload_ratio)
+
+    original_forward = module.forward
+    def new_forward(*args, **kwargs):
+        with offload_context():
+            return original_forward(*args, **kwargs)
+
+    module.forward = new_forward
+    return module
+
+
+def apply_ao(model: nn.Module, ao_config):
+    """Apply multistream activation offloading to the model"""
+    for layer_id, transformer_block in model.layers.named_children():
+        transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, ao_config)
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info(f"Applied {ao_config.mode} activation offloading to the model")
 
 
 def apply_compile(model: nn.Module):
