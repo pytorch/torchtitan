@@ -8,3 +8,6 @@
 
 # Exclude the experiments directory by adding a pattern without owners
 /torchtitan/experiments/
+
+# codeowners for experiments/forge
+/torchtitan/experiments/forge/* @ebsmothers @pbontrager @joecummings @tianyu-l @wwwjn

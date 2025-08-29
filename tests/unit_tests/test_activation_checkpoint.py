@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
-from torchtitan.models.llama3.infra.parallelize import apply_ac
+from torchtitan.distributed.activation_checkpoint import apply_ac
 
 
 class ToyModule(nn.Module):
@@ -67,7 +67,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
         )
-        apply_ac(model_selective_ac, ac_config_no_force)
+        apply_ac(model_selective_ac, ac_config_no_force, False, False)
         flops_selective_ac = get_bw_flops(model_selective_ac)
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
@@ -78,7 +78,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
         )
-        apply_ac(model_with_force_first, ac_config_with_force_first)
+        apply_ac(model_with_force_first, ac_config_with_force_first, False, False)
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
@@ -88,7 +88,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
         )
-        apply_ac(model_with_force_last, ac_config_with_force_last)
+        apply_ac(model_with_force_last, ac_config_with_force_last, False, False)
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
         # 5. Full AC
@@ -96,7 +96,7 @@ class TestApplyAC(unittest.TestCase):
         ac_config_full_ac = ACConfig(
             mode="full",
         )
-        apply_ac(model_with_full_ac, ac_config_full_ac)
+        apply_ac(model_with_full_ac, ac_config_full_ac, False, False)
         flops_full_ac = get_bw_flops(model_with_full_ac)
 
         self.assertEqual(flops_no_ac, 8.0)
@@ -133,7 +133,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
         )
-        apply_ac(model_selective_ac, ac_config_no_force)
+        apply_ac(model_selective_ac, ac_config_no_force, False, False)
         mem_selective_ac = get_act_mem(model_selective_ac)
 
         # 3. Per-op SAC with force recompute "moe.router.gate"
@@ -144,7 +144,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
         )
-        apply_ac(model_with_force_first, ac_config_with_force_first)
+        apply_ac(model_with_force_first, ac_config_with_force_first, False, False)
         mem_with_force_first = get_act_mem(model_with_force_first)
 
         # 4. Per-op SAC with force recompute "output"
@@ -154,7 +154,7 @@ class TestApplyAC(unittest.TestCase):
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
         )
-        apply_ac(model_with_force_last, ac_config_with_force_last)
+        apply_ac(model_with_force_last, ac_config_with_force_last, False, False)
         mem_with_force_last = get_act_mem(model_with_force_last)
 
         # 5. Full AC
@@ -162,7 +162,7 @@ class TestApplyAC(unittest.TestCase):
         ac_config_full_ac = ACConfig(
             mode="full",
         )
-        apply_ac(model_with_full_ac, ac_config_full_ac)
+        apply_ac(model_with_full_ac, ac_config_full_ac, False, False)
         mem_full_ac = get_act_mem(model_with_full_ac)
 
         self.assertEqual(mem_no_ac, 2.0)
@@ -186,6 +186,8 @@ class TestApplyAC(unittest.TestCase):
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=[],
             ),
+            False,
+            False,
         )
         model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
@@ -196,6 +198,8 @@ class TestApplyAC(unittest.TestCase):
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
             ),
+            False,
+            False,
         )
 
         model_force_last = ToyModule()
@@ -207,6 +211,8 @@ class TestApplyAC(unittest.TestCase):
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
             ),
+            False,
+            False,
         )
 
         def run_fwd_bwd(model, batch):

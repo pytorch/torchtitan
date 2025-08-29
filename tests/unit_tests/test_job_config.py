@@ -316,6 +316,26 @@ class TestJobConfig(unittest.TestCase):
             result = config.to_dict()
             assert isinstance(result, dict)
 
+    def test_job_config_invalid_field(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Invalid field names in .* data: .*\.\n"
+            r"Please modify your \.toml config file or override these fields from the command line\.\n"
+            r"Run `NGPU=1 \./run_train\.sh --help` to read all valid fields\.",
+        ), tempfile.NamedTemporaryFile() as fp:
+            with open(fp.name, "wb") as f:
+                tomli_w.dump(
+                    {
+                        "model": {
+                            "name": "llama3",
+                            "fake_field": 0,  # should error on this invalid field
+                        }
+                    },
+                    f,
+                )
+            config_manager = ConfigManager()
+            config_manager.parse_args(["--job.config_file", fp.name])
+
 
 if __name__ == "__main__":
     unittest.main()
