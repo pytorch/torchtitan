@@ -546,6 +546,12 @@ class ActivationCheckpoint:
     ANY mm with shape matching (*, in) x (in, out) will be force recomputed.
     """
 
+    early_stop: bool = False
+    """
+    Whether to stop recomputing early when all activations have already been
+    rematerialized.
+    """
+
 
 @dataclass
 class Compile:
