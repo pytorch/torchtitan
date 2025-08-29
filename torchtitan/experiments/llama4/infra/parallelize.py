@@ -106,7 +106,6 @@ def parallelize_llama(
     )
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
