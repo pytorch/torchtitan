@@ -10,7 +10,6 @@ from typing import Any
 
 logger = logging.getLogger()
 
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import TransformerModelArgs

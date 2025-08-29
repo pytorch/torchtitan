@@ -6,7 +6,6 @@
 
 
 import re
-from threading import local
 from typing import Any, Dict
 
 import torch
@@ -37,9 +36,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
-            "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
-            "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
-            "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
             "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
             "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
@@ -63,6 +59,22 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+
+        # Adjustments for from_hf_map based on model architecture
+        if model_args.q_lora_rank != 0:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
+                    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
+                    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
+                }
+            )
+        else:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+                }
+            )
 
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
@@ -109,7 +121,8 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             != dim_size_to_split
         ):
             raise ValueError(
-                f"Not supported split for strided_shard_dim_degree {strided_shard_dim_degree}, shard_dim_degree {shard_dim_degree}, dim_size_to_split {dim_size_to_split}"
+                f"Not supported split for strided_shard_dim_degree {strided_shard_dim_degree}, "
+                f"shard_dim_degree {shard_dim_degree}, dim_size_to_split {dim_size_to_split}"
             )
 
         start_index = block_size * (
@@ -186,7 +199,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             )
 
         return start_index, end_index
-
 
     def _get_local_experts_weights(
         self,
@@ -277,7 +289,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             local_expert_tensors[expert_key] = expert_dtensor
 
         return local_expert_tensors
-        
+
     def _concatenate_local_expert_weights(
         self,
         expert_weights_by_layer: dict[str, Any],
@@ -298,14 +310,17 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 sorted_expert_ids = sorted(experts.keys())
                 sorted_experts = [experts[i] for i in sorted_expert_ids]
                 local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
-                
+
                 assert (
                     abstract_key in self.grouped_expert_weight_placements
                     and abstract_key in self.grouped_expert_weight_shape
-                ), f"GroupedExperts weight metadata {self.grouped_expert_weight_placements} {self.grouped_expert_weight_shape} can not be None!"
+                ), "GroupedExperts weight metadata (placements, shape) can not be None!"
 
                 stacked_dtensor = DTensor.from_local(
-                    local_tensor, device_mesh, self.grouped_expert_weight_placements[abstract_key], run_check=False
+                    local_tensor,
+                    device_mesh,
+                    self.grouped_expert_weight_placements[abstract_key],
+                    run_check=False,
                 )
 
                 # Remove these experts from the tracking dict to free memory
@@ -314,6 +329,38 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     del expert_weights_by_layer[layer]
 
                 return stacked_dtensor
+
+        return None
+
+    def _split_experts_weights(
+        self, weight: torch.Tensor, n_experts: int
+    ) -> list[torch.Tensor]:
+        """
+        Split the weights of the experts into a list of tensors.
+        """
+        split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
+        return split_weight
+
+    def _concatenate_expert_weights(
+        self, expert_weights_by_layer: dict[str, Any], n_experts: int
+    ) -> torch.Tensor:
+        """
+        Concatenate the weights of separate experts into GroupedExpert weights.
+        """
+        for layer, abstract_keys in list(expert_weights_by_layer.items()):
+            for abstract_key, experts in list(abstract_keys.items()):
+                # If we have all the experts for this abstract_key, concatenate them
+                if len(experts) == n_experts:
+                    sorted_expert_ids = sorted(experts.keys())
+                    sorted_experts = [experts[i] for i in sorted_expert_ids]
+                    stacked_tensor = torch.stack(sorted_experts, dim=0)
+
+                    # Remove these experts from the tracking dict to free memory
+                    del expert_weights_by_layer[layer][abstract_key]
+                    if not expert_weights_by_layer[layer]:
+                        del expert_weights_by_layer[layer]
+
+                    return stacked_tensor
 
         return None
 
@@ -365,6 +412,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
                     expected_scale_shape, dtype=torch.float32
                 )
+        print(
+            f"In _add_quantize_scale_inv_tensors, the added weight_scale_inv_state_dict: {weight_scale_inv_state_dict.keys()}"
+        )
 
         state_dict.update(weight_scale_inv_state_dict)
         return state_dict
@@ -385,18 +435,30 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_abstract_key = to_hf_map[abstract_key]
 
                 # Store the GroupedExperts Weight metadata for from_hf()
-                self.grouped_expert_weight_placements[abstract_key] = value.placements
-                self.grouped_expert_weight_shape[abstract_key] = value.shape
+                if isinstance(value, DTensor):
+                    self.grouped_expert_weight_placements[
+                        abstract_key
+                    ] = value.placements
+                    self.grouped_expert_weight_shape[abstract_key] = value.shape
 
-                # Split GroupedExperts weight to local individual expert weights
-                local_expert_fqn = self._get_local_experts_weights(
-                    new_abstract_key,
-                    abstract_key,
-                    layer_num,
-                    value,
-                )
+                    # Split GroupedExperts weight to local individual expert weights
+                    local_expert_fqn = self._get_local_experts_weights(
+                        new_abstract_key,
+                        abstract_key,
+                        layer_num,
+                        value,
+                    )
+                    hf_state_dict.update(local_expert_fqn)
 
-                hf_state_dict.update(local_expert_fqn)
+                else:
+                    # keep this path for offline conversion
+                    split_values = self._split_experts_weights(
+                        value, self.model_args.moe_args.num_experts
+                    )
+
+                    for expert_num in range(0, self.model_args.moe_args.num_experts):
+                        new_key = new_abstract_key.format(layer_num, expert_num)
+                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -445,26 +507,16 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     expert_num
                 ] = value
 
-                # try to concat the expert's weight into GroupedExperts' weight.
-                # stacked_value = self._concatenate_expert_weights(
-                #     expert_weights_by_layer, self.model_args.moe_args.num_experts
-                # )
-                stacked_value = self._concatenate_local_expert_weights(
-                    expert_weights_by_layer, titan_abstract_key, value.device_mesh
-                )
-
+                if isinstance(value, DTensor):
+                    stacked_value = self._concatenate_local_expert_weights(
+                        expert_weights_by_layer, titan_abstract_key, value.device_mesh
+                    )
+                else:  # keep this path to be compatibile with offline conversion
+                    stacked_value = self._concatenate_expert_weights(
+                        expert_weights_by_layer, self.model_args.moe_args.num_experts
+                    )
 
                 if stacked_value is not None:
-                    if torch.distributed.get_rank() == 0:
-                        print("saving tensor to json file")
-                        local_tensor = stacked_value._local_tensor
-                        print("stacked_value: ", stacked_value.shape, stacked_value.device_mesh, stacked_value.placements, "local_tensor: ", local_tensor.shape)
-                        
-                        tensor_list = local_tensor.tolist()
-                        # Save to JSON file
-                        import json
-                        with open(f'my_imp_tensor_222_{new_key}.json', 'w') as f:
-                            json.dump(tensor_list, f)
                     state_dict[new_key] = stacked_value
 
             elif "layers" in key:

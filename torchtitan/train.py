@@ -107,7 +107,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         world_mesh = parallel_dims.world_mesh
-        print(f"Worldmesh in trainer init : {world_mesh}")
         if parallel_dims.dp_enabled:
             dp_mesh = world_mesh["dp"]
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
@@ -258,9 +257,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            print(
-                f"the world mesh before applying parallelize_fn {parallel_dims.world_mesh}"
-            )
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
 
             model.to_empty(device=init_device)
@@ -315,8 +311,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args,
-                    job_config.model.hf_assets_path,
+                    model_args, job_config.model.hf_assets_path
                 )
                 if self.train_spec.state_dict_adapter
                 else None
@@ -464,30 +459,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs)
-
-                    print("\nForward Pass Results:")
-                    print(f"- Output logits shape: {pred.shape}")
-                    print(f"- Sequence length: {pred.shape[1]}")
-                    print(f"- Vocabulary size: {pred.shape[2]}")
-                    
-                    # Get the predictions for the next token (highest probability)
-                    next_token_logits = pred[:, -1, :]
-                    print(f"\nNext token logits : {next_token_logits}")
-                    next_token_probs = torch.softmax(next_token_logits, dim=-1)
-                    print(f"\nNext token probabilities: {next_token_probs}")
-                    top_k_values, top_k_indices = torch.topk(next_token_probs, 5, dim=-1)
-
-                    print("Top K values: ", top_k_values)
-                    print("Top K indices: ", top_k_indices)
-                    
-                    print("\nTop 5 predicted next tokens (showing IDs only since we're not using tokenizer):")
-                    for i, (value, index) in enumerate(zip(top_k_values[0], top_k_indices[0])):
-                        print(f"  {i+1}. Token ID: {index} - Probability: {value.item():.4f}")
-
-                    # loss = self.loss_fn(pred, labels)
+                    loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
-                # loss.backward()
+                loss.backward()
 
         return loss
 
@@ -506,41 +481,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
         for microbatch in range(self.gradient_accumulation_steps):
-            # input_dict, labels = next(data_iterator)
-
-            print("\nCreating fake input with the same shape as tokenized input")
-            
-            # Define sequence length for fake input
-            seq_length = self.job_config.training.seq_len
-            seq_length = 2048
-            
-            with torch.no_grad():
-            # Create fake input_ids directly on the device - using random integers between 0 and 50000 (typical vocab size)
-                torch.manual_seed(42)
-                input_ids = torch.randint(0, 50000, (1, seq_length), dtype=torch.long, device=self.device)
-                
-                # Create fake attention_mask directly on the device - all 1s for full attention
-                attention_mask = torch.ones((1, seq_length), dtype=torch.long, device=self.device)
-                
-                # Create inputs dictionary similar to what tokenizer would produce
-                input_dict = {
-                    "input": input_ids,
-                    "attention_mask": attention_mask
-                }
-                
-                # Create fake labels (same as attention_mask for simplicity)
-                labels = attention_mask.clone()
-            
-            # Print input information
-            print(f"Fake input token IDs: {input_ids[0][:10].cpu().numpy()}...")
-            print(f"Fake input shape: {input_ids.shape}")
-            print(f"Input tensors device: {input_ids.device}")
-            
-            print("\nRunning single forward pass...")
-
+            input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
-
-            return 
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
@@ -596,16 +538,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     @record
     def train(self):
         job_config = self.job_config
-
-        # Following hacky print only works for debug_model
-        # w1 = self.model_parts[0].layers["1"].moe.experts.w1
-        # w2 = self.model_parts[0].layers["1"].moe.experts.w2
-        # w3 = self.model_parts[0].layers["1"].moe.experts.w3
-
-        # logger.info(f"w1 placements is: {w1.placements}, {type(w1.placements)}")
-        # logger.info(f"w2 placements is: {w2.placements}")
-        # logger.info(f"w3 placements is: {w3.placements}")
-        # logger.info(f"device mesh: {self.parallel_dims.world_mesh}, {self.parallel_dims.world_mesh.mesh_dim_names} {self.parallel_dims.world_mesh['dp_shard']}")
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")

@@ -36,7 +36,6 @@ def parallelize_deepseekv3(
     job_config: JobConfig,
 ):
     world_mesh = parallel_dims.world_mesh
-    print(f"In parallelize_deepseekv3, world mesh is {world_mesh}")
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
