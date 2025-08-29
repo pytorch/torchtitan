@@ -75,6 +75,6 @@ class StateDictAdapter(BaseStateDictAdapter):
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
                     indx = re.search(r"\d+", raw_indx).group(0)
-                    self.fqn_to_index_mapping[hf_key] = indx
+                    self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None
