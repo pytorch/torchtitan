@@ -16,6 +16,7 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from .infra.parallelize import parallelize_llama
 from .model.args import TransformerModelArgs
 from .model.model import Transformer
+from .model.state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
     "TransformerModelArgs",
@@ -108,5 +109,6 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        state_dict_adapter=Llama4StateDictAdapter,
     )
 )
