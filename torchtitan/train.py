@@ -578,7 +578,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
-            while self.step < job_config.training.steps:
+            while self.should_continue_training():
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
@@ -619,6 +619,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             time.sleep(2)
 
         logger.info("Training completed")
+
+    def should_continue_training(self) -> bool:
+        return self.step < self.job_config.training.steps
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}
