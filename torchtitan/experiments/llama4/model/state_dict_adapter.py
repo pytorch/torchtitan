@@ -40,46 +40,6 @@ class Llama4StateDictAdapter(StateDictAdapter):
             "language_model.model.layers.{}.feed_forward.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
             "language_model.model.layers.{}.feed_forward.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
             "language_model.model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            "vision_model.model.layers.{}.self_attn.k_proj.weight": None,
-            "vision_model.model.layers.{}.self_attn.v_proj.bias": None,
-            "vision_model.model.layers.{}.mlp.fc2.weight": None,
-            "vision_model.model.layers.{}.post_attention_layernorm.bias": None,
-            "vision_model.model.layers.{}.post_attention_layernorm.weight": None,
-            "vision_model.class_embedding": None,
-            "vision_model.model.layers.{}.self_attn.v_proj.weight": None,
-            "vision_model.model.layers.{}.self_attn.o_proj.bias": None,
-            "vision_model.layernorm_post.bias": None,
-            "vision_model.layernorm_pre.bias": None,
-            "vision_model.positional_embedding_vlm": None,
-            "vision_model.model.layers.{}.input_layernorm.weight": None,
-            "multi_modal_projector.linear_1.weight": None,
-            "vision_model.layernorm_pre.weight": None,
-            "vision_model.model.layers.{}.self_attn.k_proj.bias": None,
-            "vision_model.model.layers.{}.self_attn.q_proj.bias": None,
-            "vision_model.model.layers.{}.input_layernorm.bias": None,
-            "vision_model.patch_embedding.linear.weight": None,
-            "vision_model.layernorm_post.weight": None,
-            "vision_model.model.layers.{}.mlp.fc1.weight": None,
-            "vision_model.model.layers.{}.mlp.fc2.bias": None,
-            "vision_model.model.layers.{}.self_attn.q_proj.weight": None,
-            "vision_model.model.layers.{}.self_attn.o_proj.weight": None,
-            "vision_model.model.layers.{}.mlp.fc1.bias": None,
-            "vision_model.vision_adapter.mlp.fc1.weight": None,
-            "vision_model.vision_adapter.mlp.fc2.weight": None,
-        }
-
-        self.combination_plan = {
-            "language_model.model.layers.{}.feed_forward.experts.gate_up_proj": [
-                "layers.{}.moe.experts.w1",
-                "layers.{}.moe.experts.w3",
-            ]
-        }
-
-        # reverse of combination plan: maps fqns to the fqn they are combined into
-        self.reverse_combination_plan = {
-            value: key
-            for key, value_list in self.combination_plan.items()
-            for value in value_list
         }
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +47,8 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
         hf_state_dict = {}
 
+        # Keeps track of TT fqn values to combine into one HF fqn later
+        # {hf_fqn : {tt_fqn1 : value}, {tt_fqn2 : value}, ...}
         to_combine = defaultdict(dict)
         for key, value in state_dict.items():
             if "layers" in key:
@@ -98,6 +60,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
             if key in to_hf_map:
                 # do direct mapping
                 if key in "layers.{}.moe.experts.w2":
+                    # we transpose the expert weights for torchtitan optimization purpose
                     value = value.transpose(-1, -2)
 
                 new_key = to_hf_map[key]
@@ -106,9 +69,14 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 if layer_num:
                     new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
-            elif key in self.reverse_combination_plan:
+            elif key in [
+                "layers.{}.moe.experts.w1",
+                "layers.{}.moe.experts.w3",
+            ]:
                 # handle collecting values to combine
-                hf_abstract_key = self.reverse_combination_plan[key]
+                hf_abstract_key = (
+                    "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
+                )
                 if hf_abstract_key is None:
                     continue
                 to_combine[hf_abstract_key.format(layer_num)][
@@ -118,12 +86,14 @@ class Llama4StateDictAdapter(StateDictAdapter):
         # combine collected values
         for hf_fqn, tt_fqn_map in to_combine.items():
             layer_num = re.search(r"\d+", hf_fqn).group(0)
-            hf_abstract_key = re.sub(r"(\d+)", "{}", hf_fqn, count=1)
             combine_values = []
-            # use combination_plan to ensure correct order before concatenation
-            for tt_abstract_key in self.combination_plan[hf_abstract_key]:
+            # put into correct order to combine
+            for tt_abstract_key in [
+                "layers.{}.moe.experts.w1",
+                "layers.{}.moe.experts.w3",
+            ]:
                 tt_key = tt_abstract_key.format(layer_num)
-                print("tt_key", tt_key, "shape", tt_fqn_map[tt_key].shape)
+                # we transpose the expert weights for torchtitan optimization purpose
                 combine_values.append(tt_fqn_map[tt_key].transpose(-1, -2))
 
             value = torch.cat(combine_values, dim=-1)
@@ -143,9 +113,11 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
             if key in self.from_hf_map:
                 # do direct mapping
-                if key in [
-                    "language_model.model.layers.{}.feed_forward.experts.down_proj",
-                ]:
+                if (
+                    key
+                    == "language_model.model.layers.{}.feed_forward.experts.down_proj"
+                ):
+                    # we transpose the expert weights for torchtitan optimization purpose
                     value = value.transpose(-1, -2)
 
                 new_key = self.from_hf_map[key]
@@ -154,14 +126,16 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 if layer_num:
                     new_key = new_key.format(layer_num)
                 state_dict[new_key] = value
-            elif key in [
-                "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
-            ]:
+            elif (
+                key
+                == "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
+            ):
                 # handle splitting values
-                split_vals = value.chunk(2, dim=-1)
-                split_vals = [val.transpose(-1, -2) for val in split_vals]
-                for new_key, split_val in zip(self.combination_plan[key], split_vals):
-                    new_key = new_key.format(layer_num)
-                    state_dict[new_key] = split_val
+                w1, w3 = value.chunk(2, dim=-1)
+                # we transpose the expert weights for torchtitan optimization purpose
+                w1, w3 = w1.transpose(-1, -2), w3.transpose(-1, -2)
+                # split_vals = [val.transpose(-1, -2) for val in split_vals]
+                state_dict["layers.{}.moe.experts.w1".format(layer_num)] = w1
+                state_dict["layers.{}.moe.experts.w3".format(layer_num)] = w3
 
         return state_dict
