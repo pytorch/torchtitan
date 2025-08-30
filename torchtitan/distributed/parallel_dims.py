@@ -190,7 +190,7 @@ class ParallelDims:
         return mesh
 
     @property
-    def world_mesh(self) -> str:
+    def world_mesh(self) -> DeviceMesh:
         # doing late init so ParallelDims can still be used as a lightweight
         # dataclass without having to initialize the world mesh
         if self._world_mesh is None:
