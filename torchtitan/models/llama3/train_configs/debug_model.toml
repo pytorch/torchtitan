@@ -1,5 +1,3 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"

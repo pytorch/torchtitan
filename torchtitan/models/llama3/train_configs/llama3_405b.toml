@@ -1,4 +1,3 @@
-# torchtitan Config.toml
 # NOTE: this toml config is a preset for 128 H100 GPUs.
 
 [job]
