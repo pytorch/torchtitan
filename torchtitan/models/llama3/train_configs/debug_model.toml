@@ -1,10 +1,7 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false

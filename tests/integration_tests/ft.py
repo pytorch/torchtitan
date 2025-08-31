@@ -9,27 +9,20 @@ import concurrent.futures
 import logging
 import os
 import subprocess
-from collections import defaultdict
 
 from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
 
-
-def build_test_list():
+def build_ft_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
-    integration_tests_flavors = defaultdict(list)
-    integration_tests_flavors["debug_model.toml"] = [
+    integration_tests_flavors = [
         OverrideDefinitions(
             [
                 ["--training.steps 10", "--checkpoint.enable"],
@@ -39,6 +32,7 @@ def build_test_list():
             ngpu=8,
         )
     ]
+
     return integration_tests_flavors
 
 
@@ -46,7 +40,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -94,48 +88,57 @@ def run_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
             )
 
 
-def run_tests(args):
-    integration_tests_flavors = build_test_list()
-
+def run_tests(args, test_list: list[OverrideDefinitions]):
     if args.ngpu < 8:
         logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return
 
-    for config_file in os.listdir(args.config_dir):
-        if not config_file.endswith(".toml"):
+    for test_flavor in test_list:
+        # Filter by test_name if specified
+        if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        full_path = os.path.join(args.config_dir, config_file)
-        with open(full_path, "rb") as f:
-            config = tomllib.load(f)
-            is_integration_test = config["job"].get("use_for_integration_test", False)
-            if not is_integration_test:
-                continue
+        # Check if config file exists
+        assert args.config_path.endswith(
+            ".toml"
+        ), "Base config path must end with .toml"
+        assert os.path.exists(
+            args.config_path
+        ), f"Base config path {args.config_path} does not exist"
 
-            for test_flavor in integration_tests_flavors[config_file]:
-                if not (args.test == "all" or test_flavor.test_name == args.test):
-                    continue
-
-                run_test(test_flavor, full_path, args.output_dir)
+        # Check if we have enough GPUs
+        if args.ngpu < test_flavor.ngpu:
+            logger.info(
+                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+                f" because --ngpu arg is {args.ngpu}"
+            )
+        else:
+            run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--config_dir", default="./torchtitan/models/llama3/train_configs"
+        "--config_path",
+        default="./tests/integration_tests/base_config.toml",
+        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
-        "--test",
+        "--test_name",
         default="all",
-        help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",
+        help="Specific test name to run (e.g., 'tp_only', 'full_checkpoint'). Use 'all' to run all tests (default: all)",
     )
     parser.add_argument("--ngpu", default=8, type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    run_tests(args)
+    if os.listdir(args.output_dir):
+        raise RuntimeError("Please provide an empty output directory.")
+
+    test_list = build_ft_test_list()
+    run_tests(args, test_list)
 
 
 if __name__ == "__main__":
