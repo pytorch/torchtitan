@@ -1,4 +1,4 @@
-name: 8 GPU Integration Test on H100
+name: 8 GPU Model Tests
 
 on:
   push:
@@ -6,7 +6,6 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
-    branches: [ main ]
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -23,9 +22,9 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
-      runner: linux.aws.h100.8
+      runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
       gpu-arch-version: "12.6"
       # This image is faster to clone than the default, but it lacks CC needed by triton
@@ -51,6 +50,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-
-        # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
+        python -m tests.integration_tests.run_tests --test_suite models artifacts-to-be-uploaded --ngpu 8
