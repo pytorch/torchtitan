@@ -239,6 +239,9 @@ class Training:
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 
+    debug_moe_force_load_balance: bool = False
+    # if True, we force each experts get same amount of token via round-robin
+
 
 @dataclass
 class Parallelism:
