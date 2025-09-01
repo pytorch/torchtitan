@@ -1,6 +1,6 @@
 [job]
 dump_folder = "./outputs"
-description = "Qwen 3 0.6B training"
+description = "Qwen 3 1.7B training"
 
 [profiling]
 enable_profiling = false
@@ -8,14 +8,14 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 1
+log_freq = 10
 enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
 name = "qwen3"
-flavor = "0.6B"
-hf_assets_path = "./assets/hf/Qwen3-0.6B"
+flavor = "1.7B"
+hf_assets_path = "./assets/hf/Qwen3-1.7B"
 # converters = ["float8"]
 
 [optimizer]
@@ -24,13 +24,13 @@ lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up, 20% total steps
+warmup_steps = 20  # lr scheduler warm up, 20% total steps
 
 [training]
 local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 100
 dataset = "c4"
 
 [parallelism]
