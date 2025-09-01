@@ -65,8 +65,7 @@ class Qwen3ModelArgs(BaseModelArgs):
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
         if self.enable_weight_tying:
-            nparams = nparams - sum(
-                p.numel() for p in model.tok_embeddings.parameters()
-            )
+            # exclude model.token_embedding parameters from nparams
+            nparams = nparams - nparams_embedding
 
         return nparams, num_flops_per_token
