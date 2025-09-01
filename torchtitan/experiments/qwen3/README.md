@@ -23,5 +23,6 @@ Model parity test has been done and results suggest parity with HF implementatio
     - MoE alternatives
 
 - Testing
+    - Learning rate verifying: verify learning rate and schedule with real training jobs (eg, 3k stps), or find official references.
     - The model should be tested against established performance benchmarks
     - CI integration
