@@ -18,24 +18,16 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger
 
-# for selective op activation checkpointing
-_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-}
-
 
 def _apply_ac_to_transformer_block(
-    module: nn.Module, ac_config: ACConfig, *, base_fqn: str | None = None
-):
+    module: nn.Module,
+    ac_config: ACConfig,
+    *,
+    base_fqn: str | None = None,
+    save_list: set[torch._ops.OpOverload] | None = None,
+) -> nn.Module:
     valid_ac_modes = ("full", "selective")
+    save_list = save_list or set()
     if ac_config.mode not in valid_ac_modes:
         raise ValueError(
             f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
@@ -91,7 +83,7 @@ def _apply_ac_to_transformer_block(
                         return CheckpointPolicy.PREFER_RECOMPUTE
                     meta[mm_count_key] += 1
                 # Saves output of all compute ops, except every second mm
-                to_save = func in _save_list and not (
+                to_save = func in save_list and not (
                     func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
                 )
                 return (
@@ -130,11 +122,22 @@ def apply_ac(
     ac_config: ACConfig,
     model_compile_enabled: bool,
     use_flex_attn: bool,
-):
+    save_list: set[torch._ops.OpOverload] | None = None,
+) -> None:
     """Apply activation checkpointing to the model.
 
     Note that SAC, Flex Attention and model compilation have some conflicts.
     We explicitly ask the user to pass these configs to warn if there are conflicts.
+
+    Args:
+        model (nn.Module): The model to apply activation checkpointing to.
+        ac_config (ActivationCheckpoint): The activation checkpointing config.
+        model_compile_enabled (bool): Whether torch.compile is enabled for the model.
+        use_flex_attn (bool): Whether flex attention is enabled for the model.
+        save_list (set[torch._ops.OpOverload]): The list of ops to save when selective
+            activation checkpointing is used.
+    Returns:
+        None
     """
 
     if use_flex_attn and not model_compile_enabled:
@@ -160,7 +163,10 @@ def apply_ac(
         )
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = _apply_ac_to_transformer_block(
-            transformer_block, ac_config, base_fqn=f"layers.{layer_id}"
+            transformer_block,
+            ac_config,
+            base_fqn=f"layers.{layer_id}",
+            save_list=save_list,
         )
         model.layers.register_module(layer_id, transformer_block)
 
