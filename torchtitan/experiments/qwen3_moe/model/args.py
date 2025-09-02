@@ -16,13 +16,13 @@ class Qwen3MoE(BaseModelArgs):
     n_layers: int = 48 #num_hidden_layers
     n_heads: int = 32 #num_attention_heads
     n_kv_heads: int = 4 #num_kv_heads
-    vocab_size: int = -1  # defined later by tokenizer
+    vocab_size: int = 151936  # from HF config
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-6
     rope_theta: float = 10000000
 
-    max_seq_len: int = 64000
+    max_seq_len: int = 40960  # max_position_embeddings from HF config
     # If `True`, then each transformer block init uses its layer ID, and if
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
@@ -30,6 +30,20 @@ class Qwen3MoE(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 151645
+    pad_token_id: int = 151645  # Same as eos_id for Qwen
+    
+    # Pipeline parallel attributes
+    stage_idx: int = 0  # Pipeline stage index
+    num_stages: int = 1  # Total number of pipeline stages
+    
+    # Computed attributes
+    @property
+    def head_dim(self) -> int:
+        return self.dim // self.n_heads
+    
+    @property
+    def hidden_dim(self) -> int:
+        return 6144  # intermediate_size from HF config
     # iRoPE settings
     # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
     # used every n layers. Other layers uses RoPE (rotary positional embedding) and
@@ -38,6 +52,12 @@ class Qwen3MoE(BaseModelArgs):
     # only attend to the tokens within the same block regardless how long is the
     # sequence.
     every_n_layers_nope: int | None = None
+    
+    # Attention normalization
+    qk_norm: bool = False
+    
+    # Model initialization
+    initializer_range: float = 0.02
 
     # MoE args
     moe_enabled: bool = True
@@ -52,11 +72,9 @@ class Qwen3MoE(BaseModelArgs):
     load_balance_coeff: float | None = 0
 
     def update_from_config(
-        self, job_config: JobConfig, tokenizer: BaseTokenizer
+        self, job_config: JobConfig, **kwargs
     ) -> None:
-        self.vocab_size = tokenizer.get_vocab_size()
         self.max_seq_len = job_config.training.seq_len
-        self.eos_id = tokenizer.eos_id
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(

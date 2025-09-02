@@ -10,6 +10,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from typing import Optional, Tuple
 
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -297,6 +298,8 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -304,6 +307,7 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_mask (Optional[torch.Tensor]): Attention mask.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
@@ -324,10 +328,10 @@ class QwenModel(torch.nn.Module):
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DecoderLayer`]
 
     Args:
-        config: ModelArgs
+        config: Qwen3MoE
     """
 
-    def __init__(self, config: ModelArgs):
+    def __init__(self, config: Qwen3MoE):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -340,14 +344,14 @@ class QwenModel(torch.nn.Module):
         print(f"Creating model stage {config.stage_idx} of {config.num_stages}")
 
         self.embed_tokens = (
-            nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+            nn.Embedding(config.vocab_size, config.dim, self.padding_idx)
             if config.stage_idx == 0
             else None
         )
 
         self.layers = torch.nn.ModuleDict()
-        division = config.num_hidden_layers // config.num_stages
-        residual = config.num_hidden_layers % config.num_stages
+        division = config.n_layers // config.num_stages
+        residual = config.n_layers % config.num_stages
         # Some earlier stages may have 1 more layer than latter stages because
         # the division may have residual; this is more even than giving the
         # entire residual to the last stage.
@@ -355,20 +359,35 @@ class QwenModel(torch.nn.Module):
             division + 1 if stage < residual else division
             for stage in range(config.num_stages)
         ]
-        assert sum(layers_per_stage) == config.num_hidden_layers
+        assert sum(layers_per_stage) == config.n_layers
         layer_id_start = sum(layers_per_stage[: config.stage_idx])
         layer_id_end = layer_id_start + layers_per_stage[config.stage_idx]
         for layer_id in range(layer_id_start, layer_id_end):
-            self.layers[str(layer_id)] = DecoderLayer(config, layer_id)
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, config)
 
         self.norm = (
-            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            nn.RMSNorm(config.dim, eps=config.norm_eps)
             if config.stage_idx == config.num_stages - 1
             else None
         )
 
+        # Initialize rope cache
+        rope_cache = precompute_rope_cache(
+            config.head_dim, config.max_seq_len, config.rope_theta
+        )
+        self.register_buffer("rope_cache", rope_cache, persistent=False)
+
         # Initialize weights and apply final processing
         self.apply(self._init_weights)
+    
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        """Initialize model weights."""
+        # Reset parameters for normalization layers  
+        if self.norm is not None:
+            self.norm.reset_parameters()
+        # Initialize embedding weights
+        if hasattr(self, 'embed_tokens'):
+            nn.init.normal_(self.embed_tokens.weight, std=self.config.initializer_range)
 
     def _init_weights(self, module):
         std = self.config.initializer_range
@@ -396,6 +415,7 @@ class QwenModel(torch.nn.Module):
         for decoder_layer in self.layers.values():
             hidden_states = decoder_layer(
                 hidden_states,
+                self.rope_cache,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
             )
@@ -410,13 +430,20 @@ class QwenForCausalLM(torch.nn.Module):
         super().__init__()
         self.model = QwenModel(config)
         self.lm_head = (
-            nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            nn.Linear(config.dim, config.vocab_size, bias=False)
             if config.stage_idx == config.num_stages - 1
             else None
         )
 
         # Initialize weights and apply final processing
         # self.post_init()
+    
+    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+        """Initialize model weights."""
+        if self.model is not None:
+            self.model.init_weights(buffer_device=buffer_device)
+        if self.lm_head is not None:
+            nn.init.normal_(self.lm_head.weight, std=0.02)
 
     def forward(
         self,
