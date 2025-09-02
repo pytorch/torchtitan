@@ -205,9 +205,9 @@ class ScaledDotProductAttention(torch.nn.Module):
 
         # Add CuDNN on B200 w/ highest priority
         cls.backends = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.MATH,
+            # SDPBackend.FLASH_ATTENTION,
+            # SDPBackend.EFFICIENT_ATTENTION,
+            # SDPBackend.MATH,
         ]
         if has_cuda_capability(10, 0):
             cls.backends.insert(0, SDPBackend.CUDNN_ATTENTION)
@@ -220,8 +220,9 @@ class ScaledDotProductAttention(torch.nn.Module):
         scale: float | None = None,
     ) -> torch.Tensor:
         assert self.backends, "SDPA Backends should not be empty."
+        enable_gqa = q.shape[-3] != k.shape[-3]
         with sdpa_kernel(self.backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale, enable_gqa=enable_gqa)
 
 
 def build_attention(
