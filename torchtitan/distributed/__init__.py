@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from functools import partial
+
 import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
 from torch.distributed.tensor.parallel import ParallelStyle
