@@ -445,7 +445,7 @@ class CheckpointManager:
             )
 
             # Use custom planner for key mapping between TorchTitan and HuggingFace formats
-            planner = DeepSeekV3LoadPlanner()
+            # planner = DeepSeekV3LoadPlanner()
 
             # Let DCP handle the metadata reading internally
             # The planner will access the metadata in create_local_plan() after DCP calls read_metadata()
@@ -453,7 +453,7 @@ class CheckpointManager:
             dcp.load(
                 hf_state_dict,
                 storage_reader=storage_reader,
-                planner=planner,
+                # planner=planner,
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
