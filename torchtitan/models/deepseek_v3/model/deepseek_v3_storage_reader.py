@@ -614,10 +614,12 @@ class DeepSeekV3HuggingFaceStorageReader(QuantizedHuggingFaceStorageReader):
 
         for read_item in plan.items:
             tt_key = read_item.storage_index.fqn
-            if self._is_expert_grouping_needed(tt_key):
-                expert_requests.append(read_item)
-            else:
-                regular_requests.append(read_item)
+            # if self._is_expert_grouping_needed(tt_key):
+            #     expert_requests.append(read_item)
+            # else:
+            
+            # NOTE(jiani): We need to bypass the expert grouping for now
+            regular_requests.append(read_item)
 
         logger.info(
             f"Read data started. Identified a total of {len(expert_requests)} expert group tensots and {len(regular_requests)} regular tensors"
@@ -689,6 +691,7 @@ class DeepSeekV3HuggingFaceStorageReader(QuantizedHuggingFaceStorageReader):
 
         # Process expert tensor requests with parallel processing
         start_time = datetime.datetime.now()
+        assert len(expert_requests) == 0, "Should not have expert requests found"
         self._read_expert_tensors_parallel(expert_requests, planner)
         end_time = datetime.datetime.now()
         logger.info(f"Finished reading the grouped experts in time {end_time - start_time}")
@@ -935,4 +938,3 @@ class DeepSeekV3HuggingFaceStorageReader(QuantizedHuggingFaceStorageReader):
         )
 
         return dequantized_tensor
-

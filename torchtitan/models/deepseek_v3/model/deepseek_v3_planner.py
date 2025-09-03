@@ -40,7 +40,7 @@ class DeepSeekV3LoadPlanner(DefaultLoadPlanner):
         # Build cache of valid grouped expert FQNs once during setup
         self.metadata = metadata.sd_metadata
         self.io_metadata = metadata.io_metadata
-        self.valid_grouped_experts = self._build_valid_grouped_experts()
+        # self.valid_grouped_experts = self._build_valid_grouped_experts()
 
     def _build_valid_grouped_experts(self) -> set:
         """Build cache of valid grouped expert FQNs from checkpoint metadata."""
@@ -94,8 +94,8 @@ class DeepSeekV3LoadPlanner(DefaultLoadPlanner):
 
         # Process each tensor in the model's state_dict
         for fqn, obj in self.state_dict.items():
-            if self._is_grouped_expert_tensor(fqn) and fqn not in self.valid_grouped_experts:
-                raise RuntimeError(f"Grouped expert tensor {fqn} cannot be loaded from checkpoint")
+            # if self._is_grouped_expert_tensor(fqn) and fqn not in self.valid_grouped_experts:
+            #     raise RuntimeError(f"Grouped expert tensor {fqn} cannot be loaded from checkpoint")
 
             # Create read items for all tensors (both regular and grouped)
             self._validate_and_create_read_items(fqn, obj, self.metadata, requests)
@@ -120,4 +120,3 @@ class DeepSeekV3LoadPlanner(DefaultLoadPlanner):
         """Check if this FQN represents a grouped expert tensor."""
         # Match grouped expert tensors but exclude shared expert tensors
         return 'moe.experts' in fqn
-

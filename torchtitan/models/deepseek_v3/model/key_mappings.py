@@ -16,6 +16,9 @@ including the state dict adapter, storage reader, and planner.
 HF_TO_TT_KEY_MAP = {
     "model.embed_tokens.weight": "tok_embeddings.weight",
     # Attention Module
+    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
+    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
+    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
     "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
     "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
     "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
