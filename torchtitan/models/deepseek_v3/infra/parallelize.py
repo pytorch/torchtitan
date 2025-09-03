@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
@@ -27,6 +28,20 @@ from torchtitan.experiments.llama4.infra.parallelize import (
 )
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
+
+
+# for selective op activation checkpointing
+_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -95,8 +110,9 @@ def parallelize_deepseekv3(
         apply_ac(
             model,
             job_config.activation_checkpoint,
-            model_compile_enabled,
-            use_flex_attn,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            save_list=_save_list,
         )
 
     if model_compile_enabled:
