@@ -120,8 +120,9 @@ def _apply_ac_to_transformer_block(
 def apply_ac(
     model: nn.Module,
     ac_config: ACConfig,
-    model_compile_enabled: bool,
-    use_flex_attn: bool,
+    *,
+    model_compile_enabled: bool = False,
+    use_flex_attn: bool = False,
     save_list: set[torch._ops.OpOverload] | None = None,
 ) -> None:
     """Apply activation checkpointing to the model.

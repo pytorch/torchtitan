@@ -110,8 +110,8 @@ def parallelize_deepseekv3(
         apply_ac(
             model,
             job_config.activation_checkpoint,
-            model_compile_enabled,
-            use_flex_attn,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
             save_list=_save_list,
         )
 
