@@ -23,7 +23,7 @@ Then we scatter the patch embeddings to their actual positions in the LLM input 
 - Then scatter those tokens to their actual positions in the LLM input tokens.
 
 
-This result in a very simple and general interface to train modern VLM with interleaved data and native resolution & aspect ratio:
+This results in a very simple and general interface to train modern VLM with interleaved data and native resolution & aspect ratio:
 - Depending on data mixtures, we can set dataloader's hyperparameters `N, L` to have minimal empty image padding (in batch dimension).
 - Use modern pytorch features (FlexAttention, compile etc) for efficient handling of different attention mask per (padding in sequence dimension).
 - Interface nicely with TP, PP, etc
@@ -45,7 +45,7 @@ This approach requires the dataloader to handle the following aspect:
 
 
 ### Model
-We also need Ar pretrained vision encoder with support for native resolution and aspect ratio. There is relatively few Vision Encoder that have this capability up until recently, including Siglip2, AimV2, and most recently DINOv3.
+We also need a pretrained vision encoder with support for native resolution and aspect ratio. There is relatively few Vision Encoder that have this capability up until recently, including Siglip2, AimV2, and most recently DINOv3.
 - [ ] Currently we support Siglip2 encoder using Positional Embedding interpolation approach.
     - [x] Base modelling code. 
     - [ ] Weights conversion and loading from HF.

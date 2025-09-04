@@ -92,7 +92,7 @@ def smart_resize(
     """Calculate dimensions that maintain aspect ratio and satisfy constraints."""
     if height < factor or width < factor:
         raise ValueError(
-            f"height:{height} or width:{width} must be larger than factor:{factor}"
+            f"height:{height} and width:{width} must be larger than factor:{factor}"
         )
     elif max(height, width) / min(height, width) > 200:
         raise ValueError(
