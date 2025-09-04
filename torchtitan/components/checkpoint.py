@@ -417,6 +417,7 @@ class CheckpointManager:
         state_dict: dict[str, Any],
         checkpoint_id: str,
         from_hf: bool,
+        step: int = -1,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -440,11 +441,21 @@ class CheckpointManager:
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
+            before_load = state_dict['tok_embeddings.weight']._local_tensor
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            after_load = state_dict['tok_embeddings.weight']._local_tensor
+            try:
+                assert torch.equal(before_load, after_load)
+                # dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            except:
+                import fbvscode
+                fbvscode.set_trace()
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
+                # import fbvscode
+                # fbvscode.set_trace()
                 self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
@@ -508,6 +519,9 @@ class CheckpointManager:
                     enable_garbage_collection=True,
                 )
             self._purge_stale_checkpoints()
+            # import fbvscode
+            # fbvscode.set_trace()
+            self.load(step=-1)
 
             logger.info(
                 "Finished saving the checkpoint (or staging if async is enabled)"
@@ -542,6 +556,7 @@ class CheckpointManager:
 
         model_only = False
         from_hf = False
+        # torch.distributed.breakpoint()
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
@@ -596,11 +611,18 @@ class CheckpointManager:
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
+        before_load = states['tok_embeddings.weight']._local_tensor
         self.dcp_load(
             states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
         )
+        after_load = states['tok_embeddings.weight']._local_tensor
+        try:
+            assert torch.equal(before_load, after_load)
+        except:
+            import fbvscode
+            fbvscode.set_trace()
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
@@ -719,7 +741,8 @@ class CheckpointManager:
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
 
-        states_to_load = self._flattened_model_states_sd(states_to_load)
+        # states_to_load = self._flattened_model_states_sd(states_to_load)
+        states_to_load = self._flattened_model_states_sd()
 
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
