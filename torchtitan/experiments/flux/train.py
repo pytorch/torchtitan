@@ -469,7 +469,7 @@ class FluxTrainer(Trainer):
         job_config = self.job_config
         eval_loss = None
         gbs = job_config.training.batch_size * self.dataloader.dp_world_size
-        eval_freq_steps = job_config.eval.eval_freq // gbs
+        eval_freq_steps = math.ceil(job_config.eval.eval_freq / gbs)
         if self.mlperf_logger:
             self.mlperf_logger.log_run_start(
                 gbs=gbs,
@@ -478,7 +478,7 @@ class FluxTrainer(Trainer):
                 warmup_steps=self.job_config.lr_scheduler.warmup_steps,
                 gradient_clip_norm=self.job_config.training.max_norm,
                 optimizer_config=self.optimizers.optimizers[0].param_groups[0],
-                eval_freq=job_config.eval.eval_freq,
+                eval_freq=262144,
             )
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
