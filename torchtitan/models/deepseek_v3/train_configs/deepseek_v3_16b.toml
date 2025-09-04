@@ -53,7 +53,7 @@ expert_parallel_degree = 8
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 last_save_model_only = true
@@ -72,4 +72,4 @@ components = ["loss"] # ["model", "loss"]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+moe_fqns_prototype = ["experts"]

@@ -1,4 +1,3 @@
-# torchtitan Config.toml
 # NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
@@ -44,7 +43,7 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
@@ -64,7 +63,7 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enabled = false
+enable = false
 dataset = "c4_validation"
 freq = 500
-steps = -1
+steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192

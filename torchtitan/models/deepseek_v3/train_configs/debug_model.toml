@@ -2,7 +2,6 @@
 dump_folder = "./outputs"
 description = "DeepSeek-V3 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -56,7 +55,7 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 last_save_model_only = false
@@ -75,4 +74,4 @@ components = ["model", "loss"]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+moe_fqns_prototype = ["experts"]

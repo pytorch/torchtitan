@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "671B"
-hf_assets_path = "./assets/hf/DeepSeek-V3"
+hf_assets_path = "./assets/hf/DeepSeek-V3.1-Base"
 # converters = ["float8"]
 
 [optimizer]
@@ -54,7 +54,7 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
@@ -73,4 +73,4 @@ components = ["loss"] # ["model", "loss"]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+moe_fqns_prototype = ["experts"]

@@ -284,7 +284,7 @@ def pipeline_module_split(
 
         # Create a set of modules to keep for faster lookup
         modules_to_keep = set(module_names)
-        print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
+        logger.info(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
         for module_name, module_value in model.named_children():
             # Handle layer-like structures (e.g., "layers.0", "layers.1")
             if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):

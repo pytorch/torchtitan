@@ -65,7 +65,7 @@ def generate_noise_latent(
     dtype: torch.dtype,
     seed: int | None = None,
 ) -> Tensor:
-    """Generate noise latents for the Flux flow model. The random seed will be set at the begining of training.
+    """Generate noise latents for the Flux flow model. The random seed will be set at the beginning of training.
 
     Args:
         bsz (int): batch_size.

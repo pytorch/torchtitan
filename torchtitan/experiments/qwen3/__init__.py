@@ -17,6 +17,7 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
 from .model.model import Qwen3Model
+from .model.state_dict_adapter import Qwen3StateDictAdapter
 
 __all__ = [
     "parallelize_qwen3",
@@ -24,7 +25,6 @@ __all__ = [
     "Qwen3Model",
     "qwen3_configs",
 ]
-
 
 # Adding different variants of the model
 
@@ -40,6 +40,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=3072,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "1.7B": Qwen3ModelArgs(
         vocab_size=151936,
@@ -52,6 +53,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=6144,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "4B": Qwen3ModelArgs(
         vocab_size=151936,
@@ -64,6 +66,7 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=9728,
         rope_theta=1000000,
+        enable_weight_tying=True,
     ),
     "8B": Qwen3ModelArgs(
         vocab_size=151936,
@@ -117,5 +120,6 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=Qwen3StateDictAdapter,
     )
 )

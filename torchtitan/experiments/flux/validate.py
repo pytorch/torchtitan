@@ -9,7 +9,6 @@ from typing import Generator
 
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -33,6 +32,7 @@ from torchtitan.experiments.flux.utils import (
     preprocess_data,
     unpack_latents,
 )
+from torchtitan.tools.logging import logger
 
 
 class FluxValidator(Validator):
@@ -73,11 +73,18 @@ class FluxValidator(Validator):
             dp_rank=dp_rank,
             tokenizer=tokenizer,
             generate_timestamps=not self.all_timesteps,
+            infinite=self.job_config.validation.steps != -1,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
+
+        if self.job_config.validation.steps == -1:
+            logger.warning(
+                "Setting validation steps to -1 might cause hangs because of "
+                "unequal sample counts across ranks when dataset is exhausted."
+            )
 
     def flux_init(
         self,
@@ -238,12 +245,6 @@ class FluxValidator(Validator):
             global_avg_loss = loss.item()
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
-
-        # Reshard after run forward pass
-        # This is to ensure the model weights are sharded the same way for checkpoint saving.
-        for module in model.modules():
-            if isinstance(module, FSDPModule):
-                module.reshard()
 
         # Set model back to train mode
         model.train()

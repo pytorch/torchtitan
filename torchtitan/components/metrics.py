@@ -144,7 +144,9 @@ class WandBLogger(BaseLogger):
         os.makedirs(log_dir, exist_ok=True)
 
         self.wandb.init(
+            entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
+            name=os.getenv("WANDB_RUN_NAME", None),
             dir=log_dir,
             config=job_config.to_dict(),
         )
@@ -319,6 +321,7 @@ class MetricsProcessor:
     num_flops_per_token: int
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
+    model_parts: list[torch.nn.Module] | None
 
     def __init__(
         self,
@@ -349,6 +352,7 @@ class MetricsProcessor:
         self.num_flops_per_token = -1
         self.optimizers = None
         self.lr_schedulers = None
+        self.model_parts = None
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0

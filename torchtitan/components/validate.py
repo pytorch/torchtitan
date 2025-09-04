@@ -8,7 +8,6 @@ from typing import Generator
 
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
@@ -18,6 +17,7 @@ from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
+from torchtitan.tools.logging import logger
 
 
 class BaseValidator:
@@ -67,6 +67,7 @@ class Validator(BaseValidator):
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
+            infinite=self.job_config.validation.steps != -1,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
@@ -75,6 +76,12 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
 
+        if self.job_config.validation.steps == -1:
+            logger.warning(
+                "Setting validation steps to -1 might cause hangs because of "
+                "unequal sample counts across ranks when dataset is exhausted."
+            )
+
     @torch.no_grad()
     def validate(
         self,
@@ -82,8 +89,8 @@ class Validator(BaseValidator):
         step: int,
     ) -> None:
         # Set model to eval mode
-        model = model_parts[0]
-        model.eval()
+        for model in model_parts:
+            model.eval()
 
         parallel_dims = self.parallel_dims
 
@@ -148,7 +155,7 @@ class Validator(BaseValidator):
                 with self.validation_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     with self.maybe_enable_amp:
-                        predictions = model(inputs)
+                        predictions = model_parts[0](inputs)
                         loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
@@ -167,14 +174,9 @@ class Validator(BaseValidator):
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
-        # Reshard after run forward pass
-        # This is to ensure the model weights are sharded the same way for checkpoint saving.
-        for module in model.modules():
-            if isinstance(module, FSDPModule):
-                module.reshard()
-
         # Set model back to train mode
-        model.train()
+        for model in model_parts:
+            model.train()
 
 
 def build_validator(

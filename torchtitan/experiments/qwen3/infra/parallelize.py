@@ -21,15 +21,28 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.models.llama3.infra.parallelize import (
-    apply_ac,
     apply_compile,
     apply_ddp,
     apply_fsdp,
 )
 from torchtitan.tools.logging import logger
+
+
+# for selective op activation checkpointing
+_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 
 def parallelize_qwen3(
@@ -45,12 +58,20 @@ def parallelize_qwen3(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
+            and not model_compile_enabled
         ):
-            raise RuntimeError("Async TP requires --training.compile")
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -72,10 +93,16 @@ def parallelize_qwen3(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            save_list=_save_list,
+        )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if job_config.training.compile:
+    if model_compile_enabled:
         apply_compile(model)
 
     if parallel_dims.fsdp_enabled:
@@ -100,11 +127,6 @@ def parallelize_qwen3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
-
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
 
@@ -116,7 +138,7 @@ def parallelize_qwen3(
         apply_ddp(
             model,
             world_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 

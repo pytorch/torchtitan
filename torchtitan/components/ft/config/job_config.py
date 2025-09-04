@@ -52,7 +52,7 @@ class FaultTolerance(BaseFaultTolerance):
     Determines how to mix the local and global optimized parameters
 
     By default, we just use the global parameters. This ensures all
-    DDP replicas have the same parameters after syncrhonizing on
+    DDP replicas have the same parameters after synchronizing on
     the fragment. Tuning this can also affect the model quality.
 
     This is only used when "semi_sync_method" is set.

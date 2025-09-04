@@ -54,7 +54,7 @@ class GarbageCollection:
             )
             gc.collect()
         elif step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Peforming periodical GC collection")
+            self.collect("Performing periodical GC collection")
 
     @staticmethod
     def collect(reason: str, generation: int = 1):
