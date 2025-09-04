@@ -12,20 +12,20 @@ This folder showcases how to train modern Vision Language Model (vlm) in torchti
 
 
 ## Design
-Distributed training usually does not play nice with input of varying shapes. To handle a varying number of images and image sizes, we requires two hyperparameters, image batch size `N` and image length `L` (in patches), and pad the actual image patches to this fixed size. 
+Distributed training usually does not play nice with input of varying shapes. To handle a varying number of images and image sizes, we requires two hyperparameters, image batch size `N` and image length `L` (in patches), and pad the actual image patches to this fixed size.
 Then we scatter the patch embeddings to their actual positions in the LLM input tokens.
 
 <img width="1398" height="840" alt="Screenshot 2025-08-21 at 16 21 57" src="https://github.com/user-attachments/assets/63fcbbc1-c587-4a63-8246-411cb72f5789" />
 
 - After `tok_embedding`, we obtain tokens of shape `BxS`.
 - After `encoder`, we obtain visual tokens of shape `NxL`.
-- We extract the valid visual tokens only 
+- We extract the valid visual tokens only
 - Then scatter those tokens to their actual positions in the LLM input tokens.
 
 
 This results in a very simple and general interface to train modern VLM with interleaved data and native resolution & aspect ratio:
 - Depending on data mixtures, we can set dataloader's hyperparameters `N, L` to have minimal empty image padding (in batch dimension).
-- Use modern pytorch features (FlexAttention, compile etc) for efficient handling of different attention mask per (padding in sequence dimension).
+- We use modern Pytorch features like FlexAttention and torch.compile to efficient efficiently handle variable sequence length.
 - Interface nicely with TP, PP, etc
 
 
@@ -41,13 +41,13 @@ This approach requires the dataloader to handle the following aspect:
 - [x] LLM Sample / Document Packing.
 - [x] Captioning dataset: CC12M
 - [x] Interleaved dataset: Obelics
-  
+
 
 
 ### Model
 We also need a pretrained vision encoder with support for native resolution and aspect ratio. There is relatively few Vision Encoder that have this capability up until recently, including Siglip2, AimV2, and most recently DINOv3.
 - [ ] Currently we support Siglip2 encoder using Positional Embedding interpolation approach.
-    - [x] Base modelling code. 
+    - [x] Base modelling code.
     - [ ] Weights conversion and loading from HF.
 - [x] FSDP for both Encoder and Decoder
 - [x] Context Parallel for LLM only, since we will use FlexAttention for Encoder.
@@ -55,4 +55,3 @@ We also need a pretrained vision encoder with support for native resolution and 
 - [ ] Compile for Encoder + Deocoder
 - [ ] Tensor Parallel
 - [ ] Pipeline Parallel
-

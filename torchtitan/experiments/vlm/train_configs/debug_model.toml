@@ -7,7 +7,6 @@ custom_args_module = "torchtitan.experiments.vlm.assets.job_config"
 dump_folder = "./outputs"
 description = "Llama 3 Siglip2 VLM debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -49,9 +48,11 @@ max_images_per_batch = 64
 # packing_buffer_size = 100
 max_norm = 1.0  # grad norm clipping
 steps = 10
-compile = false
 # dataset = "obelics"
 dataset = "cc12m"
+
+[compile]
+enable = false
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -63,7 +64,7 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 last_save_model_only = false
@@ -73,14 +74,3 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
-
-[float8]
-enable_fsdp_float8_all_gather = false
-precompute_float8_dynamic_scale_for_fsdp = false
-filter_fqns = ["output"]
-
-[validation]
-enabled = false
-dataset = "c4_validation"
-freq = 5
-steps = 10

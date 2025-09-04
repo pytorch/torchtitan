@@ -19,7 +19,7 @@ class Training:
         Number of visual tokens is: (256/16)**2=256
     """
     spatial_merge_size: int = 1
-    """ Spatially merge visual tokens after encoder.
+    """ Spatially merge visual tokens after encoder.  Default 1 means no merging.
     For example: image size 256x256, patch size 16, spaitl merge size is 2
         Number of visual tokens for the LLM: (256/16/2)**2 = 8
     """

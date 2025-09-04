@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass, field
 
+from torchtitan.config.job_config import JobConfig
 from torchtitan.models.llama3 import TransformerModelArgs as Llama3Args
 
 
@@ -29,3 +30,7 @@ class Siglip2ModelArgs:
 class Llama3Siglip2ModelArgs(Llama3Args):
     encoder: Siglip2ModelArgs = field(default_factory=Siglip2ModelArgs)
     img_token_id: int = 1998
+
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        super().update_from_config(job_config, **kwargs)
+        self.img_token_id = job_config.special_tokens.img_id

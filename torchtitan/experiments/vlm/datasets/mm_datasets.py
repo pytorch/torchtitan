@@ -295,17 +295,15 @@ class MultiModalDataset(IterableDataset, Stateful):
                         )
                         continue
 
-                    if processed is not None:
+                    if self.enable_packing:
+                        self.packer.add_sample(processed)
 
-                        if self.enable_packing:
-                            self.packer.add_sample(processed)
-
-                            if self.packer.has_batch_ready():
-                                batch = self.packer.get_next_batch()
-                                if batch:
-                                    yield from batch
-                        else:
-                            yield processed  # individual sample
+                        if self.packer.has_batch_ready():
+                            batch = self.packer.get_next_batch()
+                            if batch:
+                                yield from batch
+                    else:
+                        yield processed  # individual sample
 
                 except Exception as e:
                     logger.warning(f"Error in iteration: {e}")
