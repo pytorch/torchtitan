@@ -72,85 +72,73 @@ class FlexAttention(torch.nn.Module):
         self.attn_mask_type = attn_mask_type
         self.fixed_block_size = fixed_block_size
 
+        self.mask_cache = {}
         FlexAttention.used_attn_mask_types.add(self.mask_key)
 
     @property
     def mask_key(self) -> FLEX_ATTN_MASK_T:
         return (self.attn_mask_type, self.fixed_block_size)
 
-    def forward(self, q, k, v, sink_weights=None, sliding_window=0, enable_gqa=False):
-        """
-        q : (B, H_q, S_q, D)
-        k : (B, H_kv, S_kv, D)   -- without sink
-        v : (B, H_kv, S_kv, D)
-        sink_weights : (H_q,) or (H, M)   -- broadcast to all queries
-        sliding_window : int
-        enable_gqa : bool
-        """
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float | None = None,
+        sink_weights: torch.Tensor | None = None,
+        sliding_window: int = 0,
+        enable_gqa: bool = False,
+    ) -> torch.Tensor:
         if sink_weights is None:
             block_mask = FlexAttention.block_masks[self.mask_key]
-            return FlexAttention.flex_attn(q, k, v, block_mask=block_mask)
+            return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
 
         B, H_q, S_q, D = q.shape
         _, H_kv, S_kv, _ = k.shape
-        sink_idx = S_kv # sink occupies final key slot
 
-        sink_k = k.new_zeros(B, H_kv, 1, D) # this needn't be 0's since it's overwritten
-        sink_v = v.new_zeros(B, H_kv, 1, D) # 0 value nullifies sink weight in output
-
-        k_ext = torch.cat([k, sink_k], dim=2)
-        v_ext = torch.cat([v, sink_v], dim=2)
-
-        # masks ensure sinks are included in softmax
-        if sliding_window is not None and sliding_window > 0:
-            mask_mod = FlexAttention._get_sliding_window_with_sink_mask_mod(sliding_window, sink_idx)
-        else:
-            mask_mod = FlexAttention._get_causal_with_sink_mask_mod(sink_idx)
-
-        block_mask = FlexAttention.compiled_create_block_mask(
-            mask_mod, B, H_q, S_q, S_kv+1
-        )
-
-        # overwrite the dummy sink scores with actual sink weights
-        def score_mod(score, b, h_q, q_idx, kv_idx):
-            return torch.where(
-                kv_idx == sink_idx,
-                sink_weights[h_q].to(score.dtype) + 0.0,  # cast + keep grad
-                score
+        # regular (no-sink) mask + no extra KV col
+        mask_key = (sliding_window, S_q, S_kv)
+        if mask_key not in self.mask_cache:
+            if sliding_window is not None and sliding_window > 0:
+                mask_mod = FlexAttention._get_sliding_window_mask_mod(sliding_window)
+            else:
+                mask_mod = FlexAttention._get_causal_mask_mod()
+            block_mask = create_block_mask(
+                mask_mod, B, H_q, S_q, S_kv,
+                _compile=True, device=q.device # NOTE: set _compile=False if sampling for debugging
             )
+            self.mask_cache[mask_key] = block_mask
 
-        return FlexAttention.flex_attn(
-            q, k_ext, v_ext,
+        block_mask = self.mask_cache[mask_key]
+
+        # run fast flex_attn and return LSE
+        out, lse = FlexAttention.flex_attn(
+            q, k, v,
             block_mask=block_mask,
-            score_mod=score_mod,
-            enable_gqa=enable_gqa
+            enable_gqa=enable_gqa,
+            return_lse=True
         )
 
-    @staticmethod
-    def _get_causal_with_sink_mask_mod(sink_idx):
-        """
-        Returns a mask_mod function that
-        - only allows kv_idx ≤ q_idx (causal)
-        - or if kv_idx == sink_idx (always allow the sink)
-        """
-        orig = FlexAttention._get_causal_mask_mod()
-        def causal_with_sink(b, h, q_idx, kv_idx):
-            return orig(b, h, q_idx, kv_idx) | (kv_idx == sink_idx)
-        return causal_with_sink
+        # rescale by sigma(lse - w[h]) and broadcast over D
+        if sink_weights is not None:
+            w = sink_weights  # [H]
+            scale = torch.sigmoid(lse - w.view(1, -1, 1)).unsqueeze(-1)  # [B,H,S,1]
+            out = out * scale
+
+        out = out.to(q.dtype)
+        return out
 
     @staticmethod
-    def _get_sliding_window_with_sink_mask_mod(window: int, sink_idx: int):
+    def _get_sliding_window_mask_mod(window: int):
         """
         Returns a mask_mod function that
         - only allows kv_idx ≤ q_idx (causal)
         - and only if (q_idx - kv_idx) ≤ window
-        - or if kv_idx == sink_idx (always allow the sink)
         """
         def sliding_mod(b, h, q_idx, kv_idx):
             # causal within window
             keep = (kv_idx <= q_idx) & (q_idx - kv_idx <= window)
-            # always allow the sink slot
-            return keep | (kv_idx == sink_idx)
+            return keep
         return sliding_mod
 
     @staticmethod
