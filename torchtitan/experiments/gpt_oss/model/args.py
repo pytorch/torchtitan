@@ -64,6 +64,7 @@ class GptOssModelArgs(BaseModelArgs):
     num_local_experts: int = 32
     num_experts_per_tok: int = 4
     use_grouped_mm: bool = True
+    load_balance_coeff: float | None = 1e-3
     # Multi-Head Latent Attention (MLA)
     head_dim: int = 64
     num_attention_heads: int = 64
@@ -82,7 +83,7 @@ class GptOssModelArgs(BaseModelArgs):
         """
         Update the model_config config from the given job config.
         """
-        # self.vocab_size = tokenizer.vocab_size # TODO: add tiktokenizer support?
+        # self.vocab_size = tokenizer.vocab_size
         self.max_seq_len = job_config.training.seq_len
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:

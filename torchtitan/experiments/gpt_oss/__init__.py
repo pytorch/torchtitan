@@ -5,7 +5,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.experiments.llama4.optimizer import build_llama4_optimizers
+from .infra.optimizer import build_gptoss_optimizers
 
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
@@ -25,12 +25,14 @@ gptoss_configs = {
     "debugmodel": GptOssModelArgs(
         hidden_size=256,
         num_hidden_layers=4,
+        use_flex_attn=False,
+        use_grouped_mm=False,
     ),
-    "20B": GptOssModelArgs(
+    "20b": GptOssModelArgs(
         num_hidden_layers=24,
         num_local_experts=32,
     ),
-    "120B": GptOssModelArgs(
+    "120b": GptOssModelArgs(
         num_hidden_layers=36,
         num_local_experts=128,
     ),
@@ -44,7 +46,7 @@ register_train_spec(
         config=gptoss_configs,
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=None,
-        build_optimizers_fn=build_llama4_optimizers,  # use optimizer hooks to update expert weights
+        build_optimizers_fn=build_gptoss_optimizers,  # use optimizer hooks to update expert weights
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,

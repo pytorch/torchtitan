@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -323,7 +324,12 @@ class Attention(nn.Module):
         v = v.transpose(1, 2).contiguous()
 
         if self.use_flex_attn:
-            output = self.attn(q, k, v, self.sinks, sliding_window=self.sliding_window, enable_gqa=True)
+            output = self.attn(
+                q, k, v,
+                self.sinks.to_local() if isinstance(self.sinks, DTensor) else self.sinks,
+                sliding_window=self.sliding_window,
+                enable_gqa=True,
+        )
         else:
             output = self.attn(
                 q, k, v, self.sinks,
@@ -346,8 +352,9 @@ class Attention(nn.Module):
             self.wv,
         ]
 
+        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
     # TODO: statically init the mask using train.seq_len
@@ -419,7 +426,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.num_hidden_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(torch.bfloat16)
-            convert_submodules_to_bf16(self.layers[str(layer_id)])
+            # convert_submodules_to_bf16(self.layers[str(layer_id)])
 
         self.norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
         self.output = nn.Linear(
@@ -430,7 +437,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         )
         self.model_args = model_args
         self.init_weights()
-        convert_submodules_to_bf16(self)
+        # convert_submodules_to_bf16(self)
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
