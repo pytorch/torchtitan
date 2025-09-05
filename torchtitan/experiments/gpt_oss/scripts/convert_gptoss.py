@@ -8,6 +8,7 @@ uv run torchtitan/experiments/gpt_oss/scripts/convert_gptoss.py hf-to-dcp --inpu
 uv run torchtitan/experiments/gpt_oss/scripts/convert_gptoss.py dcp-to-hf --input-path gptoss_dcp/ --output-path gptoss_hf/
 """
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Union
@@ -397,7 +398,7 @@ def map_torchtitan_to_hf(torchtitan_state_dict, *, strict=True):
 
 @app.command(name="hf_to_dcp")
 @torch.inference_mode()
-def convert_hf_to_dcp(input_path: str, output_path: Path, max_seq_len: int = 131072, rope_theta: float = 150000.0, dtype: str = "auto", torchtitan_config: str = "20B"):
+def convert_hf_to_dcp(input_path: str, output_path: Path, max_seq_len: int = 131072, rope_theta: float = 150000.0, dtype: str = "auto", torchtitan_config: str = "20b"):
     """Convert HuggingFace model to TorchTitan DCP format.
 
     Args:
@@ -460,7 +461,7 @@ def convert_hf_to_dcp(input_path: str, output_path: Path, max_seq_len: int = 131
 
 @app.command(name="dcp_to_hf")
 @torch.inference_mode()
-def convert_dcp_to_hf(input_path: Path, output_path: Path, max_seq_len: int = 131072, rope_theta: float = 500000.0, default_model: str = "meta-llama/Meta-Llama-3.1-8B"):
+def convert_dcp_to_hf(input_path: Path, output_path: Path, max_seq_len: int = 131072, rope_theta: float = 150000.0, default_model: str = "openai/gpt-oss-20b"):
     """Convert TorchTitan DCP format to HuggingFace model.
 
     Args:
@@ -485,7 +486,7 @@ def convert_dcp_to_hf(input_path: Path, output_path: Path, max_seq_len: int = 13
     )
     torchtitan_state_dict = state_dict["model"]
     logger.info("Converting weights to HuggingFace format")
-    hf_state_dict = map_torchtitan_to_hf(torchtitan_state_dict, max_seq_len, rope_theta)
+    hf_state_dict = map_torchtitan_to_hf(torchtitan_state_dict)
 
     # Create HuggingFace config
     hf_config = AutoConfig.from_pretrained(default_model)

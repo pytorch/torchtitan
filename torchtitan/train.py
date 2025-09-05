@@ -323,6 +323,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.train_context = dist_utils.get_train_context(
             loss_parallel_enabled,
             parallelism_config.enable_compiled_autograd,
+            use_sdpa=not getattr(model_args, "use_flex_attn", False),
         )
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
