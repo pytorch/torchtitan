@@ -2,9 +2,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.distributed.tensor import DTensor
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.experiments.llama4.infra.expert_parallel import expert_parallel
+from torchtitan.models.gpt_oss.infra.expert_parallel import expert_parallel
 
 from .args import GptOssModelArgs
 
@@ -49,7 +50,7 @@ class GroupedExperts(nn.Module):
 
     # TODO: keeping this for-loop implementation for comparison
     #       and readability, may remove later
-    # @expert_parallel
+    @expert_parallel
     @staticmethod
     def _run_experts_for_loop(
         mlp1_weight: torch.Tensor,
@@ -91,7 +92,7 @@ class GroupedExperts(nn.Module):
 
         return out
 
-    # @expert_parallel # TODO: e-sharding currently breaks shapes
+    # @expert_parallel  # NOTE: EP currently reduces 20B MFU from 17.8% to 16.5%!
     @staticmethod
     def _run_experts_grouped_mm(
         mlp1_weight: torch.Tensor,
@@ -105,24 +106,37 @@ class GroupedExperts(nn.Module):
             offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
             # grouped mm between a 2D tensor and a 3D tensor
             assert x.dim() == 2
+            num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
         else:
             offsets = None
             # fall back to regular bmm between 3D tensors
             assert x.dim() == 3
 
-        num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
+        if isinstance(mlp1_weight, DTensor):
+            mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = mlp1_weight.to_local(), mlp1_bias.to_local(), mlp2_weight.to_local(), mlp2_bias.to_local()
 
         h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
-        h += mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+        if offsets is not None:
+            b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+            tail_slack = x.shape[0] - int(offsets[-1])
+            if tail_slack:
+                b1 = torch.cat([b1, b1.new_zeros((tail_slack, b1.shape[-1]))], dim=0)
+            h = h + b1.to(h.dtype)
+
         h = swiglu(h)
         h = torch._grouped_mm(h, mlp2_weight.bfloat16(), offs=offsets)
-        h += mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+        if offsets is not None:
+            b2 = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+            tail_slack = x.shape[0] - int(offsets[-1])
+            if tail_slack:
+                b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
+            h = h + b2.to(h.dtype)
 
         return h
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
 
@@ -178,6 +192,9 @@ class TokenChoiceTopKRouter(nn.Module):
         # scores shape (bs*slen, num_experts)
         router_logits = self.gate(x)
 
+        if expert_bias is not None:
+            router_logits = router_logits + expert_bias
+
         # top scores shape (bs*slen, top_k)
         top_scores, selected_experts_indices = torch.topk(
             router_logits, k=self.top_k, dim=1
@@ -228,6 +245,21 @@ class MoE(nn.Module):
             num_experts=num_experts,
             top_k=top_k,
         )
+        self.load_balance_coeff = model_args.load_balance_coeff
+        if self.load_balance_coeff is not None:
+            assert self.load_balance_coeff > 0.0
+            self.register_buffer(
+                "expert_bias",
+                torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
+            )
+            self.register_buffer(
+                "tokens_per_expert",
+                torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
+            )
+        else:
+            self.expert_bias = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -245,7 +277,11 @@ class MoE(nn.Module):
             top_scores,
             token_indices,
             num_tokens_per_expert,
-        ) = self.router(x.reshape(bs * slen, dim))
+        ) = self.router(x.reshape(bs * slen, dim), self.expert_bias)
+
+        if self.load_balance_coeff is not None and torch.is_grad_enabled():
+            with torch.no_grad():
+                self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # shape (bs*slen*top_k, dim)
         token_indices = token_indices.reshape(-1, 1).expand(-1, dim)
@@ -278,3 +314,11 @@ class MoE(nn.Module):
     ):
         self.experts.init_weights(init_std)
         self.router.init_weights(init_std)
+        if self.load_balance_coeff is not None:
+            with torch.device(buffer_device):
+                self.expert_bias = torch.zeros(
+                    self.experts.num_experts, dtype=torch.float32
+                )
+                self.tokens_per_expert = torch.zeros(
+                    self.experts.num_experts, dtype=torch.float32
+                )
