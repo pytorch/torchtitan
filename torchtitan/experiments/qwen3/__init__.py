@@ -12,13 +12,13 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
 from .model.model import Qwen3Model
 from .model.state_dict_adapter import Qwen3StateDictAdapter
-from torchtitan.models.moe import MoEArgs
 
 
 __all__ = [
@@ -107,6 +107,29 @@ qwen3_configs = {
         rope_theta=1000000,
     ),
     # Qwen3-MoE models
+    "debugmodel_moe": Qwen3ModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        head_dim=128,
+        dim=1024,
+        n_layers=28,
+        n_heads=16,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=3072,
+        rope_theta=1000000,
+        moe_enabled=True,
+        moe_inter_dim=768,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=0,  # no shared experts, double check
+            top_k=8,  # num_experts_per_tok
+            score_func="softmax",  # need double check
+            route_norm=True,
+            route_scale=1.0,  # not needed, need double check
+            score_before_experts=False,
+        ),
+    ),
     "30B-A3B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
@@ -126,7 +149,7 @@ qwen3_configs = {
             top_k=8,  # num_experts_per_tok
             score_func="softmax",  # need double check
             route_norm=True,
-            route_scale=1.0,   # not needed, need double check
+            route_scale=1.0,  # not needed, need double check
             score_before_experts=False,
         ),
     ),
@@ -149,12 +172,10 @@ qwen3_configs = {
             top_k=8,  # num_experts_per_tok
             score_func="softmax",  # need double check
             route_norm=True,
-            route_scale=1.0,   # not needed, need double check
+            route_scale=1.0,  # not needed, need double check
             score_before_experts=False,
         ),
     ),
-
-
 }
 
 
