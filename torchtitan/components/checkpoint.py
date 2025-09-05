@@ -40,6 +40,7 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
+from torchtitan.models.deepseek_v3.model.quantization import BLOCK_SIZE
 from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -247,6 +248,7 @@ class CheckpointManager:
         # Checkpoint policy related fields.
         self.initial_load_model_only = checkpoint_config.initial_load_model_only
         self.initial_load_in_hf = checkpoint_config.initial_load_in_hf
+        self.initial_load_dequantize = checkpoint_config.initial_load_dequantize
         self.initial_load_path = checkpoint_config.initial_load_path
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
@@ -417,6 +419,7 @@ class CheckpointManager:
         state_dict: dict[str, Any],
         checkpoint_id: str,
         from_hf: bool,
+        dequantize: bool = False,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -432,10 +435,25 @@ class CheckpointManager:
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
-            )
+            if not dequantize:
+                dcp.load(
+                    hf_state_dict,
+                    storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
+                )
+            else:
+                from torch.distributed.checkpoint.quantized_hf_storage import (
+                    QuantizedHuggingFaceStorageReader,
+                )
+                BLOCK_SIZE = 128  # hardcode for deepseek 671b now
+                dcp.load(
+                    hf_state_dict,
+                    storage_reader=QuantizedHuggingFaceStorageReader(
+                        path=checkpoint_id,
+                        target_dtype=torch.float32,
+                        block_size=BLOCK_SIZE,
+                        thread_count=4,
+                    ),
+                )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
@@ -600,6 +618,7 @@ class CheckpointManager:
             states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
+            dequantize=self.initial_load_dequantize,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
