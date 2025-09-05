@@ -76,6 +76,13 @@ def _apply_ac_to_transformer_block(
 
         def _get_custom_policy(meta):
             def _custom_policy(ctx, func, *args, **kwargs):
+                if (
+                    func == torch.ops.aten._to_copy.default
+                    and "cuda" in str(args[0].device)
+                    and "device" in kwargs
+                    and str(kwargs["device"]) == "cpu"
+                ):
+                    return CheckpointPolicy.MUST_SAVE
                 mode = "recompute" if ctx.is_recompute else "forward"
                 mm_count_key = f"{mode}_mm_count"
                 if func == torch.ops.aten.mm.default:

@@ -8,9 +8,11 @@
 from typing import Callable, Literal
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed._functional_collectives import all_to_all_single_autograd
+from torch.distributed._functional_collectives import (
+    all_to_all_single,
+    all_to_all_single_autograd,
+)
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
@@ -90,26 +92,28 @@ class ExpertParallel(ParallelStyle):
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_tokens_per_expert_group = num_tokens_per_expert.new_empty(
-                num_tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(
-                num_tokens_per_expert_group,
+            num_tokens_per_expert_group = all_to_all_single(
                 num_tokens_per_expert,
+                None,
+                None,
                 group=device_mesh.get_group(),
+            )
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
             )
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
+            # NOTE: this would incur a device-to-host sync
             output_splits = (
                 num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=False)
             )
-            # NOTE: this would incur a device-to-host sync
-            torch.cuda.current_stream().synchronize()
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 
