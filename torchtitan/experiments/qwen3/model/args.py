@@ -7,7 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torch import nn
 
@@ -15,6 +15,7 @@ from torchtitan.config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 
 from torchtitan.tools.logging import logger
+from torchtitan.models.moe import MoEArgs
 
 
 @dataclass
@@ -39,6 +40,11 @@ class Qwen3ModelArgs(BaseModelArgs):
     eos_id: int = 151645
 
     enable_weight_tying: bool = False
+
+    # MoE params
+    moe_enabled: bool = False
+    moe_inter_dim: int = 768
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
