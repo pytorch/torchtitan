@@ -453,6 +453,9 @@ class Checkpoint:
     non-tensors. The default value is False.
     """
 
+    initial_load_dequantize: bool = False
+    
+
     last_save_model_only: bool = True
     """
     When last_save_model_only=True, only the model will be saved at the end of training,
