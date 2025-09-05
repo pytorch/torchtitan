@@ -202,56 +202,35 @@ def _apply_op_sac_to_transformer_block_with_flex(
             "1. If compile.enable is False, SAC will ignore any torch.compile "
             "inside the SAC region.\n"
             "2. If compile.enable is True but the transformer block contains a MoE module.\n\n"
-            "For both cases, SAC will not be directly applied to the TransformerBlock.\n"
+            "For both cases, we will not wrap the entire TransformerBlock with SAC: \n"
             "   - For case 1: SAC will be used for MoE and FeedForward modules, "
             "while full AC will be used for the Attention module.\n"
-            "   - For case 2: SAC will be used for both MoE and Attention modules, "
-            "but they will be wrapped independently.\n"
+            "   - For case 2: SAC will be used for MoE, FeedForward, and Attention modules, "
+            "but they will be wrapped separately.\n"
         ),
     )
-    if True:
-        if (moe := getattr(module, "moe", None)) is not None:
-            moe = _apply_op_sac(
-                moe,
-                ac_config,
-                base_fqn=f"{base_fqn}.moe" if base_fqn else "moe",
-                save_list=save_list,
+
+    for name in ("feed_forward", "moe"):
+        if (m := getattr(module, name, None)) is not None:
+            module.register_module(
+                name,
+                _apply_op_sac(
+                    m,
+                    ac_config,
+                    base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
+                    save_list=save_list,
+                ),
             )
-            attention = _apply_full_ac(module.attention, ac_config)
-            """
-            attention = _apply_op_sac(
-                module.attention,
-                ac_config,
-                base_fqn=f"{base_fqn}.attention" if base_fqn else "attention",
-                save_list=save_list,
-            )
-            """
-            module.register_module("moe", moe)
-            module.register_module("attention", attention)
-        else:
-            module = _apply_full_ac(module, ac_config)
-            """
-            module = _apply_op_sac(
-                module,
-                ac_config,
-                base_fqn=base_fqn,
-                save_list=save_list,
-            )
-            """
+    if model_compile_enabled:
+        attention = _apply_op_sac(
+            module.attention,
+            ac_config,
+            base_fqn=f"{base_fqn}.attention" if base_fqn else "attention",
+            save_list=save_list,
+        )
     else:
-        for name in ("feed_forward", "moe"):
-            if (m := getattr(module, name, None)) is not None:
-                module.register_module(
-                    name,
-                    _apply_op_sac(
-                        m,
-                        ac_config,
-                        base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
-                        save_list=save_list,
-                    ),
-                )
         attention = _apply_full_ac(module.attention, ac_config)
-        module.register_module("attention", attention)
+    module.register_module("attention", attention)
 
     return module
 
