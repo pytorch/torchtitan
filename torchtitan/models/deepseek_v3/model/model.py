@@ -270,9 +270,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        # self.moe_enabled = layer_id >= model_args.n_dense_layers
-        # TODO: enable me when local_map works
-        self.moe_enabled = False
+        self.moe_enabled = layer_id >= model_args.n_dense_layers
 
         if self.moe_enabled:
             self.moe = MoE(
