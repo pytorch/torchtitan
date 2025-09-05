@@ -12,7 +12,7 @@ import sys
 logger = logging.getLogger()
 
 
-def init_logger():
+def init_logger() -> None:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     ch = logging.StreamHandler(sys.stdout)
@@ -25,3 +25,12 @@ def init_logger():
 
     # suppress verbose torch.profiler logging
     os.environ["KINETO_LOG_LEVEL"] = "5"
+
+
+_logged: set[str] = set()
+
+
+def warn_once(logger: logging.Logger, msg: str) -> None:
+    if msg not in _logged:
+        logger.warn(msg)
+        _logged.add(msg)
