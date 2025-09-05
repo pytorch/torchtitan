@@ -194,7 +194,7 @@ def create_context_parallel_ctx(
 
 
 def get_train_context(
-    enable_loss_parallel: bool, enable_compiled_autograd: bool
+    enable_loss_parallel: bool, enable_compiled_autograd: bool, use_sdpa: bool = True
 ) -> Generator[None, None, None]:
     @contextlib.contextmanager
     def context(cp_context: Generator[None, None, None] | None = None):
