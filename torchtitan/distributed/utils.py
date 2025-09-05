@@ -122,10 +122,10 @@ def set_determinism(
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
 
-    # Set distinct seed for each rank in mesh dimensions, with dimension name provdied by `distinct_seed_mesh_dim`
+    # Set distinct seed for each rank in mesh dimensions, with dimension name provided by `distinct_seed_mesh_dim`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
-    # TODO(jianiw): We could further extend this to support mutiple distinct dimensions instead of just one.
+    # TODO(jianiw): We could further extend this to support multiple distinct dimensions instead of just one.
     if (
         c10d.get_world_size() > 1
         and distinct_seed_mesh_dim in world_mesh.mesh_dim_names
@@ -186,7 +186,7 @@ def create_context_parallel_ctx(
 
 
 def get_train_context(
-    enable_loss_parallel: bool, enable_compiled_autograd: bool, use_sdpa: bool = True
+    enable_loss_parallel: bool, enable_compiled_autograd: bool
 ) -> Generator[None, None, None]:
     @contextlib.contextmanager
     def context(cp_context: Generator[None, None, None] | None = None):
@@ -206,10 +206,6 @@ def get_train_context(
 
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
-                if use_sdpa:
-                    assert (
-                        ScaledDotProductAttention.backends
-                    ), "No valid SDPA backends with CP."
                 stack.enter_context(cp_context)
 
             yield

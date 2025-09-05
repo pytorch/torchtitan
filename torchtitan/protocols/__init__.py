@@ -6,7 +6,7 @@
 
 from .model import BaseModelArgs, ModelProtocol
 from .model_converter import ModelConverter, ModelConvertersContainer
-from .state_dict_adapter import StateDictAdapter
+from .state_dict_adapter import BaseStateDictAdapter, StateDictAdapter
 
 __all__ = [
     "BaseModelArgs",
@@ -14,4 +14,5 @@ __all__ = [
     "ModelConverter",
     "ModelConvertersContainer",
     "StateDictAdapter",
+    "BaseStateDictAdapter",
 ]

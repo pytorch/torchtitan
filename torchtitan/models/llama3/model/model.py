@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
+from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import TransformerModelArgs
@@ -335,14 +335,9 @@ class Transformer(nn.Module, ModelProtocol):
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
-        # TODO persistent should be set to false, since this buffer can be recomputed.
-        # however, we set it to true for 2 reasons.  (1) due to pytorch/pytorch#123411,
-        # compile or pipeline-tracer will not correctly handle non-persistent buffers,
-        # so we need to fix that.  (2) if we initialize pipeline-parallel models from
-        # a seed checkpoint rather than calling init_weights, we need freqs_cis to be
-        # initialized by the checkpoint, or we need to add a separate initializer for
-        # just the non-persistent buffers that is called after loading checkpoints.
-        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
+        self.register_buffer(
+            "freqs_cis", self._precompute_freqs_cis(), persistent=False
+        )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -400,7 +395,6 @@ class Transformer(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -420,11 +414,6 @@ class Transformer(nn.Module, ModelProtocol):
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=eos_id
-            )
-
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 

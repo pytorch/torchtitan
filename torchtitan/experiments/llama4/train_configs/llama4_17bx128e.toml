@@ -17,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama4"
 flavor = "17bx128e"
-tokenizer_path = "./assets/tokenizer/Llama-4-Scout-17B-16E"
+hf_assets_path = "./assets/hf/Llama-4-Scout-17B-128E"
 # converters = ["float8"]
 
 [optimizer]
@@ -34,7 +34,6 @@ local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 3000
-compile = false
 dataset = "c4"
 
 [parallelism]
@@ -46,9 +45,11 @@ pipeline_parallel_degree = 4
 # pipeline_parallel_schedule = "interleaved1f1b"
 # pipeline_parallel_microbatches = 2
 context_parallel_degree = 1
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 8
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
@@ -57,6 +58,10 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "full" # ["none", "selective", "full"]
+
+[compile]
+enable=false
+components = ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false

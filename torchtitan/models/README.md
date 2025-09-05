@@ -4,7 +4,7 @@ For offline explorations, we recommend the same steps, unless otherwise noted.
 
 ## Adding the model
 
-Please refer to the [Llama 3 folder](.llama3) as an example.
+Please refer to the [Llama 3 folder](llama3) as an example.
 
 The folder should be organized as follows
 - `model` folder: a self-contained folder of model definition and args
@@ -20,7 +20,7 @@ The folder should be organized as follows
       - `init_weights()` is used to properly initialize the parameters and buffers in the model. Please define it in a recursive way so that every submodule has its own `init_weights()`.
     - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, `Router`, and `GroupedExperts` modules.
   - `state_dict_adapter.py`
-    - Inherit [`StateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
+    - Inherit [`BaseStateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
     - There are multiple ways such adapters could be used
       - Checkpoint conversion scripts in `scripts/checkpoint_conversion/` will use them to adapt state dicts containing non-sharded `torch.Tensor` on CPU.
       - During training, [`CheckpointManager`](/torchtitan/components/checkpoint.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.

@@ -16,6 +16,8 @@ from torchtitan.components.checkpoint import ModelWrapper
 
 @torch.inference_mode()
 def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path):
+    if model_name == "flux":
+        import torchtitan.experiments.flux  # noqa: F401
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
@@ -65,7 +67,7 @@ if __name__ == "__main__":
         "--hf_assets_path",
         type=Path,
         help="Path to HF assets directory. This is used to get the model.safetensors.index.json mapping",
-        default="./assets/hf/Llama3.1-8B",
+        default="./assets/hf/Llama-3.1-8B",
     )
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")

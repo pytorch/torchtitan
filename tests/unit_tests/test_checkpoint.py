@@ -83,7 +83,7 @@ class DummyJobConfig:
     def __init__(self, job):
         self.job = job
         self.checkpoint = CheckpointConfig(
-            enable_checkpoint=True,
+            enable=True,
             async_mode="disabled",
             folder="",
             interval=1,
@@ -114,7 +114,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.ft_manager = DummyFTManager()
 
         ckpt_cfg = CheckpointConfig(
-            enable_checkpoint=True,
+            enable=True,
             async_mode="DISABLED",
             folder="",
             interval=1,
@@ -562,7 +562,7 @@ class TestCheckpointManager(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    def test_excluded_parameters_not_saved(self, mock_save, mock_rank):
+    def test_non_persist_buffer_not_saved(self, mock_save, mock_rank):
         """Test that freqs_cis is not saved"""
 
         # Create a fake model with freqs_cis and other parameters
@@ -572,7 +572,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.weight = nn.Parameter(torch.randn(2, 2))
                 self.bias = nn.Parameter(torch.randn(2))
                 # Register freqs_cis as a buffer (common pattern in transformer models)
-                self.register_buffer("freqs_cis", torch.randn(10, 5))
+                self.register_buffer("freqs_cis", torch.randn(10, 5), persistent=False)
                 self.other_param = nn.Parameter(torch.randn(3, 3))
 
         fake_model = FakeModelWithFreqsCis()

@@ -19,6 +19,7 @@ from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from .infra.parallelize import parallelize_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
 from .model.model import DeepSeekV3Model
+from .model.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
     "parallelize_deepseekv3",
@@ -34,7 +35,7 @@ deepseekv3_configs = {
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -57,7 +58,7 @@ deepseekv3_configs = {
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -99,6 +100,8 @@ deepseekv3_configs = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
@@ -124,6 +127,8 @@ deepseekv3_configs = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "671B": DeepSeekV3ModelArgs(
         vocab_size=129280,
@@ -149,7 +154,8 @@ deepseekv3_configs = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        dtype="fp8",
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
 }
 
@@ -166,5 +172,6 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
 )

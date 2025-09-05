@@ -2,7 +2,6 @@
 dump_folder = "./outputs"
 description = "DeepSeek v2 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -22,7 +21,7 @@ enable_wandb = false
 name = "deepseek_v2"
 flavor = "deepseek-ai/DeepSeek-V2-Lite"
 # test tokenizer.model, for debug purpose only
-tokenizer_path = "./tests/assets/tokenizer"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
@@ -56,7 +55,7 @@ context_parallel_degree = 1
 # expert_parallel_degree = 2  set in custom_args
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 model_weights_only = false

@@ -9,10 +9,26 @@ import torch.nn as nn
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_tp
+from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
 from .simple_fsdp import data_parallel, MixedPrecisionPolicy
+
+
+# for selective op activation checkpointing
+_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 
 def parallelize_llama(
@@ -38,12 +54,6 @@ def parallelize_llama(
         """
 
     if parallel_dims.tp_enabled:
-        if (
-            job_config.parallelism.enable_async_tensor_parallel
-            and not job_config.training.compile
-        ):
-            raise RuntimeError("Async TP requires --training.compile")
-
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -61,11 +71,21 @@ def parallelize_llama(
             tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            save_list=_save_list,
+        )
 
     # apply data parallel
     if (
@@ -95,11 +115,10 @@ def parallelize_llama(
             mode=dp_mode,
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
-            tp_mesh=tp_mesh if parallel_dims.tp_enabled else None,
         )
         logger.info("Applied Data Parallel (dp mode=%s) to the model", dp_mode)
 
-    if job_config.training.compile:
+    if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
         model = torch.compile(model, fullgraph=True)
 

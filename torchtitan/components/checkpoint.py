@@ -23,6 +23,9 @@ from torch.distributed.checkpoint import (
     HuggingFaceStorageReader,
     HuggingFaceStorageWriter,
 )
+from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+    consolidate_safetensors_files_on_every_rank,
+)
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -37,7 +40,7 @@ from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Checkpoint as CheckpointConfig, TORCH_DTYPE_MAP
-from torchtitan.protocols import StateDictAdapter
+from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -55,12 +58,6 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-# For now, we will manually pop the freqs_cis buffer, as we made this permanent
-# temporarily and we don't want to include it in the exported state_dict.
-# Context: https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/model.py#L404
-excluded_parameters_for_model_only = {"freqs_cis"}
-
-
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
@@ -70,9 +67,6 @@ class ModelWrapper(Stateful):
         state_dict = {
             k: v for sd in map(get_model_state_dict, self.model) for k, v in sd.items()
         }
-        # Exclude parameters that should not be saved
-        for excluded_key in excluded_parameters_for_model_only:
-            state_dict.pop(excluded_key, None)
         return state_dict
 
     def state_dict(self) -> dict[str, Any]:
@@ -147,7 +141,7 @@ class CheckpointManager:
 
         We solve this in the Model and Optimizer wrapper classes by flattening the state dicts
         from each object into one state dict before saving/loading. We rely on the individual
-        state_dicts to not collide, which is gauranteed for the model by correct pipeline
+        state_dicts to not collide, which is guaranteed for the model by correct pipeline
         splitting and for the optimizer by the flattening support described in (1).
 
     3. LR schedulers also index model states like optimizers. Here we flatten the lr_schedulers
@@ -155,12 +149,12 @@ class CheckpointManager:
 
     Note: TorchFT checkpointing flow
 
-    There are two types of checkpoints: when TorchFT is enabled: 1) the full perisistent
+    There are two types of checkpoints: when TorchFT is enabled: 1) the full persistent
     checkpoint, 2) the per-replica checkpoint.
 
-    The full perisistent checkpoint is saved by the replica with
+    The full persistent checkpoint is saved by the replica with
     ``ft_manager.participating_rank() == 0``. It contains everything including the model,
-    optimizer, lr_scheduler, dataloader, and train_state. Right now the full perisistent
+    optimizer, lr_scheduler, dataloader, and train_state. Right now the full persistent
     checkpoint is loaded by all replicas. However, we can optimize it to only load if
     there are no other alive replicas.
 
@@ -177,7 +171,7 @@ class CheckpointManager:
         checkpoint_config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with checkpoint_config.folder
-        sd_adapter (Optional[type[StateDictAdapter]]): The adapter used to convert model state
+        sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
 
@@ -191,11 +185,11 @@ class CheckpointManager:
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
         checkpoint_config: CheckpointConfig,
-        sd_adapter: StateDictAdapter | None,
+        sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
-        self.enable_checkpoint = checkpoint_config.enable_checkpoint
+        self.enable = checkpoint_config.enable
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -225,10 +219,10 @@ class CheckpointManager:
 
         async_mode = checkpoint_config.async_mode.lower()
         self.enable_staging = (
-            self.enable_checkpoint and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+            self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.ft_manager
 
-        if not self.enable_checkpoint and self.ft_manager is None:
+        if not self.enable and self.ft_manager is None:
             return
 
         self.states = states
@@ -303,7 +297,7 @@ class CheckpointManager:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
         else:
             raise ValueError(
-                f"Unkown checkpoint async_mode {checkpoint_config.async_mode}"
+                f"Unknown checkpoint async_mode {checkpoint_config.async_mode}"
             )
 
         logger.info(
@@ -314,7 +308,7 @@ class CheckpointManager:
         self.close()
 
     def close(self):
-        if hasattr(self, "enable_checkpoint") and self.enable_checkpoint:
+        if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
@@ -361,14 +355,23 @@ class CheckpointManager:
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
-
-            storage_writer = HuggingFaceStorageWriter(
-                path=checkpoint_id,
-                save_distributed=True,
-                fqn_to_index_mapping=fqn_to_index_mapping,
-                enable_consolidation=True,
-                thread_count_consolidation=5,
-            )
+            if fqn_to_index_mapping:
+                storage_writer = HuggingFaceStorageWriter(
+                    path=os.path.join(checkpoint_id, "sharded"),
+                    save_distributed=True,
+                    fqn_to_index_mapping=fqn_to_index_mapping,
+                    enable_consolidation=False,
+                )
+            else:
+                # the reason for only enabling consolidation if there is
+                # no mapping is because no mapping implies that we save all fqns
+                # to one file. This means we only need one rank to consolidate.
+                # Otherwise we should use consolidate_safetensors_files_on_every_rank
+                storage_writer = HuggingFaceStorageWriter(
+                    path=checkpoint_id,
+                    save_distributed=True,
+                    enable_consolidation=True,
+                )
 
         else:
             checkpoint_save_id = checkpoint_id
@@ -394,6 +397,14 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+            )
+
+        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+            consolidate_safetensors_files_on_every_rank(
+                input_dir=os.path.join(checkpoint_id, "sharded"),
+                output_dir=checkpoint_id,
+                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                num_threads=5,
             )
 
         if enable_garbage_collection:
@@ -526,7 +537,7 @@ class CheckpointManager:
         if self.ft_manager:
             self._ft_load()
 
-        if not self.enable_checkpoint:
+        if not self.enable:
             return False
 
         model_only = False
@@ -748,7 +759,7 @@ class CheckpointManager:
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable_checkpoint:
+        if not self.enable:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:

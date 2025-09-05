@@ -5,57 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from functools import partial
 from typing import Callable, Literal
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
     distribute_tensor,
     DTensor,
-    Replicate,
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
-from torch.distributed.tensor.placement_types import Placement
-
-
-# from torch.distributed._functional_collectives import all_to_all_single_autograd
-# TODO: there is memory leak issue with AC + all_to_all_single_autograd
-# This is a temporary fix by @rakkit https://github.com/pytorch/torchtitan/issues/1467
-class _A2A(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, out_splits, in_splits, group):
-        if isinstance(out_splits, torch.Tensor):
-            out_splits = out_splits.tolist()
-        if isinstance(in_splits, torch.Tensor):
-            in_splits = in_splits.tolist()
-        T_out = int(sum(out_splits))
-
-        y = x.new_empty((T_out,) + tuple(x.shape[1:]))  # allocate by output splits
-        dist.all_to_all_single(y, x.contiguous(), out_splits, in_splits, group=group)
-
-        ctx.in_splits = in_splits
-        ctx.out_splits = out_splits
-        ctx.group = group
-        return y
-
-    @staticmethod
-    def backward(ctx, grad_y):
-        # grad wrt input has length sum(in_splits)
-        T_in = int(sum(ctx.in_splits))
-        grad_x = grad_y.new_empty((T_in,) + tuple(grad_y.shape[1:]))
-        dist.all_to_all_single(
-            grad_x, grad_y.contiguous(), ctx.in_splits, ctx.out_splits, group=ctx.group
-        )
-        return grad_x, None, None, None
-
-
-def all_to_all_single_autograd(x, out_splits, in_splits, group):
-    return _A2A.apply(x, out_splits, in_splits, group)
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
@@ -113,59 +76,6 @@ class TensorParallel(ParallelStyle):
         )
 
 
-# NOTE: This is to achieve replicate computation on the gate module in the MoE router.
-# It does nothing other than (1) setting the module parameters as DTensors on the given mesh
-# and (2) inserting hooks to module boundary to change torch.Tensor to DTensor and back.
-# The reason we need this wrapping is to ensure all parameters are on the same 1D/2D mesh,
-# which is assumed by (1) gradient norm clipping, and (2) optimizer fused implementation.
-class NoParallel(ParallelStyle):
-    def __init__(
-        self,
-        *,
-        input_layout: Placement | None = None,
-        output_layout: Placement | None = None,
-        use_local_output: bool = True,
-    ):
-        super().__init__()
-        self.input_layout = input_layout or Replicate()
-        self.output_layout = output_layout or Replicate()
-        self.desired_input_layout = Replicate()
-        self.use_local_output = use_local_output
-
-    @staticmethod
-    def _prepare_input_fn(input_layout, desired_input_layout, mod, inputs, device_mesh):
-        # annotate module input placements/sharding with input_layouts
-        input_tensor = inputs[0]
-        if not isinstance(input_tensor, DTensor):
-            input_tensor = DTensor.from_local(
-                input_tensor, device_mesh, (input_layout,), run_check=False
-            )
-
-        if input_layout != desired_input_layout:
-            input_tensor = input_tensor.redistribute(
-                placements=(desired_input_layout,), async_op=True
-            )
-        return (input_tensor, *inputs[1:])
-
-    @staticmethod
-    def _prepare_output_fn(output_layout, use_local_output, mod, outputs, device_mesh):
-        if outputs.placements != (output_layout,):
-            outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        # back to local tensor
-        return outputs.to_local() if use_local_output else outputs
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
-            device_mesh,
-            None,
-            partial(
-                self._prepare_input_fn, self.input_layout, self.desired_input_layout
-            ),
-            partial(self._prepare_output_fn, self.output_layout, self.use_local_output),
-        )
-
-
 class ExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
@@ -176,6 +86,7 @@ class ExpertParallel(ParallelStyle):
     def _token_dispatch(self, mod, inputs, device_mesh):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
+        ep_size = device_mesh.shape[0]
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -187,15 +98,20 @@ class ExpertParallel(ParallelStyle):
                 num_tokens_per_expert,
                 group=device_mesh.get_group(),
             )
-            # NOTE: this would incur a device-to-host sync
-            self.input_splits = (
-                num_tokens_per_expert.view(device_mesh.shape[0], -1).sum(dim=1).tolist()
-            )
-            self.output_splits = (
-                num_tokens_per_expert_group.view(device_mesh.shape[0], -1)
+            input_splits = (
+                num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
-                .tolist()
+                .to(torch.device("cpu"), non_blocking=True)
             )
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_size, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            torch.cuda.current_stream().synchronize()
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
 
         # perform all-to-all
         routed_input = all_to_all_single_autograd(
@@ -320,7 +236,7 @@ def expert_parallel(func: Callable) -> Callable:
         w2: torch.Tensor,
         w3: torch.Tensor,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor | None = None,
+        num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         global TOKEN_GROUP_ALIGN_SIZE_M
         if isinstance(w1, DTensor):
@@ -328,38 +244,90 @@ def expert_parallel(func: Callable) -> Callable:
             w2 = w2.to_local()
             w3 = w3.to_local()
 
-        if num_tokens_per_expert is not None:
-            from torchtitan.experiments.kernels.moe.indices import (
-                generate_permute_indices,
+        from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+
+        experts_per_ep_rank = w1.shape[0]
+        num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
+
+        with torch.no_grad():
+            (
+                permuted_indices,
+                num_tokens_per_expert,
+                _,  # offsets,
+            ) = generate_permute_indices(
+                num_tokens_per_expert,
+                experts_per_ep_rank,
+                num_ep_ranks,
+                x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
+                TOKEN_GROUP_ALIGN_SIZE_M,
             )
 
-            experts_per_ep_rank = w1.shape[0]
-            num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
-
-            with torch.no_grad():
-                (
-                    permuted_indices,
-                    num_tokens_per_expert,
-                    _,  # offsets,
-                ) = generate_permute_indices(
-                    num_tokens_per_expert,
-                    experts_per_ep_rank,
-                    num_ep_ranks,
-                    x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
-                    TOKEN_GROUP_ALIGN_SIZE_M,
-                )
-
-            x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
-            input_shape = x.shape
-            x = x[permuted_indices, :]
+        x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
+        input_shape = x.shape
+        x = x[permuted_indices, :]
 
         out = func(w1, w2, w3, x, num_tokens_per_expert)
 
-        if num_tokens_per_expert is not None:
-            out_unpermuted = out.new_empty(input_shape)
-            out_unpermuted[permuted_indices, :] = out
-            out = out_unpermuted[:-1]
+        out_unpermuted = out.new_empty(input_shape)
+        out_unpermuted[permuted_indices, :] = out
+        out = out_unpermuted[:-1]
 
         return out
 
     return wrapper
+
+
+# This class is to support Sequence Parallel for ETP=1
+# when EP borrows from all TP and part of DP
+class ReordererSequenceParallel(ParallelStyle):
+    def __init__(self):
+        super().__init__()
+        self.num_tokens = None
+
+    def _prepare_inputput_fn(self, mod, inputs, device_mesh):
+        top_scores, selected_experts_indices = inputs
+        self.num_tokens = top_scores.shape[0]
+
+        # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
+        # if top_scores.shape[0] % device_mesh.size() != 0:
+        #     num_tokens = top_scores.shape[0]
+        #     tp_size = device_mesh.size()
+        #     n_pad = (num_tokens // tp_size + 1) * tp_size - num_tokens
+        #     selected_experts_indices = F.pad(selected_experts_indices, [0, 0, 0, n_pad])
+        #     top_scores = F.pad(top_scores, [0, 0, 0, n_pad])
+
+        def _split_along_first_dim(x: torch.Tensor) -> torch.Tensor:
+            assert x.is_contiguous()
+            assert self.num_tokens % device_mesh.size() == 0
+            local_num_tokens = self.num_tokens // device_mesh.size()
+            local_rank = device_mesh.get_local_rank()
+            offset = local_rank * local_num_tokens
+            output = x[offset : offset + local_num_tokens]
+
+            return output
+
+        top_scores = _split_along_first_dim(top_scores)
+        selected_experts_indices = _split_along_first_dim(selected_experts_indices)
+
+        return top_scores, selected_experts_indices
+
+    def _prepare_output_fn(self, mod, outputs, device_mesh):
+        top_scores, token_indices_experts_sorted, num_tokens_per_expert = outputs
+
+        # NOTE: As we shard routed tokens along bs*slen dim across the TP ranks,
+        #       the MoE gather and scatter still require global token indices.
+        local_rank = device_mesh.get_local_rank()
+        token_indices_experts_sorted += (
+            self.num_tokens // device_mesh.size() * local_rank
+        )
+
+        return top_scores, token_indices_experts_sorted, num_tokens_per_expert
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=None,
+            input_fn=self._prepare_inputput_fn,
+            output_fn=self._prepare_output_fn,
+        )

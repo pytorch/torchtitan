@@ -21,7 +21,7 @@ from torchtitan.components.validate import BaseValidator
 from torchtitan.config import LRScheduler
 
 from .model import BaseModelArgs, ModelProtocol
-from .state_dict_adapter import StateDictAdapter
+from .state_dict_adapter import BaseStateDictAdapter
 
 
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
@@ -53,7 +53,7 @@ class TrainSpec:
     build_loss_fn: LossFunctionBuilder
     build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
-    state_dict_adapter: type[StateDictAdapter] | None = None
+    state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 
 _train_specs = {}

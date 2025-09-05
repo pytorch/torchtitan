@@ -1,13 +1,19 @@
 # Tests
 
-This directory contains tests for the TorchTitan project, including unit tests and integration tests.
+This directory contains tests for the torchtitan project, including unit tests and integration tests.
 
 ## Test Structure
 
 - `unit_tests/`: Contains unit tests for individual components
-- `integration_tests.py`: Contains integration tests that test multiple components together
-- `integration_tests_h100.py`: Contains integration tests specifically designed for H100 GPUs, which utilize symmetric memory and float8.
+- `integration_tests/`: Contains integration tests that test multiple components together
+  - `base_config.toml`: Base configuration file for integration tests
+  - `features.py`: Tests for torchtitan features and composability
+  - `ft.py`: Fault-tolerance integration tests
+  - `h100.py`: Tests cases for H100 GPUs
+  - `models.py`: Tests for specific model architectures and configurations
 - `assets/`: Contains test assets and fixtures used by the tests
+  - `tokenizer/`: Tokenizer configuration and vocabulary files for testing
+  - `custom_schedule.csv`: Custom PP schedule for testing
 
 ## Running Tests
 
@@ -16,7 +22,7 @@ This directory contains tests for the TorchTitan project, including unit tests a
 Ensure you have all development dependencies installed:
 
 ```bash
-pip install -r dev-requirements.txt
+pip install -r requirements-dev.txt
 pip install -r requirements.txt
 ```
 
@@ -25,25 +31,27 @@ pip install -r requirements.txt
 To run the integration tests:
 
 ```bash
-python ./tests/integration_tests.py <output_dir> [--config_dir CONFIG_DIR] [--test TEST] [--ngpu NGPU]
+python -m tests.integration_tests.run_tests <output_dir> [--config_path CONFIG_PATH] [--test_suite TEST_SUITE] [--test_name TEST_NAME] [--ngpu NGPU]
 ```
 
 Arguments:
 - `output_dir`: (Required) Directory where test outputs will be stored
-- `--config_dir`: (Optional) Directory containing configuration files (default: "./torchtitan/models/llama3/train_configs")
-- `--test`: (Optional) Specific test to run, use test names from the `build_test_list()` function (default: "all")
+- `--test_suite`: (Optional) Specific test suite to run by name (default: "features")
+- `--config_path`: (Optional) Path to the base config file (default: "./tests/integration_tests/base_config.toml")
+- `--test_name`: (Optional) Specific test to run by name (default: "all")
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
 
 Examples:
 ```bash
-# Run all integration tests with 8 GPUs
-python ./tests/integration_tests.py ./test_output
+# Run all model integration tests with 8 GPUs
+python -m tests.integration_tests.run_tests test_output
 
-# Run a specific test with 4 GPUs
-python ./tests/integration_tests.py ./test_output --test default --ngpu 4
+# Run only core functionality tests for features
+python -m tests.integration_tests.run_tests test_output --test_suite features
 
-# Run all tests with a custom config directory
-python ./tests/integration_tests.py ./test_output --config_dir ./my_configs
+# Run a specific test with 2 GPUs
+python -m tests.integration_tests.run_tests test_output --test_suite features --test_name gradient_accumulation --ngpu 2
+
 ```
 
 ### Running Unit Tests
