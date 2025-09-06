@@ -36,7 +36,7 @@ class HFTransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
-    _torchtitan_args: dict = field(init=False, repr=False, default_factory=dict)
+    _hf_args: dict = field(init=False, repr=False, default_factory=dict)
 
     def update_from_config(self, job_config: JobConfig):
         #TODO(3outeille): what if we dont specify flavor? Should use full as default
@@ -69,31 +69,28 @@ class HFTransformerModelArgs(BaseModelArgs):
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
-        self._torchtitan_args = {
-            "dim": self.dim,
-            "n_layers": self.n_layers,
-            "n_heads": self.n_heads,
-            "n_kv_heads": self.n_kv_heads,
+        self._hf_args = {
+            "hidden_size": self.dim,
+            "num_hidden_layers": self.n_layers,
+            "num_attention_heads": self.n_heads,
+            "num_key_value_heads": self.n_kv_heads,
             "vocab_size": self.vocab_size,
-            "multiple_of": self.multiple_of,
-            "ffn_dim_multiplier": self.ffn_dim_multiplier,
+            "rope_scaling": {"type": "dynamic", "factor": 2.0},
+            "intermediate_size": self.ffn_dim_multiplier,
             "rope_theta": self.rope_theta,
-            "max_seq_len": self.max_seq_len,
+            "max_position_embeddings": self.max_seq_len,
             "rms_norm_eps": self.rms_norm_eps,
             "use_cache": self.use_cache,
-            "depth_init": self.depth_init,
-            "use_flex_attn": self.use_flex_attn,
-            "attn_mask_type": self.attn_mask_type,
-            "eos_id": self.eos_id,
+            "pad_token_id": self.eos_id,
         }
         return self
 
     def convert_to_hf_config(self) -> LlamaConfig:
-        if not self._torchtitan_args:
+        if not self._hf_args:
             raise RuntimeError(
                 "`update_from_config` must be called before `convert_to_hf_config` to prepare the arguments."
             )
-        return LlamaConfig(**self._torchtitan_args)
+        return LlamaConfig(**self._hf_args)
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
