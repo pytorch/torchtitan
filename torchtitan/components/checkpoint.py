@@ -436,15 +436,20 @@ class CheckpointManager:
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
 
             if not dequantize:
+                begin_load = time.monotonic()
+                logger.info("Starting dcp.load with HuggingFaceStorageReader")
                 dcp.load(
                     hf_state_dict,
                     storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
                 )
+                logger.info(f"dcp.load with HuggingFaceStorageReader completed in {time.monotonic() - begin_load:.2f} seconds")
             else:
                 from torch.distributed.checkpoint.quantized_hf_storage import (
                     QuantizedHuggingFaceStorageReader,
                 )
                 BLOCK_SIZE = 128  # hardcode for deepseek 671b now
+                begin_load = time.monotonic()
+                logger.info("Starting dcp.load with QuantizedHuggingFaceStorageReader")
                 dcp.load(
                     hf_state_dict,
                     storage_reader=QuantizedHuggingFaceStorageReader(
@@ -454,6 +459,7 @@ class CheckpointManager:
                         thread_count=4,
                     ),
                 )
+                logger.info(f"dcp.load with QuantizedHuggingFaceStorageReader completed in {time.monotonic() - begin_load:.2f} seconds")
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
