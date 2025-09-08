@@ -326,17 +326,11 @@ def _apply_ac_to_transformer_block(
 
 def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
-    # TODO(3outeille): Make it more generic later
-    if isinstance(model, LlamaForCausalLM):
-        layers = model.model.layers
-    else:
-        layers = model.layers
-
-    for layer_id, transformer_block in layers.named_children():
+    for layer_id, transformer_block in model.layers.named_children():
         transformer_block = _apply_ac_to_transformer_block(
             transformer_block, ac_config, base_fqn=f"layers.{layer_id}"
         )
-        layers.register_module(layer_id, transformer_block)
+        model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 

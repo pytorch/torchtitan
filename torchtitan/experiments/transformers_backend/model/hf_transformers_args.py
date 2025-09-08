@@ -58,7 +58,7 @@ class HFTransformerModelArgs(BaseModelArgs):
             self.rms_norm_eps = getattr(hf_model_config, "rms_norm_eps", 1e-6)
 
             if hasattr(hf_model_config, "intermediate_size") and hf_model_config.intermediate_size:
-                self.ffn_dim_multiplier = hf_model_config.intermediate_size / hf_model_config.hidden_size
+                self.ffn_dim_multiplier = hf_model_config.intermediate_size // hf_model_config.hidden_size
 
         # Always update max_seq_len to match training seq_len, warn if exceeded
         seq_len = job_config.training.seq_len
