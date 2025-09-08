@@ -6,6 +6,7 @@
 
 
 import re
+import time
 from typing import Any
 
 from torch.distributed.tensor import DTensor
@@ -14,6 +15,7 @@ from torchtitan.models.utils import MoEStateDictAdapter
 from .args import DeepSeekV3ModelArgs
 
 from .quantization import calculate_scale_shape, dequantize_from_fp8
+from torchtitan.tools.logging import logger
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -125,6 +127,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
+        start_time = time.time()
+        logger.info(f"Starting to_hf conversion, state_dict has {len(state_dict)} keys")
+        
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -173,10 +178,13 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 hf_state_dict[new_key] = value
 
         # Prepare for dequantization
-        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-            hf_state_dict
-        )
-        return hf_state_dict_with_scale_inv
+        # hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
+        #     hf_state_dict
+        # )
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed to_hf conversion, generated {len(hf_state_dict)} keys, duration: {duration:.4f}s")
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -184,10 +192,12 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate separate expert's wegiht into GroupedExperts' weight.
         """
+        start_time = time.time()
+        logger.info(f"Starting from_hf conversion, state_dict has {len(hf_state_dict)} keys")
 
         # dequantize the tensor in state_dict and remove the scale_inv tensor
 
-        hf_state_dict = self._dequantize(hf_state_dict)
+        # hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
 
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -237,4 +247,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed from_hf conversion, processed {len(hf_state_dict)} keys, duration: {duration:.4f}s")
         return state_dict
