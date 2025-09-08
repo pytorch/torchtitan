@@ -160,7 +160,10 @@ srun torchrun --nnodes 2
 
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
-For cloud-based multi-node training with [SkyPilot](https://docs.skypilot.co/en/latest/overview.html), see the [example](https://docs.skypilot.co/en/latest/examples/training/torchtitan/README.html) which enables launching on any cloud with `sky launch -c torchtitan-multinode torchtitan.yaml`.
+To run multi-node training with torchtitan on any cloud/neoclouds or Kubernetes clusters, you can do it with a single [SkyPilot](https://docs.skypilot.co/en/latest/overview.html) command, see the [example](https://docs.skypilot.co/en/latest/examples/training/torchtitan/README.html):
+```
+sky launch --num-nodes 4 torchtitan.sky.yaml
+```
 
 
 ## Citation
