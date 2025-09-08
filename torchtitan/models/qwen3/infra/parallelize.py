@@ -244,9 +244,9 @@ def apply_non_moe_tp(
                         input_layouts=(Shard(1),),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.gate_proj": colwise_parallel(),
-                    "feed_forward.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.up_proj": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
                 }
             )
 
