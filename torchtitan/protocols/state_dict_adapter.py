@@ -27,7 +27,11 @@ class BaseStateDictAdapter(ABC):
     """
 
     @abstractmethod
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(
+        self,
+        model_args: BaseModelArgs,
+        hf_assets_path: str | None,
+    ):
         pass
 
     @abstractmethod
@@ -58,7 +62,11 @@ class BaseStateDictAdapter(ABC):
 class StateDictAdapter(BaseStateDictAdapter):
     """State dict adapter base class which provides convenient default behavior to build fqn_to_index_mapping"""
 
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(
+        self,
+        model_args: BaseModelArgs,
+        hf_assets_path: str | None,
+    ):
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:
@@ -66,8 +74,8 @@ class StateDictAdapter(BaseStateDictAdapter):
                     hf_safetensors_indx = json.load(f)
             except FileNotFoundError:
                 logger.warning(
-                    "model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
-                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format.",
+                    f"model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
+                    Defaulting to saving a single safetensors file if checkpoint is saved in HF format"
                 )
                 hf_safetensors_indx = None
 
@@ -75,6 +83,6 @@ class StateDictAdapter(BaseStateDictAdapter):
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
                     indx = re.search(r"\d+", raw_indx).group(0)
-                    self.fqn_to_index_mapping[hf_key] = indx
+                    self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None

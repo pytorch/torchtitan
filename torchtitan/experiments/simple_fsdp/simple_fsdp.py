@@ -185,7 +185,12 @@ def fsdp_policy():
 
 class ReplicateComputation(torch.nn.Module):
     def __init__(
-        self, device_mesh, param_sharding, mode, regional_ac, mp_policy, tp_mesh
+        self,
+        device_mesh,
+        param_sharding,
+        mode,
+        regional_ac,
+        mp_policy,
     ):
         super().__init__()
         self.device_mesh = device_mesh
@@ -197,7 +202,6 @@ class ReplicateComputation(torch.nn.Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype = mp_policy.param_dtype
         self.reduce_dtype = mp_policy.reduce_dtype
-        self.tp_mesh = tp_mesh
 
     def replicate_compute(self, x):
         # data parallel runtime replicate parameters and do local compute
@@ -207,10 +211,7 @@ class ReplicateComputation(torch.nn.Module):
         # support for FSDP/DDP/HSDP + TP (assuming TP shards the inner-most dim)
         if x._spec.mesh.mesh_dim_names[-1] == "tp":
             tp_placement = x._spec.placements[-1]
-            # TODO: remove tp_mesh as an input arg to data_parallel API and use x._spec.mesh["tp"]
-            #       after DeviceMesh supports slicing a non-root mesh
-            # dp_mesh, tp_mesh = self.device_mesh, x._spec.mesh["tp"]
-            dp_mesh, tp_mesh = self.device_mesh, self.tp_mesh
+            dp_mesh, tp_mesh = self.device_mesh, x._spec.mesh["tp"]
 
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -227,7 +228,7 @@ class ReplicateComputation(torch.nn.Module):
             )
 
             # re-wrap 1D all-gathered DTensor on dp_mesh to 1D DTensor on tp_mesh
-            # TODO: DTensor should support this mesh collasping operation
+            # TODO: DTensor should support this mesh collapsing operation
             replicated_local_tensor = replicated_dtensor.to_local(
                 grad_placements=self.grad_placements
             )
@@ -270,7 +271,6 @@ def data_parallel(
     mode="replicate",
     ac_mode: str = "none",
     mp_policy: Optional[MixedPrecisionPolicy] = None,
-    tp_mesh: Optional[DeviceMesh] = None,
 ):
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -314,7 +314,6 @@ def data_parallel(
                 #         mode,
                 #         regional_ac,
                 #         mp_policy=mp_policy,
-                #         tp_mesh=tp_mesh,
                 #     ),
                 #     unsafe=True,
                 # )
@@ -328,7 +327,6 @@ def data_parallel(
                 mode,
                 regional_ac,
                 mp_policy=mp_policy,
-                tp_mesh=tp_mesh,
             ),
         )
     return model

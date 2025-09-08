@@ -8,50 +8,13 @@ import math
 from typing import Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.models.moe import MoE
+from torchtitan.models.attention import build_attention
+from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
-
-
-class FeedForward(nn.Module):
-    """
-    FeedForward module
-
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-        multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-        ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
-
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -359,7 +322,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=True
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
         self.layers = torch.nn.ModuleDict()
@@ -401,7 +364,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -420,10 +382,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=eos_id
-            )
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 

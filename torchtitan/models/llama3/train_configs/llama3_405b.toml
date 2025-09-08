@@ -1,4 +1,3 @@
-# torchtitan Config.toml
 # NOTE: this toml config is a preset for 128 H100 GPUs.
 
 [job]
@@ -18,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "405B"
-tokenizer_path = "./assets/tokenizer/Llama-3.1-8B"
+hf_assets_path = "./assets/hf/Llama-3.1-405B"
 converters = ["float8"]
 
 [optimizer]
@@ -34,7 +33,6 @@ local_batch_size = 2
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 3000
-compile = true
 dataset = "c4"
 
 [parallelism]
@@ -46,7 +44,7 @@ pipeline_parallel_degree = 1
 context_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
@@ -56,7 +54,17 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 [activation_checkpoint]
 mode = "full" # ["none", "selective", "full"]
 
+[compile]
+enable=true
+components = ["model", "loss"]
+
 [float8]
 enable_fsdp_float8_all_gather = true
 precompute_float8_dynamic_scale_for_fsdp = true
 filter_fqns = ["output"]
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 500
+steps = 1200  # Recommend value for c4_validation with world-size=8 and seq_len=8192

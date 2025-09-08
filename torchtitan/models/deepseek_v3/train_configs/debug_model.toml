@@ -1,10 +1,7 @@
-# torchtitan Config.toml
-
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -24,7 +21,7 @@ enable_wandb = false
 name = "deepseek_v3"
 flavor = "debugmodel"
 # test tokenizer, for debug purpose only
-tokenizer_path = "./tests/assets/tokenizer"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
@@ -43,7 +40,6 @@ local_batch_size = 8
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
 steps = 10
-compile = false
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -52,12 +48,14 @@ data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
-expert_parallel_degree = 1
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "1F1B"
+context_parallel_degree = 1
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = false
+enable = false
 folder = "checkpoint"
 interval = 10
 last_save_model_only = false
@@ -66,10 +64,14 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=false
+components = ["model", "loss"]
 
 [float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+moe_fqns_prototype = ["experts"]

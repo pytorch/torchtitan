@@ -5,10 +5,10 @@ You may want to enable checkpointing in `torchtitan` for better fault tolerance 
 ## A general guide to use checkpoints during training
 
 1. ENABLE CHECKPOINTING
-In your `torchtitan` training config, ensure that `enable_checkpoint` is set to True.
+In your `torchtitan` training config, ensure that under `[checkpoint]`, `enable` is set to True.
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 folder = "checkpoint"
 interval = 500
 ```
@@ -16,7 +16,7 @@ interval = 500
 By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 last_save_model_only = true
 ```
 
@@ -24,7 +24,7 @@ last_save_model_only = true
 The default model states are in `float32`. You can choose to export the checkpoint in a lower precision format such as `bfloat16`.
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 last_save_model_only = true
 export_dtype = "bfloat16"
 ```
@@ -34,7 +34,7 @@ In some cases, you may want to partially load from a previous-trained checkpoint
 This parameter takes a list of string that should be excluded from loading.
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 exclude_from_loading = ["data_loader", "lr_scheduler"]
 ```
 When used in command line, the parameter should be a comma-separated list of strings. For example: `--checkpoint.exclude_from_loading data_loader,lr_scheduler`.
@@ -42,7 +42,7 @@ When used in command line, the parameter should be a comma-separated list of str
 5. EXAMPLE CHECKPOINT CONFIGURATION
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 folder = "checkpoint"
 interval = 10
 load_step = 5
@@ -60,7 +60,7 @@ A seed checkpoint does initialization of the model on a single CPU, and can be l
 To create a seed checkpoint, use the same model config as you use for training.
 e.g.
 ```bash
-NGPU=1 CONFIG_FILE=<path_to_model_config> ./run_train.sh --checkpoint.enable_checkpoint --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
+NGPU=1 CONFIG_FILE=<path_to_model_config> ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
 ```
 
 ## Conversion support
@@ -86,7 +86,7 @@ This guide will walk you through the steps required to convert a checkpoint from
 1. CHECKPOINT CONFIGURATION
 ```
 [checkpoint]
-enable_checkpoint = true
+enable = true
 folder = "checkpoint"
 interval = 10
 last_save_model_only = true
@@ -105,12 +105,3 @@ python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outp
 
 
 That's it. You have now successfully converted a sharded `torchtitan` checkpoint for use with pytorch formats.
-
-### PyTorch Meta Llama
-
-An example script for converting the original Llama3 checkpoints into DCP format to be used with `torchtitan` can be found in `scripts/convert_from_llama.py`.
-
-The script expects a path to the original checkpoint files, and a path to an output directory:
-```bash
-python -m scripts.convert_from_llama <input_dir> <output_dir>
-```
