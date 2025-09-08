@@ -205,8 +205,8 @@ class ScaledDotProductAttention(torch.nn.Module):
 
         # Add CuDNN on B200 w/ highest priority
         cls.backends = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
+            # SDPBackend.FLASH_ATTENTION,
+            # SDPBackend.EFFICIENT_ATTENTION,
             SDPBackend.MATH,
         ]
         if has_cuda_capability(10, 0):
