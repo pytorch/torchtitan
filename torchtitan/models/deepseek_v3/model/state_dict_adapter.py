@@ -6,6 +6,7 @@
 
 
 import re
+import time
 from typing import Any
 
 import torch
@@ -16,6 +17,7 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 from .quantization import calculate_scale_shape, dequantize_from_fp8
+from torchtitan.tools.logging import logger
 
 
 class DeepSeekV3StateDictAdapter(StateDictAdapter):
@@ -220,6 +222,8 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         Returns:
             Dictionary mapping individual expert keys to their DTensor weights
         """
+        start_time = time.time()
+        logger.info(f"Starting _get_local_experts_weights for layer {layer_id}, abstract_key: {abstract_key}")
         device_mesh = grouped_expert_weight.device_mesh
         dtensor_placements = grouped_expert_weight.placements
 
@@ -285,6 +289,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
             local_expert_tensors[expert_key] = expert_dtensor
 
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed _get_local_experts_weights for layer {layer_id}, abstract_key: {abstract_key}, duration: {duration:.4f}s")
         return local_expert_tensors
 
     def _concatenate_expert_weights_dtensor(
@@ -312,6 +319,8 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         Returns:
             Concatenated GroupedExperts weight DTensor if all experts are available, otherwise None
         """
+        start_time = time.time()
+        logger.info(f"Starting _concatenate_expert_weights_dtensor for layer {layer_num}, abstract_key: {abstract_key}")
         # If we have all the experts for this abstract_key, concatenate them
         experts = expert_weights_by_layer[layer_num][abstract_key]
         expected_n_experts = (
@@ -341,6 +350,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         if not expert_weights_by_layer[layer_num]:
             del expert_weights_by_layer[layer_num]
 
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed _concatenate_expert_weights_dtensor for layer {layer_num}, abstract_key: {abstract_key}, duration: {duration:.4f}s")
         return stacked_dtensor
 
     def _split_experts_weights(
@@ -453,6 +465,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
+        start_time = time.time()
+        logger.info(f"Starting to_hf conversion, state_dict has {len(state_dict)} keys")
+        
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -501,10 +516,13 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 hf_state_dict[new_key] = value
 
         # Prepare for dequantization
-        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-            hf_state_dict
-        )
-        return hf_state_dict_with_scale_inv
+        # hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
+        #     hf_state_dict
+        # )
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed to_hf conversion, generated {len(hf_state_dict)} keys, duration: {duration:.4f}s")
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -512,10 +530,12 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         2. Convert between the HF shape and the torchtitan shape.
         3. Concate separate expert's wegiht into GroupedExperts' weight.
         """
+        start_time = time.time()
+        logger.info(f"Starting from_hf conversion, state_dict has {len(hf_state_dict)} keys")
 
         # dequantize the tensor in state_dict and remove the scale_inv tensor
 
-        hf_state_dict = self._dequantize(hf_state_dict)
+        # hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
 
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -565,4 +585,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
+        end_time = time.time()
+        duration = end_time - start_time
+        logger.info(f"Completed from_hf conversion, processed {len(hf_state_dict)} keys, duration: {duration:.4f}s")
         return state_dict
