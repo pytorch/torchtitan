@@ -47,7 +47,6 @@ class Qwen3TransformerModelArgs(LlamaTransformerModelArgs):
     # I.e. we don't just divide the hidden dim by the number of attention heads.
     head_dim: int = 128
     
-    use_packed_flash_attn: bool = True
     decoder_sparse_step: int = 1
     mlp_only_layers: List[int] = field(default_factory=lambda: [])
     norm_topk_prob: bool = True

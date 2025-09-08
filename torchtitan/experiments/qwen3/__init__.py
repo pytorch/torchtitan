@@ -109,7 +109,7 @@ qwen3_configs = {
 
 register_train_spec(
     TrainSpec(
-        name="qwen3",
+        name="qwen3_dense",
         model_cls=Qwen3Model,
         model_args=qwen3_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,

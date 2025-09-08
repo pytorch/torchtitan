@@ -208,13 +208,13 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        logits = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(logits.to(torch.float32))
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(logits.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -231,7 +231,7 @@ class TokenChoiceTopKRouter(nn.Module):
                 scores, k=self.top_k, dim=1
             )
 
-        if self.score_func == "sigmoid" and self.route_norm:
+        if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
@@ -244,7 +244,7 @@ class TokenChoiceTopKRouter(nn.Module):
             max=self.num_experts,
         )
 
-        return top_scores, selected_experts_indices, num_tokens_per_expert
+        return top_scores, selected_experts_indices, num_tokens_per_expert, logits
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
@@ -359,13 +359,15 @@ class MoE(nn.Module):
             persistent=False,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs, slen, dim)``.
 
         Returns:
-            out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+            tuple[torch.Tensor, torch.Tensor]:
+                - out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+                - logits (torch.Tensor): Logits tensor with shape ``(bs, slen, num_experts)``.
         """
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
@@ -376,6 +378,7 @@ class MoE(nn.Module):
             top_scores,
             selected_experts_indices,
             num_tokens_per_expert,
+            logits,
         ) = self.router(x, self.expert_bias)
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
@@ -433,7 +436,7 @@ class MoE(nn.Module):
             dim=0, index=token_indices_experts_sorted, src=routed_output
         )
         out = out.reshape(bs, slen, dim)
-        return out
+        return out, logits
 
     def init_weights(
         self,

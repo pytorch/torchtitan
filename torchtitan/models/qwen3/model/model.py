@@ -43,7 +43,7 @@ class Qwen3Attention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type, use_packed_flash_attn=model_args.use_packed_flash_attn)
+        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, position_ids: torch.Tensor | None):
         """Forward pass using TT attention backends (RoPE cis like Llama)."""
