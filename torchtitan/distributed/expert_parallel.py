@@ -191,15 +191,14 @@ class ExpertParallel(ParallelStyle):
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=False)
             )
             output_splits = (
                 num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
+                .to(torch.device("cpu"), non_blocking=False)
             )
             # NOTE: this would incur a device-to-host sync
-            torch.cuda.current_stream().synchronize()
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 

@@ -104,6 +104,7 @@ def _run_experts_for_loop(
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
+    torch._check(sum(num_tokens_per_expert) >= 0)
     x = torch.split(
         x[: sum(num_tokens_per_expert)],
         split_size_or_sections=num_tokens_per_expert,
@@ -157,9 +158,9 @@ class GroupedExperts(nn.Module):
     ):
         super().__init__()
         self.num_experts = num_experts
-        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
-        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
-        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+        self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim, dtype=torch.bfloat16))
+        self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim, dtype=torch.bfloat16))
+        self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim, dtype=torch.bfloat16))
         self.use_grouped_mm = use_grouped_mm
 
     def forward(
@@ -437,12 +438,18 @@ class MoE(nn.Module):
             ).to(x.dtype)
 
         fsdp_state = self.experts._get_fsdp_state()
-        args, _ = fsdp_state._pre_forward(module=self.experts, args=(routed_input, num_tokens_per_expert), kwargs={})
+        args, _ = fsdp_state._pre_forward(
+            module=self.experts,
+            args=(routed_input, num_tokens_per_expert),
+            kwargs={}
+        )
         routed_input, num_tokens_per_expert = args
 
         routed_output, out = overlapped_experts(routed_input, num_tokens_per_expert, self.experts, self.shared_experts, self.score_before_experts, x)
 
-        routed_output = fsdp_state._post_forward(module=self.experts, input=(routed_input, num_tokens_per_expert), output=routed_output)
+        routed_output = fsdp_state._post_forward(
+            module=self.experts, input=(routed_input, num_tokens_per_expert), output=routed_output
+        )
 
         out = out.scatter_add(
             dim=0, index=token_indices_experts_sorted, src=routed_output

@@ -108,6 +108,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.training.compile:
+        torch._dynamo.config.capture_scalar_outputs = True
         apply_compile(model)
 
     print(model)
@@ -450,7 +451,6 @@ def apply_compile(model: nn.Module):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    return
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for llama4 moe
         fullgraph = True
