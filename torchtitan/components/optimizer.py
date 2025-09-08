@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
-    StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
@@ -340,7 +340,7 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
-    def _should_register_hook(model_parts: list[nn.Module]) -> bool:
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
                 if (
@@ -410,7 +410,7 @@ def build_optimizers_with_moe_load_balancing(
                     moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
 
-    if _should_register_hook(model_parts):
+    if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
             lambda *args, **kwargs: _update_expert_bias(
                 model_parts, parallel_dims=parallel_dims
