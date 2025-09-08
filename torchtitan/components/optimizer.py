@@ -340,6 +340,16 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
+    def _should_register_hook(model_parts: list[nn.Module]) -> bool:
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if (
+                    transformer_block.moe_enabled
+                    and transformer_block.moe.load_balance_coeff
+                ):
+                    return True
+        return False
+
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
         return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
@@ -368,42 +378,43 @@ def build_optimizers_with_moe_load_balancing(
                     # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
                     tokens_per_expert = tokens_per_expert // 2
                 tokens_per_expert_list.append(tokens_per_expert)
-        if tokens_per_expert_list:
-            tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
-            if dp_cp_mesh is not None:
-                # Perform single all-reduce to get global statistics across all processes
-                pg = dp_cp_mesh.get_group()
-                torch.distributed.all_reduce(
-                    tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
-                )
+        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
-            moe_layer_idx = 0
-            with torch.no_grad():
-                for model_part in model_parts:
-                    for transformer_block in model_part.layers.values():
-                        if not transformer_block.moe_enabled:
-                            continue
-                        moe = transformer_block.moe
+        if dp_cp_mesh is not None:
+            # Perform single all-reduce to get global statistics across all processes
+            pg = dp_cp_mesh.get_group()
+            torch.distributed.all_reduce(
+                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
+            )
 
-                        tokens_per_expert = tokens_per_expert_by_layer[
-                            moe_layer_idx
-                        ].float()
-                        moe_layer_idx += 1
+        moe_layer_idx = 0
+        with torch.no_grad():
+            for model_part in model_parts:
+                for transformer_block in model_part.layers.values():
+                    if not transformer_block.moe_enabled:
+                        continue
+                    moe = transformer_block.moe
 
-                        # update the expert bias
-                        # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                        expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                            tokens_per_expert.mean() - tokens_per_expert
-                        )
-                        expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
-                        moe.expert_bias.add_(expert_bias_delta)
-                        moe.tokens_per_expert.zero_()
+                    tokens_per_expert = tokens_per_expert_by_layer[
+                        moe_layer_idx
+                    ].float()
+                    moe_layer_idx += 1
 
-    optimizers.register_step_pre_hook(
-        lambda *args, **kwargs: _update_expert_bias(
-            model_parts, parallel_dims=parallel_dims
+                    # update the expert bias
+                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                        tokens_per_expert.mean() - tokens_per_expert
+                    )
+                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    moe.expert_bias.add_(expert_bias_delta)
+                    moe.tokens_per_expert.zero_()
+
+    if _should_register_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallel_dims=parallel_dims
+            )
         )
-    )
 
     return optimizers
