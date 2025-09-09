@@ -448,7 +448,10 @@ class CheckpointManager:
                 from torch.distributed.checkpoint.quantized_hf_storage import (
                     QuantizedHuggingFaceStorageReader,
                 )
-                BLOCK_SIZE = 128  # hardcode for deepseek 671b now
+            
+                # NOTE: The following config is for DeepSeek-V3 671B model, which is using 
+                # FP8 weight format with 128x128 block scaling.
+                BLOCK_SIZE = 128 
                 begin_load = time.monotonic()
                 logger.info("Starting dcp.load with QuantizedHuggingFaceStorageReader")
                 dcp.load(
@@ -457,7 +460,7 @@ class CheckpointManager:
                         path=checkpoint_id,
                         target_dtype=torch.float32,
                         block_size=BLOCK_SIZE,
-                        thread_count=4,
+                        thread_count=8,
                     ),
                 )
                 logger.info(f"dcp.load with QuantizedHuggingFaceStorageReader completed in {time.monotonic() - begin_load:.2f} seconds")
