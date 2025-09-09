@@ -16,7 +16,6 @@ from torch.distributed.tensor.placement_types import _StridedShard, Replicate, S
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
-from .quantization import calculate_scale_shape, dequantize_from_fp8
 from torchtitan.tools.logging import logger
 
 
@@ -410,55 +409,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
         return stacked_tensor
 
-    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Dequantize the weights from float8 to float32.
-        """
-
-        scale_inv_keys = []
-        for key, weight in state_dict.items():
-            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
-                scale_inv = state_dict[key + "_scale_inv"]
-                dequantized_weight = dequantize_from_fp8(
-                    weight, scale_inv, dtype=torch.float32
-                )
-                # update the weight and remove the scale_inv tensor
-                state_dict[key] = dequantized_weight
-                scale_inv_keys.append(key + "_scale_inv")
-
-        for key in scale_inv_keys:
-            state_dict.pop(key)
-
-        return state_dict
-
-    def _add_quantization_scale_inv_tensors(
-        self, state_dict: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Add quantization scale tensors the state_dict.
-        """
-        non_quantized_keys = [
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "norm.weight",
-            "lm_head.weight",
-            "embed_tokens.weight",
-            "mlp.gate.weight",
-        ]
-
-        weight_scale_inv_state_dict = {}
-        for key, value in state_dict.items():
-            if key.endswith(".weight") and not any(
-                non_quantized_key in key for non_quantized_key in non_quantized_keys
-            ):
-                expected_scale_shape = calculate_scale_shape(value)
-                # add weight_scale_inv to the state_dict
-                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
-                    expected_scale_shape, dtype=torch.float32
-                )
-
-        state_dict.update(weight_scale_inv_state_dict)
-        return state_dict
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -515,10 +465,6 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        # Prepare for dequantization
-        # hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-        #     hf_state_dict
-        # )
         end_time = time.time()
         duration = end_time - start_time
         logger.info(f"Completed to_hf conversion, generated {len(hf_state_dict)} keys, duration: {duration:.4f}s")
@@ -533,11 +479,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         start_time = time.time()
         logger.info(f"Starting from_hf conversion, state_dict has {len(hf_state_dict)} keys")
 
-        # dequantize the tensor in state_dict and remove the scale_inv tensor
-
-        # hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
-
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
