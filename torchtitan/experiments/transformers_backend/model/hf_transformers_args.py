@@ -16,7 +16,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 
 @dataclass
-class HFTransformerModelArgs(BaseModelArgs):
+class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
     # Torchtitan naming
     dim: int = 4096
     n_layers: int = 32
@@ -25,72 +25,72 @@ class HFTransformerModelArgs(BaseModelArgs):
     vocab_size: int = 128256
     multiple_of: int = 256
     ffn_dim_multiplier: Optional[float] = None
+    norm_eps: float = 1e-5
     rope_theta: float = 10000
-    max_seq_len: int = 2048
     
-    # HF compatibility
-    rms_norm_eps: float = 1e-6
-    use_cache: bool = True
+    max_seq_len: int = 2048
     depth_init: bool = True
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
-
-    _hf_args: dict = field(init=False, repr=False, default_factory=dict)
+    
+    # HF args
+    attn_implementation: str = "eager"
 
     def update_from_config(self, job_config: JobConfig):
-        #TODO(3outeille): what if we dont specify flavor? Should use full as default
-        flavor = getattr(job_config.model, "flavor", None)
         
-        if flavor == "full":
-            model_name_or_config: Union[LlamaConfig, str, os.PathLike] = job_config.model.name
-            hf_model_config = LlamaConfig.from_pretrained(model_name_or_config)
+        #TODO(3outeille): clean this mess once grad norm is stabilized
+        default_args = HFTransformerModelArgs()
 
-            #TODO(3outeille): use getattr to handle models that don't have all the attributes
-            # Fill torchtitan args with HF ones
-            self.dim = hf_model_config.hidden_size
-            self.n_layers = hf_model_config.num_hidden_layers
-            self.n_heads = hf_model_config.num_attention_heads
-            self.n_kv_heads = hf_model_config.num_key_value_heads
-            self.vocab_size = hf_model_config.vocab_size
-            self.rope_theta = getattr(hf_model_config, "rope_theta", 10000.0)
-            self.max_seq_len = hf_model_config.max_position_embeddings
-            self.rms_norm_eps = getattr(hf_model_config, "rms_norm_eps", 1e-6)
+        args_to_override = {}
+        for key in default_args.__dict__:
+            if hasattr(self, key):
+                current_value = getattr(self, key)
+                default_value = getattr(default_args, key)
+                if current_value != default_value:
+                    args_to_override[key] = current_value
 
-            if hasattr(hf_model_config, "intermediate_size") and hf_model_config.intermediate_size:
-                self.ffn_dim_multiplier = hf_model_config.intermediate_size // hf_model_config.hidden_size
+        hf_model_config = LlamaConfig.from_pretrained(
+            job_config.model.name,
+            attn_implementation=self.attn_implementation,
+        )
+        # n_layers = 32
+        self.__dict__.update(hf_model_config.__dict__)
 
-        # Always update max_seq_len to match training seq_len, warn if exceeded
-        seq_len = job_config.training.seq_len
-        if seq_len > self.max_seq_len:
-            logger.warning(f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}.")
-        self.max_seq_len = seq_len
+        # num_hidden_layers = 16
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise NotImplementedError("CP support for FlexAttention is still in progress.")
+        # Update TT args with HF args (for keys that exist in both but differ in namings)
+        self.dim = self.hidden_size
+        self.n_layers = self.num_hidden_layers
+        self.n_heads = self.num_attention_heads
+        self.n_kv_heads = self.num_key_value_heads
+        self.norm_eps = self.rms_norm_eps
+        self.max_seq_len = self.max_position_embeddings
+        self.eos_id = self.eos_token_id
 
-        self._hf_args = {
-            "hidden_size": self.dim,
-            "num_hidden_layers": self.n_layers,
-            "num_attention_heads": self.n_heads,
-            "num_key_value_heads": self.n_kv_heads,
-            "vocab_size": self.vocab_size,
-            "rope_scaling": {"type": "dynamic", "factor": 2.0},
-            "intermediate_size": self.ffn_dim_multiplier,
-            "rope_theta": self.rope_theta,
-            "max_position_embeddings": self.max_seq_len,
-            "rms_norm_eps": self.rms_norm_eps,
-            "use_cache": self.use_cache,
-            "pad_token_id": self.eos_id,
-        }
+        # n_layers = 16
+        
+        self.__dict__.update(args_to_override)
+        
+        # n_layers = 2
+        # num_hidden_layers = 16
+
+        # Update HF args with TT override args because HF modeling uses HF args and not TT args
+        # TODO(3outeille): find a cleaner way to handle the mapping
+        self.hidden_size = self.dim
+        self.num_hidden_layers = self.n_layers
+        self.num_attention_heads = self.n_heads
+        self.num_key_value_heads = self.n_kv_heads
+        self.rms_norm_eps = self.norm_eps
+        self.max_position_embeddings = self.max_seq_len
+        self.eos_token_id = self.eos_id
+        
+        # n_layers = 2
+        # num_hidden_layers = 2
+
+        print(self)
+        self.use_cache = False
         return self
-
-    def convert_to_hf_config(self) -> LlamaConfig:
-        if not self._hf_args:
-            raise RuntimeError(
-                "`update_from_config` must be called before `convert_to_hf_config` to prepare the arguments."
-            )
-        return LlamaConfig(**self._hf_args)
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())

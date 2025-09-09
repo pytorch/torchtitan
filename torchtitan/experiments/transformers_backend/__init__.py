@@ -29,17 +29,13 @@ __all__ = [
 
 
 flavors = {
-    "debug": HFTransformerModelArgs(
-        dim=1,
-        n_layers=6,
-        n_heads=16,
-        rope_theta=500000,
+    "debugmodel": HFTransformerModelArgs(
+        n_layers=2,
+        vocab_size=2000,
     ),
     "medium": HFTransformerModelArgs(
-        dim=40,
-        n_layers=24,
-        n_heads=32,
-        rope_theta=500000,
+        dim=1024,
+        n_layers=12,
     ),
     "full": HFTransformerModelArgs(),
 }

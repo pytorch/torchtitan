@@ -38,8 +38,6 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger
 
-from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
 # for selective op activation checkpointing
 _save_list = {
     torch.ops.aten.mm.default,
@@ -142,7 +140,6 @@ def _apply_ac_to_transformer_block(
 
 def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
-    # TODO(3outeille): Make it more generic later
     layers = model.model.layers
 
     for layer_id, transformer_block in layers.named_children():
