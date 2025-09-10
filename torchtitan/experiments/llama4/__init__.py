@@ -55,10 +55,9 @@ llama4_configs = {
         rope_theta=500000,
         moe_args=MoEArgs(num_experts=128),
     ),
-
     "testx128e": TransformerModelArgs(
         dim=1024,
-        n_layers=12,
+        n_layers=24,
         n_heads=32,
         n_kv_heads=4,
         multiple_of=8,

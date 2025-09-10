@@ -5,10 +5,10 @@ dump_folder = "./outputs"
 description = "Llama 4 Scout 17Bx16E training"
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 100
-enable_memory_snapshot = false
+enable_memory_snapshot = true
 save_memory_snapshot_folder="memory_snapshot"
 
 [metrics]

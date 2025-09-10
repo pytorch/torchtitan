@@ -5,7 +5,7 @@ dump_folder = "./outputs"
 description = "Llama 4 Maverick 17Bx128E training"
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = true
@@ -47,7 +47,7 @@ pipeline_parallel_degree = 1
 # pipeline_parallel_schedule = "interleaved1f1b"
 # pipeline_parallel_microbatches = 2
 context_parallel_degree = 1
-expert_parallel_degree = 1
+expert_parallel_degree = 4
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
