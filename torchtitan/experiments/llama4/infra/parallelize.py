@@ -110,9 +110,6 @@ def parallelize_llama(
     if job_config.training.compile:
         apply_compile(model)
 
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
-        torch._dynamo.config.capture_scalar_outputs = True
-
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -460,3 +457,6 @@ def apply_compile(model: nn.Module):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+    # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
+    torch._dynamo.config.capture_scalar_outputs = True
