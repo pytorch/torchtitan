@@ -282,12 +282,9 @@ class TransformerBlock(nn.Module):
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
 
-        self.moe_enabled = (
-            model_args.moe_enabled and (layer_id + 1) % model_args.decoder_moe_step == 0
-        )
-
         self.attention = Attention(model_args)
 
+        self.moe_enabled = model_args.moe_enabled
         if self.moe_enabled:
             self.moe = MoE(
                 model_args.moe_args,

@@ -10,7 +10,7 @@
     - Supports FSDP/HSDP, TP, DDP, EP.
     - Supports AC, torch.compile.
     - MoE models use Token Choice routing, which is using auxiluary-loss-free load balancing algorithm.
-    - [WIP] CP is not supported currently becase we used different RoPE embeding.
+    - [WIP] CP is not supported currently because of composability issue with FlexAttention.
 
 
 Other model sizes are added to the args, but toml file configs need to be added and tested.

@@ -44,7 +44,6 @@ class Qwen3ModelArgs(BaseModelArgs):
     # MoE params
     moe_enabled: bool = False
     moe_inter_dim: int = 768
-    decoder_moe_step: int = 1
     moe_args: MoEArgs = field(default_factory=MoEArgs)
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
