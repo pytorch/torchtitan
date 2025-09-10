@@ -35,7 +35,7 @@ llama4_configs = {
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
-        n_layers=48,
+        n_layers=24,
         n_heads=40,
         n_kv_heads=8,
         ffn_dim_multiplier=1.2,
@@ -47,13 +47,26 @@ llama4_configs = {
     ),
     "17bx128e": TransformerModelArgs(
         dim=5120,
-        n_layers=48,
+        n_layers=24,
         n_heads=40,
         n_kv_heads=8,
         ffn_dim_multiplier=1.2,
         multiple_of=2048,
         rope_theta=500000,
         moe_args=MoEArgs(num_experts=128),
+    ),
+
+    "testx128e": TransformerModelArgs(
+        dim=1024,
+        n_layers=12,
+        n_heads=32,
+        n_kv_heads=4,
+        multiple_of=8,
+        ffn_dim_multiplier=1.2657,
+        rope_theta=500000,
+        max_seq_len=4096,
+        moe_args=MoEArgs(num_experts=128, top_k=8),
+        interleave_moe_layer_step=1,
     ),
     "debugmodel_irope": TransformerModelArgs(
         dim=256,

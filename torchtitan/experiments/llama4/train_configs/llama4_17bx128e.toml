@@ -7,7 +7,9 @@ description = "Llama 4 Maverick 17Bx128E training"
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 10
+enable_memory_snapshot = true
+save_memory_snapshot_folder="memory_snapshot"
 
 [metrics]
 log_freq = 10
@@ -16,8 +18,8 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama4"
-flavor = "17bx128e"
-hf_assets_path = "./assets/hf/Llama-4-Scout-17B-128E"
+flavor = "testx128e"
+hf_assets_path = "./assets/hf/Llama-4-Maverick-17B-128E"
 # converters = ["float8"]
 
 [optimizer]
@@ -33,20 +35,20 @@ min_lr_factor = 0.1
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 3000
+steps = 100
 dataset = "c4"
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 8
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
-pipeline_parallel_degree = 4
+pipeline_parallel_degree = 1
 # pipeline_parallel_schedule = "interleaved1f1b"
 # pipeline_parallel_microbatches = 2
 context_parallel_degree = 1
 expert_parallel_degree = 1
-expert_tensor_parallel_degree = 8
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable = false
@@ -57,7 +59,7 @@ export_dtype = "float32"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "full" # ["none", "selective", "full"]
+mode = "none" # ["none", "selective", "full"]
 
 [compile]
 enable=false
