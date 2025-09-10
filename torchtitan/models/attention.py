@@ -11,13 +11,16 @@ from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor.experimental._attention import create_cp_block_mask
+from torch.distributed.tensor.experimental._attention import (
+    _DispatchMode,
+    _flex_attention_wrapper,
+    create_cp_block_mask,
+)
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     BlockMask,
     create_block_mask,
-    flex_attention,
 )
 
 from torchtitan.tools.utils import has_cuda_capability
@@ -48,9 +51,12 @@ class FlexAttention(torch.nn.Module):
 
     # We registered flex_attention related attributes as class variables as we
     # need to amortize the cost of compilation.
+    """
     flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
+    """
+    flex_attn: ClassVar[Callable] = _flex_attention_wrapper
     compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     used_attn_mask_types: ClassVar[set[FLEX_ATTN_MASK_T]] = set()
     # Attention mask type to the created BlockMask.
@@ -251,6 +257,9 @@ def init_attention_mask(
     # while we continue debugging accuracy issues. However, we want to evaluate
     # the user experience with CP enabled.
     if cp_mesh is not None:
+        torch.distributed.tensor.experimental._attention._dispatch_mode = (
+            _DispatchMode.MODULE_WRAPPER
+        )
         FlexAttention.compiled_create_block_mask = functools.partial(
             create_cp_block_mask, device_mesh=cp_mesh
         )
