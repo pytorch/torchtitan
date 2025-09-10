@@ -37,19 +37,10 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
     # HF args
     attn_implementation: str = "eager"
 
+    passed_args: dict = field(init=False, repr=False, default_factory=dict)
+
     def update_from_config(self, job_config: JobConfig):
         
-        #TODO(3outeille): clean this mess once grad norm is stabilized
-        default_args = HFTransformerModelArgs()
-
-        args_to_override = {}
-        for key in default_args.__dict__:
-            if hasattr(self, key):
-                current_value = getattr(self, key)
-                default_value = getattr(default_args, key)
-                if current_value != default_value:
-                    args_to_override[key] = current_value
-
         hf_model_config = LlamaConfig.from_pretrained(
             job_config.model.name,
             attn_implementation=self.attn_implementation,
@@ -70,7 +61,7 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
 
         # n_layers = 16
         
-        self.__dict__.update(args_to_override)
+        self.__dict__.update(self.passed_args)
         
         # n_layers = 2
         # num_hidden_layers = 16

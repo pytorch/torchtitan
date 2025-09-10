@@ -28,16 +28,25 @@ __all__ = [
 ]
 
 
+def hf_transformer_model_args_builder(**kwargs):
+    # Capture the kwargs in the passed_args field
+    args = HFTransformerModelArgs(**kwargs)
+    args.passed_args = kwargs
+    return args
+
+
 flavors = {
-    "debugmodel": HFTransformerModelArgs(
-        n_layers=2,
-        vocab_size=2000,
+    "debugmodel": hf_transformer_model_args_builder(
+        # n_layers=2,
+        # vocab_size=2000,
+        max_seq_len=2048,
+        dim=256, n_layers=6, n_heads=16, vocab_size=2000, rope_theta=500000
     ),
-    "medium": HFTransformerModelArgs(
+    "medium": hf_transformer_model_args_builder(
         dim=1024,
         n_layers=12,
     ),
-    "full": HFTransformerModelArgs(),
+    "full": hf_transformer_model_args_builder(),
 }
 
 hf_train_spec = TrainSpec(
