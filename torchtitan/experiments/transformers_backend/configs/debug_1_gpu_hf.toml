@@ -1,6 +1,6 @@
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 debug training with FSDP on 2 GPUs"
+description = "HF Llama 3 debug training"
 print_args = false
 use_for_integration_test = true
 
@@ -20,7 +20,7 @@ enable_wandb = false
 
 [model]
 name = "meta-llama/Llama-3.2-1B"
-flavor = "medium"
+flavor = "debugmodel"
 tokenizer_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
 
 [optimizer]

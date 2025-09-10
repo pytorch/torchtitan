@@ -9,17 +9,28 @@ set -ex
 
 # use envs as local overwrites for convenience
 # e.g.
-# LOG_RANK=0,1 NGPU=4 ./run_train.sh
+# BACKEND=tt LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 
+DEBUG_PORT=${DEBUG_PORT:-5678}
 # Option to switch between debug and train
 MODE=${MODE:-"train"}  # Set MODE=debug or MODE=train
 
-CONFIG_FILE=${CONFIG_FILE:-"configs/debug_1_gpu.toml"}
+# Option to switch between hf and tt backend
+BACKEND=${BACKEND:-"hf"}
+
+if [ "$BACKEND" = "tt" ]; then
+    CONFIG_FILE=${CONFIG_FILE:-"/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/torchtitan/models/llama3/train_configs/my_debug_model.toml"}
+elif [ "$BACKEND" = "hf" ]; then
+    CONFIG_FILE=${CONFIG_FILE:-"configs/debug_1_gpu_hf.toml"}
+else
+    echo "Invalid BACKEND set: ${BACKEND}"
+    exit 1
+fi
 
 if [ "$MODE" = "debug" ]; then
-    PYTHON_CMD="debugpy-run -m torch.distributed.run --"
+    PYTHON_CMD="debugpy-run -p ${DEBUG_PORT} -m torch.distributed.run --"
 else
     PYTHON_CMD="torchrun"
 fi

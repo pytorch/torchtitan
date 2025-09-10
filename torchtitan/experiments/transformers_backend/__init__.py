@@ -40,7 +40,8 @@ flavors = {
         # n_layers=2,
         # vocab_size=2000,
         max_seq_len=2048,
-        dim=256, n_layers=6, n_heads=16, vocab_size=2000, rope_theta=500000
+        #TODO(3outeille): n_kv_heads=n_heads may be handle somewhere else
+        dim=256, n_layers=6, n_heads=16, vocab_size=2000, rope_theta=500000, n_kv_heads=16
     ),
     "medium": hf_transformer_model_args_builder(
         dim=1024,
