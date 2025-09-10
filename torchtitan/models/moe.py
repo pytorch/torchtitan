@@ -413,10 +413,15 @@ class MoE(nn.Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
+        fsdp_state = self.experts._get_fsdp_state()
+        args, _ = fsdp_state._pre_forward(module=self.experts, args=(routed_input, num_tokens_per_expert), kwargs={})
+        routed_input, num_tokens_per_expert = args
+
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         if not self.score_before_experts:
+            assert False
             routed_output = (
                 routed_output.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
@@ -427,6 +432,8 @@ class MoE(nn.Module):
             out = self.shared_experts(x)
         else:
             out = torch.zeros_like(x)
+
+        routed_output = fsdp_state._post_forward(module=self.experts, input=(routed_input, num_tokens_per_expert), output=routed_output)
 
         out = out.scatter_add(
             dim=0, index=token_indices_experts_sorted, src=routed_output
