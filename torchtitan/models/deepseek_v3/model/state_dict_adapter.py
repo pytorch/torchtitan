@@ -13,7 +13,6 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
-from torchtitan.tools.logging import logger
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -73,11 +72,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's wegiht.
+        2. Split the GroupedExperts' weight into separate expert's weight.
         """
-        start_time = time.time()
-        logger.info(f"Starting to_hf conversion, state_dict has {len(state_dict)} keys")
-        
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -125,19 +121,14 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        end_time = time.time()
-        duration = end_time - start_time
-        logger.info(f"Completed to_hf conversion, generated {len(hf_state_dict)} keys, duration: {duration:.4f}s")
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concate separate expert's wegiht into GroupedExperts' weight.
+        3. Concat separate expert's weight into GroupedExperts' weight.
         """
-        start_time = time.time()
-        logger.info(f"Starting from_hf conversion, state_dict has {len(hf_state_dict)} keys")
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
@@ -165,7 +156,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         layer_num,
                         value.device_mesh,
                     )
-                else:  # keep this path to be compatibile with offline conversion
+                else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,
@@ -187,7 +178,4 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
-        end_time = time.time()
-        duration = end_time - start_time
-        logger.info(f"Completed from_hf conversion, processed {len(hf_state_dict)} keys, duration: {duration:.4f}s")
         return state_dict

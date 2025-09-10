@@ -87,6 +87,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
+    # HF checkpoint args
+    hf_weight_quantized: bool = False
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:

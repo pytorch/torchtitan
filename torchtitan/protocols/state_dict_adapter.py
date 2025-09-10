@@ -11,6 +11,9 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+
+
 logger = logging.getLogger()
 
 from .model import BaseModelArgs
@@ -55,6 +58,19 @@ class BaseStateDictAdapter(ABC):
 
         Returns:
             The converted native model state dict
+        """
+        pass
+
+    @abstractmethod
+    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
+        """Returns hf storage reader to read HF checkpoint
+
+        Args:
+            path: the path to read HF checkpoint
+
+        Returns:
+            THe HuggingFace storage reader to read rom HF checkpoint
+
         """
         pass
 
