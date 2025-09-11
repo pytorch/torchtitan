@@ -340,6 +340,14 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        for model_part in model_parts:
+            for transformer_block in model_part.layers.values():
+                if transformer_block.moe_enabled:
+                    # Assumption: load_balance_coeff is set universally on all moe blocks.
+                    return bool(transformer_block.moe.load_balance_coeff)
+        return False
+
     # for MoE auxiliary-loss-free load balancing
     def _is_recomputation_enabled(module):
         return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
@@ -400,10 +408,11 @@ def build_optimizers_with_moe_load_balancing(
                     moe.expert_bias.add_(expert_bias_delta)
                     moe.tokens_per_expert.zero_()
 
-    optimizers.register_step_pre_hook(
-        lambda *args, **kwargs: _update_expert_bias(
-            model_parts, parallel_dims=parallel_dims
+    if _should_register_moe_balancing_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallel_dims=parallel_dims
+            )
         )
-    )
 
     return optimizers
