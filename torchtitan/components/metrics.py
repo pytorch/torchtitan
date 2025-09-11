@@ -163,6 +163,25 @@ class WandBLogger(BaseLogger):
         if self.wandb.run is not None:
             self.wandb.finish()
 
+class LoggerContainer(BaseLogger):
+    """Container to call all loggers enabled in the job config."""
+    def __init__(self) -> None:
+        self._loggers : list[BaseLogger] = []
+
+    def add_logger(self, logger_instance: BaseLogger) -> None:
+        self._loggers.append(logger_instance)
+
+    def log(self, metrics: dict[str, Any], step: int) -> None:
+        for logger_instance in self._loggers:
+            logger_instance.log(metrics, step)
+
+    @property
+    def number_of_loggers(self) -> int:
+        return len(self._loggers)
+
+    def close(self) -> None:
+        for logger_instance in self._loggers:
+            logger_instance.close()
 
 def ensure_pp_loss_visible(
     parallel_dims: ParallelDims, job_config: JobConfig, color: Color
@@ -274,11 +293,15 @@ def _build_metric_logger(
             base_log_dir, f"rank_{torch.distributed.get_rank()}"
         )
 
+    # Create logger container
+    logger_container = LoggerContainer()
+
     # Create loggers in priority order
     if metrics_config.enable_wandb:
         logger.debug("Attempting to create WandB logger")
         try:
-            return WandBLogger(base_log_dir, job_config, tag)
+            wandb_logger = WandBLogger(base_log_dir, job_config, tag)
+            logger_container.add_logger(wandb_logger)
         except Exception as e:
             if "No module named 'wandb'" in str(e):
                 logger.error(
@@ -289,10 +312,12 @@ def _build_metric_logger(
 
     if metrics_config.enable_tensorboard:
         logger.debug("Creating TensorBoard logger")
-        return TensorBoardLogger(base_log_dir, tag)
+        tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
+        logger_container.add_logger(tensorboard_logger)
 
-    logger.debug("No loggers enabled, returning BaseLogger")
-    return BaseLogger()
+    if logger_container.number_of_loggers == 0:
+        logger.debug("No loggers enabled, returning an emtpy LoggerContainer")
+    return logger_container
 
 
 class MetricsProcessor:
