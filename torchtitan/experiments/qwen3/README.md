@@ -22,9 +22,6 @@ eg, for Qwen3 0.6B model, the HF repo name is `Qwen/Qwen3-0.6B`. For 1.7B model,
 
 
 ## To be added
-- Dense Model
-    - Variants of Dense Models up to 32B
-
 - MoE model
     - `StateDictAdapter` support for MoE model
 
