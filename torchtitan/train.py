@@ -699,15 +699,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )
-                # for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
-                #     full_param = param.full_tensor()
-                #     ref_full_param = ref_param.full_tensor()
-                #     try:
-                #         assert torch.equal(full_param, ref_full_param)
-                #     except:
-                #         import fbvscode
-                #         fbvscode.set_trace()
-                self.checkpointer.load(step=job_config.checkpoint.load_step)
+                # def reset_model_parameters(model):
+                #     from torch.distributed.fsdp import FSDPModule
+                #     for fsdp_model in model.modules():
+                #         if not isinstance(fsdp_model, FSDPModule):
+                #             continue
+                #         # import fbvscode
+                #         # fbvscode.set_trace()
+                #         fsdp_model.reshard()
+                #         state = fsdp_model._get_fsdp_state()
+                #         if not (fsdp_param_group := state._fsdp_param_group):
+                #             continue
+                #         with torch.no_grad():
+                #             for fsdp_param in fsdp_param_group.fsdp_params:
+                #                 fsdp_param.reset_sharded_param()
+                # reset_model_parameters(self.model_parts[0])
+                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                    full_param = param.full_tensor()
+                    ref_full_param = ref_param.full_tensor()
+                    local_param = param._local_tensor
+                    ref_local_param = ref_param._local_tensor
+                    try:
+                        assert torch.equal(local_param, ref_local_param)
+                        assert torch.equal(full_param, ref_full_param)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
+                if self.checkpointer._should_save(self.step, last_step=(self.step == job_config.training.steps)):
+                    self.checkpointer.load(step=self.step)
+                
                 for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
                     full_param = param.full_tensor()
                     ref_full_param = ref_param.full_tensor()

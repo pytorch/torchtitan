@@ -422,12 +422,16 @@ class CheckpointManager:
             self.states[MODEL].load_state_dict(state_dict)
         else:
             before_load = state_dict['tok_embeddings.weight']._local_tensor
+            before_load_full = state_dict['tok_embeddings.weight'].full_tensor()
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
             after_load = state_dict['tok_embeddings.weight']._local_tensor
+            after_load_full = state_dict['tok_embeddings.weight'].full_tensor()
             try:
                 assert torch.equal(before_load, after_load)
+                assert torch.equal(before_load_full, after_load_full)
                 # dcp.load(state_dict, checkpoint_id=checkpoint_id)
             except:
+                logger.info(f"{torch.distributed.get_rank()=} does not have equal")
                 import fbvscode
                 fbvscode.set_trace()
 
