@@ -8,6 +8,7 @@ import importlib
 import os
 import time
 from datetime import timedelta
+from transformers.utils import is_torch_deterministic
 from typing import Any, Generator, Iterable, Optional
 
 import torch
@@ -287,7 +288,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
-
+            if is_torch_deterministic():
+                # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
+                torch.utils.deterministic.fill_uninitialized_memory = False
             model.to_empty(device=init_device)
             with torch.no_grad():
                 if isinstance(model, LlamaForCausalLM):
