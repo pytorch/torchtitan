@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.distributed.expert_parallel import expert_parallel
+from torch.distributed.tensor.placement_types import Shard, Replicate
 
 
 @dataclass
@@ -310,6 +311,77 @@ class TokenReorderer(nn.Module):
             num_tokens_per_expert,
         )
 
+def _moe_forward(x, router, expert_bias, reorderer, score_before_experts, experts, shared_experts):
+    # x: 64, 2048, 256
+    bs, slen, dim = x.shape
+    x = x.view(-1, dim)
+
+    # top_scores and selected_experts_indices shape (bs*slen*top_k,)
+    # num_tokens_per_expert shape (num_experts,)
+    (
+        top_scores,
+        selected_experts_indices,
+        num_tokens_per_expert,
+    ) = router(x, expert_bias)
+
+    # tokens_per_expert will be used to update the expert bias for load balancing.
+    # and also to count the expert usage
+    # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+    #       first in the forward pass, and then in the backward pass. However, this has no
+    #       effect on the expert bias update thanks to the torch.sign() operator.
+    # moved out to remove mutation
+    # with torch.no_grad():
+    #     tokens_per_expert.add_(num_tokens_per_expert)
+
+    # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+    # num_tokens_per_expert shape (num_experts,)
+    # NOTE: the reason we need to compute num_tokens_per_expert again is:
+    #       1st computation in router is to update self.tokens_per_expert
+    #       which would be the same across all TP ranks.
+    #       2nd computation in reorderer is for the actual routing and experts computation
+    #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
+    #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+    (
+        top_scores_experts_sorted,
+        token_indices_experts_sorted,
+        num_tokens_per_expert,
+    ) = reorderer(top_scores, selected_experts_indices)
+
+    # shape (bs*slen*top_k, dim)
+    token_indices_experts_sorted = token_indices_experts_sorted.reshape(
+        -1, 1
+    ).expand(-1, dim)
+
+    # shape (bs*slen*top_k, dim)
+    routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+
+    if score_before_experts:
+        routed_input = (
+            routed_input.to(torch.float32)
+            * top_scores_experts_sorted.reshape(-1, 1)
+        ).to(x.dtype)
+
+    # shape (bs*slen*top_k, dim)
+    routed_output = experts(routed_input, num_tokens_per_expert)
+
+    if not score_before_experts:
+        routed_output = (
+            routed_output.to(torch.float32)
+            * top_scores_experts_sorted.reshape(-1, 1)
+        ).to(x.dtype)
+
+    # shared expert
+    if shared_experts is not None:
+        out = shared_experts(x)
+    else:
+        out = torch.zeros_like(x)
+
+    out = out.scatter_add(
+        dim=0, index=token_indices_experts_sorted, src=routed_output
+    )
+    out = out.reshape(bs, slen, dim)
+    return out, num_tokens_per_expert
+
 
 class MoE(nn.Module):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
@@ -367,72 +439,11 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        bs, slen, dim = x.shape
-        x = x.view(-1, dim)
+        out, num_tokens_per_expert = _moe_forward(x, self.router, self.expert_bias, self.reorderer, self.score_before_experts, self.experts, self.shared_experts)
 
-        # top_scores and selected_experts_indices shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
-        (
-            top_scores,
-            selected_experts_indices,
-            num_tokens_per_expert,
-        ) = self.router(x, self.expert_bias)
-
-        # tokens_per_expert will be used to update the expert bias for load balancing.
-        # and also to count the expert usage
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
-        #       first in the forward pass, and then in the backward pass. However, this has no
-        #       effect on the expert bias update thanks to the torch.sign() operator.
+        # HOPs don't support buffer mutations, keep this outside
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
-
-        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
-        # NOTE: the reason we need to compute num_tokens_per_expert again is:
-        #       1st computation in router is to update self.tokens_per_expert
-        #       which would be the same across all TP ranks.
-        #       2nd computation in reorderer is for the actual routing and experts computation
-        #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-        #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
-        (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        ) = self.reorderer(top_scores, selected_experts_indices)
-
-        # shape (bs*slen*top_k, dim)
-        token_indices_experts_sorted = token_indices_experts_sorted.reshape(
-            -1, 1
-        ).expand(-1, dim)
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
-
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shared expert
-        if self.shared_experts is not None:
-            out = self.shared_experts(x)
-        else:
-            out = torch.zeros_like(x)
-
-        out = out.scatter_add(
-            dim=0, index=token_indices_experts_sorted, src=routed_output
-        )
-        out = out.reshape(bs, slen, dim)
         return out
 
     def init_weights(

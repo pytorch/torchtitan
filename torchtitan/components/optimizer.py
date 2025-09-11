@@ -351,12 +351,35 @@ def build_optimizers_with_moe_load_balancing(
         dp_cp_mesh = (
             parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
         )
+
+        ################################################################3
+        # AP friendly methods
+
+        def is_moe_block(block):
+            moe_enabled = getattr(block, "moe_enabled", False)
+            has_moe_submod = hasattr(block, "moe") # AP
+            return moe_enabled or has_moe_submod
+
+        def get_transformer_blocks(model_part):
+            if isinstance(model_part.layers, nn.ModuleDict):
+                # regular torchtitan
+                blocks = model_part.layers.values()
+            else:
+                # TODO: fix autoparallel to preserve the module dict
+                blocks = model_part.layers.children()
+            return blocks
+
+        def should_manual_allreduce(tokens_per_expert_by_layer):
+            return not isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor)
+        ################################################################3
+
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []
         for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
-                if not transformer_block.moe_enabled:
+            blocks = get_transformer_blocks(model_part)
+            for transformer_block in blocks:
+                if not is_moe_block(transformer_block):
                     continue
                 if transformer_block.moe.load_balance_coeff is None:
                     return
@@ -372,17 +395,19 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
         if dp_cp_mesh is not None:
-            # Perform single all-reduce to get global statistics across all processes
-            pg = dp_cp_mesh.get_group()
-            torch.distributed.all_reduce(
-                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
-            )
+            if should_manual_allreduce(tokens_per_expert_by_layer):
+                # Perform single all-reduce to get global statistics across all processes
+                pg = dp_cp_mesh.get_group()
+                torch.distributed.all_reduce(
+                    tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
+                )
 
         moe_layer_idx = 0
         with torch.no_grad():
             for model_part in model_parts:
-                for transformer_block in model_part.layers.values():
-                    if not transformer_block.moe_enabled:
+                blocks = get_transformer_blocks(model_part)
+                for transformer_block in blocks:
+                    if not is_moe_block(transformer_block):
                         continue
                     moe = transformer_block.moe
 
