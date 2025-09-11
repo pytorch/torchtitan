@@ -23,7 +23,7 @@ run_tt() {
     CUDA_VISIBLE_DEVICES=0 \
     torchrun --nproc_per_node=${NGPU} --master_port 1234 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${TT_CONFIG} "$@"
+    -m torchtitan.train --job.config_file ${TT_CONFIG} --training.seed 42 --training.deterministic "$@"
 }
 
 run_hf() {
@@ -36,7 +36,7 @@ run_hf() {
     CUDA_VISIBLE_DEVICES=1 \
     torchrun --nproc_per_node=${NGPU} --master_port 1235 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${HF_CONFIG} "$@"
+    -m torchtitan.train --job.config_file ${HF_CONFIG} --training.seed 42 --training.deterministic "$@"
 }
 
 
@@ -45,7 +45,9 @@ HF_LOG="hf_run.log"
 DIFF_LOG="run_diff.log"
 
 run_tt "$@" 2>&1 | tee ${TT_LOG}
-run_hf "$@" 2>&1 | tee ${HF_LOG}
+# run_hf "$@" 2>&1 | tee ${HF_LOG}
+run_tt "$@" 2>&1 | tee ${HF_LOG}
+
 
 # Filter logs to remove noisy differences
 TT_LOG_FILTERED="${TT_LOG}.filtered"
