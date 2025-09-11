@@ -1,26 +1,29 @@
 **The Qwen3 model is still under development.**
 
 
-#### Available features
-QWEN3 0.6B Dense model is available for:
+## Available features
+#### Dense Model
+- Qwen3 dense model:
+    - supports FSDP/HSDP, TP, DDP.
+    - Supports AC, torch.compile.
+- Qwen3 MoE model:
+    - Supports FSDP/HSDP, TP, DDP, EP.
+    - Supports AC, torch.compile.
+    - MoE models use Token Choice routing, which is using auxiluary-loss-free load balancing algorithm.
 
-- FSDP/HSDP, TP, DDP, AC, compile support
 
 Other model sizes are added to the args, but toml file configs need to be added and tested.
 
-#### Download Qwen3 tokenizer
+## Download Qwen3 tokenizer
 ```python scripts/download_hf_assets.py --repo_id <hf_repo_name> --assets tokenizer```
 
 eg, for Qwen3 0.6B model, the HF repo name is `Qwen/Qwen3-0.6B`. For 1.7B model, the HF repo name is `Qwen/Qwen3-1.7B`.
 
-#### Parity with HF
 
-Model parity test has been done and results suggest parity with HF implementation.
-
-#### To be added
+## To be added
 - Modeling
-    - Variants of Dense models up to 32B
-    - MoE alternatives
+    - CP is not supported currently because of RoPE embedding implementation details.
+    - `StateDictAdapter` support for MoE model
 
 - Testing
     - Learning rate verifying: verify learning rate and schedule with real training jobs (eg, 3k stps), or find official references.

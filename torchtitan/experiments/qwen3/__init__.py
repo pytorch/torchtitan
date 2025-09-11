@@ -12,6 +12,7 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
@@ -103,6 +104,76 @@ qwen3_configs = {
         qk_norm=True,
         hidden_dim=25600,
         rope_theta=1000000,
+    ),
+    # Qwen3-MoE models
+    "debugmodel_moe": Qwen3ModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        head_dim=128,
+        dim=1024,
+        n_layers=28,
+        n_heads=16,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=3072,
+        rope_theta=1000000,
+        moe_enabled=True,
+        moe_inter_dim=768,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=0,
+            top_k=8,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+        ),
+    ),
+    "30B-A3B": Qwen3ModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        head_dim=128,
+        dim=5120,
+        n_layers=64,
+        n_heads=64,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=25600,
+        rope_theta=1000000,
+        moe_enabled=True,
+        moe_inter_dim=768,
+        moe_args=MoEArgs(
+            num_experts=128,
+            num_shared_experts=0,
+            top_k=8,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+        ),
+    ),
+    "235B-A22B": Qwen3ModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        head_dim=128,
+        dim=4096,
+        n_layers=94,
+        n_heads=64,
+        n_kv_heads=4,
+        qk_norm=True,
+        hidden_dim=12288,
+        rope_theta=5000000,
+        moe_enabled=True,
+        moe_inter_dim=1536,
+        moe_args=MoEArgs(
+            num_experts=128,
+            num_shared_experts=0,  # no shared experts, double check
+            top_k=8,  # num_experts_per_tok
+            score_func="softmax",  # need double check
+            route_norm=True,
+            route_scale=1.0,  # not needed, need double check
+            score_before_experts=False,
+        ),
     ),
 }
 
