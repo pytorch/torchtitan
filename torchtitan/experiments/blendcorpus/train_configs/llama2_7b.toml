@@ -1,0 +1,104 @@
+# torchtitan Config.toml
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 debug training"
+print_args = false
+use_for_integration_test = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+# choose which preset to start from
+name   = "blendcorpus"
+flavor = "Llama-2-7b"         # this picks the preset your log shows
+
+# tokenizer wiring (your local SPM)
+tokenizer_backend = "sptoken"
+hf_assets_path    = "./assets/hf/Llama-2-7b"
+# converters = ["float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+local_batch_size = 1
+seq_len = 4096
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+dataset = "blendcorpus"  # supported datasets: c4_test (2K), c4 (177M)
+#dataset_path = "/home/hzheng/AuroraGPT/datasets/dolma/file_list.txt" 
+dataset_path = "/flare/Aurora_deployment/AuroraGPT/datasets/dolma/dolma_v1_7_file_list_mini.txt"
+
+[experimental]
+custom_args_module = "torchtitan.experiments.blendcorpus.job_config"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+# enable = false
+folder = "checkpoint"
+interval = 10
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=false
+components = ["model", "loss"]
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 5
+steps = 10
+
+
+[blendcorpus]
+# Optional overrides / extras
+num_workers = 2
+split = "98,1,1"
+dataloader_type = "single"
+shuffle = true
+append_eod = true
+provide_attention_mask = false
+shuffle_sample_in_corpus = true
+blend_sample_in_corpus=false
+eod_token_id = 2
+#data_cache_path = "./data_cache_path"
