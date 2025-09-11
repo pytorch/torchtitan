@@ -19,14 +19,59 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
+def apply_local_map_to_moe():
+    """
+    TODO: fix HOPs not restoring the original signature.
+    TODO: fix tracing with local shapes so that we can use Shard placements
+
+    Current HOP signature we get:
+
+    class subgraph_0(torch.nn.Module):
+        def forward(self,
+        rms_norm_5: "f32[64, 2048, 256][524288, 256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__router____modules__gate____parameters__weight: "f32[8, 256][256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____buffers__expert_bias: "f32[8][1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w1: "f32[8, 256, 256][65536, 256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w3: "f32[8, 256, 256][65536, 256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w2: "f32[8, 256, 256][65536, 256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w1____parameters__weight: "f32[512, 256][256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w3____parameters__weight: "f32[512, 256][256, 1]cuda:0",
+        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w2____parameters__weight: "f32[256, 512][512, 1]cuda:0"):
+    """
+    from torchtitan.models import moe
+    from torch.distributed._tensor.experimental import local_map
+    moe._moe_forward = local_map(
+        moe._moe_forward,
+        out_placements=(
+            (Replicate(),), # (Shard(0),),
+            (Replicate(),),
+        ),
+        in_placements=(
+            (Replicate(),), # (Shard(0),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+            (Replicate(),),
+        ),
+        redistribute_inputs=True,
+        in_grad_placements=None,
+        device_mesh=None,
+    )
+
+
+# Run workflow with:
+# CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseekv3_auto_parallel
 def parallelize_deepseekv3(
     model,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
     """
-    Apply tensor parallelism, activation checkpointing, torch.compile, and data
-    parallelism to the model.
+    Apply Autoparallel to the model
 
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
@@ -53,6 +98,9 @@ def parallelize_deepseekv3(
     assert parallel_dims.dp_replicate_enabled is False, "DDP not supported yet"
     assert parallel_dims.cp_enabled is False, "CP not supported yet"
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
+
+    # apply local_map to MoE
+    apply_local_map_to_moe()
 
     # torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
     #     lambda bucket_idx: 500 / parallel_dims.tp
@@ -131,4 +179,47 @@ def parallelize_deepseekv3(
         # removing it at any point
         parallel_mod.register_forward_hook(_return_as_dtensor_for_loss_parallel)
 
+    _preserve_moe_attributes(model, parallel_mod)
+
     return parallel_mod
+
+
+def _preserve_moe_attributes(original_model, parallel_model):
+    """
+    Preserve MoE custom attributes from the original model to the parallel model.
+    This is only needed for attributes that aren't used in the graph, so they aren't
+    lifted as graph inputs and fetched by the pre-graph runtime wrapper.
+
+    `moe_enabled` ane `load_balance_coeff` are used later in the optimizer to identify
+    this block as a moe block. This should be safe as they are read-only.
+    """
+    def get_moe_modules(model):
+        """Extract all MoE modules from the model."""
+        moe_modules = []
+        if hasattr(model, 'layers'):
+            if isinstance(model.layers, torch.nn.ModuleDict):
+                # regular torchtitan structure
+                blocks = model.layers.values()
+            else:
+                # autoparallel might change structure
+                blocks = model.layers.children() if hasattr(model.layers, 'children') else []
+
+            for block in blocks:
+                if hasattr(block, 'moe_enabled') and block.moe_enabled and hasattr(block, 'moe'):
+                    moe_modules.append(block.moe)
+                elif hasattr(block, 'moe'):  # fallback for autoparallel
+                    moe_modules.append(block.moe)
+        return moe_modules
+
+    original_moe_modules = get_moe_modules(original_model)
+    parallel_moe_modules = get_moe_modules(parallel_model)
+
+    # Copy custom attributes from original to parallel MoE modules
+    # This is fine to do since these attributes are read only
+    for orig_moe, par_moe in zip(original_moe_modules, parallel_moe_modules):
+        if hasattr(orig_moe, 'moe_enabled'):
+            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+
+        # Copy load_balance_coeff
+        if hasattr(orig_moe, 'load_balance_coeff'):
+            par_moe.load_balance_coeff = orig_moe.load_balance_coeff
