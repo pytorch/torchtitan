@@ -4,13 +4,12 @@
 ## Available features
 #### Dense Model
 - Qwen3 dense model:
-    - supports FSDP/HSDP, TP, CP, DDP.
+    - supports FSDP/HSDP, TP, DDP.
     - Supports AC, torch.compile.
 - Qwen3 MoE model:
     - Supports FSDP/HSDP, TP, DDP, EP.
     - Supports AC, torch.compile.
     - MoE models use Token Choice routing, which is using auxiluary-loss-free load balancing algorithm.
-    - [WIP] CP is not supported currently because of composability issue with FlexAttention.
 
 
 Other model sizes are added to the args, but toml file configs need to be added and tested.
@@ -22,7 +21,8 @@ eg, for Qwen3 0.6B model, the HF repo name is `Qwen/Qwen3-0.6B`. For 1.7B model,
 
 
 ## To be added
-- MoE model
+- Modeling
+    - CP is not supported currently because of RoPE embedding implementation details.
     - `StateDictAdapter` support for MoE model
 
 - Testing
