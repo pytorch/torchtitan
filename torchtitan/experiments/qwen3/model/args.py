@@ -82,9 +82,6 @@ class Qwen3ModelArgs(BaseModelArgs):
             + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
-        if self.enable_weight_tying:
-            nparams = nparams - nparams_embedding
-
         logger.info(
             f"Total parameter count: dense {nparams_dense:,}, "
             f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
@@ -106,5 +103,8 @@ class Qwen3ModelArgs(BaseModelArgs):
             6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
             + 12 * l * h * q * t
         )
+
+        if self.enable_weight_tying:
+            nparams = nparams - nparams_embedding
 
         return nparams, num_flops_per_token
