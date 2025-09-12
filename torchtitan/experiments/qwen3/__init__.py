@@ -167,11 +167,11 @@ qwen3_configs = {
         moe_inter_dim=1536,
         moe_args=MoEArgs(
             num_experts=128,
-            num_shared_experts=0,  # no shared experts, double check
-            top_k=8,  # num_experts_per_tok
-            score_func="softmax",  # need double check
+            num_shared_experts=0,
+            top_k=8,
+            score_func="softmax",
             route_norm=True,
-            route_scale=1.0,  # not needed, need double check
+            route_scale=1.0,
             score_before_experts=False,
         ),
     ),

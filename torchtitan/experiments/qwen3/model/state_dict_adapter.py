@@ -13,6 +13,7 @@ aligned with the HF implementation.
 
 """
 import re
+import torch
 from typing import Any
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
@@ -45,13 +46,73 @@ class Qwen3StateDictAdapter(StateDictAdapter):
             "lm_head.weight": "output.weight",
         }
 
+        if model_args.moe_enabled:
+            self.from_hf_map.update({
+                # MoE gating (token router)
+                "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+                # Experts
+                "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
+                "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
+                "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
+            })
+
+    def _split_experts_weights(
+        self, weight: torch.Tensor, n_experts: int,
+    ) -> list[torch.Tensor]:
+        """
+        Split the weights of the experts into a list of tensors.
+        """
+        split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
+        return split_weight
+
+    def _concatenate_expert_weights(
+        self, expert_weights_by_layer: dict[str, Any], n_experts: int
+    ) -> torch.Tensor:
+        """
+        Concatenate the weights of seprate experts into GroupedExpert weights.
+        """
+        for layer, abstract_keys in list(expert_weights_by_layer.items()):
+            for abstract_key, experts in list(abstract_keys.items()):
+                # If we have all the experts for this abstract_key, concatenate them
+                if len(experts) == n_experts:
+                    sorted_expert_ids = sorted(experts.keys())
+                    sorted_experts = [experts[i] for i in sorted_expert_ids]
+                    stacked_tensor = torch.stack(sorted_experts, dim=0)
+
+                    # Remove these experts from the tracking dict to free memory
+                    del expert_weights_by_layer[layer][abstract_key]
+                    if not expert_weights_by_layer[layer]:
+                        del expert_weights_by_layer[layer]
+
+                    return stacked_tensor
+
+        return None
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "layers" in key:
+            if "moe.experts" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                layer_num = re.search(r"\d+", key).group(0)
+                new_abstract_key = to_hf_map[abstract_key]
+
+                # Split expert weights into seperate expert weights
+                # This will cause all_gather and OOM
+                split_values = self._split_experts_weights(
+                    value, self.model_args.moe_args.num_experts
+                )
+
+                for expert_num in range(0, self.model_args.moe_args.num_experts):
+                    new_key = new_abstract_key.format(layer_num, expert_num)
+                    hf_state_dict[new_key] = split_values[expert_num].squeeze()
+            
+            elif "expert_bias" in key:
+                continue
+        
+            elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
@@ -69,9 +130,30 @@ class Qwen3StateDictAdapter(StateDictAdapter):
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
 
         state_dict = {}
+        expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
-            if "layers" in key:
+            if "mlp.experts" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
+                layer_num, expert_num = re.findall(r"\d+", key)
+                new_key = self.from_hf_map[abstract_key]
+                new_key = new_key.format(layer_num)
+
+                # Store the expert's weight in expert_weights_by_layer for concating later.
+                if layer_num not in expert_weights_by_layer:
+                    expert_weights_by_layer[layer_num] = {}
+                if abstract_key not in expert_weights_by_layer[layer_num]:
+                    expert_weights_by_layer[layer_num][abstract_key] = {}
+                expert_weights_by_layer[layer_num][abstract_key][expert_num] = value
+
+                # try to concat the expert's weight into GroupedExperts' weight.
+                stacked_value = self._concatenate_expert_weights(
+                    expert_weights_by_layer, self.model_args.moe_args.num_experts
+                )
+                if stacked_value is not None:
+                    state_dict[new_key] = stacked_value
+            
+            elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
