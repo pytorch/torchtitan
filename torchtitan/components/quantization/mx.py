@@ -30,7 +30,7 @@ class MXConverter(ModelConverter):
     enabled: bool
     filter_fqns: List[str]
     mx_config: Any  # MXLinearConfig type when imported
-    mxfp8_token_group_alignment_size = 32
+    token_group_alignment_size = 32
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         # Ensure minimum torchao versions
@@ -40,7 +40,7 @@ class MXConverter(ModelConverter):
             )
         torchao_version = version("torchao")
 
-        # Last torchao release was 0.13.0, so nightly build starts with 0.13.0+git...
+        # Require latest release or nightly builds for prototype features
         is_nightly_build = torchao_version.startswith("0.14.0")
         if not is_nightly_build:
             raise ImportError(
@@ -64,9 +64,9 @@ class MXConverter(ModelConverter):
         self.moe_fqns = job_config.mx.moe_fqns_prototype
         if self.moe_fqns:
             logger.info(
-                f"Setting token group alignment size to {self.mxfp8_token_group_alignment_size}"
+                f"Setting token group alignment size to {self.token_group_alignment_size}"
             )
-            set_token_group_alignment_size_m(self.mxfp8_token_group_alignment_size)
+            set_token_group_alignment_size_m(self.token_group_alignment_size)
 
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
@@ -116,17 +116,11 @@ class MXConverter(ModelConverter):
         Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
         to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
         """
+        from torchao.prototype.moe_training.conversion_utils import (
+            MoEScalingType,
+            MoETrainingConfig,
+        )
         from torchao.quantization.quant_api import quantize_
-
-        try:
-            from torchao.prototype.moe_training.conversion_utils import (
-                MoEScalingType,
-                MoETrainingConfig,
-            )
-        except ImportError as e:
-            raise ImportError(
-                "torchao installation does not have MoE training support. Please install torchao nightly build."
-            ) from e
 
         def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
             for target_fqn in self.moe_fqns:
