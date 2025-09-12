@@ -67,7 +67,10 @@ class ModelWrapper(Stateful):
         return state_dict
 
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        # import fbvscode
+        # fbvscode.set_trace()
+        # return self.cache_state_dict
+        return self._get_state_dict()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -421,12 +424,19 @@ class CheckpointManager:
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
-            before_load = state_dict['tok_embeddings.weight']._local_tensor
-            before_load_full = state_dict['tok_embeddings.weight'].full_tensor()
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
-            after_load = state_dict['tok_embeddings.weight']._local_tensor
-            after_load_full = state_dict['tok_embeddings.weight'].full_tensor()
+            before_load = state_dict['tok_embeddings.weight']._local_tensor.clone()
+            before_load_full = state_dict['tok_embeddings.weight'].full_tensor().clone()
             try:
+                assert torch.equal(state_dict['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+            except:
+                logger.info(f"{torch.distributed.get_rank()=} does not have equal")
+                import fbvscode
+                fbvscode.set_trace()
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            after_load = state_dict['tok_embeddings.weight']._local_tensor.clone()
+            after_load_full = state_dict['tok_embeddings.weight'].full_tensor().clone()
+            try:
+                assert torch.equal(state_dict['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
                 assert torch.equal(before_load, after_load)
                 assert torch.equal(before_load_full, after_load_full)
                 # dcp.load(state_dict, checkpoint_id=checkpoint_id)
@@ -435,12 +445,59 @@ class CheckpointManager:
                 import fbvscode
                 fbvscode.set_trace()
 
+            for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                full_param = param.full_tensor()
+                ref_full_param = ref_param.full_tensor()
+                local_param = param._local_tensor
+                ref_local_param = ref_param._local_tensor
+                try:
+                    # if torch.distributed.get_rank() != 3:
+                    assert torch.equal(local_param, ref_local_param)
+                    # assert torch.equal(full_param, ref_full_param)
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
+
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 # import fbvscode
                 # fbvscode.set_trace()
+                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                    full_param = param.full_tensor()
+                    ref_full_param = ref_param.full_tensor()
+                    local_param = param._local_tensor
+                    ref_local_param = ref_param._local_tensor
+                    try:
+                        # if torch.distributed.get_rank() != 3:
+                        assert torch.equal(local_param, ref_local_param)
+                        # assert torch.equal(full_param, ref_full_param)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
+                try:
+                    assert torch.equal(state_dict['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
                 self.states[MODEL].load_state_dict(state_dict)
+                try:
+                    assert torch.equal(state_dict['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
+                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
+                    full_param = param.full_tensor()
+                    ref_full_param = ref_param.full_tensor()
+                    local_param = param._local_tensor
+                    ref_local_param = ref_param._local_tensor
+                    try:
+                        # if torch.distributed.get_rank() != 3:
+                        assert torch.equal(local_param, ref_local_param)
+                        # assert torch.equal(full_param, ref_full_param)
+                    except:
+                        import fbvscode
+                        fbvscode.set_trace()
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -595,6 +652,11 @@ class CheckpointManager:
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
         states = self._states_to_load(model_only)
+        try:
+            assert torch.equal(states['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+        except:
+            import fbvscode
+            fbvscode.set_trace()
         before_load = states['tok_embeddings.weight']._local_tensor
         self.dcp_load(
             states,
@@ -725,8 +787,13 @@ class CheckpointManager:
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
 
-        # states_to_load = self._flattened_model_states_sd(states_to_load)
-        states_to_load = self._flattened_model_states_sd()
+        states_to_load = self._flattened_model_states_sd(states_to_load)
+
+        try:
+            assert torch.equal(states_to_load['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+        except:
+            import fbvscode
+            fbvscode.set_trace()
 
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
