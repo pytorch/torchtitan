@@ -13,8 +13,9 @@ aligned with the HF implementation.
 
 """
 import re
-import torch
 from typing import Any
+
+import torch
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -47,17 +48,21 @@ class Qwen3StateDictAdapter(StateDictAdapter):
         }
 
         if model_args.moe_enabled:
-            self.from_hf_map.update({
-                # MoE gating (token router)
-                "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
-                # Experts
-                "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-                "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-                "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
-            })
+            self.from_hf_map.update(
+                {
+                    # MoE gating (token router)
+                    "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+                    # Experts
+                    "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
+                    "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
+                    "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
+                }
+            )
 
     def _split_experts_weights(
-        self, weight: torch.Tensor, n_experts: int,
+        self,
+        weight: torch.Tensor,
+        n_experts: int,
     ) -> list[torch.Tensor]:
         """
         Split the weights of the experts into a list of tensors.
@@ -108,10 +113,10 @@ class Qwen3StateDictAdapter(StateDictAdapter):
                 for expert_num in range(0, self.model_args.moe_args.num_experts):
                     new_key = new_abstract_key.format(layer_num, expert_num)
                     hf_state_dict[new_key] = split_values[expert_num].squeeze()
-            
+
             elif "expert_bias" in key:
                 continue
-        
+
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
@@ -152,7 +157,7 @@ class Qwen3StateDictAdapter(StateDictAdapter):
                 )
                 if stacked_value is not None:
                     state_dict[new_key] = stacked_value
-            
+
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 layer_num = re.search(r"\d+", key).group(0)
