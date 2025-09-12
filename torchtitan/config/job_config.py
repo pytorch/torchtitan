@@ -739,6 +739,11 @@ class Experimental:
 
     enable_simplefsdp_passes: bool = False
 
+    enable_inductor_aten_fx_overlap_scheduler: bool = False
+    enable_inductor_aten_fx_overlap_scheduler_bucketing: bool = False
+    enable_autoparallel_asynctp: bool = False
+
+
 @dataclass
 class Validation:
     enable: bool = False
