@@ -163,10 +163,12 @@ class WandBLogger(BaseLogger):
         if self.wandb.run is not None:
             self.wandb.finish()
 
+
 class LoggerContainer(BaseLogger):
     """Container to call all loggers enabled in the job config."""
+
     def __init__(self) -> None:
-        self._loggers : list[BaseLogger] = []
+        self._loggers: list[BaseLogger] = []
 
     def add_logger(self, logger_instance: BaseLogger) -> None:
         self._loggers.append(logger_instance)
@@ -182,6 +184,7 @@ class LoggerContainer(BaseLogger):
     def close(self) -> None:
         for logger_instance in self._loggers:
             logger_instance.close()
+
 
 def ensure_pp_loss_visible(
     parallel_dims: ParallelDims, job_config: JobConfig, color: Color
