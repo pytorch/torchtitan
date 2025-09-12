@@ -22,7 +22,7 @@ hf_assets_path = "./assets/hf/Qwen3-32B"
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 8e-4
 eps = 1e-8
 
 [lr_scheduler]
@@ -55,7 +55,7 @@ mode = "full"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
-enable=true
+enable=false
 components = ["model", "loss"]
 
 [float8]
