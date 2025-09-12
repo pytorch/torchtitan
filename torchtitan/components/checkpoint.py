@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import deepcopy
 import enum
 import functools
 import os
@@ -59,6 +60,7 @@ class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cache_state_dict = self._get_state_dict()
+        assert self.cache_state_dict['tok_embeddings.weight']._local_tensor.untyped_storage().data_ptr() == self.model[0].tok_embeddings.weight._local_tensor.untyped_storage().data_ptr()
 
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
@@ -67,10 +69,7 @@ class ModelWrapper(Stateful):
         return state_dict
 
     def state_dict(self) -> dict[str, Any]:
-        # import fbvscode
-        # fbvscode.set_trace()
-        # return self.cache_state_dict
-        return self._get_state_dict()
+        return self.cache_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -234,6 +233,11 @@ class CheckpointManager:
                 LR_SCHEDULER: lr_schedulers,
             }
         )
+        try:
+            assert self.states['model'].state_dict()['tok_embeddings.weight']._local_tensor.untyped_storage().data_ptr(), self.states[MODEL].model[0].tok_embeddings.weight._local_tensor.untyped_storage().data_ptr()
+        except:
+            import fbvscode
+            fbvscode.set_trace()
         self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False
@@ -463,18 +467,6 @@ class CheckpointManager:
             if MODEL in self.states:
                 # import fbvscode
                 # fbvscode.set_trace()
-                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
-                    full_param = param.full_tensor()
-                    ref_full_param = ref_param.full_tensor()
-                    local_param = param._local_tensor
-                    ref_local_param = ref_param._local_tensor
-                    try:
-                        # if torch.distributed.get_rank() != 3:
-                        assert torch.equal(local_param, ref_local_param)
-                        # assert torch.equal(full_param, ref_full_param)
-                    except:
-                        import fbvscode
-                        fbvscode.set_trace()
                 try:
                     assert torch.equal(state_dict['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
                 except:
@@ -486,18 +478,6 @@ class CheckpointManager:
                 except:
                     import fbvscode
                     fbvscode.set_trace()
-                for (param_name, param), (_, ref_param) in zip(self.model_parts[0].named_parameters(), self.ref_model_parts[0].named_parameters()):
-                    full_param = param.full_tensor()
-                    ref_full_param = ref_param.full_tensor()
-                    local_param = param._local_tensor
-                    ref_local_param = ref_param._local_tensor
-                    try:
-                        # if torch.distributed.get_rank() != 3:
-                        assert torch.equal(local_param, ref_local_param)
-                        # assert torch.equal(full_param, ref_full_param)
-                    except:
-                        import fbvscode
-                        fbvscode.set_trace()
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -553,12 +533,23 @@ class CheckpointManager:
                 )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
             else:
+                try:
+                    assert states['tok_embeddings.weight']._local_tensor.untyped_storage().data_ptr() == self.states[MODEL].model[0].tok_embeddings.weight._local_tensor.untyped_storage().data_ptr()
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
                 self.dcp_save(
                     states,
                     checkpoint_id=checkpoint_id,
                     async_mode=AsyncMode.DISABLED,
                     enable_garbage_collection=True,
                 )
+                try:
+                    assert torch.equal(self.states['model']._get_state_dict()['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+                    assert torch.equal(self.states['model'].state_dict()['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+                except:
+                    import fbvscode
+                    fbvscode.set_trace()
             self._purge_stale_checkpoints()
             # import fbvscode
             # fbvscode.set_trace()
@@ -786,10 +777,11 @@ class CheckpointManager:
         states_to_load = {
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
-
         states_to_load = self._flattened_model_states_sd(states_to_load)
 
         try:
+            assert torch.equal(self.states['model']._get_state_dict()['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
+            assert torch.equal(self.states['model'].state_dict()['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
             assert torch.equal(states_to_load['tok_embeddings.weight']._local_tensor, self.states[MODEL].model[0].tok_embeddings.weight._local_tensor)
         except:
             import fbvscode

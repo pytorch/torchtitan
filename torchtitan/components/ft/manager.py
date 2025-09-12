@@ -119,6 +119,7 @@ def maybe_semi_sync_training(
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
+    return nullcontext()
     semi_sync_method = ft_config.semi_sync_method
     if ft_config.enable and semi_sync_method is not None:
         from torchft import local_sgd

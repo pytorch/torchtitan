@@ -551,7 +551,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     fbvscode.set_trace()
 
             input_dict, labels = next(data_iterator)
+            try:
+                assert self.checkpointer.states['model'].state_dict()['tok_embeddings.weight']._local_tensor.untyped_storage().data_ptr() == self.model_parts[0].tok_embeddings.weight._local_tensor.untyped_storage().data_ptr()
+            except:
+                import fbvscode
+                fbvscode.set_trace()
             loss, ref_loss = self.forward_backward_step(input_dict, labels)
+            try:
+                assert self.checkpointer.states['model'].state_dict()['tok_embeddings.weight']._local_tensor.untyped_storage().data_ptr() == self.model_parts[0].tok_embeddings.weight._local_tensor.untyped_storage().data_ptr()
+            except:
+                import fbvscode
+                fbvscode.set_trace()
             accumulated_losses.append(loss.detach())
             ref_accumulated_losses.append(ref_loss.detach())
 
@@ -603,6 +613,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.ref_optimizers.step()
         self.ref_lr_schedulers.step()
 
+        # try:
+        #     assert torch.equal(self.checkpointer.states['model']._get_state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+        #     assert torch.equal(self.checkpointer.states['model'].state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+        # except:
+        #     import fbvscode
+        #     fbvscode.set_trace()
+
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
@@ -643,6 +660,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     @record
     def train(self):
         job_config = self.job_config
+
+        try:
+            assert torch.equal(self.checkpointer.states['model']._get_state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+            assert torch.equal(self.checkpointer.states['model'].state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+        except:
+            import fbvscode
+            fbvscode.set_trace()
 
         # self.checkpointer.load(step=job_config.checkpoint.load_step)
         # self.ref_checkpointer.load(step=job_config.checkpoint.load_step)
@@ -691,6 +715,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
+                    # try:
+                    #     assert torch.equal(self.checkpointer.states['model']._get_state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+                    #     assert torch.equal(self.checkpointer.states['model'].state_dict()['tok_embeddings.weight']._local_tensor, self.checkpointer.states['model'].model[0].tok_embeddings.weight._local_tensor)
+                    # except:
+                    #     import fbvscode
+                    #     fbvscode.set_trace()
                     self.train_step(data_iterator)
                 except DataloaderStopIteration:
                     logger.warning("Ran out of data; last step was canceled.")
