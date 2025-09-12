@@ -14,6 +14,8 @@ from torch.distributed._composable.replicate import replicate
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
+
+from torch.distributed.tensor.experimental._attention import _ContextParallel
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -67,8 +69,6 @@ def parallelize_llama(
         """
 
     use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
@@ -89,6 +89,17 @@ def parallelize_llama(
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
+
+    if parallel_dims.cp_enabled:
+        for block in model.layers.values():
+            parallelize_module(
+                module=block.attention.sdpa.attention_fn_wrapper,
+                device_mesh=world_mesh["cp"],
+                parallelize_plan=_ContextParallel(
+                    seq_dim=2,
+                    attention_type=_ContextParallel.AttentionType.FLEX,
+                ),
+            )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components

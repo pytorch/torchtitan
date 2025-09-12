@@ -15,6 +15,7 @@ from torch.distributed.tensor.experimental._attention import create_cp_block_mas
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
+    AuxOutput,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -26,6 +27,26 @@ from torchtitan.tools.utils import has_cuda_capability
 # batch. To record what it is initialized, FLEX_ATTN_MASK_T is used as the key to
 # track the initialized mask.
 FLEX_ATTN_MASK_T = tuple[str, int | None]
+
+
+class FlexAttentionWrapper(torch.nn.Module):
+    _flex_attn: ClassVar[Callable] = torch.compile(
+        flex_attention, mode="max-autotune-no-cudagraphs"
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, *args: object, **kwargs: object) -> [
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, AuxOutput],
+    ]:
+        # 1. _flex_attn has to be a class variable, otherwise there will
+        #    be multiple complied flex_attention, which can be slow.
+        # 2. `self._flex_attn` is not correct, `self` will be passed in
+        #    as the first argument, which will cause an error.
+        #    `FlexAttentionWrapper._flex_attn` is correct.
+        return FlexAttentionWrapper._flex_attn(*args, **kwargs)
 
 
 class FlexAttention(torch.nn.Module):
@@ -46,11 +67,6 @@ class FlexAttention(torch.nn.Module):
             to the keys within the same block.
     """
 
-    # We registered flex_attention related attributes as class variables as we
-    # need to amortize the cost of compilation.
-    flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
-    )
     compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     used_attn_mask_types: ClassVar[set[FLEX_ATTN_MASK_T]] = set()
     # Attention mask type to the created BlockMask.
@@ -71,6 +87,7 @@ class FlexAttention(torch.nn.Module):
             raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
         self.attn_mask_type = attn_mask_type
         self.fixed_block_size = fixed_block_size
+        self.attention_fn_wrapper = FlexAttentionWrapper()
 
         FlexAttention.used_attn_mask_types.add(self.mask_key)
 
@@ -86,7 +103,7 @@ class FlexAttention(torch.nn.Module):
         scale: float | None = None,
     ) -> torch.Tensor:
         block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
+        return self.attention_fn_wrapper(q, k, v, block_mask=block_mask, scale=scale)
 
     @staticmethod
     def _get_causal_mask_mod() -> _mask_mod_signature:
@@ -251,6 +268,11 @@ def init_attention_mask(
     # while we continue debugging accuracy issues. However, we want to evaluate
     # the user experience with CP enabled.
     if cp_mesh is not None:
+        from torch.distributed.tensor.experimental._attention import _DispatchMode
+
+        torch.distributed.tensor.experimental._attention._dispatch_mode = (
+            _DispatchMode.MODULE_WRAPPER
+        )
         FlexAttention.compiled_create_block_mask = functools.partial(
             create_cp_block_mask, device_mesh=cp_mesh
         )
