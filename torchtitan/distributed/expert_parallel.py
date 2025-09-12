@@ -241,6 +241,7 @@ def expert_parallel(func: Callable) -> Callable:
         w3: torch.Tensor,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         global TOKEN_GROUP_ALIGN_SIZE_M
         if isinstance(w1, DTensor):
@@ -270,7 +271,7 @@ def expert_parallel(func: Callable) -> Callable:
         input_shape = x.shape
         x = x[permuted_indices, :]
 
-        out = func(w1, w2, w3, x, num_tokens_per_expert)
+        out = func(w1, w2, w3, x, num_tokens_per_expert, **kwargs)
 
         out_unpermuted = out.new_empty(input_shape)
         out_unpermuted[permuted_indices, :] = out
