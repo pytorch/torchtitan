@@ -482,7 +482,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            no_grad_sync = _microbatch < self.gradient_accumulation_steps - 1
+            with dist_utils.no_grad_sync(self.model_parts, no_grad_sync):
+                loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
