@@ -35,33 +35,6 @@ from torchtitan.tools.profiling import (
 )
 
 from transformers.models.llama.modeling_llama import LlamaForCausalLM, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
-
-
-# NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
-# The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
-# which prevents subsequent proper initialization.
-def _initialize_weights_patched(self, module):
-    """
-    Patched version of _initialize_weights that skips initialization and setting
-    the _is_hf_initialized flag if the module is on a meta device.
-    """
-    if getattr(module, "_is_hf_initialized", False):
-        return
-
-    # Check if any parameter is on the meta device
-    for param in module.parameters(recurse=False):
-        if param.device.type == "meta":
-            return
-    
-    #TODO(3outeille): check if register bufffer is init 
-
-    # If not on a meta device, call the original weight initialization
-    self._init_weights(module)
-    module._is_hf_initialized = True
-
-
-PreTrainedModel._initialize_weights = _initialize_weights_patched
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -294,6 +267,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 if isinstance(model, LlamaForCausalLM):
+                    print("Now done with meta device, calling post_init")
+                    for m in model.modules():
+                        if hasattr(m, "_is_hf_initialized"):
+                            m._is_hf_initialized = False
                     model.post_init()
                 else:
                     model.init_weights(buffer_device=buffer_device)
