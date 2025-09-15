@@ -48,7 +48,7 @@ def _apply_op_sac(
     ac_config: ACConfig,
     *,
     base_fqn: str | None = None,
-    save_list: set[torch._ops.OpOverload],
+    op_sac_save_list: set[torch._ops.OpOverload],
 ) -> nn.Module:
     """Apply selective activation checkpointing to the module.
 
@@ -56,7 +56,7 @@ def _apply_op_sac(
         module (nn.Module): The module to apply selective activation checkpointing to.
         ac_config (ActivationCheckpoint): The activation checkpointing config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
-        save_list (set[torch._ops.OpOverload]): The list of ops to save instead
+        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
 
     Returns:
@@ -106,7 +106,7 @@ def _apply_op_sac(
                     return CheckpointPolicy.PREFER_RECOMPUTE
                 meta[mm_count_key] += 1
             # Saves output of all compute ops, except every second mm
-            to_save = func in save_list and not (
+            to_save = func in op_sac_save_list and not (
                 func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
             )
             return (
@@ -141,7 +141,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
     *,
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
-    save_list: set[torch._ops.OpOverload],
+    op_sac_save_list: set[torch._ops.OpOverload],
 ) -> nn.Module:
     """Apply SAC to the transformer block that uses FlexAttention.
 
@@ -151,7 +151,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         model_compile_enabled (bool): Whether model compilation is enabled.
             Defaults to False.
-        save_list (set[torch._ops.OpOverload]): The list of ops to save instead
+        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
 
     Returns:
@@ -177,28 +177,36 @@ def _apply_op_sac_to_transformer_block_with_flex(
         ),
     )
 
-    for name in ("feed_forward", "moe"):
-        if (m := getattr(module, name, None)) is not None:
-            module.register_module(
-                name,
-                _apply_op_sac(
-                    m,
-                    ac_config,
-                    base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
-                    save_list=save_list,
-                ),
+    def wrap_submodule(name: str, full_ac: bool = False) -> None:
+        submodule = getattr(module, name)
+        if full_ac:
+            submodule = _apply_full_ac(submodule, ac_config)
+        else:
+            submodule = _apply_op_sac(
+                submodule,
+                ac_config,
+                base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
+                op_sac_save_list=op_sac_save_list,
             )
-    if model_compile_enabled:
-        attention = _apply_op_sac(
-            module.attention,
-            ac_config,
-            base_fqn=f"{base_fqn}.attention" if base_fqn else "attention",
-            save_list=save_list,
-        )
-    else:
-        attention = _apply_full_ac(module.attention, ac_config)
-    module.register_module("attention", attention)
+        module.register_module(name, submodule)
 
+    if hasattr(module, "moe"):
+        wrap_submodule("moe", full_ac=False)
+        if model_compile_enabled:
+            wrap_submodule("attention", full_ac=False)
+        else:
+            wrap_submodule("attention", full_ac=True)
+    else:
+        if model_compile_enabled:
+            module = _apply_op_sac(
+                module,
+                ac_config,
+                base_fqn=base_fqn or "",
+                op_sac_save_list=op_sac_save_list,
+            )
+        else:
+            wrap_submodule("feed_forward", full_ac=False)
+            wrap_submodule("attention", full_ac=True)
     return module
 
 
@@ -209,7 +217,7 @@ def _apply_ac_to_transformer_block(
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
     use_flex_attn: bool = False,
-    save_list: set[torch._ops.OpOverload] | None = None,
+    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -230,18 +238,18 @@ def _apply_ac_to_transformer_block(
         )
 
     if use_op_sac:
-        save_list = save_list or set()
+        op_sac_save_list = op_sac_save_list or set()
         if use_flex_attn:
             return _apply_op_sac_to_transformer_block_with_flex(
                 module,
                 ac_config,
                 base_fqn=base_fqn,
                 model_compile_enabled=model_compile_enabled,
-                save_list=save_list,
+                op_sac_save_list=op_sac_save_list,
             )
         else:
             return _apply_op_sac(
-                module, ac_config, base_fqn=base_fqn, save_list=save_list
+                module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
             )
 
     return _apply_layer_sac(module, ac_config)
@@ -253,7 +261,7 @@ def apply_ac(
     *,
     model_compile_enabled: bool = False,
     use_flex_attn: bool = False,
-    save_list: set[torch._ops.OpOverload] | None = None,
+    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> None:
     """Apply activation checkpointing to the model.
 
@@ -266,7 +274,7 @@ def apply_ac(
         ac_config (ActivationCheckpoint): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
         use_flex_attn (bool): Whether flex attention is enabled for the model.
-        save_list (set[torch._ops.OpOverload]): The list of ops to save instead
+        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
     Returns:
         None
@@ -279,7 +287,7 @@ def apply_ac(
             base_fqn=f"layers.{layer_id}",
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=save_list,
+            op_sac_save_list=op_sac_save_list,
         )
         model.layers.register_module(layer_id, transformer_block)
 
