@@ -759,8 +759,7 @@ class CheckpointManager:
         self.dcp_save(
             states,
             checkpoint_id=self._create_checkpoint_id(curr_step),
-            async_mode=AsyncMode.DISA/dcp.load wit
-            BLED,
+            async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
         )
