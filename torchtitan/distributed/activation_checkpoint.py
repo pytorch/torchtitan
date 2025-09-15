@@ -168,12 +168,12 @@ def _apply_op_sac_to_transformer_block_with_flex(
             "torch.compile may be invalidated:\n"
             "1. If compile.enable is False, SAC will ignore any torch.compile "
             "inside the SAC region.\n"
-            "2. If compile.enable is True but the transformer block contains a MoE module.\n\n"
-            "For both cases, we will not wrap the entire TransformerBlock with SAC: \n"
+            "2. If compile.enable is True but the transformer block contains an MoE module.\n\n"
+            "For both cases, we will not wrap the entire TransformerBlock with SAC:\n"
             "   - For case 1: SAC will be used for MoE and FeedForward modules, "
             "while full AC will be used for the Attention module.\n"
-            "   - For case 2: SAC will be used for MoE, FeedForward, and Attention modules, "
-            "but they will be wrapped separately.\n"
+            "   - For case 2: SAC will be applied to MoE and Attention modules if the block "
+            "is sparse. But we still apply SAC to an entire dense block.\n"
         ),
     )
 
