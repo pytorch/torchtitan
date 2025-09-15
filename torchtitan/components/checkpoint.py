@@ -434,7 +434,7 @@ class CheckpointManager:
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_id)
 
             begin_load = time.monotonic()
-            logger.info("Starting dcp.load with HuggingFaceStorageReader")
+            logger.info(f"Starting dcp.load with {hf_storage_reader}")
             dcp.load(
                 hf_state_dict,
                 storage_reader=hf_storage_reader,
@@ -759,7 +759,8 @@ class CheckpointManager:
         self.dcp_save(
             states,
             checkpoint_id=self._create_checkpoint_id(curr_step),
-            async_mode=AsyncMode.DISABLED,
+            async_mode=AsyncMode.DISA/dcp.load wit
+            BLED,
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
         )

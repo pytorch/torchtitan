@@ -89,13 +89,11 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
             # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
             BLOCK_SIZE = 128
-            return (
-                QuantizedHuggingFaceStorageReader(
-                    path=path,
-                    target_dtype=torch.float32,
-                    block_size=BLOCK_SIZE,
-                    thread_count=8,
-                ),
+            return QuantizedHuggingFaceStorageReader(
+                path=path,
+                target_dtype=torch.float32,
+                block_size=BLOCK_SIZE,
+                thread_count=8,
             )
         else:
             return HuggingFaceStorageReader(path)
