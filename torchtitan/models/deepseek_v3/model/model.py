@@ -337,7 +337,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             bias=False,
         )
         self.model_args = model_args
-        self.init_weights()
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
