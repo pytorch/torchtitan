@@ -378,8 +378,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
-        self.init_weights()
-
     def init_weights(
         self,
         buffer_device: torch.device | None = None,

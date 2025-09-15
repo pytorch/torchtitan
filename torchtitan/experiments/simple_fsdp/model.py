@@ -11,7 +11,6 @@ from .simple_fsdp import disable_data_parallel
 class SimpleFSDPTransformer(Transformer):
     def __init__(self, model_args: TransformerModelArgs):
         super().__init__(model_args)
-        self.init_weights()
 
     def init_weights(self, *args, **kwargs):
         with disable_data_parallel():
