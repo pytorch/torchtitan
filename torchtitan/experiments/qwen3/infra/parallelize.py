@@ -33,7 +33,7 @@ from torchtitan.tools.logging import logger
 
 
 # for selective op activation checkpointing
-_save_list = {
+_op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
@@ -51,7 +51,6 @@ def parallelize_qwen3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-
     world_mesh = parallel_dims.world_mesh
     assert (
         job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
@@ -114,7 +113,7 @@ def parallelize_qwen3(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=_save_list,
+            op_sac_save_list=_op_sac_save_list,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
