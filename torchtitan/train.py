@@ -267,10 +267,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model.to_empty(device=init_device)
             with torch.no_grad():
                 if isinstance(model, LlamaForCausalLM):
-                    print("Now done with meta device, calling post_init")
-                    for m in model.modules():
-                        if hasattr(m, "_is_hf_initialized"):
-                            m._is_hf_initialized = False
                     model.post_init()
                 else:
                     model.init_weights(buffer_device=buffer_device)

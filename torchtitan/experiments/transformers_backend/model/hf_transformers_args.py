@@ -28,8 +28,7 @@ def _initialize_weights_patched(self, module):
     if getattr(module, "_is_hf_initialized", False):
         return
 
-    # Check if any parameter is on the meta device
-    for param in module.parameters(recurse=False):
+    for param in module.parameters(recurse=True):
         if param.device.type == "meta":
             return
     
