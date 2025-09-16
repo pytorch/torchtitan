@@ -17,7 +17,7 @@ run_tt() {
     echo "##############################################"
     echo "### Running TorchTitan (native) training ###"
     echo "##############################################"
-    TT_CONFIG="/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/torchtitan/models/llama3/train_configs/my_debug_model.toml"
+    TT_CONFIG="/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/torchtitan/experiments/transformers_backend/configs/debug_1_gpu_tt.toml"
 
     # Use CUDA_VISIBLE_DEVICES=0 for TT run
     CUDA_VISIBLE_DEVICES=0 \
@@ -44,9 +44,11 @@ TT_LOG="tt_run.log"
 HF_LOG="hf_run.log"
 DIFF_LOG="run_diff.log"
 
-run_tt "$@" 2>&1 | tee ${TT_LOG}
-# run_hf "$@" 2>&1 | tee ${HF_LOG}
-run_tt "$@" 2>&1 | tee ${HF_LOG}
+export DEBUG_JSON_PATH="/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/torchtitan/experiments/transformers_backend/debug_mode_hf"
+run_hf "$@" 2>&1 | tee ${HF_LOG} || true
+export DEBUG_JSON_PATH="/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/torchtitan/experiments/transformers_backend/debug_mode_tt"
+run_tt "$@" 2>&1 | tee ${TT_LOG} || true
+# run_tt "$@" 2>&1 | tee ${HF_LOG}
 
 
 # Filter logs to remove noisy differences
