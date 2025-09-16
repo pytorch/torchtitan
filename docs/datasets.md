@@ -48,7 +48,7 @@ DATASETS = {
     "wikipedia": DatasetConfig(
         path="wikipedia",  # default HuggingFace dataset path
         loader=load_wikipedia_dataset,
-        text_processor=process_wikipedia_text,
+        sample_processor=process_wikipedia_text,
     ),
 }
 ```
@@ -66,7 +66,7 @@ That's it! Your custom dataset is now ready to use with `torchtitan`.
 - The DatasetConfig contains all necessary components for a dataset:
   - `path`: The default path to the dataset (can be overridden during training)
   - `loader`: Function to load the dataset
-  - `text_processor`: Function to process individual samples
+  - `sample_processor`: Function to process individual samples
 - The loader function should return a HuggingFace dataset object
 - The processor function should return a string that combines the relevant fields from your dataset
 - Use `streaming=True` for large datasets to manage memory efficiently
