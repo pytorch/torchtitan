@@ -63,7 +63,7 @@ initial_load_in_hf = true
 initial_load_path = "/home/jianiw/tmp/mffuse/deepseek-v3/DeepSeek-V3.1-Base"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]

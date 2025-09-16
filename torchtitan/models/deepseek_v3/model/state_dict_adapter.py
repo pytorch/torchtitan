@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import logging
 import re
 import time
 from typing import Any
@@ -93,7 +94,7 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 path=path,
                 target_dtype=torch.float32,
                 block_size=BLOCK_SIZE,
-                thread_count=8,
+                thread_count=4,
             )
         else:
             return HuggingFaceStorageReader(path)
@@ -471,6 +472,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                     hf_state_dict.update(local_expert_fqn)
 
                 else:
+                    logger.info(
+                        f"Using the old torch.split for value {new_abstract_key} "
+                    )
                     # keep this path for offline conversion
                     split_values = self._split_experts_weights(
                         value, self.model_args.moe_args.num_experts
@@ -536,6 +540,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                         value.device_mesh,
                     )
                 else:  # keep this path to be compatibile with offline conversion
+                    logger.info(
+                        f"Using the old torch.split for value {titan_abstract_key} "
+                    )
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,
