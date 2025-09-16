@@ -89,6 +89,7 @@ def _init_weights_patched(self, module):
         )
         if module.bias is not None:
             module.bias.data.zero_()
+
     elif isinstance(module, nn.Embedding):
         std = config.initializer_range
         module.weight.data.normal_(mean=0.0, std=std)
@@ -112,88 +113,172 @@ PreTrainedModel._initialize_weights = _initialize_weights_patched
 
 @dataclass
 class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
-    # Torchtitan naming
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: int = 128256
-    multiple_of: int = 256
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
+    """
+    Configuration class that bridges TorchTitan and HuggingFace Transformers naming conventions.
     
-    max_seq_len: int = 2048
-    depth_init: bool = True
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
-    eos_id: int = 0
+    Uses properties to provide TorchTitan-style access while maintaining HuggingFace compatibility.
+    """
     
-    # HF args
-    attn_implementation: str = "sdpa"
+    def __init__(
+        self,
+        # TorchTitan args
+        dim: int = 4096,
+        n_layers: int = 32,
+        n_heads: int = 32,
+        n_kv_heads: Optional[int] = None,
+        vocab_size: int = 128256,
+        multiple_of: int = 256,
+        ffn_dim_multiplier: Optional[float] = None,
+        norm_eps: float = 1e-5,
+        rope_theta: float = 10000,
+        max_seq_len: int = 2048,
+        depth_init: bool = True,
+        use_flex_attn: bool = False,
+        attn_mask_type: str = "causal",
+        eos_id: int = 0,
+        # HuggingFace specific args
+        attn_implementation: str = "sdpa",
+        **kwargs
+    ):
+        # Map TorchTitan arguments to HuggingFace arguments for parent class initialization
+        hf_config_dict = dict(
+            hidden_size=dim,
+            num_hidden_layers=n_layers,
+            num_attention_heads=n_heads,
+            num_key_value_heads=n_kv_heads,
+            vocab_size=vocab_size,
+            rms_norm_eps=norm_eps,
+            rope_theta=rope_theta,
+            max_position_embeddings=max_seq_len,
+            eos_token_id=eos_id,
+            **kwargs
+        )
+        
+        super().__init__(**hf_config_dict)
+        
+        # Store TorchTitan-specific args (no HF equivalent)
+        self.multiple_of = multiple_of
+        self.ffn_dim_multiplier = ffn_dim_multiplier
+        self.depth_init = depth_init
+        self.use_flex_attn = use_flex_attn
+        self.attn_mask_type = attn_mask_type
+        
+        # HuggingFace specific args
+        self.attn_implementation = attn_implementation
 
-    passed_args: dict = field(init=False, repr=False, default_factory=dict)
+        self._passed_args = dict(
+            dim=dim,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            vocab_size=vocab_size,
+            multiple_of=multiple_of,
+            ffn_dim_multiplier=ffn_dim_multiplier,
+            norm_eps=norm_eps,
+            rope_theta=rope_theta,
+            max_seq_len=max_seq_len,
+            depth_init=depth_init,
+            use_flex_attn=use_flex_attn,
+            attn_mask_type=attn_mask_type,
+            eos_id=eos_id,
+            attn_implementation=attn_implementation,
+            **kwargs
+        )
+
+    @property
+    def dim(self) -> int:
+        """TorchTitan: Model dimension (alias for HF hidden_size)"""
+        return self.hidden_size
+    
+    @dim.setter
+    def dim(self, value: int):
+        self.hidden_size = value
+    
+    @property
+    def n_layers(self) -> int:
+        """TorchTitan: Number of layers (alias for HF num_hidden_layers)"""
+        return self.num_hidden_layers
+    
+    @n_layers.setter
+    def n_layers(self, value: int):
+        self.num_hidden_layers = value
+    
+    @property
+    def n_heads(self) -> int:
+        """TorchTitan: Number of attention heads (alias for HF num_attention_heads)"""
+        return self.num_attention_heads
+    
+    @n_heads.setter
+    def n_heads(self, value: int):
+        self.num_attention_heads = value
+    
+    @property
+    def n_kv_heads(self) -> Optional[int]:
+        """TorchTitan: Number of key-value heads (alias for HF num_key_value_heads)"""
+        return self.num_key_value_heads
+    
+    @n_kv_heads.setter
+    def n_kv_heads(self, value: Optional[int]):
+        self.num_key_value_heads = value
+    
+    @property
+    def norm_eps(self) -> float:
+        """TorchTitan: Layer norm epsilon (alias for HF rms_norm_eps)"""
+        return self.rms_norm_eps
+    
+    @norm_eps.setter
+    def norm_eps(self, value: float):
+        self.rms_norm_eps = value
+    
+    @property
+    def max_seq_len(self) -> int:
+        """TorchTitan: Maximum sequence length (alias for HF max_position_embeddings)"""
+        return self.max_position_embeddings
+    
+    @max_seq_len.setter
+    def max_seq_len(self, value: int):
+        self.max_position_embeddings = value
+    
+    @property
+    def eos_id(self) -> int:
+        """TorchTitan: End of sequence token ID (alias for HF eos_token_id)"""
+        return self.eos_token_id
+    
+    @eos_id.setter
+    def eos_id(self, value: int):
+        self.eos_token_id = value
 
     def update_from_config(self, job_config: JobConfig):
-        
+        # Load HF config (overwrites our HF attributes)
         hf_model_config = LlamaConfig.from_pretrained(
             job_config.model.name,
             attn_implementation=self.attn_implementation,
         )
-        # n_layers = 32
+
         self.__dict__.update(hf_model_config.__dict__)
-
-        # num_hidden_layers = 16
-
-        # Update TT args with HF args (for keys that exist in both but differ in namings)
-        self.dim = self.hidden_size
-        self.n_layers = self.num_hidden_layers
-        self.n_heads = self.num_attention_heads
-        self.n_kv_heads = self.num_key_value_heads
-        self.norm_eps = self.rms_norm_eps
-        self.max_seq_len = self.max_position_embeddings
-        self.eos_id = self.eos_token_id
-
-        # n_layers = 16
         
-        self.__dict__.update(self.passed_args)
+        # Update our attributes with the passed args from flavors
+        for key, value in self._passed_args.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
         
-        # n_layers = 2
-        # num_hidden_layers = 16
-
-        # Update HF args with TT override args because HF modeling uses HF args and not TT args
-        # TODO(3outeille): find a cleaner way to handle the mapping
-        self.hidden_size = self.dim
-        self.num_hidden_layers = self.n_layers
-        self.num_attention_heads = self.n_heads
-        self.num_key_value_heads = self.n_kv_heads
-        self.rms_norm_eps = self.norm_eps
-        self.max_position_embeddings = self.max_seq_len
-        self.eos_token_id = self.eos_id
-        
-        # Match torchtitan parameter counts
+        # Configure HF-specific settings to match TorchTitan settings
         self.tie_word_embeddings = False
         self.attention_bias = False
         self.mlp_bias = False
-
-        # Match torchtitan intermediate size calculation
-        ffn_hidden_size = 4 * self.hidden_size
+        self.use_cache = False
+        self.initializer_range = 1.0  # use as std for normal init in embedding
+        
+        ffn_hidden_size = 4 * self.dim
         ffn_hidden_size = int(2 * ffn_hidden_size / 3)
         if self.ffn_dim_multiplier is not None:
             ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
         self.intermediate_size = self.multiple_of * (
             (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
         )
-        # Forced it as HF has config.head_dim and the modeling retrieves it instead of doing config.hidden_size // config.num_attention_heads
+        
         self.head_dim = self.dim // self.num_attention_heads
         
-        # n_layers = 2
-        # num_hidden_layers = 2
-
-        self.use_cache = False
-
-        # HF numerical stability matching
-        self.initializer_range = 1.0 # use as std for normal init in embedding
         return self
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
