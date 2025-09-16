@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 from dataclasses import dataclass
 from typing import Optional
 
@@ -16,6 +17,8 @@ from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
 from transformers.modeling_utils import PreTrainedModel
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
 
 # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
 # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
@@ -329,7 +332,6 @@ class HFTransformerModel(nn.Module):
         model_cls = globals().get(model_class_name, None)
         if model_cls is None:
             try:
-                import importlib
                 transformers_mod = importlib.import_module("transformers")
                 model_cls = getattr(transformers_mod, model_class_name)
             except (ImportError, AttributeError) as e:
@@ -349,7 +351,10 @@ class HFTransformerModel(nn.Module):
             raise AttributeError("Could not find layers in the model. Please check the model structure.")
 
     def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
+        output = self.model(*args, **kwargs)
+        if isinstance(output, CausalLMOutputWithPast):
+            return output.logits
+        return output
 
     def init_weights(self, *args, **kwargs):
         self.model.post_init()

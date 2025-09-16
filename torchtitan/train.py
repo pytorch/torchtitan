@@ -464,9 +464,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs)
-                    #NOTE(3outeille): just trying to make it work for now. Will refactor later.
-                    if isinstance(pred, CausalLMOutputWithPast):
-                        pred = pred.logits
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
