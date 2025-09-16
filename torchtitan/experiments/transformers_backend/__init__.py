@@ -16,14 +16,14 @@ from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize_hf_transformers import parallelize_hf_transformers
-from .model.hf_transformers_args import HFTransformerModelArgs
+from .model.hf_transformers_args import HFTransformerModelArgs, HFTransformerModel
 
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 
 __all__ = [
     "HFTransformerModelArgs",
-    "LlamaForCausalLM", #TODO(3outeille): later use AutoModelForCausalLM
+    "HFTransformerModel",
     "hf_transformers_configs",
 ]
 
@@ -52,7 +52,7 @@ flavors = {
 
 hf_train_spec = TrainSpec(
     name="hf_auto_model",
-    model_cls=LlamaForCausalLM,
+    model_cls=HFTransformerModel,
     model_args=flavors,
     parallelize_fn=parallelize_hf_transformers,
     pipelining_fn=pipeline_llama,

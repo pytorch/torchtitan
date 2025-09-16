@@ -266,10 +266,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 torch.utils.deterministic.fill_uninitialized_memory = False
             model.to_empty(device=init_device)
             with torch.no_grad():
-                if isinstance(model, LlamaForCausalLM):
-                    model.post_init()
-                else:
-                    model.init_weights(buffer_device=buffer_device)
+                model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]

@@ -16,6 +16,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
 # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
@@ -32,8 +33,6 @@ def _initialize_weights_patched(self, module):
         if param.device.type == "meta":
             return
     
-    #TODO(3outeille): check if register bufffer is init 
-
     # If not on a meta device, call the original weight initialization
     self._init_weights(module)
     module._is_hf_initialized = True
@@ -336,3 +335,39 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
         l, h, q, t = self.n_layers, self.n_heads, self.dim // self.n_heads, seq_len
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
         return nparams, num_flops_per_token
+
+
+class HFTransformerModel(LlamaForCausalLM):
+    def __init__(self, model_args: HFTransformerModelArgs):
+        super().__init__(model_args)
+
+    def init_weights(self, *args, **kwargs):
+        # Taken from transformers.modeling_utils.PreTrainedModel.init_weights
+        super().init_weights()
+        self._backward_compatibility_gradient_checkpointing()
+
+        # Make sure the modules correctly exist if the flag is active
+        if self._keep_in_fp32_modules is not None or self._keep_in_fp32_modules_strict is not None:
+            all_parameters = {name for name, _ in self.named_parameters() if len(name) > 0}
+            unique_module_names = set()
+            # Get all unique module names in the module graph, without the prefixes
+            for param in all_parameters:
+                unique_module_names.update(
+                    [name for name in param.split(".") if not name.isnumeric() and name not in ["weight", "bias"]]
+                )
+            # Check that every module in the keep_in_fp32 list is part of the module graph
+            if self._keep_in_fp32_modules is not None:
+                for module in self._keep_in_fp32_modules:
+                    if module not in unique_module_names:
+                        raise ValueError(
+                            f"{module} was specified in the `_keep_in_fp32_modules` list, but is not part of the modules in"
+                            f" {self.__class__.__name__}"
+                        )
+
+            if self._keep_in_fp32_modules_strict is not None:
+                for module in self._keep_in_fp32_modules_strict:
+                    if module not in unique_module_names:
+                        raise ValueError(
+                            f"{module} was specified in the `_keep_in_fp32_modules_strict` list, but is not part of the modules in"
+                            f" {self.__class__.__name__}"
+                        )
