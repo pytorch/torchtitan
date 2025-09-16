@@ -636,7 +636,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.metrics_processor:
             self.metrics_processor.close()
 
-
+import fbvscode
+fbvscode.attach_debugger()
 if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
