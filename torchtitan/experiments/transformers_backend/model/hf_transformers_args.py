@@ -4,19 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
-from typing import Optional, Union
-import os
+from dataclasses import dataclass
+from typing import Optional
 
 from torch import nn
 from torchtitan.config import JobConfig
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from transformers.models.llama.configuration_llama import LlamaConfig
-
-from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP
-from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers.modeling_utils import PreTrainedModel
+from transformers import AutoConfig
+from transformers.configuration_utils import PretrainedConfig
 
 # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
 # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
@@ -111,7 +110,7 @@ PreTrainedModel._init_weights = _init_weights_patched
 PreTrainedModel._initialize_weights = _initialize_weights_patched
 
 @dataclass
-class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
+class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     """
     Configuration class that bridges TorchTitan and HuggingFace Transformers naming conventions.
     
@@ -138,23 +137,7 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
         # HuggingFace specific args
         attn_implementation: str = "sdpa",
         **kwargs
-    ):
-        # Map TorchTitan arguments to HuggingFace arguments for parent class initialization
-        hf_config_dict = dict(
-            hidden_size=dim,
-            num_hidden_layers=n_layers,
-            num_attention_heads=n_heads,
-            num_key_value_heads=n_kv_heads,
-            vocab_size=vocab_size,
-            rms_norm_eps=norm_eps,
-            rope_theta=rope_theta,
-            max_position_embeddings=max_seq_len,
-            eos_token_id=eos_id,
-            **kwargs
-        )
-        
-        super().__init__(**hf_config_dict)
-        
+    ):  
         # Store TorchTitan-specific args (no HF equivalent)
         self.multiple_of = multiple_of
         self.ffn_dim_multiplier = ffn_dim_multiplier
@@ -249,7 +232,7 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
 
     def update_from_config(self, job_config: JobConfig):
         # Load HF config (overwrites our HF attributes)
-        hf_model_config = LlamaConfig.from_pretrained(
+        hf_model_config = AutoConfig.from_pretrained(
             job_config.model.name,
             attn_implementation=self.attn_implementation,
         )
@@ -337,37 +320,36 @@ class HFTransformerModelArgs(LlamaConfig, BaseModelArgs):
         return nparams, num_flops_per_token
 
 
-class HFTransformerModel(LlamaForCausalLM):
+class HFTransformerModel(nn.Module):
     def __init__(self, model_args: HFTransformerModelArgs):
-        super().__init__(model_args)
+        super().__init__()
+        
+        # Try to import the model class dynamically from the transformers library if not found in globals
+        model_class_name = model_args.architectures[0]
+        model_cls = globals().get(model_class_name, None)
+        if model_cls is None:
+            try:
+                import importlib
+                transformers_mod = importlib.import_module("transformers")
+                model_cls = getattr(transformers_mod, model_class_name)
+            except (ImportError, AttributeError) as e:
+                raise ImportError(
+                    f"Could not find model class '{model_class_name}' in globals or transformers. "
+                    f"Make sure the class is available. Original error: {e}"
+                )
+        self.model = model_cls(config=model_args)
+
+    @property
+    def layers(self):
+        """Returns the model's layers, handling different Hugging Face model structures."""
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):  # Llama-like
+            return self.model.model.layers
+        else:
+            # Add more cases here if needed for other model architectures
+            raise AttributeError("Could not find layers in the model. Please check the model structure.")
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
 
     def init_weights(self, *args, **kwargs):
-        # Taken from transformers.modeling_utils.PreTrainedModel.init_weights
-        super().init_weights()
-        self._backward_compatibility_gradient_checkpointing()
-
-        # Make sure the modules correctly exist if the flag is active
-        if self._keep_in_fp32_modules is not None or self._keep_in_fp32_modules_strict is not None:
-            all_parameters = {name for name, _ in self.named_parameters() if len(name) > 0}
-            unique_module_names = set()
-            # Get all unique module names in the module graph, without the prefixes
-            for param in all_parameters:
-                unique_module_names.update(
-                    [name for name in param.split(".") if not name.isnumeric() and name not in ["weight", "bias"]]
-                )
-            # Check that every module in the keep_in_fp32 list is part of the module graph
-            if self._keep_in_fp32_modules is not None:
-                for module in self._keep_in_fp32_modules:
-                    if module not in unique_module_names:
-                        raise ValueError(
-                            f"{module} was specified in the `_keep_in_fp32_modules` list, but is not part of the modules in"
-                            f" {self.__class__.__name__}"
-                        )
-
-            if self._keep_in_fp32_modules_strict is not None:
-                for module in self._keep_in_fp32_modules_strict:
-                    if module not in unique_module_names:
-                        raise ValueError(
-                            f"{module} was specified in the `_keep_in_fp32_modules_strict` list, but is not part of the modules in"
-                            f" {self.__class__.__name__}"
-                        )
+        self.model.post_init()

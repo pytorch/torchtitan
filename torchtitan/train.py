@@ -34,7 +34,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
-from transformers.models.llama.modeling_llama import LlamaForCausalLM, CausalLMOutputWithPast
+from transformers.models.llama.modeling_llama import CausalLMOutputWithPast
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
