@@ -304,10 +304,10 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def _apply_act_offloading_to_transformer_block(module: nn.Module, ao_config):
+def _apply_act_offloading_to_transformer_block(module: nn.Module, offloading_stream: torch.cuda.Stream, ao_config):
     offload_context = contextlib.nullcontext
     if ao_config.mode == "multistream":
-        offload_context = functools.partial(activation_offload_with_overlap, module, ao_config.offload_ratio)
+        offload_context = functools.partial(activation_offload_with_overlap, module, offloading_stream, ao_config.offload_ratio)
 
     original_forward = module.forward
     def new_forward(*args, **kwargs):
@@ -320,8 +320,9 @@ def _apply_act_offloading_to_transformer_block(module: nn.Module, ao_config):
 
 def apply_ao(model: nn.Module, ao_config):
     """Apply multistream activation offloading to the model"""
+    offloading_stream = torch.cuda.Stream()
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, ao_config)
+        transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, offloading_stream, ao_config)
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ao_config.mode} activation offloading to the model")

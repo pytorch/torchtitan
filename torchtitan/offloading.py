@@ -30,7 +30,7 @@ class UnpackInfo(NamedTuple):
 # TODO: Remove these from global namespace and register on modules. Consider
 # using module state as identifier instead of int ID.
 # Used or overlapping H2D/D2H copy with compute
-offload_stream: torch.cuda.Stream = torch.cuda.Stream()
+# offload_stream: torch.cuda.Stream = torch.cuda.Stream()
 # Used for module ordering
 module_id_to_module: dict[int, Module] = {}
 next_module_id = 0
@@ -61,7 +61,7 @@ class activation_offload_with_overlap(saved_tensors_hooks):
 
     """
 
-    def __init__(self, module: Module, offload_ratio: float = 1.0) -> None:
+    def __init__(self, module: Module, offload_stream: torch.cuda.Stream, offload_ratio: float = 1.0) -> None:
         global next_module_id
 
         module_id = next_module_id
@@ -72,6 +72,7 @@ class activation_offload_with_overlap(saved_tensors_hooks):
         self.offload_ratio = max(0.0, min(1.0, offload_ratio))
         self.tensors_offloaded = 0
         self.tensors_kept_on_gpu = 0
+        self.offload_stream = offload_stream
 
         # logger.info(f"This is module {id(module):#x}, {module_id}.")
 
@@ -112,12 +113,12 @@ class activation_offload_with_overlap(saved_tensors_hooks):
                 module_to_free = module_id_to_module[module_id_to_free]
                 self.free_packed_device_tensors(module_to_free)
 
-            offload_stream.wait_stream(current_stream)
-            with torch.cuda.stream(offload_stream):
+            self.offload_stream.wait_stream(current_stream)
+            with torch.cuda.stream(self.offload_stream):
                 # logger.info(f"Copying activation tensor of {num_bytes} bytes, size = {sizes}, dtype = {device_tensor.dtype} to CPU...")
                 cpu_tensor = device_tensor.to(torch.device("cpu"), non_blocking=True)
                 # logger.info(f"Record d2h event.")
-                d2h_event = offload_stream.record_event()
+                d2h_event = self.offload_stream.record_event()
                 self.tensors_offloaded += 1
 
             module_to_cpu_tensors[module].append(cpu_tensor)
@@ -153,7 +154,7 @@ class activation_offload_with_overlap(saved_tensors_hooks):
 
             if cpu_tensor in cpu_tensor_to_unpack_info:  # prefetched
                 event, device_tensor = cpu_tensor_to_unpack_info[cpu_tensor]
-                offload_stream.wait_event(event)
+                self.offload_stream.wait_event(event)
                 del cpu_tensor_to_unpack_info[cpu_tensor]
             else:
                 device_tensor = torch.empty_like(cpu_tensor, device=device)
@@ -166,11 +167,11 @@ class activation_offload_with_overlap(saved_tensors_hooks):
                         torch.empty_like(_cpu_tensor, device=device),
                     )
                 del module_to_cpu_tensors[module]
-                offload_stream.wait_stream(current_stream)
+                self.offload_stream.wait_stream(current_stream)
 
-            with torch.cuda.stream(offload_stream):
+            with torch.cuda.stream(self.offload_stream):
                 device_tensor.copy_(cpu_tensor, non_blocking=True)
-            current_stream.wait_stream(offload_stream)
+            current_stream.wait_stream(self.offload_stream)
 
             return device_tensor
 
