@@ -9,7 +9,7 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
+from torch.distributed._composable.replicate_with_fsdp import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
@@ -135,11 +135,13 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
+        # if world_mesh.ndim > 1:
+        #    raise RuntimeError("DDP has not supported > 1D parallelism")
+
+        dp_mesh_dim_names = ("dp_replicate", "dp_shard")
         apply_ddp(
             model,
-            world_mesh,
+            world_mesh[tuple(dp_mesh_dim_names)],
             enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
@@ -328,6 +330,6 @@ def apply_ddp(
         else:
             torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    replicate(model, device_mesh=dp_mesh)
 
     logger.info("Applied DDP to the model")

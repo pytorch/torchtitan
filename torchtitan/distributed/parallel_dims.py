@@ -151,7 +151,9 @@ class ParallelDims:
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
         ):
-            if d > 1:
+            # Include dp_shard dimension even if it equals 1 when replicate > 1
+            # to make device_mesh compatible with replicate function
+            if d > 1 or (name == "dp_shard" and self.dp_replicate > 1):
                 dims.append(d)
                 names.append(name)
 
