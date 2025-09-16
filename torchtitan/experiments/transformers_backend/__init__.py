@@ -52,7 +52,4 @@ hf_train_spec = TrainSpec(
     build_loss_fn=build_cross_entropy_loss,
 )
 
-# Register multiple train_specs under the same name
 register_train_spec(hf_train_spec)
-register_train_spec(dataclasses.replace(hf_train_spec, name="meta-llama/Llama-3.2-3B"))
-register_train_spec(dataclasses.replace(hf_train_spec, name="meta-llama/Llama-3.2-1B"))

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
+import dataclasses
 from dataclasses import dataclass
 from typing import Mapping, TypeAlias
 
@@ -69,8 +70,14 @@ def register_train_spec(train_spec: TrainSpec) -> None:
 
 def get_train_spec(name: str) -> TrainSpec:
     global _train_specs
-    if name not in _train_specs:
+
+    if "/" in name: # HF model (dynamic loading)
+        hf_spec = _train_specs["hf_auto_model"]
+        new_spec = dataclasses.replace(hf_spec, name=name)
+        _train_specs[name] = new_spec
+    elif name not in _train_specs:  # Torchtitan
         raise ValueError(f"Model {name} is not registered.")
+
     return _train_specs[name]
 
 
