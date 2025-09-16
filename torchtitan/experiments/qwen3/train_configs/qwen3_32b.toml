@@ -1,8 +1,8 @@
-# NOTE: this toml config is a preset for 8 H100 GPUs.
+# NOTE: this toml config is a preset for 8 H100 GPUs (with 96GiB memory).
 
 [job]
 dump_folder = "./outputs"
-description = "Qwen 3 32B training"
+description = "Qwen3 32B training"
 
 [profiling]
 enable_profiling = false
@@ -10,7 +10,7 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 100
+log_freq = 10
 enable_tensorboard = false
 save_tb_folder = "tb"
 
