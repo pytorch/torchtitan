@@ -10,7 +10,8 @@ import torch
 from datasets import load_dataset
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import ConfigManager
-from torchtitan.datasets.hf_datasets import build_hf_dataloader, DatasetConfig, DATASETS
+from torchtitan.datasets import DatasetConfig
+from torchtitan.datasets.hf_datasets import build_hf_dataloader, DATASETS
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
             loader=lambda path: load_dataset(path, split="train").to_iterable_dataset(
                 num_shards=4
             ),
-            text_processor=lambda sample: sample["text"],
+            sample_processor=lambda sample: sample["text"],
         )
 
     def tearDown(self):
