@@ -68,8 +68,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -110,7 +108,7 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
+            use_flex_attn=getattr(model.model_args, "use_flex_attn", False),
             save_list=_save_list,
         )
 

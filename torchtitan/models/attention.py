@@ -37,7 +37,9 @@ class FlexAttentionWrapper(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, *args: object, **kwargs: object) -> [
+    def forward(
+        self, *args: object, **kwargs: object
+    ) -> [
         torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         tuple[torch.Tensor, AuxOutput],
     ]:
@@ -47,6 +49,14 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._flex_attn` is correct.
         return FlexAttentionWrapper._flex_attn(*args, **kwargs)
+
+
+class SDPAWrapper(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
+        return F.scaled_dot_product_attention(*args, **kwargs)
 
 
 class FlexAttention(torch.nn.Module):
@@ -214,6 +224,7 @@ class ScaledDotProductAttention(torch.nn.Module):
             )
 
         ScaledDotProductAttention._init_backend()
+        self.attention_fn_wrapper = SDPAWrapper()
 
     @classmethod
     def _init_backend(cls) -> None:
@@ -238,7 +249,7 @@ class ScaledDotProductAttention(torch.nn.Module):
     ) -> torch.Tensor:
         assert self.backends, "SDPA Backends should not be empty."
         with sdpa_kernel(self.backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
+            return self.attention_fn_wrapper(q, k, v, is_causal=True, scale=scale)
 
 
 def build_attention(
@@ -263,7 +274,6 @@ def init_attention_mask(
     eos_id: int | None,
     cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
 ) -> None:
-
     # This is not functional yet because we currently gate the use of Flex + CP
     # while we continue debugging accuracy issues. However, we want to evaluate
     # the user experience with CP enabled.
