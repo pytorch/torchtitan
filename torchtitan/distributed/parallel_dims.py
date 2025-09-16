@@ -102,11 +102,7 @@ class ParallelDims:
             # helps the MoE layers do mixed precision training
             # dp_shard_in_ep is included even if it equals 1 when replicate > 1
             # to make device_mesh compatible with replicate function
-            if (
-                d > 1
-                or name == "dp_shard_mod_ep"
-                or (name == "dp_shard_in_ep" and self.dp_replicate > 1)
-            ):
+            if d > 1 or name == "dp_shard_mod_ep":
                 dims.append(d)
                 names.append(name)
 
