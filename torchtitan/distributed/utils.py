@@ -448,3 +448,9 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
+
+
+def _round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    x_ceil_div_y = (x + y - 1) // y
+    return x_ceil_div_y * y
