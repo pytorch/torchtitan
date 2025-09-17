@@ -602,7 +602,7 @@ class Float8:
 
 
 @dataclass
-class MX:
+class MXLinear:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """Temp work around for inductor performance gap"""
 
@@ -620,11 +620,14 @@ class MX:
     Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
-    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+
+@dataclass
+class MXMoE:
+    fqns: list[str] | str = field(default_factory=list)
     """
     Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --mx.moe_fqns_prototype="experts"
+    Example: --mx_moe.fqns="experts"
     """
 
 
@@ -773,7 +776,8 @@ class JobConfig:
     )
     compile: Compile = field(default_factory=Compile)
     float8: Float8 = field(default_factory=Float8)
-    mx: MX = field(default_factory=MX)
+    mx: MXLinear = field(default_factory=MXLinear)
+    mx_moe: MXMoE = field(default_factory=MXMoE)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

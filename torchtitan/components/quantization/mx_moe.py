@@ -1,0 +1,103 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from importlib.metadata import version
+from importlib.util import find_spec
+from typing import List
+
+import torch.nn as nn
+from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+
+from torchtitan.config.job_config import JobConfig
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
+from torchtitan.protocols.model_converter import (
+    ModelConverter,
+    register_model_converter,
+)
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
+
+
+class MXMoEConverter(ModelConverter):
+    """Converts target 3D nn.Parameters of a model, representing 'experts',
+    to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
+
+    enabled: bool
+    filter_fqns: List[str]
+
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        # Ensure minimum torchao versions
+        if find_spec("torchao") is None:
+            raise ImportError(
+                "torchao is not installed. Please install it to use MXFP8 linear layers."
+            )
+        torchao_version = version("torchao")
+
+        # Require latest release or nightly builds for prototype features
+        is_nightly_build = torchao_version.startswith("0.14.0")
+        if not is_nightly_build:
+            raise ImportError(
+                f"torchao version {torchao_version} is too old, please install torchao nightly build and try again"
+            )
+
+        # Can be removed if we enable the emulated versions
+        assert has_cuda_capability(
+            10, 0
+        ), "MXFP8 is only supported on SM100 or architectures"
+
+        # Warn user if torch.compile is not enabled
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
+        if not model_compile_enabled:
+            logger.warning(
+                "torch.compile enablement is required for highest performance of MXFP8 dynamic quantization."
+            )
+
+        # For MoE training with mxfp8, token group sizes must be multiples of 32
+        self.moe_fqns = job_config.mx_moe.fqns
+        if self.moe_fqns:
+            logger.info(
+                f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"
+            )
+            set_token_group_alignment_size_m(MXFP8_GROUP_ALIGNMENT_SIZE)
+
+        self.enabled = True
+        logger.info("MXFP8 MoE training enabled")
+
+    def convert(self, model: nn.Module):
+        """
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        to perform dynamic MXFP8 quantization + scaled grouped GEMMs for the target MoE FQNs.
+        """
+        from torchao.prototype.moe_training.conversion_utils import (
+            MoEScalingType,
+            MoETrainingConfig,
+        )
+        from torchao.quantization.quant_api import quantize_
+
+        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+            for target_fqn in self.moe_fqns:
+                if target_fqn in cur_fqn:
+                    return True
+            return False
+
+        config = MoETrainingConfig(scaling_type=MoEScalingType.MXFP8)
+        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        logger.info(
+            f"Converted MoE layers matching FQNS {self.moe_fqns} "
+            "to use dynamic MXFP8 quantization with scaled grouped GEMMs"
+        )
+
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        """
+        MXFP8 MoE training doesn't require any post-optimizer hooks at the moment
+        """
+        return
+
+
+register_model_converter(MXMoEConverter, "mx_moe")

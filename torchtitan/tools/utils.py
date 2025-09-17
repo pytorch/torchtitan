@@ -202,3 +202,9 @@ def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
         yield
     finally:
         torch.set_default_dtype(old_dtype)
+
+
+def _round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    x_ceil_div_y = (x + y - 1) // y
+    return x_ceil_div_y * y
