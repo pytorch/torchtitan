@@ -16,6 +16,8 @@ from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from torchtitan.models.moe import MoEArgs
+
 from .hf_llama_patch import patch_hf_llama
 patch_hf_llama()
 
@@ -44,19 +46,43 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         use_flex_attn: bool = False,
         attn_mask_type: str = "causal",
         eos_id: int = 0,
+        moe_args: Optional[MoEArgs] = None,
+        # DeepSeekV3 specific args
+        n_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        inter_dim: Optional[int] = None,
+        moe_inter_dim: Optional[int] = None,
+        n_dense_layers: Optional[int] = None,
+        n_expert_groups: Optional[int] = None,
+        n_limited_groups: Optional[int] = None,
+        q_lora_rank: Optional[int] = None,
+        kv_lora_rank: Optional[int] = None,
+        qk_nope_head_dim: Optional[int] = None,
+        qk_rope_head_dim: Optional[int] = None,
+        v_head_dim: Optional[int] = None,
+        original_seq_len: Optional[int] = None,
+        rope_factor: Optional[float] = None,
+        beta_fast: Optional[int] = None,
+        beta_slow: Optional[int] = None,
+        mscale: Optional[float] = None,
         # HuggingFace specific args
         attn_implementation: str = "sdpa",
-        **kwargs
-    ):  
+        **kwargs,
+    ):
         # Store TorchTitan-specific args (no HF equivalent)
         self.multiple_of = multiple_of
         self.ffn_dim_multiplier = ffn_dim_multiplier
         self.depth_init = depth_init
         self.use_flex_attn = use_flex_attn
         self.attn_mask_type = attn_mask_type
-        
+
         # HuggingFace specific args
         self.attn_implementation = attn_implementation
+
+        # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
+        # setting it to None in HuggingFace.
+        if q_lora_rank == 0:
+            q_lora_rank = None
 
         self._passed_args = dict(
             dim=dim,
@@ -74,8 +100,43 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             attn_mask_type=attn_mask_type,
             eos_id=eos_id,
             attn_implementation=attn_implementation,
-            **kwargs
+            # DeepSeekV3 specific args
+            n_group=n_group,
+            topk_group=topk_group,
+            inter_dim=inter_dim,
+            moe_inter_dim=moe_inter_dim,
+            n_dense_layers=n_dense_layers,
+            n_expert_groups=n_expert_groups,
+            n_limited_groups=n_limited_groups,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            original_seq_len=original_seq_len,
+            rope_factor=rope_factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            mscale=mscale,
+            **kwargs,
         )
+
+        if moe_args is not None:
+            # MoE args for HF config
+            # HF uses different names for these
+            self.num_experts_per_tok = moe_args.top_k
+            self.n_routed_experts = moe_args.num_experts
+            self.n_shared_experts = moe_args.num_shared_experts
+            self.moe_intermediate_size = moe_inter_dim
+            self._passed_args.update(
+                dict(
+                    num_experts_per_tok=moe_args.top_k,
+                    n_routed_experts=moe_args.num_experts,
+                    n_shared_experts=moe_args.num_shared_experts,
+                    moe_intermediate_size=moe_inter_dim,
+                )
+            )
+
 
     def __repr__(self) -> str:
         # HFTransformerModelArgs is a dataclass that also inherits from PretrainedConfig.
@@ -83,8 +144,9 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         # doesn't work well with how HFTransformerModelArgs is initialized.
         # This custom __repr__ provides a dataclass-like representation that correctly
         # displays the arguments passed during initialization.
-        args_str = ", ".join(f"{k}={v!r}" for k, v in self._passed_args.items())
-        return f"{self.__class__.__name__}({args_str})"
+        args_lines = [f"{k}={v!r}" for k, v in sorted(self._passed_args.items())]
+        args_str = "\n".join(args_lines)
+        return f"{self.__class__.__name__}(\n{args_str}\n)"
 
     @property
     def dim(self) -> int:
@@ -149,6 +211,25 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     def eos_id(self, value: int):
         self.eos_token_id = value
 
+    # === DeepSeekV3 specific properties ===
+    @property
+    def inter_dim(self) -> int:
+        """TorchTitan: Intermediate dimension (alias for HF intermediate_size)"""
+        return self.intermediate_size
+    
+    @inter_dim.setter
+    def inter_dim(self, value: int):
+        self.intermediate_size = value
+    
+    @property
+    def n_dense_layers(self) -> int:
+        """TorchTitan: Number of dense layers (alias for HF first_k_dense_replace)"""
+        return self.first_k_dense_replace
+    
+    @n_dense_layers.setter
+    def n_dense_layers(self, value: int):
+        self.first_k_dense_replace = value
+
     def update_from_config(self, job_config: JobConfig):
         # Load HF config (overwrites our HF attributes)
         hf_model_config = AutoConfig.from_pretrained(
@@ -163,6 +244,10 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             if hasattr(self, key):
                 setattr(self, key, value)
         
+        # MoE
+        if hasattr(self, "qk_nope_head_dim") and hasattr(self, "qk_rope_head_dim"):
+            self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        
         # Configure HF-specific settings to match TorchTitan settings
         self.tie_word_embeddings = False
         self.attention_bias = False
@@ -170,13 +255,14 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self.use_cache = False
         self.initializer_range = 1.0  # use as std for normal init in embedding
         
-        ffn_hidden_size = 4 * self.dim
-        ffn_hidden_size = int(2 * ffn_hidden_size / 3)
-        if self.ffn_dim_multiplier is not None:
-            ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
-        self.intermediate_size = self.multiple_of * (
-            (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
-        )
+        if self.inter_dim is None: # Only for llama model
+            ffn_hidden_size = 4 * self.dim
+            ffn_hidden_size = int(2 * ffn_hidden_size / 3)
+            if self.ffn_dim_multiplier is not None:
+                ffn_hidden_size = int(self.ffn_dim_multiplier * ffn_hidden_size)
+            self.intermediate_size = self.multiple_of * (
+                (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
+            )
         
         self.head_dim = self.dim // self.num_attention_heads
         
