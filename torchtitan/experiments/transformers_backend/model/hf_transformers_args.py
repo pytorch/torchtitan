@@ -77,6 +77,15 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             **kwargs
         )
 
+    def __repr__(self) -> str:
+        # HFTransformerModelArgs is a dataclass that also inherits from PretrainedConfig.
+        # PretrainedConfig has a __repr__ that serializes the object to JSON, but it
+        # doesn't work well with how HFTransformerModelArgs is initialized.
+        # This custom __repr__ provides a dataclass-like representation that correctly
+        # displays the arguments passed during initialization.
+        args_str = ", ".join(f"{k}={v!r}" for k, v in self._passed_args.items())
+        return f"{self.__class__.__name__}({args_str})"
+
     @property
     def dim(self) -> int:
         """TorchTitan: Model dimension (alias for HF hidden_size)"""
