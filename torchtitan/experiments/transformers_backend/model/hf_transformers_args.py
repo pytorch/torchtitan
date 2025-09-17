@@ -21,122 +21,143 @@ from torchtitan.models.moe import MoEArgs
 from .hf_llama_patch import patch_hf_llama
 patch_hf_llama()
 
+class AliasedPropertiesMeta(type):
+    """
+    This metaclass automatically creates aliased properties on a class.
+    It looks for a `_TITAN_TO_HF_MAPPING` dictionary in the class
+    namespace and generates properties based on its contents.
+    """
+
+    def __new__(cls, name, bases, dct):
+        def _create_aliased_property(hf_name: str) -> property:
+            def getter(self):
+                return getattr(self, hf_name)
+            def setter(self, value):
+                setattr(self, hf_name, value)
+            return property(getter, setter)
+            
+        mapping = dct.get('_TITAN_TO_HF_MAPPING', {})
+        for titan_name, hf_name in mapping.items():
+            dct[titan_name] = _create_aliased_property(hf_name)
+        return super().__new__(cls, name, bases, dct)
+
 @dataclass
-class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
+class TitanModelArgs:
+    """Arguments for the base TorchTitan model."""
+
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: Optional[int] = None
+    vocab_size: int = 128256
+    multiple_of: int = 256
+    ffn_dim_multiplier: Optional[float] = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 10000
+    max_seq_len: int = 2048
+    depth_init: bool = True
+    use_flex_attn: bool = False
+    attn_mask_type: str = "causal"
+    eos_id: int = 0
+    moe_args: Optional[MoEArgs] = None
+
+
+@dataclass
+class DeepSeekV3Args:
+    """Arguments specific to DeepSeekV3 models."""
+
+    n_group: Optional[int] = None
+    topk_group: Optional[int] = None
+    inter_dim: Optional[int] = None
+    moe_inter_dim: Optional[int] = None
+    n_dense_layers: Optional[int] = None
+    n_expert_groups: Optional[int] = None
+    n_limited_groups: Optional[int] = None
+    q_lora_rank: Optional[int] = None
+    kv_lora_rank: Optional[int] = None
+    qk_nope_head_dim: Optional[int] = None
+    qk_rope_head_dim: Optional[int] = None
+    v_head_dim: Optional[int] = None
+    original_seq_len: Optional[int] = None
+    rope_factor: Optional[float] = None
+    beta_fast: Optional[int] = None
+    beta_slow: Optional[int] = None
+    mscale: Optional[float] = None
+
+
+@dataclass
+class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs, metaclass=AliasedPropertiesMeta):
     """
     Configuration class that bridges TorchTitan and HuggingFace Transformers naming conventions.
     
     Uses properties to provide TorchTitan-style access while maintaining HuggingFace compatibility.
     """
     
+    _TITAN_TO_HF_MAPPING = {
+        # TorchTitan Name: HuggingFace Name
+        "dim": "hidden_size",
+        "n_layers": "num_hidden_layers",
+        "n_heads": "num_attention_heads",
+        "n_kv_heads": "num_key_value_heads",
+        "norm_eps": "rms_norm_eps",
+        "max_seq_len": "max_position_embeddings",
+        "eos_id": "eos_token_id",
+        # DeepSeekV3 specific aliases
+        "inter_dim": "intermediate_size",
+        "n_dense_layers": "first_k_dense_replace",
+    }
+
     def __init__(
         self,
-        # TorchTitan args
-        dim: int = 4096,
-        n_layers: int = 32,
-        n_heads: int = 32,
-        n_kv_heads: Optional[int] = None,
-        vocab_size: int = 128256,
-        multiple_of: int = 256,
-        ffn_dim_multiplier: Optional[float] = None,
-        norm_eps: float = 1e-5,
-        rope_theta: float = 10000,
-        max_seq_len: int = 2048,
-        depth_init: bool = True,
-        use_flex_attn: bool = False,
-        attn_mask_type: str = "causal",
-        eos_id: int = 0,
-        moe_args: Optional[MoEArgs] = None,
-        # DeepSeekV3 specific args
-        n_group: Optional[int] = None,
-        topk_group: Optional[int] = None,
-        inter_dim: Optional[int] = None,
-        moe_inter_dim: Optional[int] = None,
-        n_dense_layers: Optional[int] = None,
-        n_expert_groups: Optional[int] = None,
-        n_limited_groups: Optional[int] = None,
-        q_lora_rank: Optional[int] = None,
-        kv_lora_rank: Optional[int] = None,
-        qk_nope_head_dim: Optional[int] = None,
-        qk_rope_head_dim: Optional[int] = None,
-        v_head_dim: Optional[int] = None,
-        original_seq_len: Optional[int] = None,
-        rope_factor: Optional[float] = None,
-        beta_fast: Optional[int] = None,
-        beta_slow: Optional[int] = None,
-        mscale: Optional[float] = None,
+        titan_args: Optional[TitanModelArgs] = None,
+        deepseek_v3_args: Optional[DeepSeekV3Args] = None,
         # HuggingFace specific args
         attn_implementation: str = "sdpa",
         **kwargs,
     ):
+        titan_args = titan_args or TitanModelArgs()
+        deepseek_v3_args = deepseek_v3_args or DeepSeekV3Args()
+
         # Store TorchTitan-specific args (no HF equivalent)
-        self.multiple_of = multiple_of
-        self.ffn_dim_multiplier = ffn_dim_multiplier
-        self.depth_init = depth_init
-        self.use_flex_attn = use_flex_attn
-        self.attn_mask_type = attn_mask_type
+        self.multiple_of = titan_args.multiple_of
+        self.ffn_dim_multiplier = titan_args.ffn_dim_multiplier
+        self.depth_init = titan_args.depth_init
+        self.use_flex_attn = titan_args.use_flex_attn
+        self.attn_mask_type = titan_args.attn_mask_type
 
         # HuggingFace specific args
         self.attn_implementation = attn_implementation
 
         # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
         # setting it to None in HuggingFace.
+        q_lora_rank = deepseek_v3_args.q_lora_rank
         if q_lora_rank == 0:
             q_lora_rank = None
+        deepseek_v3_args.q_lora_rank = q_lora_rank
 
-        self._passed_args = dict(
-            dim=dim,
-            n_layers=n_layers,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            vocab_size=vocab_size,
-            multiple_of=multiple_of,
-            ffn_dim_multiplier=ffn_dim_multiplier,
-            norm_eps=norm_eps,
-            rope_theta=rope_theta,
-            max_seq_len=max_seq_len,
-            depth_init=depth_init,
-            use_flex_attn=use_flex_attn,
-            attn_mask_type=attn_mask_type,
-            eos_id=eos_id,
-            attn_implementation=attn_implementation,
-            # DeepSeekV3 specific args
-            n_group=n_group,
-            topk_group=topk_group,
-            inter_dim=inter_dim,
-            moe_inter_dim=moe_inter_dim,
-            n_dense_layers=n_dense_layers,
-            n_expert_groups=n_expert_groups,
-            n_limited_groups=n_limited_groups,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            original_seq_len=original_seq_len,
-            rope_factor=rope_factor,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            mscale=mscale,
-            **kwargs,
-        )
+        self._passed_args = {
+            **titan_args.__dict__,
+            **deepseek_v3_args.__dict__,
+            "attn_implementation": attn_implementation,
+        }
+        self._passed_args.update(kwargs)
 
-        if moe_args is not None:
+        if titan_args.moe_args is not None:
             # MoE args for HF config
             # HF uses different names for these
+            moe_args = titan_args.moe_args
             self.num_experts_per_tok = moe_args.top_k
             self.n_routed_experts = moe_args.num_experts
             self.n_shared_experts = moe_args.num_shared_experts
-            self.moe_intermediate_size = moe_inter_dim
+            self.moe_intermediate_size = deepseek_v3_args.moe_inter_dim
             self._passed_args.update(
                 dict(
                     num_experts_per_tok=moe_args.top_k,
                     n_routed_experts=moe_args.num_experts,
                     n_shared_experts=moe_args.num_shared_experts,
-                    moe_intermediate_size=moe_inter_dim,
+                    moe_intermediate_size=deepseek_v3_args.moe_inter_dim,
                 )
             )
-
 
     def __repr__(self) -> str:
         # HFTransformerModelArgs is a dataclass that also inherits from PretrainedConfig.
@@ -147,88 +168,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         args_lines = [f"{k}={v!r}" for k, v in sorted(self._passed_args.items())]
         args_str = "\n".join(args_lines)
         return f"{self.__class__.__name__}(\n{args_str}\n)"
-
-    @property
-    def dim(self) -> int:
-        """TorchTitan: Model dimension (alias for HF hidden_size)"""
-        return self.hidden_size
-    
-    @dim.setter
-    def dim(self, value: int):
-        self.hidden_size = value
-    
-    @property
-    def n_layers(self) -> int:
-        """TorchTitan: Number of layers (alias for HF num_hidden_layers)"""
-        return self.num_hidden_layers
-    
-    @n_layers.setter
-    def n_layers(self, value: int):
-        self.num_hidden_layers = value
-    
-    @property
-    def n_heads(self) -> int:
-        """TorchTitan: Number of attention heads (alias for HF num_attention_heads)"""
-        return self.num_attention_heads
-    
-    @n_heads.setter
-    def n_heads(self, value: int):
-        self.num_attention_heads = value
-    
-    @property
-    def n_kv_heads(self) -> Optional[int]:
-        """TorchTitan: Number of key-value heads (alias for HF num_key_value_heads)"""
-        return self.num_key_value_heads
-    
-    @n_kv_heads.setter
-    def n_kv_heads(self, value: Optional[int]):
-        self.num_key_value_heads = value
-    
-    @property
-    def norm_eps(self) -> float:
-        """TorchTitan: Layer norm epsilon (alias for HF rms_norm_eps)"""
-        return self.rms_norm_eps
-    
-    @norm_eps.setter
-    def norm_eps(self, value: float):
-        self.rms_norm_eps = value
-    
-    @property
-    def max_seq_len(self) -> int:
-        """TorchTitan: Maximum sequence length (alias for HF max_position_embeddings)"""
-        return self.max_position_embeddings
-    
-    @max_seq_len.setter
-    def max_seq_len(self, value: int):
-        self.max_position_embeddings = value
-    
-    @property
-    def eos_id(self) -> int:
-        """TorchTitan: End of sequence token ID (alias for HF eos_token_id)"""
-        return self.eos_token_id
-    
-    @eos_id.setter
-    def eos_id(self, value: int):
-        self.eos_token_id = value
-
-    # === DeepSeekV3 specific properties ===
-    @property
-    def inter_dim(self) -> int:
-        """TorchTitan: Intermediate dimension (alias for HF intermediate_size)"""
-        return self.intermediate_size
-    
-    @inter_dim.setter
-    def inter_dim(self, value: int):
-        self.intermediate_size = value
-    
-    @property
-    def n_dense_layers(self) -> int:
-        """TorchTitan: Number of dense layers (alias for HF first_k_dense_replace)"""
-        return self.first_k_dense_replace
-    
-    @n_dense_layers.setter
-    def n_dense_layers(self, value: int):
-        self.first_k_dense_replace = value
 
     def update_from_config(self, job_config: JobConfig):
         # Load HF config (overwrites our HF attributes)
@@ -314,7 +253,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         total_params = sum(p.numel() for p in model.parameters())
         logger.info(f"{model.__class__.__name__} - {total_params:,} params")
         _format_module(model, "  ")
-
 
 
 class HFTransformerModel(nn.Module):
