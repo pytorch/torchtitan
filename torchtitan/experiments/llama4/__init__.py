@@ -35,7 +35,7 @@ llama4_configs = {
         multiple_of=2048,
         rope_theta=500000,
         max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=2),
+        moe_args=MoEArgs(num_experts=4),
         interleave_moe_layer_step=1,
     ),
     "17bx16e": TransformerModelArgs(

@@ -22,7 +22,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.distributed.utils import _round_up
+from torchtitan.tools.utils import _round_up
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
@@ -261,6 +261,7 @@ def expert_parallel(func: Callable) -> Callable:
             x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M
         )
         padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
+
         with torch.no_grad():
             (
                 permuted_indices,
