@@ -175,59 +175,51 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams = sum(p.numel() for p in model.parameters())
-
-        layer_params = {}  # int -> int
-        embedding_params = 0
-        norm_params = 0
-        lm_head_params = 0
-        misc_params = {}
-
-        for name, p in model.named_parameters():
-            if "model.embed_tokens" in name:
-                embedding_params += p.numel()
-            elif "model.layers." in name:
-                try:
-                    layer_num = int(name.split("layers.")[1].split(".")[0])
-                    if layer_num not in layer_params:
-                        layer_params[layer_num] = 0
-                    layer_params[layer_num] += p.numel()
-                except (ValueError, IndexError):
-                    # Should not happen with standard HF llama names
-                    component = "misc_layer_parts"
-                    if component not in misc_params:
-                        misc_params[component] = 0
-                    misc_params[component] += p.numel()
-            elif "model.norm" in name:
-                norm_params += p.numel()
-            elif "lm_head" in name:
-                lm_head_params += p.numel()
-            else:
-                # Catch anything else
-                component = name.split(".")[0]
-                if component not in misc_params:
-                    misc_params[component] = 0
-                misc_params[component] += p.numel()
-
-        logger.info("Parameter breakdown:")
-        logger.info(f"  - embedding: {embedding_params:,} parameters")
-        for layer_num in sorted(layer_params.keys()):
-            params = layer_params[layer_num]
-            logger.info(f"  - layer_{layer_num}: {params:,} parameters")
-        logger.info(f"  - final_norm: {norm_params:,} parameters")
-        logger.info(f"  - lm_head: {lm_head_params:,} parameters")
-        if misc_params:
-            for name, params in misc_params.items():
-                logger.info(f"  - {name} (misc): {params:,} parameters")
-
         nparams_embedding = sum(
             sum(p.numel() for p in m.parameters())
             for m in model.children()
             if isinstance(m, nn.Embedding)
         )
 
-        l, h, q, t = self.n_layers, self.n_heads, self.dim // self.n_heads, seq_len
+        l, h, q, t = (
+            self.n_layers,
+            self.n_heads,
+            self.dim // self.n_heads,
+            seq_len,
+        )
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+
         return nparams, num_flops_per_token
+
+    def debug_structure_param(self, model: nn.Module):
+        logger.info("Model Structure Parameter Breakdown:")
+
+        def _format_module(module: nn.Module, prefix: str = ""):
+            for name, sub_module in module.named_children():
+                sub_module_params = sum(p.numel() for p in sub_module.parameters())
+                if sub_module_params == 0:
+                    continue
+
+                # For HF models, we want to "unwrap" the ".model" attribute
+                # to get a view comparable to the native TorchTitan models.
+                if name == "model":
+                    _format_module(sub_module, prefix)
+                else:
+                    logger.info(
+                        f"{prefix}({name}): {sub_module.__class__.__name__} - {sub_module_params:,} params"
+                    )
+                    _format_module(sub_module, prefix + "  ")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"{model.__class__.__name__} - {total_params:,} params")
+        _format_module(model, "  ")
+
 
 
 class HFTransformerModel(nn.Module):

@@ -159,3 +159,19 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         )
 
         return nparams, num_flops_per_token
+
+    def debug_structure_param(self, model: nn.Module):
+        logger.info("Model Structure Parameter Breakdown:")
+
+        def _format_module(module: nn.Module, prefix: str = ""):
+            for name, sub_module in module.named_children():
+                sub_module_params = sum(p.numel() for p in sub_module.parameters())
+                if sub_module_params > 0:
+                    logger.info(
+                        f"{prefix}({name}): {sub_module.__class__.__name__} - {sub_module_params:,} params"
+                    )
+                    _format_module(sub_module, prefix + "  ")
+
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"{model.__class__.__name__} - {total_params:,} params")
+        _format_module(model, "  ")
