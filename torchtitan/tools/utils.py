@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import gc
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Generator, Optional
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
@@ -174,3 +175,30 @@ def check_if_feature_in_pytorch(
             f"{min_nightly_version}. Please upgrade a newer version to include the "
             f"change in ({pull_request}) for correct {feature_name}."
         )
+
+
+@contextlib.contextmanager
+def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
+    """
+    Context manager to set torch's default dtype.
+
+    Args:
+        dtype (torch.dtype): The desired default dtype inside the context manager.
+
+    Returns:
+        ContextManager: context manager for setting default dtype.
+
+    Example:
+        >>> with set_default_dtype(torch.bfloat16):
+        >>>     x = torch.tensor([1, 2, 3])
+        >>>     x.dtype
+        torch.bfloat16
+
+
+    """
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
