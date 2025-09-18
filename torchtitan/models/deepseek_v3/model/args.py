@@ -100,11 +100,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
-            )
-
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """
         Adopted from llama4 implementation.
