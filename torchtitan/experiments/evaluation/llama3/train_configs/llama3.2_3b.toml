@@ -1,0 +1,68 @@
+# torchtitan Config.toml
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3.2 3B training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+enable_memory_snapshot = false
+
+[metrics]
+log_freq = 100
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "llama3.2"
+flavor = "3b"
+# TODO
+tokenizer_path = "/{your_path}/assets/tokenizer/Llama-3.2-1B"  # Change to your tokenizer path
+# converters = ["float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 250  # lr scheduler warm up
+decay_ratio = 0.2
+decay_type = "linear"
+lr_min = 0.0
+
+[training]
+batch_size = 1
+seq_len = 8192
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+compile = false
+dataset = "c4"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable_checkpoint = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+hf_model_name = "meta-llama/Llama-3.2-3B"
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "selective", "full"]
+selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+
+[float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
