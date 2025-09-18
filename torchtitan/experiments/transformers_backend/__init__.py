@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -71,62 +71,65 @@ class DeepSeekV3Args:
     mscale: Optional[float] = None
 
 # #TODO(3outeille): identify that if MoE model is used, we add a moe_args field
-# flavors = {
-#     "debugmodel": HFTransformerModelArgs(
-#         titan_args=TitanModelArgs(
-#             max_seq_len=2048,
-#             dim=256,
-#             n_layers=6,
-#             n_heads=16,
-#             n_kv_heads=16,
-#             vocab_size=2000,
-#             rope_theta=500000
-#         ),
-#     ),
-#     "medium": HFTransformerModelArgs(
-#         titan_args=TitanModelArgs(
-#             dim=1024,
-#             n_layers=12,
-#         ),
-#     ),
-#     "full": HFTransformerModelArgs(
-#         titan_args=TitanModelArgs(),
-#     ),
-# }
 
-# DeepSeekV3 flavors
-flavors = {
-    "debugmodel": HFTransformerModelArgs(
-        titan_args=TitanModelArgs(
-            dim=256,
-            n_layers=3,
-            n_heads=16,
-            n_kv_heads=16,
-            vocab_size=2000,
-        ),
-        deepseek_v3_args=DeepSeekV3Args(
-            inter_dim=1024,
-            moe_inter_dim=256,
-            n_dense_layers=1,
-            n_group=2,
-            topk_group=1,
-            kv_lora_rank=16,
-            q_lora_rank=0,
-            qk_nope_head_dim=32,
-            qk_rope_head_dim=16,
-            v_head_dim=32,
-            mscale=0.70,
-            moe_args=MoEArgs(
-                num_experts=8,
-                num_shared_experts=2,
-                top_k=3,
-                score_func="softmax",
-                route_norm=True,
-                score_before_experts=False,
+if os.environ.get("MODEL_TYPE") == "llama":
+    print("Using llama model")
+    flavors = {
+        "debugmodel": HFTransformerModelArgs(
+            titan_args=TitanModelArgs(
+                max_seq_len=2048,
+                dim=256,
+                n_layers=6,
+                n_heads=16,
+                n_kv_heads=16,
+                vocab_size=2000,
+                rope_theta=500000
             ),
-        )
-    ),
-}
+        ),
+        "medium": HFTransformerModelArgs(
+            titan_args=TitanModelArgs(
+                dim=1024,
+                n_layers=12,
+            ),
+        ),
+        "full": HFTransformerModelArgs(
+            titan_args=TitanModelArgs(),
+        ),
+    }
+else:
+    print("Using deepseek model")
+    flavors = {
+        "debugmodel": HFTransformerModelArgs(
+            titan_args=TitanModelArgs(
+                vocab_size=2000,
+                dim=256,
+                n_layers=3,
+                n_heads=16,
+                n_kv_heads=16,
+            ),
+            deepseek_v3_args=DeepSeekV3Args(
+                inter_dim=1024,
+                moe_inter_dim=256,
+                n_dense_layers=1,
+                n_group=2,
+                topk_group=1,
+                kv_lora_rank=16,
+                q_lora_rank=0,
+                qk_nope_head_dim=32,
+                qk_rope_head_dim=16,
+                v_head_dim=32,
+                mscale=0.70,
+                moe_args=MoEArgs(
+                    num_experts=8,
+                    num_shared_experts=2,
+                    top_k=3,
+                    score_func="softmax",
+                    route_norm=True,
+                    score_before_experts=False,
+                ),
+            )
+        ),
+    }
 
 hf_train_spec = TrainSpec(
     name="hf_auto_model",

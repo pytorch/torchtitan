@@ -12,6 +12,35 @@ set -o pipefail
 NGPU=${NGPU:-"1"}
 export LOG_RANK=${LOG_RANK:-0}
 
+# Parse command line arguments for model selection
+MODEL_TYPE=${1:-"llama"}
+export MODEL_TYPE
+
+# Set model names based on argument
+case $MODEL_TYPE in
+    "llama")
+        TT_MODEL_NAME="llama3"
+        HF_MODEL_NAME="meta-llama/Llama-3.2-1B"
+        ;;
+    "deepseek")
+        TT_MODEL_NAME="deepseek_v3"
+        HF_MODEL_NAME="deepseek-ai/DeepSeek-V3"
+        ;;
+    *)
+        echo "Error: Unsupported model type '$MODEL_TYPE'"
+        echo "Usage: $0 [llama|deepseek] [additional_args...]"
+        echo "  llama   - Uses llama3 for TT and meta-llama/Llama-3.2-1B for HF"
+        echo "  deepseek - Uses deepseek_v3 for TT and deepseek-ai/DeepSeek-V3 for HF"
+        exit 1
+        ;;
+esac
+
+echo "Using model type: $MODEL_TYPE"
+echo "  TT model: $TT_MODEL_NAME"
+echo "  HF model: $HF_MODEL_NAME"
+
+# Shift to remove the model type argument, pass remaining args to training
+shift
 
 run_tt() {
     echo "##############################################"
@@ -23,7 +52,7 @@ run_tt() {
     CUDA_VISIBLE_DEVICES=0 \
     torchrun --nproc_per_node=${NGPU} --master_port 1234 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${TT_CONFIG} --training.seed 42 --training.deterministic "$@"
+    -m torchtitan.train --job.config_file ${TT_CONFIG} --training.seed 42 --training.deterministic --model.name ${TT_MODEL_NAME} "$@"
 }
 
 run_hf() {
@@ -36,9 +65,8 @@ run_hf() {
     CUDA_VISIBLE_DEVICES=1 \
     torchrun --nproc_per_node=${NGPU} --master_port 1235 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${HF_CONFIG} --training.seed 42 --training.deterministic "$@"
+    -m torchtitan.train --job.config_file ${HF_CONFIG} --training.seed 42 --training.deterministic --model.name ${HF_MODEL_NAME} "$@"
 }
-
 
 TT_LOG="tt_run.log"
 HF_LOG="hf_run.log"
