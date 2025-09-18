@@ -25,6 +25,9 @@ from torchtitan.distributed.pipeline_parallel import (
     pipeline_module_split,
 )
 
+from torch.distributed.pipelining import SplitPoint, pipeline
+from torch.distributed.pipelining.stage import _PipelineStage
+
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
@@ -123,6 +126,78 @@ def pipeline_llama(
         job_config.parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
+    )
+
+    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+    # optimizer, and checkpointing
+    for i, m in enumerate(model_parts):
+        # apply SPMD-style PT-D techniques
+        m = parallelize_fn(m, parallel_dims, job_config)
+        model_parts[i] = m
+        # NOTE: this is to update the model in the stage
+        #       in case the model is modified e.g. by torch.compile
+        stages[i].submod = m
+
+    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+
+    # This is used in the train loop to determine whether to pass in the input_ids and labels
+    has_first_stage = False
+    has_last_stage = False
+    for stage in stages:
+        if stage.is_first:
+            has_first_stage = True
+        if stage.is_last:
+            has_last_stage = True
+
+    return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def pipeline_llama_tracer(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    job_config: JobConfig,
+    device: torch.device,
+    model_args: BaseModelArgs,
+    parallelize_fn: ParallelizeFunction,
+    loss_fn: LossFunction,
+):
+    assert (
+        parallel_dims.pp_enabled
+    ), "can't apply pipeline parallelism if it is not enabled"
+
+    # if job_config.model.norm_type == "fused_rmsnorm":
+    #     # TODO(whc) - torch._dynamo.exc.Unsupported: Illegal getattr invocation stride in strict mode
+    #     # coming from ` if dy.stride(-1) != 1:` in fused_rmsnorm
+    #     raise NotImplementedError(
+    #         "fused_rmsnorm not yet compatible with Pipeline Tracer (strides error). Please use layernorm or rmsnorm."
+    #     )
+    pp_mesh = parallel_dims.world_mesh["pp"]
+    pp_rank = pp_mesh.get_local_rank()
+    stage_idx = pp_mesh.get_local_rank()
+    layers_per_rank = model_args.n_layers // parallel_dims.pp
+    split_spec = {
+        f"layers.{i * layers_per_rank}": SplitPoint.BEGINNING
+        for i in range(1, parallel_dims.pp)
+    }
+    # Get example input
+    input_shape = (job_config.training.local_batch_size, job_config.training.seq_len)
+    assert hasattr(model_args, "vocab_size")
+    input_ids = torch.randint(
+        model_args.vocab_size, input_shape, dtype=torch.int64, device="meta"
+    )
+
+    # Create a pipeline representation from the model
+    pipe = pipeline(
+        model, mb_args=(input_ids,), split_spec=split_spec
+    )
+    model = pipe.get_stage_module(stage_idx)
+    stage = _PipelineStage(
+        stage_module=model,
+        stage_index=pp_rank,
+        pipe_info=pipe.pipe_info,
+        device=device,
+        group=pp_mesh.get_group(),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.

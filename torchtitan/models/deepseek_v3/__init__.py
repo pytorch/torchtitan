@@ -11,7 +11,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.models.llama3.infra.pipeline import pipeline_llama
+from torchtitan.models.llama3.infra.pipeline import pipeline_llama, pipeline_llama_tracer
 from torchtitan.models.moe import MoEArgs
 
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
@@ -32,10 +32,10 @@ __all__ = [
 deepseekv3_configs = {
     "debugmodel": DeepSeekV3ModelArgs(
         vocab_size=2000,
-        dim=256,
+        dim=4,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=6,
+        n_layers=16,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -166,7 +166,7 @@ register_train_spec(
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_llama,
+        pipelining_fn=pipeline_llama_tracer,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
