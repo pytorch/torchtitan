@@ -23,11 +23,12 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.models.llama3.infra.parallelize import (
+from torchtitan.experiments.llama4.infra.parallelize import (
     apply_compile,
-    apply_ddp,
     apply_fsdp,
+    apply_moe_ep_tp,
 )
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
 
 
@@ -84,12 +85,27 @@ def parallelize_qwen3(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        apply_tp(
+        apply_non_moe_tp(
             model,
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+        )
+
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
+            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
+            ep_tp_mesh=(
+                world_mesh["ep", "tp"]
+                if parallel_dims.tp_enabled
+                and parallel_dims.ep_enabled
+                and parallel_dims.etp_enabled
+                else None
+            ),
+            etp_enabled=parallel_dims.etp_enabled,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -111,15 +127,30 @@ def parallelize_qwen3(
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
+        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        dp_mod_ep_mesh_dim_names = []
+        if parallel_dims.ep_enabled:
+            if parallel_dims.dp_replicate_enabled:
+                dp_mod_ep_mesh_dim_names.append("dp_replicate")
+            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
+            dp_mod_ep_mesh=(
+                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
+                if parallel_dims.ep_enabled
+                else None
+            ),
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -149,7 +180,7 @@ def parallelize_qwen3(
     return model
 
 
-def apply_tp(
+def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
@@ -218,14 +249,20 @@ def apply_tp(
             "attention.k_norm": NoParallel(use_local_output=False),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
-            "feed_forward": prepare_module_input(
-                input_layouts=(Shard(1),),
-                desired_input_layouts=(Replicate(),),
-            ),
-            "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            "feed_forward.w3": colwise_parallel(),
         }
+
+        if not transformer_block.moe_enabled:
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             module=transformer_block,

@@ -6,6 +6,7 @@
 
 import logging
 import os
+import sys
 
 
 logger = logging.getLogger()
@@ -13,7 +14,8 @@ logger = logging.getLogger()
 
 def init_logger():
     logger.setLevel(logging.INFO)
-    ch = logging.StreamHandler()
+    logger.handlers.clear()
+    ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     formatter = logging.Formatter(
         "[titan] %(asctime)s - %(name)s - %(levelname)s - %(message)s"
