@@ -57,7 +57,7 @@ def process_image(
             image = image.convert("RGB")
 
         # Resize maintaining aspect ratio
-        image = resize_image_by_patch_count(
+        image = _resize_image_by_patch_count(
             image,
             max_patch_per_image=max_patch_per_image,
             patch_size=patch_size,
@@ -82,7 +82,7 @@ def process_image(
         return None
 
 
-def smart_resize(
+def _smart_resize(
     height: int,
     width: int,
     factor: int,  # should be equal patch_size * merge_size
@@ -119,7 +119,7 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def resize_image_by_patch_count(
+def _resize_image_by_patch_count(
     image: Image.Image,
     max_patch_per_image: int,
     patch_size: int,
@@ -145,7 +145,7 @@ def resize_image_by_patch_count(
         new_width = int(original_width * scale_factor)
         new_height = int(original_height * scale_factor)
 
-        resized_height, resized_width = smart_resize(
+        resized_height, resized_width = _smart_resize(
             new_height,
             new_width,
             factor,
@@ -155,7 +155,7 @@ def resize_image_by_patch_count(
 
     # If patches are within [min, max] range, just use smart_resize
     elif current_patches <= max_patch_per_image:
-        resized_height, resized_width = smart_resize(
+        resized_height, resized_width = _smart_resize(
             original_height, original_width, factor, max_patch_per_image
         )
         return image.resize((resized_width, resized_height))
@@ -166,7 +166,7 @@ def resize_image_by_patch_count(
         new_width = int(original_width * scale_factor)
         new_height = int(original_height * scale_factor)
 
-        resized_height, resized_width = smart_resize(
+        resized_height, resized_width = _smart_resize(
             new_height, new_width, factor, max_patch_per_image
         )
         return image.resize((resized_width, resized_height))
@@ -183,8 +183,8 @@ def calculate_image_tokens(
     else:
         width, height = image.size
 
-    tokens_per_row = int(width / (patch_size * spatial_merge_size))
-    num_rows = int(height / (patch_size * spatial_merge_size))
+    tokens_per_row = width // (patch_size * spatial_merge_size)
+    num_rows = height // (patch_size * spatial_merge_size)
     total_tokens = tokens_per_row * num_rows
 
     return total_tokens, tokens_per_row, num_rows

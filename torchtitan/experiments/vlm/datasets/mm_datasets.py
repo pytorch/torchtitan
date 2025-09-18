@@ -393,14 +393,13 @@ def build_mm_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    max_images_per_batch = job_config.training.max_images_per_batch
-    max_patches_per_image = job_config.training.max_patches_per_image
-    packing_buffer_size = job_config.training.packing_buffer_size
-    spatial_merge_size = job_config.training.spatial_merge_size
-
+    max_images_per_batch = job_config.data.max_images_per_batch
+    max_patches_per_image = job_config.data.max_patches_per_image
     # NOTE: technically patch_size belongs to model variants, but we don't
     # have access to model_args here. To discuss later.
-    patch_size = job_config.training.patch_size
+    patch_size = job_config.data.patch_size
+    spatial_merge_size = job_config.data.spatial_merge_size
+    packing_buffer_size = job_config.data.packing_buffer_size
 
     dataset = MultiModalDataset(
         dataset_name=job_config.training.dataset,

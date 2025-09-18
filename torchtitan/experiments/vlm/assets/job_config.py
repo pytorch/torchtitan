@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class Training:
+class Data:
     max_images_per_batch: int = 10
     """Vision encoder batch size (N)"""
     max_patches_per_image: int = 256
@@ -44,5 +44,5 @@ class SpecialTokens:
 
 @dataclass
 class JobConfig:
-    training: Training = field(default_factory=Training)
+    data: Data = field(default_factory=Data)
     special_tokens: SpecialTokens = field(default_factory=SpecialTokens)

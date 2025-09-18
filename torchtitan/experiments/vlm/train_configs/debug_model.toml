@@ -43,13 +43,15 @@ min_lr_factor = 0.0
 [training]
 local_batch_size = 32
 seq_len = 4096
-max_patches_per_image = 1024
-max_images_per_batch = 64
-# packing_buffer_size = 100
 max_norm = 1.0  # grad norm clipping
 steps = 10
 # dataset = "obelics"
 dataset = "cc12m"
+
+[data]
+max_patches_per_image = 1024
+max_images_per_batch = 64
+# packing_buffer_size = 100
 
 [compile]
 enable = false

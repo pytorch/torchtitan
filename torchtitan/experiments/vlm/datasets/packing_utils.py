@@ -27,7 +27,7 @@ class SamplePacker:
         self.batch_size = batch_size
 
         # Initialize buffers
-        self.sample_buffer: deque = deque(maxlen=buffer_size)
+        self.sample_buffer: deque = deque()
         self.packed_samples: deque = deque()
 
     def _pack_buffered_samples(self) -> list[dict[str, Any]]:

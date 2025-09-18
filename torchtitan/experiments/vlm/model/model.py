@@ -15,6 +15,21 @@ from .args import Llama3Siglip2ModelArgs
 from .siglip2 import VisionTransformer
 
 
+def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id):
+    B, S, D = h_BSD.shape
+    # Where are the image tokens in LLM input, make broadcastable with h_BSD
+    img_mask_h_BSD = E.repeat(tokens_BS == img_id, "b s -> b s 1")
+    # Only get valid (non-padded) tokens, result are flatten
+    i_flatten = torch.masked_select(i_NLD, mask=i_mask_NL.unsqueeze(-1))
+
+    assert i_flatten.numel() // D == img_mask_h_BSD.sum(), (
+        f"Different number of visual embeddings {i_flatten.numel() // D} "
+        f"with placeholder in input token embeddings {img_mask_h_BSD.sum()}"
+    )
+    h_BSD.masked_scatter_(mask=img_mask_h_BSD, source=i_flatten)
+    return h_BSD
+
+
 class Projector(nn.Module):
     """Project the Encoder embedding to the LLM embedding."""
 
@@ -41,50 +56,27 @@ class Projector(nn.Module):
 
 class Llama3Siglip2Transformer(Llama3):
     def __init__(self, model_args: Llama3Siglip2ModelArgs):
-        super().__init__(model_args)
+        super().__init__(model_args.decoder)
         self.model_args = model_args
         self.encoder = VisionTransformer(model_args.encoder)
         self.projector = Projector(
-            in_dim=model_args.encoder.dim, out_dim=model_args.dim
+            in_dim=model_args.encoder.dim, out_dim=model_args.decoder.dim
         )
-        self.n_pixels_per_token = model_args.encoder.patch_size**2
-        self.init_encoder_weights()
 
-    def init_encoder_weights(self, buffer_device=None):
+    def init_weights(self, buffer_device=None):
         super().init_weights(buffer_device=buffer_device)
         if self.encoder is not None:
             self.encoder.init_weights()
         if self.projector is not None:
             self.projector.init_weights()
 
-    def _scatter_img_tokens(self, h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id=None):
-        img_id = img_id or self.model_args.img_token_id
-        B, S, D = h_BSD.shape
-        # Where are the image tokens in LLM input, make broadcastable with h_BSD
-        img_mask_h_BSD = E.repeat(tokens_BS == img_id, "b s -> b s 1")
-        # Only get valid (non-padded) tokens, result are flatten
-        i_flatten = torch.masked_select(i_NLD, mask=i_mask_NL.unsqueeze(-1))
-
-        assert i_flatten.numel() // D == img_mask_h_BSD.sum(), (
-            f"Different number of visual embeddings {i_flatten.numel() // D} "
-            f"with placeholder in input token embeddings {img_mask_h_BSD.sum()}"
-        )
-        h_BSD.masked_scatter_(mask=img_mask_h_BSD, source=i_flatten)
-        return h_BSD
-
     def forward(
         self,
         tokens: torch.Tensor,
-        eos_id: int | None = None,
         input_batch: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
     ):
-        if self.model_args.use_flex_attn:
-            init_attention_mask(
-                input_batch if input_batch is not None else tokens, eos_id=self.eos_id
-            )
-
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
@@ -93,7 +85,9 @@ class Llama3Siglip2Transformer(Llama3):
             pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
             i_NLD = self.encoder(pixel_values, pixel_masks, grid_hw)
             i_NLD = self.projector(i_NLD)
-            h_BSD = self._scatter_img_tokens(h_BSD, tokens, i_NLD, pixel_masks)
+            h_BSD = _scatter_img_tokens(
+                h_BSD, tokens, i_NLD, pixel_masks, self.model_args.img_token_id
+            )
 
         for layer in self.layers.values():
             h_BSD = layer(h_BSD, self.freqs_cis)

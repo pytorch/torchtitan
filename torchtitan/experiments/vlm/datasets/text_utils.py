@@ -116,7 +116,7 @@ def process_text_with_images(
         >>> text = ["<image>", "photo of a cat"]
         >>> image_tokens = [(16, 4, 4)]  # 4x4 grid = 16 tokens
         >>> result = process_text_with_images(text, image_tokens, tokenizer)
-        >>> print(result)  # <|startofimage|><|image|>...<|endofimage|> A photo...
+        >>> print(result)  # <|begin_of_image|><|image|>...<|end_of_image|> A photo...
     """
     parts = []  # Build parts list instead of string concat
     image_idx = 0

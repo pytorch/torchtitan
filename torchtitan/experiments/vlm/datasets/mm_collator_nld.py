@@ -25,7 +25,7 @@ class MultiModalCollatorNLD:
     """Multimodal collator that works with image patches in NLD format.
     N: Number of images (vision encoder's batch size)
     L: Length of patches (vision encoder's sequence length)
-    D: Dimension of a patch (3 * spatial_patch_size**2 * temporral patch_size)
+    D: Dimension of a patch (3 * spatial_patch_size**2 * temporal patch_size)
 
     This module provides a collator class that handles both image and text data,
     converting images to patches and preparing text for model input.
@@ -83,10 +83,10 @@ class MultiModalCollatorNLD:
     max_images_per_batch: int  # Vision Encoder's batch size
     max_patches_per_image: int  # Vision Encoder's sequence length
 
-    padding_idx: int = 0
-    ignore_idx: int = -100
+    padding_idx: int
+    ignore_idx: int
 
-    def process_images(
+    def collate_images(
         self, all_images: list[torch.Tensor]
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Process a list of image tensors into patches with coordinate grids.
@@ -123,7 +123,7 @@ class MultiModalCollatorNLD:
 
         return patches, grids
 
-    def process_text(
+    def collate_text(
         self,
         batch: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -212,10 +212,10 @@ class MultiModalCollatorNLD:
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
-        patches, grids = self.process_images(all_images)
+        patches, grids = self.collate_images(all_images)
 
         # Process text and pad to batch size
-        input_ids, labels = self.process_text(batch)
+        input_ids, labels = self.collate_text(batch)
         input_dict = {"input": input_ids, "pixel_values": patches, "grid_thw": grids}
 
         return input_dict, labels
