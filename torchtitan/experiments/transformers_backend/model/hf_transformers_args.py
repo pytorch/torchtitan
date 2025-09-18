@@ -29,7 +29,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     """
     
     # Define all possible mappings organized by argument type
-    _ALL_MAPPINGS = {
+    _TT_TO_HF_MAPPINGS = {
         "base": {
             # Core TorchTitan mappings (always available)
             "dim": "hidden_size",
@@ -59,10 +59,10 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         active_mappings = {}
         
-        active_mappings.update(self._ALL_MAPPINGS["base"])
+        active_mappings.update(self._TT_TO_HF_MAPPINGS["base"])
         
         if deepseek_v3_args is not None:
-            active_mappings.update(self._ALL_MAPPINGS["deepseek_v3"])
+            active_mappings.update(self._TT_TO_HF_MAPPINGS["deepseek_v3"])
         
         self._active_mappings = active_mappings
         
@@ -92,6 +92,8 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             deepseek_v3_args.q_lora_rank = q_lora_rank
 
             self._passed_args.update(**deepseek_v3_args.__dict__)
+
+            self.partial_rotary_factor = deepseek_v3_args.partial_rotary_factor
 
             if deepseek_v3_args.moe_args is not None:
                 moe_args = deepseek_v3_args.moe_args
