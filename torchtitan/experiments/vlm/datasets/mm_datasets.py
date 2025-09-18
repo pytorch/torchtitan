@@ -226,7 +226,7 @@ def _validate_mm_dataset(
 
 
 class MultiModalDataset(IterableDataset, Stateful):
-    """PyTorch MultiModal Dataset with support for sample packing."""
+    """MultiModal Dataset with support for sample packing."""
 
     def __init__(
         self,
