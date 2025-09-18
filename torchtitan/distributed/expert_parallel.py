@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from typing import Callable, Literal
+from typing import Callable, Literal, Dict
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,160 @@ from torch.distributed.tensor import (
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
+
+import threading
+import torch
+from typing import Optional
+import time
+
+class HookSequenceCoordinator:
+    """Coordinates hooks based on a predefined sequence"""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        
+        # Define your desired execution sequence matching:
+        # stageB.combine() -> stageA.forward_attention() -> stageB.backward_moe() -> 
+        # stageA.dispatch() -> stageB.dispatch() -> stageA.forward_moe() -> 
+        # stageB.backward_attention() -> stageA.combine()
+        self._hook_sequence = [
+            "combine_D_bwd",
+            "dispatch_A_fwd",
+            "combine_C_bwd",
+            "dispatch_B_fwd",
+            "dispatch_B_bwd",
+            "combine_C_fwd",
+            "dispatch_A_bwd",
+            "combine_D_fwd",
+        ]
+        # Create a semaphore for each hook in the sequence
+        self._semaphores: Dict[str, threading.Semaphore] = {}
+        self._reset_semaphores()
+        
+        # Coordination control - disabled by default
+        self._coordination_enabled = False
+        self._cycle_count = 0
+        
+    def _reset_semaphores(self):
+        """Reset all semaphores - first one gets 1 permit, others get 0"""
+        self._semaphores.clear()
+        for i, hook_name in enumerate(self._hook_sequence):
+            # First semaphore starts with 1 permit, others start with 0
+            initial_permits = 1 if i == 0 else 0
+            self._semaphores[hook_name] = threading.Semaphore(initial_permits)
+        
+    def enable_coordination(self):
+        """Enable hook coordination"""
+        self._coordination_enabled = True
+        self._reset_semaphores()  # Reset semaphores when enabling
+        print("[COORDINATION] Hook coordination ENABLED")
+    
+    def disable_coordination(self):
+        """Disable hook coordination"""
+        self._coordination_enabled = False
+        # Release all semaphores so no threads get stuck
+        for semaphore in self._semaphores.values():
+            try:
+                semaphore.release()
+            except ValueError:
+                pass  # Semaphore was already at max value
+        print("[COORDINATION] Hook coordination DISABLED")
+    
+    def is_coordination_enabled(self) -> bool:
+        """Check if coordination is currently enabled"""
+        return self._coordination_enabled
+    
+    def reset_coordination(self):
+        """Reset coordination state (useful between training runs)"""
+        self._cycle_count = 0
+        self._reset_semaphores()
+        print("[COORDINATION] Hook coordination state RESET")
+    
+    def acquire_execution(self, hook_name: str):
+        """Acquire execution permission using semaphores"""
+        # If coordination is disabled, just pass through
+        if not self._coordination_enabled:
+            print(f"[PASSTHROUGH] {hook_name} executing (coordination disabled)")
+            return
+        
+        # Check if hook is in our sequence
+        if hook_name not in self._semaphores:
+            print(f"[WARNING] {hook_name} not in sequence, executing without coordination")
+            return
+        
+        # Acquire the semaphore for this hook (blocks until available)
+        print(f"[WAITING] {hook_name} waiting for semaphore")
+        self._semaphores[hook_name].acquire()
+        print(f"[EXECUTING] {hook_name} acquired semaphore")
+    
+    def release_execution(self, hook_name: str):
+        """Release execution and signal next hook"""
+        # If coordination is disabled, just pass through
+        if not self._coordination_enabled:
+            return
+        
+        # Check if hook is in our sequence
+        if hook_name not in self._semaphores:
+            return
+        
+        # Find the next hook in the sequence and release its semaphore
+        try:
+            current_index = self._hook_sequence.index(hook_name)
+            next_index = (current_index + 1) % len(self._hook_sequence)
+            next_hook = self._hook_sequence[next_index]
+            
+            print(f"[COMPLETED] {hook_name} completed, signaling {next_hook}")
+            self._semaphores[next_hook].release()
+            
+            # Check if we completed a full cycle
+            if next_index == 0:
+                self._cycle_count += 1
+                print(f"[CYCLE] Completed cycle {self._cycle_count}")
+                
+        except ValueError:
+            print(f"[ERROR] {hook_name} not found in sequence")
+
+# Global coordinator
+_hook_coordinator = HookSequenceCoordinator()
+
+class SyncHook(torch.autograd.Function):
+    """Sync hook that follows a predefined execution sequence"""
+    
+    @staticmethod
+    def forward(ctx, x, hook_name):
+        ctx.hook_name = hook_name
+        
+        # Use forward-specific hook name
+        forward_hook_name = f"{hook_name}_fwd"
+        _hook_coordinator.acquire_execution(forward_hook_name)
+        
+        try:
+            if _hook_coordinator.is_coordination_enabled():
+                print(f"[FORWARD HOOK] {forward_hook_name} (coordinated)")
+            else:
+                print(f"[FORWARD HOOK] {forward_hook_name} (uncoordinated)")
+            return x
+        finally:
+            _hook_coordinator.release_execution(forward_hook_name)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        hook_name = ctx.hook_name
+        
+        # Use backward-specific hook name
+        backward_hook_name = f"{hook_name}_bwd"
+        _hook_coordinator.acquire_execution(backward_hook_name)
+        
+        try:
+            if _hook_coordinator.is_coordination_enabled():
+                print(f"[BACKWARD HOOK] {backward_hook_name} (coordinated)")
+            else:
+                print(f"[BACKWARD HOOK] {backward_hook_name} (uncoordinated)")
+            return grad_output, None
+        finally:
+            _hook_coordinator.release_execution(backward_hook_name)
+
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
@@ -77,7 +231,6 @@ class TensorParallel(ParallelStyle):
             self._partition_fn,
         )
 
-
 class ExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
@@ -89,6 +242,9 @@ class ExpertParallel(ParallelStyle):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
         ep_size = device_mesh.shape[0]
+
+        # HOOK: signal ready for sync
+        routed_input = SyncHook.apply(routed_input, "dispatch_A")
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -135,6 +291,9 @@ class ExpertParallel(ParallelStyle):
         # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
         # each expert gets locally is a multiple of ALIGN_SIZE_M.
 
+        # HOOK: signal ready for sync
+        routed_input = SyncHook.apply(routed_input, "dispatch_B")
+
         return routed_input, num_tokens_per_expert_group
 
     @staticmethod
@@ -146,12 +305,16 @@ class ExpertParallel(ParallelStyle):
 
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
+        # HOOK: signal ready for sync
+        routed_output = SyncHook.apply(routed_output, "combine_C")
         routed_output = all_to_all_single_autograd(
             routed_output,
             self.input_splits,
             self.output_splits,
             device_mesh.get_group(),
         )
+        # HOOK: signal ready for sync
+        routed_output = SyncHook.apply(routed_output, "combine_D")
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:

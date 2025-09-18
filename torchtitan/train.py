@@ -32,7 +32,16 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-
+from torch.distributed.pipelining.schedules import (
+    _Action,
+    _PipelineContext,
+    _PipelineScheduleRuntime,
+    _PipelineStageBase,
+    _wait_batch_p2p,
+    FORWARD,
+    OVERLAP_F_B,
+)
+import concurrent.futures
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
@@ -435,6 +444,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         if parallel_dims.pp_enabled:
+            # register custom functions
+            assert isinstance(self.pp_schedule, _PipelineScheduleRuntime)
+            # self.pp_schedule.register_custom_function(FORWARD, forward_callback)
+            self.pp_schedule.register_custom_function(OVERLAP_F_B, overlap_callback)
+
             # Pipeline Parallel forward / backward inside step() call
             with self.train_context(optional_context_parallel_ctx):
                 targets, losses = (
@@ -488,15 +502,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
+        # TODO: parameters are not DTensors which im not sure why
+        # grad_norm = dist_utils.clip_grad_norm_(
+        #     [p for m in self.model_parts for p in m.parameters()],
+        #     self.job_config.training.max_norm,
+        #     foreach=True,
+        #     pp_mesh=(
+        #         parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+        #     ),
+        #     ep_enabled=parallel_dims.ep_enabled,
+        # )
+        grad_norm = torch.tensor([0.0], device=self.device)
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
@@ -639,7 +655,142 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.metrics_processor:
             self.metrics_processor.close()
 
+def overlap_callback(action: _Action, ctx: _PipelineContext):
+    print("overlap_callback begin", "=" * 80)
+    """Custom callback for OVERLAP_F_B computation that mimics the original implementation."""
+    schedule = ctx.schedule_ref
+    assert isinstance(schedule, _PipelineScheduleRuntime)
+    stage_index_to_stage: dict[int, _PipelineStageBase] = {
+        stage.stage_index: stage for stage in schedule._stages
+    }
+    assert action.sub_actions is not None
+    fwd_action = action.sub_actions[0]
+    bwd_action = action.sub_actions[1]
 
+    # Get stages
+    forward_stage_index = fwd_action.stage_index
+    forward_mb_index = fwd_action.microbatch_index
+    assert forward_mb_index is not None
+    backward_stage_index = bwd_action.stage_index
+    backward_stage = stage_index_to_stage[backward_stage_index]
+
+    # Forward setup
+    arg_mbs = ctx.arg_mbs
+    kwarg_mbs = ctx.kwarg_mbs
+    fwd_recv_ops = schedule.fwd_recv_ops
+    forward_stage = stage_index_to_stage[forward_stage_index]
+    forward_is_next_stage_on_this_rank = forward_stage_index + 1 in stage_index_to_stage
+    forward_is_prev_stage_on_this_rank = forward_stage_index - 1 in stage_index_to_stage
+
+    # Backward setup
+    backward_is_next_stage_on_this_rank = (
+        backward_stage.stage_index + 1 in stage_index_to_stage
+    )
+    backward_is_prev_stage_on_this_rank = (
+        backward_stage.stage_index - 1 in stage_index_to_stage
+    )
+    backward_mb_index = bwd_action.microbatch_index
+    assert backward_mb_index is not None
+    bwd_recv_ops = schedule.bwd_recv_ops
+
+    # PP communication ========================================================
+
+    # Fwd receives
+    if (
+        not forward_stage.is_first
+        # no recv op expected for V-schedule special case (see [Note: V-schedule special case])
+        and not forward_is_prev_stage_on_this_rank
+    ):
+        assert (
+            forward_stage_index,
+            forward_mb_index,
+        ) in fwd_recv_ops, f"Computing {action=} before receiving input"
+        _wait_batch_p2p(fwd_recv_ops.pop((forward_stage_index, forward_mb_index)))
+
+    # Bwd receives
+    if (
+        not backward_stage.is_last
+        # no recv op expected for V-schedule special case (see [Note: V-schedule special case])
+        and not backward_is_next_stage_on_this_rank
+    ):
+        assert (
+            backward_stage_index,
+            backward_mb_index,
+        ) in bwd_recv_ops, f"Attempted to run compute {action=} before receiving input"
+        _wait_batch_p2p(bwd_recv_ops.pop((backward_stage_index, backward_mb_index)))
+
+    # PP computation ========================================================
+    def forward_backward_overlapped():
+        from torchtitan.distributed.expert_parallel import _hook_coordinator
+        _hook_coordinator.enable_coordination()
+        if _hook_coordinator.is_coordination_enabled():
+            print("Coordination is active")
+        else:
+            print("Coordination is disabled")
+
+        # Backward ========================================================
+        loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
+        schedule.backward_counter[backward_stage_index] += 1
+        last_backward = (
+            schedule.backward_counter[backward_stage_index] == schedule._n_microbatches
+        )
+
+        # Create a shared CUDA stream
+        # shared_stream = torch.cuda.current_stream()
+        shared_stream = torch.cuda.Stream()
+
+        def run_backward():
+            with torch.cuda.stream(shared_stream):
+                backward_stage.backward_one_chunk(
+                    backward_mb_index,
+                    loss=loss,
+                    full_backward=True,
+                    last_backward=last_backward,
+                )
+
+        # Forward ========================================================
+        def run_forward():
+            with torch.cuda.stream(shared_stream):
+                output = forward_stage.forward_one_chunk(
+                    forward_mb_index,
+                    arg_mbs[forward_mb_index],
+                    kwarg_mbs[forward_mb_index],
+                )
+                return output
+
+        # Run forward and backward in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            forward_future = executor.submit(run_forward)
+            backward_future = executor.submit(run_backward)
+            
+            # Wait for both to complete simultaneously
+            done, not_done = concurrent.futures.wait([forward_future, backward_future])
+            output = forward_future.result()
+            schedule._maybe_compute_loss(
+                forward_stage, output, ctx.target_mbs, forward_mb_index
+            )
+
+        if forward_is_next_stage_on_this_rank:
+            stage_index_to_stage[forward_stage_index + 1].set_local_fwd_input(
+                output, forward_mb_index
+            )
+
+        # finish backward op
+        grad_scale_factor = schedule._n_microbatches if schedule.scale_grads else 1
+        if last_backward:
+            backward_stage.scale_grads(grad_scale_factor)
+        
+        if backward_is_prev_stage_on_this_rank:
+            stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
+                backward_stage.get_local_bwd_output(backward_mb_index),
+                backward_mb_index,
+            )
+        _hook_coordinator.reset_coordination()
+    forward_backward_overlapped()
+    print("overlap_callback end", "=" * 80)
+
+import fbvscode
+fbvscode.attach_debugger()
 if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
