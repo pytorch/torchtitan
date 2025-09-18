@@ -40,6 +40,21 @@ llama3_configs = {
         use_flex_attn=True,
         attn_mask_type="block_causal",
     ),
+    "160M": TransformerModelArgs(
+        dim=768,
+        n_layers=18,
+        n_heads=12,
+    ),
+    "300M": TransformerModelArgs(
+        dim=1024,
+        n_layers=20,
+        n_heads=16,
+    ),
+    "660M": TransformerModelArgs(
+        dim=1408,
+        n_layers=24,
+        n_heads=11,
+    ),
     "8B": TransformerModelArgs(
         dim=4096,
         n_layers=32,
