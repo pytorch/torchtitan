@@ -103,7 +103,8 @@ def _process_mm_sample(
                     # Replace None with empty string if processing failed
                     texts_list[idx] = ""
 
-        if not processed_images:
+        if len(processed_images) != len([_ for _ in images if _ is not None]):
+            logger.warning("Cannot process all images for sample. Dropping")
             return None
 
         # Process all image tokens at once
