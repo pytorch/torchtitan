@@ -363,15 +363,11 @@ def apply_fsdp(
                 gradient_divide_factor,
             )
         else:
-            try:
-                fully_shard(
-                    transformer_block._checkpoint_wrapped_module.feed_forward,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                )
-            except:
-                import fbvscode
-                fbvscode.set_trace()
+            fully_shard(
+                transformer_block._checkpoint_wrapped_module.feed_forward if hasattr(transformer_block, "_checkpoint_wrapped_module") else transformer_block.feed_forward,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
         fully_shard(
             transformer_block,
