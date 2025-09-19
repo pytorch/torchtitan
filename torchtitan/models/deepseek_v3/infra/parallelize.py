@@ -156,6 +156,9 @@ def parallelize_deepseekv3(
         else:
             logger.info("Applied FSDP to the model")
 
+        # import fbvscode
+        # fbvscode.set_trace()
+
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
 
