@@ -84,7 +84,9 @@ class FlexAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         scale: float | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert position_ids is None, "Position ids are not yet supported for FlexAttention."
         block_mask = FlexAttention.block_masks[self.mask_key]
         return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
 
@@ -218,7 +220,9 @@ class ScaledDotProductAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         scale: float | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert position_ids is None, "Position ids are not yet supported for SDPA."
         assert self.backends, "SDPA Backends should not be empty."
         with sdpa_kernel(self.backends, set_priority=True):
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
