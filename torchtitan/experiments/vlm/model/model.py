@@ -10,6 +10,8 @@ from torch import nn
 
 from torchtitan.models.llama3 import Transformer as Llama3
 
+from ..datasets.mm_datasets import SpecialTokens
+
 from .args import Llama3Siglip2ModelArgs
 from .siglip2 import VisionTransformer
 
@@ -72,9 +74,10 @@ class Llama3Siglip2Transformer(Llama3):
     def forward(
         self,
         tokens: torch.Tensor,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        special_tokens: SpecialTokens,
         input_batch: torch.Tensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        grid_thw: torch.Tensor | None = None,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
@@ -85,7 +88,7 @@ class Llama3Siglip2Transformer(Llama3):
             i_NLD = self.encoder(pixel_values, pixel_masks, grid_hw)
             i_NLD = self.projector(i_NLD)
             h_BSD = _scatter_img_tokens(
-                h_BSD, tokens, i_NLD, pixel_masks, self.model_args.img_token_id
+                h_BSD, tokens, i_NLD, pixel_masks, special_tokens.img_id
             )
 
         for layer in self.layers.values():

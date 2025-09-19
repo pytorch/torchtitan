@@ -29,20 +29,6 @@ class Data:
     """
 
 
-# HACK: couldn't figure out how to modify the HF tokenizer's json
-# to make these attribute accesible. Ideally these should be accesible from the tokenizer itself.
-@dataclass
-class SpecialTokens:
-    img_token: str = "<|image|>"
-    boi_token: str = "<|begin_of_image|>"
-    eoi_token: str = "<|end_of_image|>"
-    img_id: int = 1998
-    boi_id: int = 1999
-    eoi_id: int = 2000
-    pad_id: int = 2001
-
-
 @dataclass
 class JobConfig:
     data: Data = field(default_factory=Data)
-    special_tokens: SpecialTokens = field(default_factory=SpecialTokens)

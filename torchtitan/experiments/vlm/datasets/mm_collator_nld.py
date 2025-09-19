@@ -12,6 +12,8 @@ from torch.nn.utils.rnn import pad_sequence
 
 from torchtitan.tools.logging import logger
 
+from ..model.args import SpecialTokens
+
 from .image_utils import (
     convert_to_patches,
     pad_empty_images_to_target_batch_size,
@@ -83,8 +85,7 @@ class MultiModalCollatorNLD:
     max_images_per_batch: int  # Vision Encoder's batch size
     max_patches_per_image: int  # Vision Encoder's sequence length
 
-    padding_idx: int
-    ignore_idx: int
+    special_tokens: SpecialTokens
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -144,12 +145,12 @@ class MultiModalCollatorNLD:
         input_ids = pad_sequence(
             [s["input_ids"] for s in batch],
             batch_first=True,
-            padding_value=self.padding_idx,
+            padding_value=self.special_tokens.pad_id,
         )
         labels = pad_sequence(
             [s["labels"] for s in batch],
             batch_first=True,
-            padding_value=self.padding_idx,
+            padding_value=self.special_tokens.pad_id,
         )
 
         # Handle sequence length
@@ -157,15 +158,15 @@ class MultiModalCollatorNLD:
             input_ids,
             labels,
             self.seq_len + 1,  # Extra token for label shifting
-            padding_idx=self.padding_idx,
-            ignore_idx=self.ignore_idx,
+            padding_idx=self.special_tokens.pad_id,
+            ignore_idx=self.special_tokens.ignore_id,
         )
         input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
             input_ids,
             labels,
             self.batch_size,
-            padding_idx=self.padding_idx,
-            ignore_idx=self.ignore_idx,
+            padding_idx=self.special_tokens.pad_id,
+            ignore_idx=self.special_tokens.ignore_id,
         )
 
         return input_ids[:, :-1], labels[:, 1:]  # Shift for next token prediction
@@ -216,6 +217,11 @@ class MultiModalCollatorNLD:
 
         # Process text and pad to batch size
         input_ids, labels = self.collate_text(batch)
-        input_dict = {"input": input_ids, "pixel_values": patches, "grid_thw": grids}
+        input_dict = {
+            "input": input_ids,
+            "pixel_values": patches,
+            "grid_thw": grids,
+            "special_tokens": self.special_tokens,
+        }
 
         return input_dict, labels

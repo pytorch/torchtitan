@@ -26,7 +26,7 @@ enable_wandb = false
 name = "llama3-siglip2"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
-hf_assets_path = "torchtitan/experiments/vlm/assets/tokenizer"
+hf_assets_path = "tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]

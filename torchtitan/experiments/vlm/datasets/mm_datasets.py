@@ -11,7 +11,6 @@ including images and text. Images are interleaved with text at native aspect rat
 It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
-from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
@@ -23,14 +22,14 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
+from torchtitan.datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
+from ..model.args import SpecialTokens
 from .image_utils import calculate_image_tokens, process_image
 from .mm_collator_nld import MultiModalCollatorNLD
 from .packing_utils import SamplePacker
 from .text_utils import process_text_with_images
-
-IGNORE_INDEX = -100  # Pytorch F.cross_entropy default
 
 
 def _process_mm_sample(
@@ -40,7 +39,7 @@ def _process_mm_sample(
     patch_size: int,
     max_patch_per_image: int,
     spatial_merge_size: int,
-    special_tokens,
+    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
 
@@ -123,7 +122,7 @@ def _process_mm_sample(
             [special_tokens.boi_id, special_tokens.eoi_id, special_tokens.img_id]
         )
         labels = torch.where(
-            torch.isin(labels, special_token_ids), IGNORE_INDEX, labels
+            torch.isin(labels, special_token_ids), special_tokens.ignore_id, labels
         )
 
         return {
@@ -143,7 +142,7 @@ def _process_obelics_sample(
     patch_size: int,
     spatial_merge_size: int,
     max_patch_per_image: int,
-    special_tokens,
+    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset."""
     return _process_mm_sample(
@@ -163,7 +162,7 @@ def _process_cc12_wd_sample(
     patch_size: int,
     spatial_merge_size: int,
     max_patch_per_image: int,
-    special_tokens,
+    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Process a sample from the CC12-WD dataset.
     Transforms CC12-WD format to match Interleaved format:
@@ -188,20 +187,13 @@ def _process_cc12_wd_sample(
     )
 
 
-@dataclass
-class MMDatasetConfig:
-    path: str
-    loader: Callable
-    sample_processor: Callable
-
-
 MM_DATASETS = {
-    "obelics": MMDatasetConfig(
+    "obelics": DatasetConfig(
         path="HuggingFaceM4/OBELICS",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_obelics_sample,
     ),
-    "cc12m": MMDatasetConfig(
+    "cc12m": DatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_cc12_wd_sample,
@@ -240,7 +232,7 @@ class MultiModalDataset(IterableDataset, Stateful):
         max_patches_per_image: int,
         max_images_per_batch: int,
         packing_buffer_size: int,
-        special_tokens,
+        special_tokens: SpecialTokens,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -400,6 +392,7 @@ def build_mm_dataloader(
     patch_size = job_config.data.patch_size
     spatial_merge_size = job_config.data.spatial_merge_size
     packing_buffer_size = job_config.data.packing_buffer_size
+    special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
     dataset = MultiModalDataset(
         dataset_name=job_config.training.dataset,
@@ -412,7 +405,7 @@ def build_mm_dataloader(
         max_patches_per_image=max_patches_per_image,
         max_images_per_batch=max_images_per_batch,
         packing_buffer_size=packing_buffer_size,
-        special_tokens=job_config.special_tokens,
+        special_tokens=special_tokens,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
@@ -424,8 +417,7 @@ def build_mm_dataloader(
         patch_size=patch_size,
         max_images_per_batch=max_images_per_batch,
         max_patches_per_image=max_patches_per_image,
-        padding_idx=job_config.special_tokens.pad_id,
-        ignore_idx=IGNORE_INDEX,
+        special_tokens=special_tokens,
     )
 
     base_dataloader = ParallelAwareDataloader(

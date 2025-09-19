@@ -6,8 +6,38 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.config.job_config import JobConfig
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
 from torchtitan.models.llama3 import TransformerModelArgs as Llama3Args
+
+
+@dataclass
+class SpecialTokens:
+    img_token: str
+    img_id: int
+    boi_token: str
+    boi_id: int
+    eoi_token: str
+    eoi_id: int
+    pad_token: str
+    pad_id: int
+    ignore_id: int = -100  # Pytorch F.cross_entropy default
+
+    @classmethod
+    def from_tokenizer(cls, tokenizer: HuggingFaceTokenizer):
+        SPECIAL_TOKENS_MAP = {
+            "img": "<|image|>",
+            "boi": "<|begin_of_image|>",
+            "eoi": "<|end_of_image|>",
+            "pad": "<|pad|>",
+        }
+        added_tokens = tokenizer.tokenizer.get_added_tokens_decoder()
+        token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
+        special_tokens_dict = {}
+        for prefix, tok in SPECIAL_TOKENS_MAP.items():
+            special_tokens_dict[f"{prefix}_token"] = tok
+            special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
+        return cls(**special_tokens_dict)
 
 
 @dataclass
@@ -20,6 +50,7 @@ class Siglip2ModelArgs:
     n_pos_embs: int = 16  # Number of positional embeddings per h&w
     n_channels: int = 3  # RGB channels
     patch_size: int = 16
+    spatial_merge_size: int = 1
 
     layer_norm_eps: float = 1e-6
     use_flex_attn: bool = True
@@ -31,6 +62,6 @@ class Llama3Siglip2ModelArgs(Llama3Args):
     encoder: Siglip2ModelArgs = field(default_factory=Siglip2ModelArgs)
     img_token_id: int = 1998
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        super().update_from_config(job_config, **kwargs)
-        self.img_token_id = job_config.special_tokens.img_id
+    # def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+    #     super().update_from_config(job_config, **kwargs)
+    #     self.img_token_id = job_config.special_tokens.img_id
