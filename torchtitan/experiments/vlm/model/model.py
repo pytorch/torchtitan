@@ -8,7 +8,6 @@ import einops as E
 import torch
 from torch import nn
 
-from torchtitan.models.attention import init_attention_mask
 from torchtitan.models.llama3 import Transformer as Llama3
 
 from .args import Llama3Siglip2ModelArgs
@@ -56,11 +55,11 @@ class Projector(nn.Module):
 
 class Llama3Siglip2Transformer(Llama3):
     def __init__(self, model_args: Llama3Siglip2ModelArgs):
-        super().__init__(model_args.decoder)
+        super().__init__(model_args)
         self.model_args = model_args
         self.encoder = VisionTransformer(model_args.encoder)
         self.projector = Projector(
-            in_dim=model_args.encoder.dim, out_dim=model_args.decoder.dim
+            in_dim=model_args.encoder.dim, out_dim=model_args.dim
         )
 
     def init_weights(self, buffer_device=None):

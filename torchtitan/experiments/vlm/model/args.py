@@ -29,7 +29,6 @@ class Siglip2ModelArgs:
 @dataclass
 class Llama3Siglip2ModelArgs(Llama3Args):
     encoder: Siglip2ModelArgs = field(default_factory=Siglip2ModelArgs)
-    decoder: Llama3Args = field(default_factory=Llama3Args)
     img_token_id: int = 1998
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:

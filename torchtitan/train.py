@@ -443,7 +443,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs, **extra_inputs, target=targets, losses=losses, input_batch=inputs
+                        inputs,
+                        **extra_inputs,
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(

@@ -4,14 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
+from dataclasses import asdict, replace
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from torchtitan.models.llama3 import llama3_configs
+from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .datasets.mm_datasets import build_mm_dataloader
 from .infra.parallelize import parallelize_vlm
@@ -28,13 +29,13 @@ __all__ = [
 
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2ModelArgs(
+        **asdict(replace(llama3_configs["debugmodel"], vocab_size=2048)),
         encoder=Siglip2ModelArgs(
             dim=128,
             ffn_dim=256,
             n_layers=4,
             n_heads=2,
         ),
-        decoder=replace(llama3_configs["debugmodel"], vocab_size=2048)
     ),
 }
 
