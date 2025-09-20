@@ -2029,7 +2029,11 @@
       "land": 1994,
       "?\n": 1995,
       " respect": 1996,
-      "ances": 1997
+      "ances": 1997,
+      "<|image|>": 1998,
+      "<|begin_of_image|>": 1999,
+      "<|end_of_image|>": 2000,
+      "<|pad|>": 2001
     },
     "merges": [
     ]
