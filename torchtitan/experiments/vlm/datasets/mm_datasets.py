@@ -26,10 +26,10 @@ from torchtitan.datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens
-from .image_utils import calculate_image_tokens, process_image
 from .mm_collator_nld import MultiModalCollatorNLD
-from .packing_utils import SamplePacker
-from .text_utils import process_text_with_images
+from .utils.image import calculate_image_tokens, process_image
+from .utils.packing import SamplePacker
+from .utils.text import process_text_with_images
 
 
 def _process_mm_sample(

@@ -14,12 +14,12 @@ from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens
 
-from .image_utils import (
+from .utils.image import (
     convert_to_patches,
     pad_empty_images_to_target_batch_size,
     pad_patches,
 )
-from .text_utils import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
+from .utils.text import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
 
 
 @dataclass
