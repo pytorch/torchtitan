@@ -30,7 +30,7 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         n_heads=16,
-        vocab_size=2000,
+        vocab_size=2048,
         rope_theta=500000,
     ),
     "17bx16e": TransformerModelArgs(
@@ -59,7 +59,7 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         n_heads=16,
-        vocab_size=2000,
+        vocab_size=2048,
         rope_theta=500000,
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
