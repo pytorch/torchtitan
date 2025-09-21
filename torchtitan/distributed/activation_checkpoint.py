@@ -169,13 +169,17 @@ def apply_ac(
             "effect and provide optimal performance.\n"
             "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
         )
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = _apply_ac_to_transformer_block(
-            transformer_block,
-            ac_config,
-            base_fqn=f"layers.{layer_id}",
-            save_list=save_list,
-        )
-        model.layers.register_module(layer_id, transformer_block)
+    if ac_config.mode == "budget":
+        torch._functorch.config.activation_memory_budget = ac_config.budget_ac_option
+        logger.info(f"Selected {ac_config.budget_ac_option} budget option")
+    else:
+        for layer_id, transformer_block in model.layers.named_children():
+            transformer_block = _apply_ac_to_transformer_block(
+                transformer_block,
+                ac_config,
+                base_fqn=f"layers.{layer_id}",
+                save_list=save_list,
+            )
+            model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
