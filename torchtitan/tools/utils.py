@@ -55,13 +55,13 @@ class GarbageCollection:
             )
             gc.collect()
         elif step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Performing periodical GC collection")
+            self.collect("Performing periodic GC collection")
 
     @staticmethod
     def collect(reason: str, generation: int = 1):
         begin = time.monotonic()
         gc.collect(generation)
-        logger.info("[GC] %s %.2f seconds", reason, time.monotonic() - begin)
+        logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
