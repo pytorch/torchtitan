@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import os
+import functools
 from typing import Tuple
 
 import torch
@@ -15,6 +17,35 @@ from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
+
+
+def seeded_init_decorator_for_test(seed):
+    """
+    Decorator that adds torch.manual_seed before every nn.init.trunc_normal_ call
+    and prints layer weights after initialization.
+    """
+    import lovely_tensors as lt; lt.monkey_patch()
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            original_trunc_normal = nn.init.trunc_normal_
+ 
+            def seeded_trunc_normal(*trunc_args, **trunc_kwargs):
+                torch.manual_seed(seed)
+                tensor = trunc_args[0]  # First argument is always the tensor
+                result = original_trunc_normal(*trunc_args, **trunc_kwargs)
+                # # Try to get module info from the calling context
+                # module_name = "Unknown"
+                # if len(args) > 0 and hasattr(args[0], "__class__"):
+                #     module_name = args[0].__class__.__name__
+                # print(f"Module: {module_name}, Tensor value: {tensor}")
+                return result
+ 
+            nn.init.trunc_normal_ = seeded_trunc_normal
+            return func(*args, **kwargs)
+ 
+        return wrapper
+    return decorator
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -240,6 +271,7 @@ class Attention(nn.Module):
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, init_std: float):
         linear_list = [
             self.wkv_a,
@@ -302,6 +334,7 @@ class TransformerBlock(nn.Module):
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
@@ -339,6 +372,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.init_weights()
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):

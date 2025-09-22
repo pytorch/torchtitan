@@ -1,12 +1,38 @@
-
-
+import os
+import torch
 import torch.nn as nn
+import functools
 
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3Attention, DeepseekV3MLP, DeepseekV3MoE, DeepseekV3DecoderLayer
 from transformers.modeling_utils import PreTrainedModel
 
 _original_deepseek_v3_decoder_layer_init = DeepseekV3DecoderLayer.__init__
+
+def seeded_init_decorator_for_test(seed):
+    """
+    Decorator that adds torch.manual_seed before every nn.init.trunc_normal_ call
+    and prints layer weights after initialization.
+    """
+    import lovely_tensors as lt; lt.monkey_patch()
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, module):
+            original_trunc_normal = nn.init.trunc_normal_
+
+            def seeded_trunc_normal(*args, **kwargs):
+                torch.manual_seed(seed)
+                tensor = args[0]  # First argument is always the tensor
+                result = original_trunc_normal(*args, **kwargs)
+                # module_name = getattr(module, "__class__", type(module)).__name__
+                # print(f"Module: {module_name}, Tensor value: {tensor}")
+                return result
+
+            nn.init.trunc_normal_ = seeded_trunc_normal
+            return func(self, module)
+
+        return wrapper
+    return decorator
 
 def _deepseek_v3_decoder_layer_init_patched(self, config: DeepseekV3Config, layer_idx: int):
     _original_deepseek_v3_decoder_layer_init(self, config, layer_idx)
@@ -33,6 +59,7 @@ def _initialize_weights_patched(self, module):
     self._init_weights(module)
     module._is_hf_initialized = True
 
+@seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
 def _init_weights_patched(self, module):
     """
     Patched version of _init_weights to match TorchTitan's initialization for Llama.
@@ -46,12 +73,8 @@ def _init_weights_patched(self, module):
         init_std = 0.02 / (2 * (layer_idx + 1)) ** 0.5
 
     if isinstance(module, DeepseekV3Attention):
-        print("DeepseekV3Attention", module.layer_idx)
         if hasattr(module, 'q_proj'):
             nn.init.trunc_normal_(module.q_proj.weight, mean=0.0, std=0.02)
-            # NOTE(3outeille): module.smart_apply is called on parent class, we have 3 child so init will be called 3 times
-            # That's why we need to set _is_hf_initialized to True to avoid triple initialization
-            print(f"module.q_proj.weight: {module.q_proj.weight}")
         else:
             nn.init.trunc_normal_(module.q_a_proj.weight, mean=0.0, std=0.02)
             nn.init.trunc_normal_(module.q_b_proj.weight, mean=0.0, std=0.02)
@@ -60,7 +83,6 @@ def _init_weights_patched(self, module):
         nn.init.trunc_normal_(module.kv_b_proj.weight, mean=0.0, std=0.02)
         
         nn.init.trunc_normal_(module.o_proj.weight, mean=0.0, std=init_std)
-        print("=====")
     
     elif isinstance(module, DeepseekV3MLP):
         nn.init.trunc_normal_(module.gate_proj.weight, mean=0.0, std=0.02)

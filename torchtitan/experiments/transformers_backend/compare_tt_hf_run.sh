@@ -15,7 +15,8 @@ export LOG_RANK=${LOG_RANK:-0}
 # Parse command line arguments for model selection
 MODEL_TYPE=${1:-"llama"}
 export MODEL_TYPE
-
+SEED=${SEED:-42}
+export SEED
 # Set model names based on argument
 case $MODEL_TYPE in
     "llama")
@@ -52,7 +53,7 @@ run_tt() {
     CUDA_VISIBLE_DEVICES=0 \
     torchrun --nproc_per_node=${NGPU} --master_port 1234 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${TT_CONFIG} --training.seed 42 --training.deterministic --model.name ${TT_MODEL_NAME} "$@"
+    -m torchtitan.train --job.config_file ${TT_CONFIG} --training.seed ${SEED} --training.deterministic --model.name ${TT_MODEL_NAME} "$@"
 }
 
 run_hf() {
@@ -65,7 +66,7 @@ run_hf() {
     CUDA_VISIBLE_DEVICES=1 \
     torchrun --nproc_per_node=${NGPU} --master_port 1235 --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
-    -m torchtitan.train --job.config_file ${HF_CONFIG} --training.seed 42 --training.deterministic --model.name ${HF_MODEL_NAME} "$@"
+    -m torchtitan.train --job.config_file ${HF_CONFIG} --training.seed ${SEED} --training.deterministic --model.name ${HF_MODEL_NAME} "$@"
 }
 
 TT_LOG="tt_run.log"

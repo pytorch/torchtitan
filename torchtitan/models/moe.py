@@ -12,7 +12,37 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.distributed.expert_parallel import expert_parallel
+import os
+import functools
 
+
+def seeded_init_decorator_for_test(seed):
+    """
+    Decorator that adds torch.manual_seed before every nn.init.trunc_normal_ call
+    and prints layer weights after initialization.
+    """
+    import lovely_tensors as lt; lt.monkey_patch()
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            original_trunc_normal = nn.init.trunc_normal_
+ 
+            def seeded_trunc_normal(*trunc_args, **trunc_kwargs):
+                torch.manual_seed(seed)
+                tensor = trunc_args[0]  # First argument is always the tensor
+                result = original_trunc_normal(*trunc_args, **trunc_kwargs)
+                # # Try to get module info from the calling context
+                # module_name = "Unknown"
+                # if len(args) > 0 and hasattr(args[0], "__class__"):
+                #     module_name = args[0].__class__.__name__
+                # print(f"Module: {module_name}, Tensor value: {tensor}")
+                return result
+ 
+            nn.init.trunc_normal_ = seeded_trunc_normal
+            return func(*args, **kwargs)
+ 
+        return wrapper
+    return decorator
 
 @dataclass
 class MoEArgs:
@@ -57,6 +87,7 @@ class FeedForward(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, init_std: float = 0.02):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
@@ -153,6 +184,7 @@ class GroupedExperts(nn.Module):
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
@@ -246,6 +278,7 @@ class TokenChoiceTopKRouter(nn.Module):
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
@@ -435,6 +468,7 @@ class MoE(nn.Module):
         out = out.reshape(bs, slen, dim)
         return out
 
+    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(
         self,
         init_std: float,
