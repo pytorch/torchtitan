@@ -83,6 +83,7 @@ def build_pipeline_schedule(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
+        scale_grads=False,
     )
     logger.info(
         f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "

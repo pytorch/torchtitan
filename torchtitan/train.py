@@ -62,6 +62,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
+    pp_n_microbatches: int
 
     # additional training states
     step: int
@@ -214,13 +215,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
         )
 
+        if parallel_dims.pp_enabled:
+            # When using pp, loss needs to be scaled by the number of microbatches
+            microbatch_size = job_config.parallelism.pipeline_parallel_microbatch_size
+            batch_size = job_config.training.local_batch_size
+            self.pp_n_microbatches = batch_size // microbatch_size
+        else:
+            self.pp_n_microbatches = 1
+
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
             job_config.training.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.loss_fn = rescale_accumulated_loss(
-            self.loss_fn, self.gradient_accumulation_steps
+            self.loss_fn, self.gradient_accumulation_steps * self.pp_n_microbatches
         )
 
         # apply parallelisms and initialization
@@ -452,7 +461,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                torch.mean(torch.stack(losses)).to(self.device)
+                torch.mean(torch.stack(losses)).multiply(self.pp_n_microbatches).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
