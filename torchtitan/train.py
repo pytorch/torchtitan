@@ -490,11 +490,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs, target=targets, losses=losses, input_batch=inputs
+                        # TODO: input_batch kwarg only needed for CP, but
+                        # autoparallel doesn't accept kwargs in its forward
+                        inputs, target=targets, losses=losses #, input_batch=inputs
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
+                        target=targets, losses=losses #, input_batch=inputs
                     )
 
             # accumulate losses across pipeline microbatches
