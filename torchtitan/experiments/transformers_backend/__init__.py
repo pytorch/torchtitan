@@ -20,6 +20,9 @@ from .infra.parallelize_hf_transformers import parallelize_hf_transformers
 from .model.hf_transformers_args import HFTransformerModelArgs, HFTransformerModel
 
 from torchtitan.models.moe import MoEArgs
+from .model.hf_llama_patch import patch_hf_llama
+from .model.hf_deepseek_v3_patch import patch_hf_deepseek_v3
+
 
 
 __all__ = [
@@ -75,6 +78,7 @@ class DeepSeekV3Args:
 
 if os.environ.get("MODEL_TYPE") == "llama":
     print("Using llama model")
+    patch_hf_llama()
     flavors = {
         "debugmodel": HFTransformerModelArgs(
             titan_args=TitanModelArgs(
@@ -99,12 +103,13 @@ if os.environ.get("MODEL_TYPE") == "llama":
     }
 else:
     print("Using deepseek model")
+    patch_hf_deepseek_v3()
     flavors = {
         "debugmodel": HFTransformerModelArgs(
             titan_args=TitanModelArgs(
                 vocab_size=2000,
                 dim=256,
-                n_layers=3,
+                n_layers=2,
                 n_heads=16,
                 n_kv_heads=16,
             ),

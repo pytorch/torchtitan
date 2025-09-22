@@ -16,9 +16,6 @@ from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from .hf_llama_patch import patch_hf_llama
-patch_hf_llama()
-
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     """
