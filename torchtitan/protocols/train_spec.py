@@ -6,6 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Mapping, TypeAlias
 
 import torch.nn as nn
@@ -56,25 +57,32 @@ class TrainSpec:
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 
-_train_specs = {}
+_extra_train_specs: dict[str, TrainSpec] = {}
 
 
 def register_train_spec(train_spec: TrainSpec) -> None:
-    global _train_specs
-    if train_spec.name in _train_specs:
-        raise ValueError(f"Model {train_spec.name} is already registered.")
+    global _extra_train_specs
+    if train_spec.name in _extra_train_specs:
+        raise ValueError(f"TrainSpec {train_spec.name} is already registered.")
 
-    _train_specs[train_spec.name] = train_spec
+    # user can define a TrainSpec from outside of torchtitan
+    _extra_train_specs[train_spec.name] = train_spec
 
 
 def get_train_spec(name: str) -> TrainSpec:
-    global _train_specs
-    if name not in _train_specs:
-        raise ValueError(f"Model {name} is not registered.")
-    return _train_specs[name]
+    # user-defined TrainSpec has higher priority
+    global _extra_train_specs
+    if name in _extra_train_specs:
+        return _extra_train_specs[name]
 
+    from torchtitan.experiments import _supported_experiments
+    from torchtitan.models import _supported_models
 
-def apply_to_train_specs(func: Callable[[TrainSpec], TrainSpec]) -> None:
-    global _train_specs
-    for name, train_spec in _train_specs.items():
-        _train_specs[name] = func(train_spec)
+    if name in _supported_models:
+        module = import_module(f"torchtitan.models.{name}")
+        return module.get_train_spec()
+    elif name in _supported_experiments:
+        module = import_module(f"torchtitan.experiments.{name}")
+        return module.get_train_spec()
+
+    raise ValueError(f"TrainSpec {name} is not registered.")
