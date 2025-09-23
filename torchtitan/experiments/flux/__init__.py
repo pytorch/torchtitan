@@ -9,7 +9,7 @@
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .dataset.flux_dataset import build_flux_dataloader
 from .infra.parallelize import parallelize_flux
@@ -107,8 +107,8 @@ flux_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="flux",
         model_cls=FluxModel,
         model_args=flux_configs,
@@ -122,4 +122,3 @@ register_train_spec(
         build_validator_fn=build_flux_validator,
         state_dict_adapter=FluxStateDictAdapter,
     )
-)

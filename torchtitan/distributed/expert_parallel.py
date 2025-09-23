@@ -22,6 +22,8 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from torchtitan.distributed.utils import _round_up
+
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
@@ -253,6 +255,12 @@ def expert_parallel(func: Callable) -> Callable:
         experts_per_ep_rank = w1.shape[0]
         num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
 
+        # Make sure max_len of permuted token indicies is divisible by TOKEN_GROUP_ALIGN_SIZE_M,
+        # by padding it to the nearest multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+        x_padded_per_expert = (
+            x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M
+        )
+        padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
         with torch.no_grad():
             (
                 permuted_indices,
@@ -262,7 +270,7 @@ def expert_parallel(func: Callable) -> Callable:
                 num_tokens_per_expert,
                 experts_per_ep_rank,
                 num_ep_ranks,
-                x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
+                padded_max_len,
                 TOKEN_GROUP_ALIGN_SIZE_M,
             )
 

@@ -20,7 +20,6 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import parallelize_llama, pipeline_llama
 from torchtitan.protocols import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.train_spec import (
-    apply_to_train_specs,
     get_train_spec,
     register_train_spec,
     TrainSpec,
@@ -59,6 +58,20 @@ def fake_build_optimizers(
     )
 
 
+def fake_build_optimizers_with_hook(
+    model_parts: list[nn.Module],
+    optimizer_config: OptimizerConfig,
+    parallel_dims: ParallelDims,
+    ft_manager: FTManager,
+    optimizer_hook,
+) -> OptimizersContainer:
+    optimizers = fake_build_optimizers(
+        model_parts, optimizer_config, parallel_dims, ft_manager
+    )
+    optimizers.register_step_post_hook(partial(optimizer_hook, model_parts=model_parts))
+    return optimizers
+
+
 class TestTrainSpec:
     def test_register_train_spec(self):
         fake_config = {"fake": BaseModelArgs()}
@@ -83,13 +96,14 @@ class TestTrainSpec:
 
     def test_optim_hook(self):
         fake_config = {"fake": BaseModelArgs()}
+
         spec = TrainSpec(
             name="fake2",
             model_cls=FakeModel,
             model_args=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=pipeline_llama,
-            build_optimizers_fn=fake_build_optimizers,
+            build_optimizers_fn=fake_build_optimizers_with_hook,
             build_lr_schedulers_fn=build_lr_schedulers,
             build_dataloader_fn=build_hf_dataloader,
             build_tokenizer_fn=build_hf_tokenizer,
@@ -97,6 +111,9 @@ class TestTrainSpec:
         )
         register_train_spec(spec)
         new_spec = get_train_spec("fake2")
+
+        model = new_spec.model_cls(BaseModelArgs())
+        model_parts = [model]
 
         # Demonstrate how to register a optimizer hook for all model specs
         hook_called = False
@@ -110,32 +127,9 @@ class TestTrainSpec:
             nonlocal hook_called
             hook_called = True
 
-        def register_optimizer_hook_to_spec(spec: TrainSpec) -> TrainSpec:
-            # Create a closure to capture the original spec.build_optimizers_fn
-            original_build_optimizers_fn = spec.build_optimizers_fn
-
-            def my_build_optimizer_fn(
-                model_parts: list[nn.Module],
-                optimizer_config: OptimizerConfig,
-                parallel_dims: ParallelDims,
-                ft_manager: FTManager,
-            ) -> OptimizersContainer:
-                optimizers = original_build_optimizers_fn(
-                    model_parts, optimizer_config, parallel_dims, ft_manager
-                )
-                optimizers.register_step_post_hook(
-                    partial(my_hook, model_parts=model_parts)
-                )
-                return optimizers
-
-            spec.build_optimizers_fn = my_build_optimizer_fn
-            return spec
-
-        apply_to_train_specs(register_optimizer_hook_to_spec)
-
-        model = new_spec.model_cls(BaseModelArgs())
-        model_parts = [model]
-        optimizers = new_spec.build_optimizers_fn(model_parts, None, None, None)
+        optimizers = new_spec.build_optimizers_fn(
+            model_parts, None, None, None, my_hook
+        )
         assert optimizers.optimizers[0].__class__.__name__ == "Adam"
         batch = torch.randn(8, 8)
         model(batch).sum().backward()

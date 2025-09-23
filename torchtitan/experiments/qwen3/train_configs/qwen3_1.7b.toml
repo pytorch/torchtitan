@@ -20,7 +20,7 @@ hf_assets_path = "./assets/hf/Qwen3-1.7B"
 
 [optimizer]
 name = "AdamW"
-lr = 3e-4
+lr = 8e-4
 eps = 1e-8
 
 [lr_scheduler]
@@ -43,7 +43,7 @@ context_parallel_degree = 1
 [checkpoint]
 enable = false
 folder = "checkpoint"
-interval = 500
+interval = 50
 last_save_model_only = false
 export_dtype = "float16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]

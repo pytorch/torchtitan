@@ -98,7 +98,7 @@ class TestGenerateImage:
         t1 = time.perf_counter()
 
         model = self._get_test_model(
-            context_in_dim=4096, device=torch_device, dtype=torch.bfloat16
+            context_in_dim=768, device=torch_device, dtype=torch.bfloat16
         )
         model.eval()
 
