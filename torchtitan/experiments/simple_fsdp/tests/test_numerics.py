@@ -39,6 +39,7 @@ class TestSimpleFSDP(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
+            etp=1,
             world_size=self.world_size,
         )
         self.device_mesh = self.parallel_dims.world_mesh
