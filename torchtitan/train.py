@@ -461,7 +461,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                torch.mean(torch.stack(losses)).multiply(self.pp_n_microbatches).to(self.device)
+                torch.mean(torch.stack(losses))
+                .multiply(self.pp_n_microbatches)
+                .to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
