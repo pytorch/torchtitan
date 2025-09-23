@@ -32,7 +32,11 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
-from torchtitan.offloading import activation_offload_with_overlap
+from torchtitan.offloading import (
+    activation_offload_with_overlap,
+    ActOffloadContext,
+    ExampleActOffloadPolicy
+)
 
 
 def parallelize_llama(
@@ -304,10 +308,10 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def _apply_act_offloading_to_transformer_block(module: nn.Module, offloading_stream: torch.cuda.Stream, ao_config):
+def _apply_act_offloading_to_transformer_block(module: nn.Module, ao_context: ActOffloadContext, ao_config):
     offload_context = contextlib.nullcontext
     if ao_config.mode == "multistream":
-        offload_context = functools.partial(activation_offload_with_overlap, module, offloading_stream, ao_config.offload_ratio)
+        offload_context = functools.partial(activation_offload_with_overlap, ao_context, module)
 
     original_forward = module.forward
     def new_forward(*args, **kwargs):
@@ -321,8 +325,10 @@ def _apply_act_offloading_to_transformer_block(module: nn.Module, offloading_str
 def apply_ao(model: nn.Module, ao_config):
     """Apply multistream activation offloading to the model"""
     offloading_stream = torch.cuda.Stream()
+    ao_policy = ExampleActOffloadPolicy()
+    ao_context = ActOffloadContext(offloading_stream, ao_policy)
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, offloading_stream, ao_config)
+        transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, ao_context, ao_config)
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ao_config.mode} activation offloading to the model")
