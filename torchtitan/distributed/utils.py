@@ -258,7 +258,7 @@ def init_distributed(
         return backend
 
     TRACE_BUFFER_SIZE = "TORCH_FR_BUFFER_SIZE"
-    TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
+    TRACE_FILE = "TORCH_FR_DUMP_TEMP_FILE"
     DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
     ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
     SKIP_CLEANUP = "3"
@@ -275,8 +275,9 @@ def init_distributed(
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
         dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
+        prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
-        _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
+        _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
