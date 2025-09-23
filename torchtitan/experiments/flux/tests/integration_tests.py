@@ -87,6 +87,19 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             "Flux Validation Test",
             "validation",
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                ],
+                [
+                    # placeholder for the generation script's generate step
+                ],
+            ],
+            "Flux Generation script test",
+            "test_generate",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 
@@ -123,11 +136,26 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         cmd += " " + t5_encoder_version_arg
         cmd += " " + tokenzier_path_arg
         if override_arg:
-            cmd += " " + " ".join(override_arg)
+            cmd += " " + " ".join(override_arg)   
+        
+
+        # save checkpoint (idx == 0) and load it for generation (idx == 1)
+        if test_name == "test_generate" and idx == 1:
+            # For flux generation, we would need a flux-specific generation script
+            # For now, we'll skip the actual generation step as there might not be a flux generation script yet
+            cmd = (
+                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"./torchtitan/experiments/flux/inference/run_infer.sh"
+            )
+            cmd += " " + dump_folder_arg
+            cmd += " " + random_init_encoder_arg
+            cmd += " " + clip_encoder_version_arg
+            cmd += " " + t5_encoder_version_arg
+            cmd += " " + tokenzier_path_arg
+
         logger.info(
             f"=====Flux Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
-
         result = _run_cmd(cmd)
         logger.info(result.stdout)
         if result.returncode != 0:
