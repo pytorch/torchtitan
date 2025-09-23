@@ -13,7 +13,7 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_qwen3
 from .model.args import Qwen3ModelArgs
@@ -178,8 +178,8 @@ qwen3_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="qwen3",
         model_cls=Qwen3Model,
         model_args=qwen3_configs,  # Change from dict to Mapping
@@ -193,4 +193,3 @@ register_train_spec(
         build_validator_fn=build_validator,
         state_dict_adapter=Qwen3StateDictAdapter,
     )
-)
