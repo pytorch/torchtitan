@@ -22,6 +22,7 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 
+from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
@@ -82,7 +83,7 @@ def build_pipeline_schedule(
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
-        loss_fn=loss_fn,
+        loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
         scale_grads=False,
     )
     logger.info(
