@@ -13,46 +13,6 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import GptOssModelArgs
 from .moe import MoE
 
-# TODO: may be able to remove this once parallelized properly
-def convert_submodules_to_bf16(
-        module: nn.Module,
-        exclude_names: tuple[str, ...] = ("freqs_cis", "attention_norm", "ffn_norm", "norm"),
-        attr_opt_out: str = "no_bf16",   # if a submodule sets `self.no_bf16 = True`, it will be skipped
-    ) -> None:
-        """
-        Recursively convert parameters & buffers of submodules to bfloat16,
-        except:
-          - modules whose *qualified name* ends with any of `exclude_names`
-          - modules with attribute `{attr_opt_out} == True`
-        Conversion is *shallow per-module* so exclusions are respected even deep in the tree.
-        """
-
-        def should_skip(qname: str, mod: nn.Module) -> bool:
-            base = qname.rsplit(".", 1)[-1]  # local (leaf) name
-            if base in exclude_names:
-                return True
-            if getattr(mod, attr_opt_out, False):
-                return True
-            return False
-
-        def convert_shallow(mod: nn.Module):
-            # convert parameters owned by this module
-            for _, p in mod.named_parameters(recurse=False):
-                if p.is_floating_point():
-                    p.data = p.data.to(torch.bfloat16)
-            # convert buffers owned by this module
-            for _, b in mod.named_buffers(recurse=False):
-                # keep non-float buffers (e.g., ints, bool masks) as-is
-                if torch.is_floating_point(b):
-                    b.data = b.data.to(torch.bfloat16)
-
-        # walk the module tree; convert only *this* module's tensors if not skipped
-        for qname, mod in module.named_modules():
-            # skip the root container name (empty) check gracefully
-            local_name = qname.rsplit(".", 1)[-1] if qname else ""
-            if local_name and should_skip(qname, mod):
-                continue
-            convert_shallow(mod)
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
 def precompute_freqs_cis(args: GptOssModelArgs) -> torch.Tensor:
@@ -191,6 +151,12 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor):
     assert freqs_cis.shape[-1] == rot, "freqs_cis last dim must be D/2"
     freqs_cis = freqs_cis[:T, :]
 
+    # Memory layout comparison for head_dim=8:
+    # HF Format:     [r0][r1][r2][r3][i0][i1][i2][i3]
+    #             ↑-- reals --↑   ↑-- imags --↑
+
+    # Interleaved:   [r0][i0][r1][i1][r2][i2][r3][i3]  
+    #             ↑-pair-↑ ↑-pair-↑ ↑-pair-↑ ↑-pair-↑
     # --- inline: HF half-split -> interleaved (real0, imag0, real1, imag1, ...)
     # q_i, k_i: [B, T, H, D]
     q_i = torch.empty_like(q)
@@ -202,10 +168,12 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor):
 
     # --- Torchtitan default complex apply (expects interleaved last dim)
     # freqs_cis will be reshaped inside to [1, T, 1, rot]
+    # TODO(jianiw): I think we shoud go with sin/cos representation to simplify the conversion between paired real/imaginary <-> half-split real/imaginary 
     q_rot_i = apply_rotary_emb_inner(q_i, freqs_cis)  # uses TT's complex path
     k_rot_i = apply_rotary_emb_inner(k_i, freqs_cis)
 
     # --- inline: interleaved -> HF half-split
+    # TODO(jianiw): convert it back
     q_out = torch.cat([q_rot_i[..., 0::2], q_rot_i[..., 1::2]], dim=-1)
     k_out = torch.cat([k_rot_i[..., 0::2], k_rot_i[..., 1::2]], dim=-1)
     return q_out, k_out
@@ -331,6 +299,7 @@ class Attention(nn.Module):
                 enable_gqa=True,
         )
         else:
+            # eager attention forward
             output = self.attn(
                 q, k, v, self.sinks,
                 attention_mask=self.sliding_window_causal(seqlen, x.device),

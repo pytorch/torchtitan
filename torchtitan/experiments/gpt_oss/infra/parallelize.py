@@ -29,6 +29,7 @@ from .expert_parallel import (
     NoParallel,
     TensorParallel,
 )
+from torchtitan.distributed import NoParallel
 
 
 # Adapted from llama4/infra/parallelize.py

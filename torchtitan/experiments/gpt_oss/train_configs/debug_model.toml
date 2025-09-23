@@ -24,7 +24,7 @@ enable_wandb = false
 name = "gpt_oss"
 flavor = "debugmodel"
 # test tokenizer, for debug purpose only
-tokenizer_path = "./tests/assets/tokenizer"
+hf_asset_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]

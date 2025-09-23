@@ -2,17 +2,17 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
+
 from torchtitan.config_manager import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
-
-# from transformers.models.gpt_oss.modeling_gpt_oss import GPT_OSS_PRETRAINED_INIT_CONFIGURATION
+from torchtitan.models.moe import MoEArgs
+from torchtitan.tools.utils import has_cuda_capability
 
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
@@ -61,10 +61,8 @@ class GptOssModelArgs(BaseModelArgs):
     num_hidden_layers: int = 24
     norm_eps: float = 1e-5  # eps used for RMSNorm
     # MoE
-    num_local_experts: int = 32
-    num_experts_per_tok: int = 4
-    use_grouped_mm: bool = True
-    load_balance_coeff: float | None = 1e-3
+    moe_args: MoEArgs = field(default_factory=MoEArgs)
+    swiglu_limit: float = 7.0
     # Multi-Head Latent Attention (MLA)
     head_dim: int = 64
     num_attention_heads: int = 64
@@ -79,12 +77,24 @@ class GptOssModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
 
-    def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
-        """
-        Update the model_config config from the given job config.
-        """
-        # self.vocab_size = tokenizer.vocab_size
-        self.max_seq_len = job_config.training.seq_len
+    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+        seq_len = job_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
+
+        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
+            logger.warning(
+                "Failed to use grouped mm, which is only supported on SM90 or later",
+            )
+            self.moe_args.use_grouped_mm = False
+
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
+            )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         """
