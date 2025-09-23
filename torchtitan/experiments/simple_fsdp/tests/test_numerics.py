@@ -93,7 +93,7 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_replicate_loss in zip(
             fsdp2_losses, simple_fsdp_replicate_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_replicate_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_replicate_loss)
 
     def test_fullyshard_convergence(self):
         # unit test for fully_shard mode
@@ -109,7 +109,7 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_fullyshard_loss in zip(
             fsdp2_losses, simple_fsdp_fullyshard_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_fullyshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_fullyshard_loss)
 
     def test_hybridshard_convergence(self):
         # unit test for hybrid_shard mode
@@ -125,4 +125,4 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_hybridshard_loss in zip(
             fsdp2_losses, simple_fsdp_hybridshard_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_hybridshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_hybridshard_loss)
