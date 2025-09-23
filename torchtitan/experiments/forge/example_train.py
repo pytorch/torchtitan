@@ -297,8 +297,11 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if self.job_config.enable and self.validator.should_validate(self.step):
-                    self.validator.validate(self.model_parts)
+                if (
+                    self.job_config.validation.enable
+                    and self.validator.should_validate(self.step)
+                ):
+                    self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

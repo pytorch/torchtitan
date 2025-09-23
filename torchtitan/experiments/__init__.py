@@ -4,7 +4,4 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torchtitan.experiments.llama4  # noqa: F401
-import torchtitan.experiments.qwen3
-import torchtitan.experiments.simple_fsdp  # noqa: F401
-import torchtitan.experiments.vlm  # noqa: F401
+_supported_experiments = frozenset(["flux", "llama4", "qwen3", "simple_fsdp", "vlm"])

@@ -12,14 +12,15 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import llama3_configs, pipeline_llama
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .model import SimpleFSDPTransformer
 from .parallelize import parallelize_llama
 
-register_train_spec(
-    TrainSpec(
-        name="llama3_simple_fsdp",
+
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
+        name="simple_fsdp",
         model_cls=SimpleFSDPTransformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
@@ -30,4 +31,3 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )
-)

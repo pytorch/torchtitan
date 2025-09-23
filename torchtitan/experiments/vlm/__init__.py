@@ -12,7 +12,7 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.models.llama3 import llama3_configs
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .datasets.mm_datasets import build_mm_dataloader
 from .infra.parallelize import parallelize_vlm
@@ -40,8 +40,8 @@ llama3_siglip2_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="llama3-siglip2",
         model_cls=Llama3Siglip2Transformer,
         model_args=llama3_siglip2_configs,
@@ -54,4 +54,3 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
     )
-)

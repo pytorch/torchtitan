@@ -21,7 +21,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                 ],
             ],
@@ -31,7 +31,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
@@ -43,7 +43,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--activation_checkpoint.mode full",
                 ],
@@ -54,7 +54,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -66,7 +66,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--model.name llama3_simple_fsdp",
+        #             "--model.name simple_fsdp",
         #             "--compile.enable",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.enable_async_tensor_parallel",
@@ -78,12 +78,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                 ],
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                     "--training.steps 20",
@@ -95,7 +95,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -103,7 +103,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--training.steps 20",
                     "--checkpoint.enable",
@@ -119,7 +119,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.data_parallel_replicate_degree 4",
@@ -132,7 +132,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -145,7 +145,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -159,7 +159,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -172,7 +172,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -186,7 +186,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -200,7 +200,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                     "--training.steps 10",
@@ -208,7 +208,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
@@ -217,7 +217,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                 ],
                 # load at [tp:4].
                 [
-                    "--model.name llama3_simple_fsdp",
+                    "--model.name simple_fsdp",
                     "--compile.enable",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",

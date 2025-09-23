@@ -10,10 +10,10 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu
 
 This folder includes an experimental frontend implementation for [SimpleFSDP: Simpler Fully Sharded Data Parallel with torch.compile](https://arxiv.org/abs/2411.00284). SimpleFSDP is a compiler-based Fully Sharded Data Parallel (FSDP) framework, which has a simple implementation for maintenance and composability, allows full computation-communication graph tracing, and brings performance enhancement via compiler backend optimizations.
 
-### Enable SimpleFSDP Training
+### Run SimpleFSDP Training on Llama 3
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name llama3_simple_fsdp --compile.enable
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp --compile.enable
 ```
 
 ### Composability Support
