@@ -9,7 +9,7 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
+from torch.distributed._composable.replicate_with_fsdp import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
@@ -135,13 +135,15 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
+        dp_mesh_dim_names = ("dp_replicate", "dp_shard")
         apply_ddp(
             model,
-            world_mesh,
+            world_mesh[tuple(dp_mesh_dim_names)],
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
+            cpu_offload=job_config.training.enable_cpu_offload,
         )
 
     return model
@@ -317,17 +319,33 @@ def apply_fsdp(
 def apply_ddp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
     enable_compile: bool,
     enable_compiled_autograd: bool,
+    cpu_offload: bool = False,
 ):
-    if enable_compile:
-        if enable_compiled_autograd:
-            torch._dynamo.config.optimize_ddp = (
-                "python_reducer_without_compiled_forward"
-            )
-        else:
-            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    replicate_config = {"device_mesh": dp_mesh, "mp_policy": mp_policy}
+    if cpu_offload:
+        replicate_config["offload_policy"] = CPUOffloadPolicy()
 
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    if model.tok_embeddings is not None:
+        replicate(
+            model.tok_embeddings,
+            **replicate_config,
+        )
+    for layer_id, transformer_block in model.layers.items():
+        replicate(
+            transformer_block,
+            **replicate_config,
+        )
+
+    if model.norm is not None and model.output is not None:
+        replicate(
+            [model.norm, model.output],
+            **replicate_config,
+        )
+    replicate(model, **replicate_config)
 
     logger.info("Applied DDP to the model")
