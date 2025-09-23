@@ -11,7 +11,7 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama
 from .model.args import TransformerModelArgs
@@ -30,7 +30,7 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         n_heads=16,
-        vocab_size=2000,
+        vocab_size=2048,
         rope_theta=500000,
     ),
     "17bx16e": TransformerModelArgs(
@@ -59,7 +59,7 @@ llama4_configs = {
         dim=256,
         n_layers=6,
         n_heads=16,
-        vocab_size=2000,
+        vocab_size=2048,
         rope_theta=500000,
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
@@ -97,8 +97,8 @@ llama4_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="llama4",
         model_cls=Transformer,
         model_args=llama4_configs,
@@ -111,4 +111,3 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=Llama4StateDictAdapter,
     )
-)

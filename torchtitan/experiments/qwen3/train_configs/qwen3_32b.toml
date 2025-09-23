@@ -1,6 +1,8 @@
+# NOTE: this toml config is a preset for 8 H100 GPUs (with 96GiB memory).
+
 [job]
 dump_folder = "./outputs"
-description = "Qwen 3 1.7B training"
+description = "Qwen3 32B training"
 
 [profiling]
 enable_profiling = false
@@ -14,8 +16,8 @@ save_tb_folder = "tb"
 
 [model]
 name = "qwen3"
-flavor = "1.7B"
-hf_assets_path = "./assets/hf/Qwen3-1.7B"
+flavor = "32B"
+hf_assets_path = "./assets/hf/Qwen3-32B"
 # converters = ["float8"]
 
 [optimizer]
@@ -24,13 +26,13 @@ lr = 8e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 20  # lr scheduler warm up, 20% total steps
+warmup_steps = 600  # lr scheduler warm up, 20% total steps
 
 [training]
-local_batch_size = 4
+local_batch_size = 2
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 100
+steps = 3000
 dataset = "c4"
 
 [parallelism]
@@ -43,13 +45,13 @@ context_parallel_degree = 1
 [checkpoint]
 enable = false
 folder = "checkpoint"
-interval = 50
+interval = 500
 last_save_model_only = false
 export_dtype = "float16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
+mode = "full"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]

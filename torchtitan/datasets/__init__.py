@@ -4,5 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Import to register quantization modules.
-import torchtitan.components.quantization  # noqa: F401
+from dataclasses import dataclass
+from typing import Callable
+
+
+__all__ = ["DatasetConfig"]
+
+
+@dataclass
+class DatasetConfig:
+    path: str
+    loader: Callable
+    sample_processor: Callable
