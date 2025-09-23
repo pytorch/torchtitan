@@ -8,7 +8,7 @@ from typing import Literal
 from torch import nn
 
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.models.moe import MoEArgs
@@ -58,6 +58,7 @@ class GptOssModelArgs(BaseModelArgs):
     dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 201088
     hidden_size: int = 2880
+    moe_inter_dim: int = 2880
     num_hidden_layers: int = 24
     norm_eps: float = 1e-5  # eps used for RMSNorm
     # MoE
@@ -124,7 +125,7 @@ class GptOssModelArgs(BaseModelArgs):
         nparams_sparse_active = (
             nparams_moe_router
             + nparams_shared_expert
-            + nparams_experts * self.num_experts_per_tok // self.num_local_experts
+            + nparams_experts * self.moe_args.top_k // self.moe_args.num_experts
         )
 
         logger.info(

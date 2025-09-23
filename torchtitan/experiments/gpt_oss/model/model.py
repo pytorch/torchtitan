@@ -7,11 +7,12 @@ from typing import Tuple
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torchtitan.experiments.simple_fsdp import model
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import GptOssModelArgs
-from .moe import MoE
+from .moe import GptOssMoE
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -190,6 +191,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+# TODO(jianw): This is eager version from HuggingFace
 def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -257,8 +259,13 @@ class Attention(nn.Module):
         self.sinks = nn.Parameter(torch.empty(model_args.num_attention_heads))
 
         self.use_flex_attn = model_args.use_flex_attn
+
         if self.use_flex_attn:
-            self.attn = build_attention(True, model_args.attn_mask_type)
+            # Only apply sliding window to every other layer
+            if use_sliding_attention:
+                self.attn = build_attention(use_flex_attn=True, attn_mask_type="sliding_window", sliding_window=self.sliding_window)
+            else:
+                self.attn = build_attention(use_flex_attn=True, attn_mask_type=model_args.attn_mask_type)
         else:
             # NOTE: sampling with FlexAttn seems broken; use TorchAttn if needed
             self.attn = eager_attention_forward
@@ -294,10 +301,11 @@ class Attention(nn.Module):
         if self.use_flex_attn:
             output = self.attn(
                 q, k, v,
-                self.sinks.to_local() if isinstance(self.sinks, DTensor) else self.sinks,
-                sliding_window=self.sliding_window,
-                enable_gqa=True,
-        )
+                scale=None,
+                sink_weights=self.sinks.to_local() if isinstance(self.sinks, DTensor) else self.sinks,
+                # sliding_window=self.sliding_window,
+                enable_gqa=True if self.sliding_window else False,
+            )
         else:
             # eager attention forward
             output = self.attn(
@@ -352,7 +360,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
 
-        self.moe = MoE(model_args)
+        self.moe = GptOssMoE(model_args, dim=model_args.hidden_size, hidden_dim=model_args.moe_inter_dim)
+        self.moe_enabled = True  # for composability with load balancing
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id

@@ -15,7 +15,8 @@ if torch.__version__ >= "2.9":
 else:
     print(f"Since torch version {torch.__version__} < 2.9, PrepareModuleInputOutput is not available and MoE EP TP will fail.")
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import JobConfig
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
@@ -26,22 +27,46 @@ from torch.distributed.tensor import Partial, Replicate, Shard
 from .expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
-    NoParallel,
     TensorParallel,
 )
 from torchtitan.distributed import NoParallel
 
 
+# for selective op activation checkpointing
+_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
+
 # Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: nn.Module,
-    world_mesh: DeviceMesh,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
+    world_mesh = parallel_dims.world_mesh
+
+    assert (
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
+        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
+        """
+
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
-            # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
                 "Currently, async TP is not tested for gptoss. \
                 torch.compile is not supported yet, which is required for async TP."
@@ -55,7 +80,6 @@ def parallelize_gptoss(
 
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
-            # TODO(jianiw): This branch needs to be tested and enabled
             raise NotImplementedError(
                 "Currently, float8 tensorwise TP is not tested for gptoss"
             )
@@ -79,13 +103,20 @@ def parallelize_gptoss(
                 else None
             ),
         )
+    
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
-
-    if job_config.training.compile:
-        raise NotImplementedError("torch.compile is not supported yet for gptoss")
-
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            save_list=_save_list,
+        )
+    
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -134,95 +165,11 @@ def parallelize_gptoss(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.training.compile,
+            enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     return model
-
-
-def apply_non_moe_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-        },
-    )
-
-    rowwise_parallel, colwise_parallel, prepare_module_input = (
-        RowwiseParallel,
-        ColwiseParallel,
-        PrepareModuleInput,
-    )
-
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for transformer_block in model.layers.values():
-        layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate()),
-                desired_input_layouts=(Replicate(), Replicate()),
-            ),
-            # use_local_output=False make the output to be a DTensor instead of a plain Tensor
-            "attention.wkv_a": NoParallel(use_local_output=False),
-            "attention.wkv_b": colwise_parallel(use_local_output=False),
-            "attention.kv_norm": NoParallel(use_local_output=False),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
-        }
-
-        if transformer_block.attention.q_lora_rank == 0:
-            layer_plan.update(
-                {
-                    "attention.wq": colwise_parallel(
-                        use_local_output=False
-                    ),  # This is only used when q_lora_rank==0
-                }
-            )
-        else:
-            layer_plan.update(
-                {
-                    "attention.wq_a": NoParallel(use_local_output=False),
-                    "attention.wq_b": colwise_parallel(use_local_output=False),
-                    "attention.q_norm": NoParallel(use_local_output=False),
-                }
-            )
-
-        parallelize_module(
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
-
 
 def apply_non_moe_tp(
     model: nn.Module,
@@ -280,12 +227,12 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), Replicate()),
+                desired_input_layouts=(Replicate(), Replicate()),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
@@ -297,6 +244,7 @@ def apply_non_moe_tp(
         )
 
         # shard attention.sinks across heads
+        # TODO(jianiw): Fix the sink implementation
         attn = transformer_block.attention
         attn.register_parameter(
             "sinks",

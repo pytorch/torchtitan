@@ -5,7 +5,7 @@ import torch
 from torch.distributed.tensor import DTensor
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.gpt_oss.infra.expert_parallel import expert_parallel
+from torchtitan.experiments.gpt_oss.infra.expert_parallel import expert_parallel
 from torchtitan.protocols import model
 
 from .args import GptOssModelArgs
@@ -24,6 +24,7 @@ class GptOssGroupedExperts(nn.Module):
     def __init__(
         self,
         dim: int,
+        hidden_dim: int,
         num_experts: int,
         swiglu_limit: float,
         use_grouped_mm: bool,
@@ -33,9 +34,9 @@ class GptOssGroupedExperts(nn.Module):
         self.use_grouped_mm = use_grouped_mm
         self.swiglu_limit = swiglu_limit
 
-        self.mlp1_weight = nn.Parameter(torch.empty((num_experts, dim, dim * 2))) # w1 and w3
-        self.mlp1_bias = nn.Parameter(torch.empty((num_experts, dim * 2)))
-        self.mlp2_weight = nn.Parameter(torch.empty((num_experts, dim, dim)))
+        self.mlp1_weight = nn.Parameter(torch.empty((num_experts, dim, hidden_dim * 2))) # w1 and w3
+        self.mlp1_bias = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
+        self.mlp2_weight = nn.Parameter(torch.empty((num_experts, hidden_dim, dim)))
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
     def forward(
@@ -168,6 +169,7 @@ class GptOssMoE(MoE):
         # Override the base GroupedExperts with GptOssGroupedExperts
         self.experts = GptOssGroupedExperts(
             dim=dim,
+            hidden_dim=hidden_dim,
             num_experts=moe_args.num_experts,
             swiglu_limit=model_args.swiglu_limit,
             use_grouped_mm=moe_args.use_grouped_mm,

@@ -6,7 +6,6 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.moe import MoEArgs
-from .infra.optimizer import build_gptoss_optimizers
 
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
@@ -27,7 +26,6 @@ gptoss_configs = {
     "debugmodel": GptOssModelArgs(
         hidden_size=256,
         num_hidden_layers=4,
-        use_flex_attn=False,
         moe_args = MoEArgs(
             num_experts=8,
             num_shared_experts=0,
@@ -38,7 +36,9 @@ gptoss_configs = {
             top_k=4,
             use_grouped_mm=False,
             load_balance_coeff=1e-3,
-        )
+        ),
+        use_flex_attn=True,
+        attn_mask_type="causal"
     ),
     "20b": GptOssModelArgs(
         num_hidden_layers=24,
@@ -71,8 +71,8 @@ gptoss_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="gpt_oss",
         model_cls=GptOssModel,
         model_args=gptoss_configs,
@@ -84,4 +84,3 @@ register_train_spec(
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )
-)

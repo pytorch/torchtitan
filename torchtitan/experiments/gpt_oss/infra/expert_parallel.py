@@ -93,7 +93,7 @@ class ExpertTensorParallel(ExpertParallel):
         )
 
 
-# TODO(jianiw): This need to be merged with 
+# TODO(jianiw): This need to be merged with expert_parallel
 def expert_parallel(func: Callable) -> Callable:
     """
     This is a wrapper applied to the GroupedExperts computation, serving
