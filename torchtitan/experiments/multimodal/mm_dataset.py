@@ -20,7 +20,7 @@ from utils import load_image
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.config import JobConfig
-from torchtitan.datasets.common import DatasetConfig
+from torchtitan.datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 
