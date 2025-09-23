@@ -129,16 +129,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/experiments/flux/run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
-        cmd += " " + model_arg
-        cmd += " " + dump_folder_arg
-        cmd += " " + random_init_encoder_arg
-        cmd += " " + clip_encoder_version_arg
-        cmd += " " + t5_encoder_version_arg
-        cmd += " " + tokenzier_path_arg
-        if override_arg:
-            cmd += " " + " ".join(override_arg)   
         
-
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
         if test_name == "test_generate" and idx == 1:
             # For flux generation, we would need a flux-specific generation script
@@ -147,11 +138,15 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"./torchtitan/experiments/flux/inference/run_infer.sh"
             )
-            cmd += " " + dump_folder_arg
-            cmd += " " + random_init_encoder_arg
-            cmd += " " + clip_encoder_version_arg
-            cmd += " " + t5_encoder_version_arg
-            cmd += " " + tokenzier_path_arg
+        
+        cmd += " " + model_arg
+        cmd += " " + dump_folder_arg
+        cmd += " " + random_init_encoder_arg
+        cmd += " " + clip_encoder_version_arg
+        cmd += " " + t5_encoder_version_arg
+        cmd += " " + tokenzier_path_arg
+        if override_arg:
+            cmd += " " + " ".join(override_arg)   
 
         logger.info(
             f"=====Flux Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
