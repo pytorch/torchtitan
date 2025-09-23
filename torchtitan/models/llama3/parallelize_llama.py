@@ -325,7 +325,7 @@ def _apply_act_offloading_to_transformer_block(module: nn.Module, ao_context: Ac
 def apply_ao(model: nn.Module, ao_config):
     """Apply multistream activation offloading to the model"""
     offloading_stream = torch.cuda.Stream()
-    ao_policy = ExampleActOffloadPolicy()
+    ao_policy = ExampleActOffloadPolicy(offload_ratio=ao_config.offload_ratio)
     ao_context = ActOffloadContext(offloading_stream, ao_policy)
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = _apply_act_offloading_to_transformer_block(transformer_block, ao_context, ao_config)
