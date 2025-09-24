@@ -13,9 +13,9 @@ shift
 echo "Building ${IMAGE_NAME} Docker image"
 
 OS=ubuntu
-OS_VERSION=20.04
+OS_VERSION=24.04
 CLANG_VERSION=""
-PYTHON_VERSION=3.11
+PYTHON_VERSION=3.12
 MINICONDA_VERSION=24.3.0-0
 
 case "${IMAGE_NAME}" in
@@ -34,7 +34,7 @@ docker build \
   --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
   --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
-  --shm-size=1g \
+  --build-arg "CUDA_VERSION=12.8.1" \
   -f "${OS}"/Dockerfile \
   "$@" \
   .
