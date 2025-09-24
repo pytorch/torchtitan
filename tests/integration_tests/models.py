@@ -18,6 +18,18 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         A dictionary where each key is a model name and value is a list of OverrideDefinitions
     """
     model_tests = [
+        OverrideDefinitions(
+            [
+                [
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 8",
+                    "--parallelism.enable_async_tensor_parallel",
+                ],
+            ],
+            "8D async TP compile",
+            "8d_asynctp_compile",
+            ngpu=8,
+        ),
         # Integration Test Cases for DeepSeek-V3
         OverrideDefinitions(
             [
